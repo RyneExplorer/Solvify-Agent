@@ -49,6 +49,7 @@ Solvify-Agent 是一个基于 Go + Gin + Eino 的可运行 Agent 项目初始化
 ├── go.mod
 └── README.md
 ```
+
 ## 启动链路
 
 1. `cmd/server` 创建 `internal/app.App`
