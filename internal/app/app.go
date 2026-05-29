@@ -84,19 +84,11 @@ func (a *App) initConfig() error {
 
 // initLogger 初始化 zap 日志系统
 func (a *App) initLogger() error {
-	log, err := logger.New(logger.Config{
-		Level:      a.cfg.Log.Level,
-		Filename:   a.cfg.Log.Filename,
-		MaxSize:    a.cfg.Log.MaxSize,
-		MaxBackups: a.cfg.Log.MaxBackups,
-		MaxAge:     a.cfg.Log.MaxAge,
-		Compress:   a.cfg.Log.Compress,
-	})
-	if err != nil {
+	if err := logger.Init(&a.cfg.Log); err != nil {
 		return fmt.Errorf("初始化日志失败: %w", err)
 	}
 
-	a.log = log
+	a.log = logger.GetLogger()
 	a.log.Info("配置加载成功",
 		zap.String("app", a.cfg.App.Name),
 		zap.String("version", a.cfg.App.Version),
