@@ -16,6 +16,7 @@ import (
 	"solvify-agent/internal/agent"
 	"solvify-agent/internal/api"
 	"solvify-agent/internal/llm"
+	"solvify-agent/internal/middleware"
 	"solvify-agent/internal/rag"
 	"solvify-agent/internal/service"
 	"solvify-agent/internal/tool"
@@ -123,14 +124,19 @@ func (a *App) initDependencies() {
 // initRouter 初始化 Gin 模式和项目路由
 func (a *App) initRouter() {
 	gin.SetMode(a.cfg.App.Mode)
-	a.router = api.NewRouter(a.chatService, a.log)
+	a.router = api.NewRouter(a.chatService)
 }
 
 // initServer 初始化 HTTP Server
 func (a *App) initServer() {
+	engine := gin.New()
+	engine.Use(middleware.Recovery(a.log))
+	engine.Use(middleware.Logger(a.log))
+	a.router.Setup(engine)
+
 	a.server = &http.Server{
 		Addr:              a.cfg.Server.Addr(),
-		Handler:           a.router.Engine(),
+		Handler:           engine,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 }
