@@ -60,6 +60,35 @@
 - Entity 不直接绑定 HTTP 请求语义
 - DTO 和 Entity 不混用
 
+## 接口与依赖注入规范
+
+- 每个功能模块必须定义接口，通过接口实现依赖注入
+- 接口文件命名为 `{功能}_interface.go`，例如 `model_interface.go`、`chat_interface.go`
+- 实现文件命名为 `{功能}_service.go` 或 `{功能}_repository.go`
+- Repository 层接口文件放在 `internal/repository/`，命名为 `{模块}_interface.go`
+- Repository 层实现文件放在 `internal/repository/`，命名为 `{模块}_repository.go`
+- Service 层接口文件放在 `internal/service/`，命名为 `{模块}_interface.go`
+- Service 层实现文件放在 `internal/service/`，命名为 `{模块}_service.go`
+- Controller 和 Service 依赖接口而非具体类型
+- 工厂函数返回接口类型，例如 `func NewModelService(repo ModelRepo) ModelServiceInterface`
+
+**示例结构：**
+```
+internal/
+├── repository/
+│   ├── model_interface.go        # ModelRepo 接口
+│   ├── model_repository.go       # ModelRepo 实现
+│   ├── session_interface.go      # SessionRepo 接口
+│   ├── session_repository.go     # SessionRepo 实现
+│   ├── message_interface.go      # MessageRepo 接口
+│   └── message_repository.go     # MessageRepo 实现
+├── service/
+│   ├── model_interface.go        # ModelServiceInterface 接口
+│   ├── model_service.go          # ModelService 实现
+│   ├── chat_interface.go         # ChatServiceInterface 接口
+│   └── chat_service.go           # ChatService 实现
+```
+
 ## Service 规范
 
 - Service 是业务用例入口，Controller 只能通过 Service 调用业务能力
