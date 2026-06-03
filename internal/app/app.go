@@ -27,7 +27,6 @@ import (
 // App 是全局应用结构体，集中持有配置、依赖、路由和服务实例
 type App struct {
 	cfg         *config.Config
-	log         *zap.Logger
 	router      *api.Router
 	chatService *service.ChatService
 	server      *http.Server
@@ -54,18 +53,19 @@ func (a *App) Initialize() error {
 }
 
 // Run 启动 HTTP 服务并等待优雅关闭信号
-func (a *App) Run() error {
-	errCh := make(chan error, 1)
+func (a *App) Run() {
 	go func() {
-		a.log.Info("HTTP 服务已启动", zap.String("addr", a.server.Addr), zap.String("mode", a.cfg.App.Mode))
+		logger.Info("HTTP 服务已启动",
+			zap.String("addr", a.server.Addr),
+			zap.String("mode", a.cfg.App.Mode),
+		)
 		if err := a.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-			return
+			logger.Fatal("HTTP 服务启动失败", zap.Error(err))
 		}
-		errCh <- nil
 	}()
 
-	return a.gracefulShutdown(errCh)
+	// 优雅关闭
+	a.gracefulShutdown()
 }
 
 // Config 返回应用全局配置
@@ -83,19 +83,19 @@ func (a *App) initConfig() error {
 	return nil
 }
 
-// initLogger 初始化 zap 日志系统
+// initLogger 初始化日志
 func (a *App) initLogger() error {
 	if err := logger.Init(&a.cfg.Log); err != nil {
 		return fmt.Errorf("初始化日志失败: %w", err)
 	}
 
-	a.log = logger.GetLogger()
-	a.log.Info("配置加载成功",
-		zap.String("app", a.cfg.App.Name),
-		zap.String("version", a.cfg.App.Version),
-		zap.String("env", a.cfg.App.Env),
-		zap.String("mode", a.cfg.App.Mode),
-	)
+	logger.Info("=========================================")
+	logger.Info(fmt.Sprintf("欢迎使用 %s", a.cfg.App.Name))
+	logger.Info(fmt.Sprintf("版本: %s", a.cfg.App.Version))
+	logger.Info(fmt.Sprintf("环境: %s", a.cfg.App.Env))
+	logger.Info(fmt.Sprintf("模式: %s", a.cfg.App.Mode))
+	logger.Info("配置加载成功")
+	logger.Info("=========================================")
 	return nil
 }
 
@@ -115,7 +115,7 @@ func (a *App) initDependencies() {
 		LLM:       llm.NewMockClient(a.cfg.LLM.Model),
 		Retriever: retriever,
 		Tools:     tools,
-		Logger:    a.log,
+		Logger:    logger.GetLogger(),
 		Model:     a.cfg.LLM.Model,
 	})
 	a.chatService = service.NewChatService(knowledgeAgent)
@@ -130,8 +130,8 @@ func (a *App) initRouter() {
 // initServer 初始化 HTTP Server
 func (a *App) initServer() {
 	engine := gin.New()
-	engine.Use(middleware.Recovery(a.log))
-	engine.Use(middleware.Logger(a.log))
+	engine.Use(middleware.Recovery(logger.GetLogger()))
+	engine.Use(middleware.Logger(logger.GetLogger()))
 	a.router.Setup(engine)
 
 	a.server = &http.Server{
@@ -142,28 +142,22 @@ func (a *App) initServer() {
 }
 
 // gracefulShutdown 监听退出信号并优雅关闭服务
-func (a *App) gracefulShutdown(errCh <-chan error) error {
+func (a *App) gracefulShutdown() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(quit)
 
-	select {
-	case err := <-errCh:
-		_ = logger.Sync()
-		return err
-	case <-quit:
-		a.log.Info("正在关闭 HTTP 服务")
-		timeout := time.Duration(a.cfg.Server.ShutdownTimeoutSeconds) * time.Second
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
+	<-quit
+	logger.Info("正在关闭 HTTP 服务")
+	timeout := time.Duration(a.cfg.Server.ShutdownTimeoutSeconds) * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
-		if err := a.server.Shutdown(ctx); err != nil {
-			a.log.Error("HTTP 服务关闭失败", zap.Error(err))
-			_ = logger.Sync()
-			return err
-		}
-
-		a.log.Info("HTTP 服务已停止")
-		return logger.Sync()
+	if err := a.server.Shutdown(ctx); err != nil {
+		logger.Fatal("HTTP 服务关闭失败", zap.Error(err))
 	}
+
+	logger.Info("HTTP 服务已停止")
+	logger.Info("=========================================")
+	_ = logger.Sync()
 }
