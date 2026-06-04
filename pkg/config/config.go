@@ -7,66 +7,97 @@ import (
 	"strconv"
 
 	"github.com/goccy/go-yaml"
+	"github.com/mitchellh/mapstructure"
 )
 
-const defaultConfigPath = "configs/configs.yaml"
+const defaultConfigPath = "configs/config.yaml"
 
 // Config 描述应用全局配置
 type Config struct {
-	App    AppConfig    `yaml:"app"`
-	Log    LogConfig    `yaml:"log"`
-	Agent  AgentConfig  `yaml:"agent"`
-	LLM    LLMConfig    `yaml:"llm"`
-	RAG    RAGConfig    `yaml:"rag"`
-	Tools  ToolsConfig  `yaml:"tools"`
-	Server ServerConfig `yaml:"server"`
+	App      AppConfig      `mapstructure:"app"`
+	Log      LogConfig      `mapstructure:"log"`
+	Agent    AgentConfig    `mapstructure:"agent"`
+	LLM      LLMConfig      `mapstructure:"llm"`
+	RAG      RAGConfig      `mapstructure:"rag"`
+	Tools    ToolsConfig    `mapstructure:"tools"`
+	Server   ServerConfig   `mapstructure:"server"`
+	Database DatabaseConfig `mapstructure:"database"`
 }
 
 // AppConfig 描述应用基础信息
 type AppConfig struct {
-	Name    string `yaml:"name"`
-	Version string `yaml:"version"`
-	Env     string `yaml:"env"`
-	Mode    string `yaml:"mode"`
+	Name    string `mapstructure:"name"`
+	Version string `mapstructure:"version"`
+	Env     string `mapstructure:"env"`
+	Mode    string `mapstructure:"mode"`
 }
 
 // LogConfig 描述日志配置
 type LogConfig struct {
-	Level      string `yaml:"level"`
-	Filename   string `yaml:"filename"`
-	MaxSize    int    `yaml:"max_size"`
-	MaxBackups int    `yaml:"max_backups"`
-	MaxAge     int    `yaml:"max_age"`
-	Compress   bool   `yaml:"compress"`
+	Level      string `mapstructure:"level"`
+	Filename   string `mapstructure:"filename"`
+	MaxSize    int    `mapstructure:"max_size"`
+	MaxBackups int    `mapstructure:"max_backups"`
+	MaxAge     int    `mapstructure:"max_age"`
+	Compress   bool   `mapstructure:"compress"`
 }
 
 // AgentConfig 描述 Agent 行为开关
 type AgentConfig struct {
-	EnableDemo bool `yaml:"enable_demo"`
+	EnableDemo bool `mapstructure:"enable_demo"`
 }
 
 // LLMConfig 描述模型调用配置
 type LLMConfig struct {
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
-	APIKey   string `yaml:"api_key"`
+	Provider string `mapstructure:"provider"`
+	Model    string `mapstructure:"model"`
+	APIKey   string `mapstructure:"api_key"`
 }
 
 // RAGConfig 描述检索增强配置
 type RAGConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // ToolsConfig 描述工具调用配置
 type ToolsConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // ServerConfig 描述进程关闭配置
 type ServerConfig struct {
-	Host                   string `yaml:"host"`
-	Port                   int    `yaml:"port"`
-	ShutdownTimeoutSeconds int    `yaml:"shutdown_timeout_seconds"`
+	Host                   string `mapstructure:"host"`
+	Port                   int    `mapstructure:"port"`
+	ShutdownTimeoutSeconds int    `mapstructure:"shutdown_timeout_seconds"`
+}
+
+// DatabaseConfig 描述数据库和缓存配置
+type DatabaseConfig struct {
+	Postgres PostgresConfig `mapstructure:"postgres"`
+	Redis    RedisConfig    `mapstructure:"redis"`
+}
+
+// PostgresConfig 描述 PostgreSQL 数据库配置
+type PostgresConfig struct {
+	Host                   string `mapstructure:"host"`
+	Port                   int    `mapstructure:"port"`
+	Username               string `mapstructure:"username"`
+	Password               string `mapstructure:"password"`
+	Database               string `mapstructure:"database"`
+	TimeZone               string `mapstructure:"timezone"`
+	MaxIdleConns           int    `mapstructure:"max_idle_conns"`
+	MaxOpenConns           int    `mapstructure:"max_open_conns"`
+	ConnMaxLifetimeMinutes int    `mapstructure:"conn_max_lifetime_minutes"`
+	EnablePGVector         bool   `mapstructure:"enable_pgvector"`
+}
+
+// RedisConfig 描述 Redis 配置
+type RedisConfig struct {
+	Host     string `mapstructure:"host"`
+	Port     int    `mapstructure:"port"`
+	Password string `mapstructure:"password"`
+	DB       int    `mapstructure:"db"`
+	PoolSize int    `mapstructure:"pool_size"`
 }
 
 var globalConfig *Config
@@ -83,8 +114,14 @@ func Load(configPath string) (*Config, error) {
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("读取配置文件失败: %w", err)
 		}
-	} else if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("解析配置文件失败: %w", err)
+	} else {
+		values := map[string]any{}
+		if err := yaml.Unmarshal(data, &values); err != nil {
+			return nil, fmt.Errorf("解析配置文件失败: %w", err)
+		}
+		if err := mapstructure.Decode(values, cfg); err != nil {
+			return nil, fmt.Errorf("映射配置结构失败: %w", err)
+		}
 	}
 
 	applyEnv(cfg)
@@ -148,6 +185,25 @@ func Default() *Config {
 			Port:                   8080,
 			ShutdownTimeoutSeconds: 10,
 		},
+		Database: DatabaseConfig{
+			Postgres: PostgresConfig{
+				Host:                   "127.0.0.1",
+				Port:                   5432,
+				Username:               "postgres",
+				Database:               "solvify_agent",
+				TimeZone:               "Asia/Shanghai",
+				MaxIdleConns:           5,
+				MaxOpenConns:           20,
+				ConnMaxLifetimeMinutes: 60,
+				EnablePGVector:         true,
+			},
+			Redis: RedisConfig{
+				Host:     "127.0.0.1",
+				Port:     6379,
+				DB:       0,
+				PoolSize: 10,
+			},
+		},
 	}
 }
 
@@ -164,6 +220,36 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.ShutdownTimeoutSeconds <= 0 {
 		return errors.New("服务关闭超时时间必须大于 0")
+	}
+	if c.Database.Postgres.Host == "" {
+		return errors.New("database.postgres.host 不能为空")
+	}
+	if c.Database.Postgres.Port <= 0 || c.Database.Postgres.Port > 65535 {
+		return errors.New("database.postgres.port 必须在 1 到 65535 之间")
+	}
+	if c.Database.Postgres.Username == "" {
+		return errors.New("database.postgres.username 不能为空")
+	}
+	if c.Database.Postgres.Database == "" {
+		return errors.New("database.postgres.database 不能为空")
+	}
+	if c.Database.Postgres.MaxIdleConns < 0 || c.Database.Postgres.MaxOpenConns < 0 {
+		return errors.New("PostgreSQL 连接池数量不能小于 0")
+	}
+	if c.Database.Postgres.ConnMaxLifetimeMinutes <= 0 {
+		return errors.New("PostgreSQL 连接最大生命周期必须大于 0")
+	}
+	if c.Database.Redis.Host == "" {
+		return errors.New("database.redis.host 不能为空")
+	}
+	if c.Database.Redis.Port <= 0 || c.Database.Redis.Port > 65535 {
+		return errors.New("database.redis.port 必须在 1 到 65535 之间")
+	}
+	if c.Database.Redis.DB < 0 {
+		return errors.New("database.redis.db 不能小于 0")
+	}
+	if c.Database.Redis.PoolSize <= 0 {
+		return errors.New("database.redis.pool_size 必须大于 0")
 	}
 	return nil
 }
@@ -186,9 +272,19 @@ func applyEnv(cfg *Config) {
 	cfg.LLM.Provider = getEnv("LLM_PROVIDER", cfg.LLM.Provider)
 	cfg.LLM.Model = getEnv("LLM_MODEL", cfg.LLM.Model)
 	cfg.LLM.APIKey = getEnv("LLM_API_KEY", cfg.LLM.APIKey)
+	cfg.Database.Postgres.Host = getEnv("POSTGRES_HOST", cfg.Database.Postgres.Host)
+	cfg.Database.Postgres.Username = getEnv("POSTGRES_USERNAME", cfg.Database.Postgres.Username)
+	cfg.Database.Postgres.Password = getEnv("POSTGRES_PASSWORD", cfg.Database.Postgres.Password)
+	cfg.Database.Postgres.Database = getEnv("POSTGRES_DATABASE", cfg.Database.Postgres.Database)
+	cfg.Database.Postgres.TimeZone = getEnv("POSTGRES_TIMEZONE", cfg.Database.Postgres.TimeZone)
+	cfg.Database.Redis.Host = getEnv("REDIS_HOST", cfg.Database.Redis.Host)
+	cfg.Database.Redis.Password = getEnv("REDIS_PASSWORD", cfg.Database.Redis.Password)
 
 	if value := os.Getenv("RAG_ENABLED"); value != "" {
 		cfg.RAG.Enabled = parseBool(value, cfg.RAG.Enabled)
+	}
+	if value := os.Getenv("POSTGRES_ENABLE_PGVECTOR"); value != "" {
+		cfg.Database.Postgres.EnablePGVector = parseBool(value, cfg.Database.Postgres.EnablePGVector)
 	}
 	if value := os.Getenv("TOOLS_ENABLED"); value != "" {
 		cfg.Tools.Enabled = parseBool(value, cfg.Tools.Enabled)
@@ -198,6 +294,27 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("SERVER_PORT"); value != "" {
 		cfg.Server.Port = parseInt(value, cfg.Server.Port)
+	}
+	if value := os.Getenv("POSTGRES_PORT"); value != "" {
+		cfg.Database.Postgres.Port = parseInt(value, cfg.Database.Postgres.Port)
+	}
+	if value := os.Getenv("POSTGRES_MAX_IDLE_CONNS"); value != "" {
+		cfg.Database.Postgres.MaxIdleConns = parseInt(value, cfg.Database.Postgres.MaxIdleConns)
+	}
+	if value := os.Getenv("POSTGRES_MAX_OPEN_CONNS"); value != "" {
+		cfg.Database.Postgres.MaxOpenConns = parseInt(value, cfg.Database.Postgres.MaxOpenConns)
+	}
+	if value := os.Getenv("POSTGRES_CONN_MAX_LIFETIME_MINUTES"); value != "" {
+		cfg.Database.Postgres.ConnMaxLifetimeMinutes = parseInt(value, cfg.Database.Postgres.ConnMaxLifetimeMinutes)
+	}
+	if value := os.Getenv("REDIS_PORT"); value != "" {
+		cfg.Database.Redis.Port = parseInt(value, cfg.Database.Redis.Port)
+	}
+	if value := os.Getenv("REDIS_DB"); value != "" {
+		cfg.Database.Redis.DB = parseInt(value, cfg.Database.Redis.DB)
+	}
+	if value := os.Getenv("REDIS_POOL_SIZE"); value != "" {
+		cfg.Database.Redis.PoolSize = parseInt(value, cfg.Database.Redis.PoolSize)
 	}
 	if value := os.Getenv("LOG_MAX_SIZE"); value != "" {
 		cfg.Log.MaxSize = parseInt(value, cfg.Log.MaxSize)

@@ -6,6 +6,8 @@ dist/
 *.out
 coverage.out
 configs/config.yaml
+docs/Solvify-Agent思维导图.xmind
+docs/模块划分.md
 
 # 本地环境配置
 .env
@@ -29,3 +31,4 @@ Thumbs.db
 
 # 临时文件
 tmp/
+tasks/

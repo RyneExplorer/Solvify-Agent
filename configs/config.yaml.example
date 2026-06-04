@@ -23,6 +23,25 @@ llm:
 rag:
   enabled: true
 
+database:
+  postgres:
+    host: "127.0.0.1"
+    port: 5432
+    username: "postgres"
+    password: ""
+    database: "solvify_agent"
+    timezone: "Asia/Shanghai"
+    max_idle_conns: 5
+    max_open_conns: 20
+    conn_max_lifetime_minutes: 60
+    enable_pgvector: true
+  redis:
+    host: "127.0.0.1"
+    port: 6379
+    password: ""
+    db: 0
+    pool_size: 10
+
 tools:
   enabled: true
 

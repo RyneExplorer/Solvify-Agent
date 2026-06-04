@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 
 	"solvify-agent/internal/agent"
 	"solvify-agent/internal/api"
@@ -21,12 +23,15 @@ import (
 	"solvify-agent/internal/service"
 	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/config"
+	"solvify-agent/pkg/database"
 	"solvify-agent/pkg/logger"
 )
 
 // App 是全局应用结构体，集中持有配置、依赖、路由和服务实例
 type App struct {
 	cfg         *config.Config
+	db          *gorm.DB
+	redisClient *redis.Client
 	router      *api.Router
 	chatService *service.ChatService
 	server      *http.Server
@@ -43,6 +48,9 @@ func (a *App) Initialize() error {
 		return err
 	}
 	if err := a.initLogger(); err != nil {
+		return err
+	}
+	if err := a.initDatabase(); err != nil {
 		return err
 	}
 
@@ -96,6 +104,23 @@ func (a *App) initLogger() error {
 	logger.Info(fmt.Sprintf("模式: %s", a.cfg.App.Mode))
 	logger.Info("配置加载成功")
 	logger.Info("=========================================")
+	return nil
+}
+
+// initDatabase 初始化 PostgreSQL 和 Redis 连接
+func (a *App) initDatabase() error {
+	db, err := database.OpenPostgreSQL(&a.cfg.Database.Postgres)
+	if err != nil {
+		return fmt.Errorf("初始化 PostgreSQL 失败: %w", err)
+	}
+	a.db = db
+
+	client, err := database.OpenRedis(&a.cfg.Database.Redis)
+	if err != nil {
+		_ = database.ClosePostgreSQL(a.db)
+		return fmt.Errorf("初始化 Redis 失败: %w", err)
+	}
+	a.redisClient = client
 	return nil
 }
 
@@ -155,6 +180,17 @@ func (a *App) gracefulShutdown() {
 
 	if err := a.server.Shutdown(ctx); err != nil {
 		logger.Fatal("HTTP 服务关闭失败", zap.Error(err))
+	}
+
+	if a.db != nil {
+		if err := database.ClosePostgreSQL(a.db); err != nil {
+			logger.Error("PostgreSQL 连接关闭失败", zap.Error(err))
+		}
+	}
+	if a.redisClient != nil {
+		if err := database.CloseRedis(a.redisClient); err != nil {
+			logger.Error("Redis 连接关闭失败", zap.Error(err))
+		}
 	}
 
 	logger.Info("HTTP 服务已停止")
