@@ -20,6 +20,11 @@ const (
 	CodeLLMCallFailed   = 5001
 	CodeAgentRunFailed  = 5002
 	CodeAgentRunTimeout = 5003
+
+	CodeModelConfigExists = 7001
+	CodeModelConfigNotFound = 7002
+
+	CodeModelExists = 7003
 )
 
 var codeMessages = map[int]string{
@@ -35,7 +40,10 @@ var codeMessages = map[int]string{
 	CodeToolCallFailed:   "工具调用失败",
 	CodeLLMCallFailed:    "LLM 调用失败",
 	CodeAgentRunFailed:   "Agent 执行失败",
-	CodeAgentRunTimeout:  "Agent 执行超时",
+	CodeAgentRunTimeout:    "Agent 执行超时",
+	CodeModelConfigExists:  "模型配置已存在",
+	CodeModelConfigNotFound: "模型配置不存在",
+	CodeModelExists:        "系统模型已存在",
 }
 
 // GetMessage 获取错误码对应的文本消息
