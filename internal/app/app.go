@@ -15,15 +15,11 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"solvify-agent/internal/agent"
 	"solvify-agent/internal/api"
-	"solvify-agent/internal/llm"
 	"solvify-agent/internal/middleware"
 	"solvify-agent/internal/model/entity"
-	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
-	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/database"
 	"solvify-agent/pkg/logger"
@@ -36,9 +32,7 @@ type App struct {
 	db                     *gorm.DB
 	redisClient            *redis.Client
 	router                 *api.Router
-	chatService            service.ChatServiceInterface
 	modelService           service.ModelServiceInterface
-	knowledgeService       service.KnowledgeServiceInterface
 	userModelConfigService service.UserModelConfigServiceInterface
 	server                 *http.Server
 }
@@ -125,8 +119,6 @@ func (a *App) initDatabase() error {
 	if err := db.AutoMigrate(
 		&entity.Model{},
 		&entity.UserModelConfig{},
-		&entity.ChatSession{},
-		&entity.ChatMessage{},
 	); err != nil {
 		return fmt.Errorf("数据库自动迁移失败: %w", err)
 	}
@@ -142,61 +134,15 @@ func (a *App) initDatabase() error {
 
 // initDependencies 初始化 Agent、Tool、RAG、LLM 和业务服务
 func (a *App) initDependencies() {
-	var retriever rag.Retriever
-	if a.cfg.RAG.Enabled {
-		// 创建 Embedding 客户端
-		embeddingClient := llm.NewOpenAIEmbeddingClient(a.cfg.Embedding)
-
-		// 尝试启用 pgvector 扩展
-		if err := rag.EnablePgVector(a.db); err != nil {
-			logger.Warn("启用 pgvector 扩展失败", zap.Error(err))
-		}
-
-		// 创建向量检索器
-		vectorRetriever := rag.NewVectorRetriever(a.db, embeddingClient, a.cfg.RAG, logger.GetLogger())
-
-		// 设置 ReRanker（使用 LLM 做重排序）
-		llmClient := llm.NewClient(a.cfg.LLM)
-		reranker := rag.NewReRanker(llmClient, a.cfg.LLM.Model, a.cfg.RAG.ScoreThreshold, logger.GetLogger())
-		vectorRetriever.SetReRanker(reranker)
-
-		retriever = vectorRetriever
-		logger.Info("使用向量检索器（含 ReRank）")
-	}
-
-	var tools []tool.Tool
-	if a.cfg.Tools.Enabled {
-		tools = []tool.Tool{
-			tool.NewCalculator(),
-			tool.NewGrepChunks(a.db),
-			tool.NewWebSearch(),
-		}
-		if retriever != nil {
-			tools = append(tools, tool.NewKnowledgeSearch(retriever))
-		}
-	}
-
-	llmClient := llm.NewClient(a.cfg.LLM)
-
-	knowledgeAgent := agent.NewKnowledgeAgent(agent.Options{
-		LLM:       llmClient,
-		Retriever: retriever,
-		Tools:     tools,
-		Logger:    logger.GetLogger(),
-		Model:     a.cfg.LLM.Model,
-	})
 
 	// 初始化 Repository
 	modelRepo := repository.NewModelRepository(a.db)
-	sessionRepo := repository.NewSessionRepository(a.db)
-	messageRepo := repository.NewMessageRepository(a.db)
+
 	userModelConfigRepo := repository.NewUserModelConfigRepository(a.db)
 
 	// 初始化 Service
 	a.modelService = service.NewModelService(modelRepo)
-	a.knowledgeService = service.NewKnowledgeService()
 	a.userModelConfigService = service.NewUserModelConfigService(userModelConfigRepo)
-	a.chatService = service.NewChatService(knowledgeAgent, sessionRepo, messageRepo, modelRepo, a.modelService, a.userModelConfigService)
 
 }
 
@@ -228,7 +174,7 @@ func (a *App) seedDefaultModel(repo repository.ModelRepo) {
 // initRouter 初始化 Gin 模式和项目路由
 func (a *App) initRouter() {
 	gin.SetMode(a.cfg.App.Mode)
-	a.router = api.NewRouter(a.chatService, a.modelService, a.knowledgeService, a.userModelConfigService)
+	a.router = api.NewRouter(a.modelService, a.userModelConfigService)
 }
 
 // initServer 初始化 HTTP Server
