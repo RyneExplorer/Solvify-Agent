@@ -11,12 +11,12 @@ import (
 
 // Controller 处理知识库模块请求
 type Controller struct {
-	knowledgeBaseService *service.KnowledgeBaseService
+	knowledgeBaseSvc *service.KnowledgeBaseService
 }
 
 // NewController 创建知识库控制器
-func NewController(knowledgeBaseService *service.KnowledgeBaseService) *Controller {
-	return &Controller{knowledgeBaseService: knowledgeBaseService}
+func NewController(knowledgeBaseSvc *service.KnowledgeBaseService) *Controller {
+	return &Controller{knowledgeBaseSvc: knowledgeBaseSvc}
 }
 
 // Create 创建本地知识库
@@ -32,7 +32,7 @@ func (ctrl *Controller) Create(c *gin.Context) {
 		return
 	}
 
-	output, err := ctrl.knowledgeBaseService.Create(c.Request.Context(), userID, input)
+	output, err := ctrl.knowledgeBaseSvc.Create(c.Request.Context(), userID, input)
 	if err != nil {
 		response.BizError(c, err)
 		return
@@ -47,7 +47,7 @@ func (ctrl *Controller) List(c *gin.Context) {
 		return
 	}
 
-	output, err := ctrl.knowledgeBaseService.List(c.Request.Context(), userID)
+	output, err := ctrl.knowledgeBaseSvc.List(c.Request.Context(), userID)
 	if err != nil {
 		response.BizError(c, err)
 		return
@@ -62,7 +62,7 @@ func (ctrl *Controller) Detail(c *gin.Context) {
 		return
 	}
 
-	output, err := ctrl.knowledgeBaseService.Detail(c.Request.Context(), userID, kbID)
+	output, err := ctrl.knowledgeBaseSvc.Detail(c.Request.Context(), userID, kbID)
 	if err != nil {
 		response.BizError(c, err)
 		return
@@ -83,7 +83,7 @@ func (ctrl *Controller) Update(c *gin.Context) {
 		return
 	}
 
-	output, err := ctrl.knowledgeBaseService.Update(c.Request.Context(), userID, kbID, input)
+	output, err := ctrl.knowledgeBaseSvc.Update(c.Request.Context(), userID, kbID, input)
 	if err != nil {
 		response.BizError(c, err)
 		return
@@ -98,7 +98,7 @@ func (ctrl *Controller) Delete(c *gin.Context) {
 		return
 	}
 
-	if err := ctrl.knowledgeBaseService.Delete(c.Request.Context(), userID, kbID); err != nil {
+	if err := ctrl.knowledgeBaseSvc.Delete(c.Request.Context(), userID, kbID); err != nil {
 		response.BizError(c, err)
 		return
 	}
@@ -112,7 +112,7 @@ func (ctrl *Controller) Stats(c *gin.Context) {
 		return
 	}
 
-	output, err := ctrl.knowledgeBaseService.Stats(c.Request.Context(), userID, kbID)
+	output, err := ctrl.knowledgeBaseSvc.Stats(c.Request.Context(), userID, kbID)
 	if err != nil {
 		response.BizError(c, err)
 		return

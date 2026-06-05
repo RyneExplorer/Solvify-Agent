@@ -21,12 +21,12 @@ const (
 
 // KnowledgeBaseService 封装知识库业务用例
 type KnowledgeBaseService struct {
-	repo repository.KnowledgeBaseRepository
+	knowledgeBaseRepo repository.KnowledgeBaseRepository
 }
 
 // NewKnowledgeBaseService 创建知识库业务服务
-func NewKnowledgeBaseService(repo repository.KnowledgeBaseRepository) *KnowledgeBaseService {
-	return &KnowledgeBaseService{repo: repo}
+func NewKnowledgeBaseService(knowledgeBaseRepo repository.KnowledgeBaseRepository) *KnowledgeBaseService {
+	return &KnowledgeBaseService{knowledgeBaseRepo: knowledgeBaseRepo}
 }
 
 // Create 创建本地知识库
@@ -39,7 +39,7 @@ func (s *KnowledgeBaseService) Create(ctx context.Context, userID string, req re
 		SourceType:  knowledgeBaseSourceLocal,
 		Status:      knowledgeBaseStatusNormal,
 	}
-	if err := s.repo.Create(ctx, &kb); err != nil {
+	if err := s.knowledgeBaseRepo.Create(ctx, &kb); err != nil {
 		return responsedto.KnowledgeBaseResponse{}, err
 	}
 	return knowledgeBaseResponse(kb), nil
@@ -47,7 +47,7 @@ func (s *KnowledgeBaseService) Create(ctx context.Context, userID string, req re
 
 // List 查询当前用户正常状态的知识库
 func (s *KnowledgeBaseService) List(ctx context.Context, userID string) ([]responsedto.KnowledgeBaseResponse, error) {
-	items, err := s.repo.ListNormal(ctx, userID, knowledgeBaseStatusNormal)
+	items, err := s.knowledgeBaseRepo.ListNormal(ctx, userID, knowledgeBaseStatusNormal)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +70,7 @@ func (s *KnowledgeBaseService) Detail(ctx context.Context, userID, kbID string) 
 
 // Update 更新知识库基础信息
 func (s *KnowledgeBaseService) Update(ctx context.Context, userID, kbID string, req requestdto.UpdateKnowledgeBaseRequest) (responsedto.KnowledgeBaseResponse, error) {
-	ok, err := s.repo.UpdateBasic(ctx, userID, kbID, knowledgeBaseStatusNormal, req.Name, req.Category, req.Description)
+	ok, err := s.knowledgeBaseRepo.UpdateBasic(ctx, userID, kbID, knowledgeBaseStatusNormal, req.Name, req.Category, req.Description)
 	if err != nil {
 		return responsedto.KnowledgeBaseResponse{}, err
 	}
@@ -84,7 +84,7 @@ func (s *KnowledgeBaseService) Update(ctx context.Context, userID, kbID string, 
 func (s *KnowledgeBaseService) Delete(ctx context.Context, userID, kbID string) error {
 	now := time.Now()
 	expiredAt := now.AddDate(0, 0, deleteRetentionDays)
-	ok, err := s.repo.SoftDelete(ctx, userID, kbID, knowledgeBaseStatusNormal, knowledgeBaseStatusDeleted, now, expiredAt)
+	ok, err := s.knowledgeBaseRepo.SoftDelete(ctx, userID, kbID, knowledgeBaseStatusNormal, knowledgeBaseStatusDeleted, now, expiredAt)
 	if err != nil {
 		return err
 	}
@@ -100,17 +100,17 @@ func (s *KnowledgeBaseService) Stats(ctx context.Context, userID, kbID string) (
 		return responsedto.KnowledgeBaseStatsResponse{}, err
 	}
 
-	documentCount, err := s.repo.CountDocuments(ctx, userID, kbID, 5)
+	documentCount, err := s.knowledgeBaseRepo.CountDocuments(ctx, userID, kbID, 5)
 	if err != nil {
 		return responsedto.KnowledgeBaseStatsResponse{}, err
 	}
 
-	storageBytes, err := s.repo.SumDocumentStorage(ctx, userID, kbID, 5)
+	storageBytes, err := s.knowledgeBaseRepo.SumDocumentStorage(ctx, userID, kbID, 5)
 	if err != nil {
 		return responsedto.KnowledgeBaseStatsResponse{}, err
 	}
 
-	retrievableChunkCount, err := s.repo.CountRetrievableChunks(ctx, userID, kbID)
+	retrievableChunkCount, err := s.knowledgeBaseRepo.CountRetrievableChunks(ctx, userID, kbID)
 	if err != nil {
 		return responsedto.KnowledgeBaseStatsResponse{}, err
 	}
@@ -125,7 +125,7 @@ func (s *KnowledgeBaseService) Stats(ctx context.Context, userID, kbID string) (
 
 // findNormalKnowledgeBase 查询当前用户正常状态的知识库
 func (s *KnowledgeBaseService) findNormalKnowledgeBase(ctx context.Context, userID, kbID string) (entity.KnowledgeBase, error) {
-	kb, ok, err := s.repo.FindNormal(ctx, userID, kbID, knowledgeBaseStatusNormal)
+	kb, ok, err := s.knowledgeBaseRepo.FindNormal(ctx, userID, kbID, knowledgeBaseStatusNormal)
 	if err != nil {
 		return entity.KnowledgeBase{}, err
 	}

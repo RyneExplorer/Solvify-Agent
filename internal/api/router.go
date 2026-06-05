@@ -16,10 +16,10 @@ type Router struct {
 }
 
 // NewRouter 创建 API 路由聚合器
-func NewRouter(knowledgeBaseService *service.KnowledgeBaseService, storageService *service.StorageService) *Router {
+func NewRouter(knowledgeBaseSvc *service.KnowledgeBaseService, storageSvc *service.StorageService) *Router {
 	return &Router{
-		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseService),
-		storageCtrl:       storage.NewController(storageService),
+		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseSvc),
+		storageCtrl:       storage.NewController(storageSvc),
 	}
 }
 

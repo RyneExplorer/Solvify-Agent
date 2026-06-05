@@ -11,17 +11,17 @@ const defaultMaxStorageBytes int64 = 10 * 1024 * 1024 * 1024
 
 // StorageService 封装存储配额业务用例
 type StorageService struct {
-	repo repository.StorageQuotaRepository
+	storageQuotaRepo repository.StorageQuotaRepository
 }
 
 // NewStorageService 创建存储配额业务服务
-func NewStorageService(repo repository.StorageQuotaRepository) *StorageService {
-	return &StorageService{repo: repo}
+func NewStorageService(storageQuotaRepo repository.StorageQuotaRepository) *StorageService {
+	return &StorageService{storageQuotaRepo: storageQuotaRepo}
 }
 
 // Quota 查询当前用户存储配额
 func (s *StorageService) Quota(ctx context.Context, userID string) (responsedto.StorageQuotaResponse, error) {
-	quota, ok, err := s.repo.FindByUserID(ctx, userID)
+	quota, ok, err := s.storageQuotaRepo.FindByUserID(ctx, userID)
 	if err != nil {
 		return responsedto.StorageQuotaResponse{}, err
 	}

@@ -44,6 +44,7 @@ Controller 位于 `internal/api/v1/<module>`，只负责：
 - 使用 `pkg/response` 返回统一响应
 
 Controller 不直接访问数据库，不直接依赖 Agent 内部结构，不编排 RAG、Tool、LLM 流程。
+Controller 中持有的 Service 字段按 `模块名Svc` 命名，例如 `knowledgeBaseSvc`、`storageSvc`。
 
 ### 上下文命名
 
@@ -61,6 +62,7 @@ Service 位于 `internal/service`，负责业务用例编排：
 - 透传或转换业务错误
 
 Service 不直接写 GORM 查询，不直接拼 SQL，不处理 HTTP 细节。
+Service 中持有的 Repository 字段按 `模块名Repo` 命名，例如 `knowledgeBaseRepo`、`storageQuotaRepo`。
 
 ### Repository
 

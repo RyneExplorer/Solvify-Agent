@@ -125,10 +125,10 @@ func (a *App) initDependencies() {
 	knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
 
-	knowledgeBaseService := service.NewKnowledgeBaseService(knowledgeBaseRepo)
-	storageService := service.NewStorageService(storageQuotaRepo)
+	knowledgeBaseSvc := service.NewKnowledgeBaseService(knowledgeBaseRepo)
+	storageSvc := service.NewStorageService(storageQuotaRepo)
 
-	a.router = api.NewRouter(knowledgeBaseService, storageService)
+	a.router = api.NewRouter(knowledgeBaseSvc, storageSvc)
 }
 
 // initRouter 初始化路由
