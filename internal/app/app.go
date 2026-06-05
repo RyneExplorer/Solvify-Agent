@@ -15,13 +15,11 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"solvify-agent/internal/agent"
 	"solvify-agent/internal/api"
-	"solvify-agent/internal/llm"
 	"solvify-agent/internal/middleware"
-	"solvify-agent/internal/rag"
+	"solvify-agent/internal/model/entity"
+	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
-	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/database"
 	"solvify-agent/pkg/logger"
@@ -29,12 +27,14 @@ import (
 
 // App 是全局应用结构体，集中持有配置、依赖、路由和服务实例
 type App struct {
-	cfg         *config.Config
-	db          *gorm.DB
-	redisClient *redis.Client
-	router      *api.Router
-	chatService *service.ChatService
-	server      *http.Server
+	cfg                    *config.Config
+	log                    *zap.Logger
+	db                     *gorm.DB
+	redisClient            *redis.Client
+	router                 *api.Router
+	modelService           service.ModelServiceInterface
+	userModelConfigService service.UserModelConfigServiceInterface
+	server                 *http.Server
 }
 
 // NewApp 创建应用实例
@@ -115,6 +115,14 @@ func (a *App) initDatabase() error {
 	}
 	a.db = db
 
+	// 自动迁移数据库表结构
+	if err := db.AutoMigrate(
+		&entity.Model{},
+		&entity.UserModelConfig{},
+	); err != nil {
+		return fmt.Errorf("数据库自动迁移失败: %w", err)
+	}
+
 	client, err := database.OpenRedis(&a.cfg.Database.Redis)
 	if err != nil {
 		_ = database.ClosePostgreSQL(a.db)
@@ -126,30 +134,47 @@ func (a *App) initDatabase() error {
 
 // initDependencies 初始化 Agent、Tool、RAG、LLM 和业务服务
 func (a *App) initDependencies() {
-	var retriever rag.Retriever
-	if a.cfg.RAG.Enabled {
-		retriever = rag.NewMemoryRetriever(rag.SeedDocuments())
+
+	// 初始化 Repository
+	modelRepo := repository.NewModelRepository(a.db)
+
+	userModelConfigRepo := repository.NewUserModelConfigRepository(a.db)
+
+	// 初始化 Service
+	a.modelService = service.NewModelService(modelRepo)
+	a.userModelConfigService = service.NewUserModelConfigService(userModelConfigRepo)
+
+}
+
+// seedDefaultModel 首次启动时从配置文件创建默认系统模型
+func (a *App) seedDefaultModel(repo repository.ModelRepo) {
+	ctx := context.Background()
+
+	// 检查是否已有模型
+	models, err := repo.List(ctx)
+	if err == nil && len(models) > 0 {
+		return // 已有模型，跳过
 	}
 
-	var tools []tool.Tool
-	if a.cfg.Tools.Enabled {
-		tools = []tool.Tool{tool.NewCalculator()}
+	model := &entity.Model{
+		Name:      a.cfg.LLM.Model,
+		Provider:  a.cfg.LLM.Provider,
+		ModelID:   a.cfg.LLM.Model,
+		BaseURL:   a.cfg.LLM.BaseURL,
+		APIKey:    a.cfg.LLM.APIKey,
+		IsEnabled: true,
 	}
-
-	knowledgeAgent := agent.NewKnowledgeAgent(agent.Options{
-		LLM:       llm.NewMockClient(a.cfg.LLM.Model),
-		Retriever: retriever,
-		Tools:     tools,
-		Logger:    logger.GetLogger(),
-		Model:     a.cfg.LLM.Model,
-	})
-	a.chatService = service.NewChatService(knowledgeAgent)
+	if err := repo.Create(ctx, model); err != nil {
+		logger.Warn("创建默认系统模型失败", zap.Error(err))
+		return
+	}
+	logger.Info("已创建默认系统模型", zap.String("model_id", model.ModelID))
 }
 
 // initRouter 初始化 Gin 模式和项目路由
 func (a *App) initRouter() {
 	gin.SetMode(a.cfg.App.Mode)
-	a.router = api.NewRouter(a.chatService)
+	a.router = api.NewRouter(a.modelService, a.userModelConfigService)
 }
 
 // initServer 初始化 HTTP Server
