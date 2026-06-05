@@ -8,6 +8,7 @@ coverage.out
 configs/config.yaml
 docs/Solvify-Agent思维导图.xmind
 docs/模块划分.md
+scripts/seed_interface_data.sql
 
 # 本地环境配置
 .env

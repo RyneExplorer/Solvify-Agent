@@ -39,8 +39,11 @@ CREATE TABLE IF NOT EXISTS knowledge_bases
     source_platform VARCHAR(32)  NOT NULL DEFAULT '',      -- 同步来源平台
     document_count  INT          NOT NULL DEFAULT 0,       -- 文档数量
     storage_bytes   BIGINT       NOT NULL DEFAULT 0,       -- 已占用存储字节数
+    status          SMALLINT     NOT NULL DEFAULT 1,       -- 知识库状态，1 正常，2 已删除
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),         -- 创建时间
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),         -- 更新时间
+    deleted_at TIMESTAMPTZ,                                -- 删除时间
+    delete_expired_at TIMESTAMPTZ,                         -- 删除保留到期时间
 
     CONSTRAINT knowledge_bases_user_name_unique UNIQUE (user_id, name)
 );
@@ -55,8 +58,11 @@ COMMENT ON COLUMN knowledge_bases.source_type IS '知识库来源类型，local 
 COMMENT ON COLUMN knowledge_bases.source_platform IS '同步来源平台';
 COMMENT ON COLUMN knowledge_bases.document_count IS '文档数量';
 COMMENT ON COLUMN knowledge_bases.storage_bytes IS '已占用存储字节数';
+COMMENT ON COLUMN knowledge_bases.status IS '知识库状态，1 正常，2 已删除';
 COMMENT ON COLUMN knowledge_bases.created_at IS '创建时间';
 COMMENT ON COLUMN knowledge_bases.updated_at IS '更新时间';
+COMMENT ON COLUMN knowledge_bases.deleted_at IS '删除时间';
+COMMENT ON COLUMN knowledge_bases.delete_expired_at IS '删除保留到期时间';
 
 -- 文档表记录上传文件和处理状态
 CREATE TABLE IF NOT EXISTS documents
@@ -75,7 +81,9 @@ CREATE TABLE IF NOT EXISTS documents
     error_message TEXT         NOT NULL DEFAULT '',       -- 处理失败原因
     ready_at TIMESTAMPTZ,                                 -- 文档就绪时间
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),        -- 创建时间
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()         -- 更新时间
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),        -- 更新时间
+    deleted_at TIMESTAMPTZ,                               -- 删除时间
+    delete_expired_at TIMESTAMPTZ                         -- 删除保留到期时间
 
 );
 
@@ -93,6 +101,8 @@ COMMENT ON COLUMN documents.source_type IS '文档来源类型，upload 上传�
 COMMENT ON COLUMN documents.status IS '文档状态，1 已上传，2 处理中，3 已就绪，4 处理失败，5 已删除';
 COMMENT ON COLUMN documents.error_message IS '处理失败原因';
 COMMENT ON COLUMN documents.ready_at IS '文档就绪时间';
+COMMENT ON COLUMN documents.deleted_at IS '删除时间';
+COMMENT ON COLUMN documents.delete_expired_at IS '删除保留到期时间';
 COMMENT ON COLUMN documents.created_at IS '创建时间';
 COMMENT ON COLUMN documents.updated_at IS '更新时间';
 

@@ -20,6 +20,8 @@ const (
 	CodeLLMCallFailed   = 5001
 	CodeAgentRunFailed  = 5002
 	CodeAgentRunTimeout = 5003
+
+	CodeKnowledgeBaseNotFound = 6001
 )
 
 var codeMessages = map[int]string{
@@ -36,6 +38,8 @@ var codeMessages = map[int]string{
 	CodeLLMCallFailed:    "LLM 调用失败",
 	CodeAgentRunFailed:   "Agent 执行失败",
 	CodeAgentRunTimeout:  "Agent 执行超时",
+
+	CodeKnowledgeBaseNotFound: "知识库不存在",
 }
 
 // GetMessage 获取错误码对应的文本消息

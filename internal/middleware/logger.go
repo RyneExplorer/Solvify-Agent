@@ -13,24 +13,24 @@ func Logger(log *zap.Logger) gin.HandlerFunc {
 		log = zap.NewNop()
 	}
 
-	return func(ctx *gin.Context) {
+	return func(c *gin.Context) {
 		start := time.Now()
-		path := ctx.Request.URL.Path
-		query := ctx.Request.URL.RawQuery
+		path := c.Request.URL.Path
+		query := c.Request.URL.RawQuery
 
-		ctx.Next()
+		c.Next()
 
 		fields := []zap.Field{
-			zap.String("method", ctx.Request.Method),
+			zap.String("method", c.Request.Method),
 			zap.String("path", path),
 			zap.String("query", query),
-			zap.Int("status", ctx.Writer.Status()),
-			zap.String("ip", ctx.ClientIP()),
-			zap.String("user_agent", ctx.Request.UserAgent()),
+			zap.Int("status", c.Writer.Status()),
+			zap.String("ip", c.ClientIP()),
+			zap.String("user_agent", c.Request.UserAgent()),
 			zap.Duration("latency", time.Since(start)),
 		}
-		if len(ctx.Errors) > 0 {
-			fields = append(fields, zap.String("errors", ctx.Errors.String()))
+		if len(c.Errors) > 0 {
+			fields = append(fields, zap.String("errors", c.Errors.String()))
 		}
 
 		log.Info("HTTP 请求完成", fields...)

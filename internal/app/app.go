@@ -15,26 +15,22 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"solvify-agent/internal/agent"
 	"solvify-agent/internal/api"
-	"solvify-agent/internal/llm"
 	"solvify-agent/internal/middleware"
-	"solvify-agent/internal/rag"
+	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
-	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/database"
 	"solvify-agent/pkg/logger"
 )
 
-// App 是全局应用结构体，集中持有配置、依赖、路由和服务实例
+// App 是全局应用结构体，集中持有配置、基础设施和路由实例
 type App struct {
-	cfg         *config.Config
-	db          *gorm.DB
-	redisClient *redis.Client
-	router      *api.Router
-	chatService *service.ChatService
-	server      *http.Server
+	cfg          *config.Config
+	postgresqlDB *gorm.DB
+	redis        *redis.Client
+	router       *api.Router
+	server       *http.Server
 }
 
 // NewApp 创建应用实例
@@ -109,47 +105,36 @@ func (a *App) initLogger() error {
 
 // initDatabase 初始化 PostgreSQL 和 Redis 连接
 func (a *App) initDatabase() error {
-	db, err := database.OpenPostgreSQL(&a.cfg.Database.Postgres)
+	postgresqlDB, err := database.OpenPostgreSQL(&a.cfg.Database.Postgres)
 	if err != nil {
 		return fmt.Errorf("初始化 PostgreSQL 失败: %w", err)
 	}
-	a.db = db
+	a.postgresqlDB = postgresqlDB
 
-	client, err := database.OpenRedis(&a.cfg.Database.Redis)
+	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
 	if err != nil {
-		_ = database.ClosePostgreSQL(a.db)
+		_ = database.ClosePostgreSQL(a.postgresqlDB)
 		return fmt.Errorf("初始化 Redis 失败: %w", err)
 	}
-	a.redisClient = client
+	a.redis = redisClient
 	return nil
 }
 
-// initDependencies 初始化 Agent、Tool、RAG、LLM 和业务服务
+// initDependencies 初始化业务依赖并创建路由
 func (a *App) initDependencies() {
-	var retriever rag.Retriever
-	if a.cfg.RAG.Enabled {
-		retriever = rag.NewMemoryRetriever(rag.SeedDocuments())
-	}
+	knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
+	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
 
-	var tools []tool.Tool
-	if a.cfg.Tools.Enabled {
-		tools = []tool.Tool{tool.NewCalculator()}
-	}
+	knowledgeBaseService := service.NewKnowledgeBaseService(knowledgeBaseRepo)
+	storageService := service.NewStorageService(storageQuotaRepo)
 
-	knowledgeAgent := agent.NewKnowledgeAgent(agent.Options{
-		LLM:       llm.NewMockClient(a.cfg.LLM.Model),
-		Retriever: retriever,
-		Tools:     tools,
-		Logger:    logger.GetLogger(),
-		Model:     a.cfg.LLM.Model,
-	})
-	a.chatService = service.NewChatService(knowledgeAgent)
+	a.router = api.NewRouter(knowledgeBaseService, storageService)
 }
 
-// initRouter 初始化 Gin 模式和项目路由
+// initRouter 初始化路由
 func (a *App) initRouter() {
+	// 设置 Gin 模式
 	gin.SetMode(a.cfg.App.Mode)
-	a.router = api.NewRouter(a.chatService)
 }
 
 // initServer 初始化 HTTP Server
@@ -182,13 +167,13 @@ func (a *App) gracefulShutdown() {
 		logger.Fatal("HTTP 服务关闭失败", zap.Error(err))
 	}
 
-	if a.db != nil {
-		if err := database.ClosePostgreSQL(a.db); err != nil {
+	if a.postgresqlDB != nil {
+		if err := database.ClosePostgreSQL(a.postgresqlDB); err != nil {
 			logger.Error("PostgreSQL 连接关闭失败", zap.Error(err))
 		}
 	}
-	if a.redisClient != nil {
-		if err := database.CloseRedis(a.redisClient); err != nil {
+	if a.redis != nil {
+		if err := database.CloseRedis(a.redis); err != nil {
 			logger.Error("Redis 连接关闭失败", zap.Error(err))
 		}
 	}
