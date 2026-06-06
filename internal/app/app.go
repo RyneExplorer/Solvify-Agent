@@ -123,12 +123,14 @@ func (a *App) initDatabase() error {
 // initDependencies 初始化业务依赖并创建路由
 func (a *App) initDependencies() {
 	knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
+	documentRepo := repository.NewDocumentRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
 
 	knowledgeBaseSvc := service.NewKnowledgeBaseService(knowledgeBaseRepo)
+	documentSvc := service.NewDocumentService(knowledgeBaseRepo, documentRepo, storageQuotaRepo)
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 
-	a.router = api.NewRouter(knowledgeBaseSvc, storageSvc)
+	a.router = api.NewRouter(knowledgeBaseSvc, documentSvc, storageSvc)
 }
 
 // initRouter 初始化路由

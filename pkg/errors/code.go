@@ -22,6 +22,13 @@ const (
 	CodeAgentRunTimeout = 5003
 
 	CodeKnowledgeBaseNotFound = 6001
+
+	CodeDocumentNotFound        = 7001
+	CodeDocumentFileTooLarge    = 7002
+	CodeDocumentFileTypeInvalid = 7003
+	CodeDocumentFileDuplicated  = 7004
+	CodeStorageQuotaExceeded    = 7005
+	CodeKnowledgeBaseReadonly   = 7006
 )
 
 var codeMessages = map[int]string{
@@ -40,6 +47,13 @@ var codeMessages = map[int]string{
 	CodeAgentRunTimeout:  "Agent 执行超时",
 
 	CodeKnowledgeBaseNotFound: "知识库不存在",
+
+	CodeDocumentNotFound:        "文档不存在",
+	CodeDocumentFileTooLarge:    "文件大小超过限制",
+	CodeDocumentFileTypeInvalid: "文件类型不支持",
+	CodeDocumentFileDuplicated:  "同名文档已存在",
+	CodeStorageQuotaExceeded:    "存储配额不足",
+	CodeKnowledgeBaseReadonly:   "当前知识库不允许上传文档",
 }
 
 // GetMessage 获取错误码对应的文本消息
