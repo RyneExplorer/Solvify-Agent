@@ -18,6 +18,7 @@ import (
 	"solvify-agent/internal/api"
 	"solvify-agent/internal/middleware"
 	"solvify-agent/internal/repository"
+	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/database"
@@ -31,6 +32,8 @@ type App struct {
 	redis        *redis.Client
 	router       *api.Router
 	server       *http.Server
+	modelService           service.ModelServiceInterface
+	userModelConfigService service.UserModelConfigServiceInterface
 }
 
 // NewApp 创建应用实例
@@ -105,12 +108,23 @@ func (a *App) initLogger() error {
 
 // initDatabase 初始化 PostgreSQL 和 Redis 连接
 func (a *App) initDatabase() error {
+	// postgresql
 	postgresqlDB, err := database.OpenPostgreSQL(&a.cfg.Database.Postgres)
 	if err != nil {
 		return fmt.Errorf("初始化 PostgreSQL 失败: %w", err)
 	}
 	a.postgresqlDB = postgresqlDB
 
+
+	// 自动迁移数据库表结构
+	if err := postgresqlDB.AutoMigrate(
+		&entity.Model{},
+		&entity.UserModelConfig{},
+	); err != nil {
+		return fmt.Errorf("数据库自动迁移失败: %w", err)
+	}
+
+	// redis
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
 	if err != nil {
 		_ = database.ClosePostgreSQL(a.postgresqlDB)
@@ -122,16 +136,23 @@ func (a *App) initDatabase() error {
 
 // initDependencies 初始化业务依赖并创建路由
 func (a *App) initDependencies() {
+	// 初始化 Repository
 	knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
 	documentRepo := repository.NewDocumentRepository(a.postgresqlDB)
 	documentJobRepo := repository.NewDocumentProcessingJobRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
+	modelRepo := repository.NewModelRepository(a.postgresqlDB)
+	userModelConfigRepo := repository.NewUserModelConfigRepository(a.postgresqlDB)
 
+	// 初始化 Service
+	modelService := service.NewModelService(modelRepo)
+	userModelConfigService := service.NewUserModelConfigService(userModelConfigRepo)
 	knowledgeBaseSvc := service.NewKnowledgeBaseService(knowledgeBaseRepo)
 	documentSvc := service.NewDocumentService(knowledgeBaseRepo, documentRepo, documentJobRepo, storageQuotaRepo)
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 
-	a.router = api.NewRouter(knowledgeBaseSvc, documentSvc, storageSvc)
+	// 路由
+	a.router = api.NewRouter(modelService, userModelConfigService, knowledgeBaseSvc, documentSvc, storageSvc)
 }
 
 // initRouter 初始化路由
