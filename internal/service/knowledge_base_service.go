@@ -19,18 +19,18 @@ const (
 	deleteRetentionDays      = 30
 )
 
-// KnowledgeBaseService 封装知识库业务用例
-type KnowledgeBaseService struct {
+// knowledgeBaseService 封装知识库业务用例实现
+type knowledgeBaseService struct {
 	knowledgeBaseRepo repository.KnowledgeBaseRepository
 }
 
 // NewKnowledgeBaseService 创建知识库业务服务
-func NewKnowledgeBaseService(knowledgeBaseRepo repository.KnowledgeBaseRepository) *KnowledgeBaseService {
-	return &KnowledgeBaseService{knowledgeBaseRepo: knowledgeBaseRepo}
+func NewKnowledgeBaseService(knowledgeBaseRepo repository.KnowledgeBaseRepository) KnowledgeBaseServiceInterface {
+	return &knowledgeBaseService{knowledgeBaseRepo: knowledgeBaseRepo}
 }
 
 // Create 创建本地知识库
-func (s *KnowledgeBaseService) Create(ctx context.Context, userID string, req requestdto.CreateKnowledgeBaseRequest) (dto.KnowledgeBaseResponse, error) {
+func (s *knowledgeBaseService) Create(ctx context.Context, userID string, req requestdto.CreateKnowledgeBaseRequest) (dto.KnowledgeBaseResponse, error) {
 	kb := entity.KnowledgeBase{
 		UserID:      userID,
 		Name:        req.Name,
@@ -46,7 +46,7 @@ func (s *KnowledgeBaseService) Create(ctx context.Context, userID string, req re
 }
 
 // List 查询当前用户正常状态的知识库
-func (s *KnowledgeBaseService) List(ctx context.Context, userID string) ([]dto.KnowledgeBaseResponse, error) {
+func (s *knowledgeBaseService) List(ctx context.Context, userID string) ([]dto.KnowledgeBaseResponse, error) {
 	items, err := s.knowledgeBaseRepo.ListNormal(ctx, userID, knowledgeBaseStatusNormal)
 	if err != nil {
 		return nil, err
@@ -60,7 +60,7 @@ func (s *KnowledgeBaseService) List(ctx context.Context, userID string) ([]dto.K
 }
 
 // Detail 查询知识库详情
-func (s *KnowledgeBaseService) Detail(ctx context.Context, userID, kbID string) (dto.KnowledgeBaseResponse, error) {
+func (s *knowledgeBaseService) Detail(ctx context.Context, userID, kbID string) (dto.KnowledgeBaseResponse, error) {
 	kb, err := s.findNormalKnowledgeBase(ctx, userID, kbID)
 	if err != nil {
 		return dto.KnowledgeBaseResponse{}, err
@@ -69,7 +69,7 @@ func (s *KnowledgeBaseService) Detail(ctx context.Context, userID, kbID string) 
 }
 
 // Update 更新知识库基础信息
-func (s *KnowledgeBaseService) Update(ctx context.Context, userID, kbID string, req requestdto.UpdateKnowledgeBaseRequest) (dto.KnowledgeBaseResponse, error) {
+func (s *knowledgeBaseService) Update(ctx context.Context, userID, kbID string, req requestdto.UpdateKnowledgeBaseRequest) (dto.KnowledgeBaseResponse, error) {
 	ok, err := s.knowledgeBaseRepo.UpdateBasic(ctx, userID, kbID, knowledgeBaseStatusNormal, req.Name, req.Category, req.Description)
 	if err != nil {
 		return dto.KnowledgeBaseResponse{}, err
@@ -81,7 +81,7 @@ func (s *KnowledgeBaseService) Update(ctx context.Context, userID, kbID string, 
 }
 
 // Delete 软删除知识库
-func (s *KnowledgeBaseService) Delete(ctx context.Context, userID, kbID string) error {
+func (s *knowledgeBaseService) Delete(ctx context.Context, userID, kbID string) error {
 	now := time.Now()
 	expiredAt := now.AddDate(0, 0, deleteRetentionDays)
 	ok, err := s.knowledgeBaseRepo.SoftDelete(ctx, userID, kbID, knowledgeBaseStatusNormal, knowledgeBaseStatusDeleted, now, expiredAt)
@@ -95,7 +95,7 @@ func (s *KnowledgeBaseService) Delete(ctx context.Context, userID, kbID string) 
 }
 
 // Stats 查询知识库统计数据
-func (s *KnowledgeBaseService) Stats(ctx context.Context, userID, kbID string) (dto.KnowledgeBaseStatsResponse, error) {
+func (s *knowledgeBaseService) Stats(ctx context.Context, userID, kbID string) (dto.KnowledgeBaseStatsResponse, error) {
 	if _, err := s.findNormalKnowledgeBase(ctx, userID, kbID); err != nil {
 		return dto.KnowledgeBaseStatsResponse{}, err
 	}
@@ -124,7 +124,7 @@ func (s *KnowledgeBaseService) Stats(ctx context.Context, userID, kbID string) (
 }
 
 // findNormalKnowledgeBase 查询当前用户正常状态的知识库
-func (s *KnowledgeBaseService) findNormalKnowledgeBase(ctx context.Context, userID, kbID string) (entity.KnowledgeBase, error) {
+func (s *knowledgeBaseService) findNormalKnowledgeBase(ctx context.Context, userID, kbID string) (entity.KnowledgeBase, error) {
 	kb, ok, err := s.knowledgeBaseRepo.FindNormal(ctx, userID, kbID, knowledgeBaseStatusNormal)
 	if err != nil {
 		return entity.KnowledgeBase{}, err

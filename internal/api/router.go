@@ -5,8 +5,8 @@ import (
 
 	"solvify-agent/internal/api/v1/document"
 	"solvify-agent/internal/api/v1/knowledgebase"
-	"solvify-agent/internal/api/v1/storage"
 	"solvify-agent/internal/api/v1/model"
+	"solvify-agent/internal/api/v1/storage"
 	"solvify-agent/internal/middleware"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
@@ -17,21 +17,21 @@ type Router struct {
 	knowledgeBaseCtrl *knowledgebase.Controller
 	documentCtrl      *document.Controller
 	storageCtrl       *storage.Controller
-	modelCtrl     *model.Controller
-	userModelCtrl *model.UserModelController
+	modelCtrl         *model.Controller
+	userModelCtrl     *model.UserModelController
 }
 
 // NewRouter 创建 API 路由聚合器
 func NewRouter(
 	modelService service.ModelServiceInterface,
 	userModelConfigService service.UserModelConfigServiceInterface,
-	knowledgeBaseSvc *service.KnowledgeBaseService,
-	documentSvc *service.DocumentService,
-	storageSvc *service.StorageService,
-	) *Router {
+	knowledgeBaseSvc service.KnowledgeBaseServiceInterface,
+	documentSvc service.DocumentServiceInterface,
+	storageSvc service.StorageServiceInterface,
+) *Router {
 	return &Router{
-		modelCtrl:     model.NewController(modelService),
-		userModelCtrl: model.NewUserModelController(userModelConfigService),
+		modelCtrl:         model.NewController(modelService),
+		userModelCtrl:     model.NewUserModelController(userModelConfigService),
 		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseSvc),
 		documentCtrl:      document.NewController(documentSvc),
 		storageCtrl:       storage.NewController(storageSvc),

@@ -10,11 +10,11 @@ import (
 
 // Controller 处理存储配额模块请求
 type Controller struct {
-	storageSvc *service.StorageService
+	storageSvc service.StorageServiceInterface
 }
 
 // NewController 创建存储配额控制器
-func NewController(storageSvc *service.StorageService) *Controller {
+func NewController(storageSvc service.StorageServiceInterface) *Controller {
 	return &Controller{storageSvc: storageSvc}
 }
 

@@ -17,8 +17,8 @@ import (
 
 	"solvify-agent/internal/api"
 	"solvify-agent/internal/middleware"
-	"solvify-agent/internal/repository"
 	"solvify-agent/internal/model/entity"
+	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/database"
@@ -27,11 +27,11 @@ import (
 
 // App 是全局应用结构体，集中持有配置、基础设施和路由实例
 type App struct {
-	cfg          *config.Config
-	postgresqlDB *gorm.DB
-	redis        *redis.Client
-	router       *api.Router
-	server       *http.Server
+	cfg                    *config.Config
+	postgresqlDB           *gorm.DB
+	redis                  *redis.Client
+	router                 *api.Router
+	server                 *http.Server
 	modelService           service.ModelServiceInterface
 	userModelConfigService service.UserModelConfigServiceInterface
 }
@@ -115,7 +115,6 @@ func (a *App) initDatabase() error {
 	}
 	a.postgresqlDB = postgresqlDB
 
-
 	// 自动迁移数据库表结构
 	if err := postgresqlDB.AutoMigrate(
 		&entity.Model{},
@@ -152,7 +151,12 @@ func (a *App) initDependencies() {
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 
 	// 路由
-	a.router = api.NewRouter(modelService, userModelConfigService, knowledgeBaseSvc, documentSvc, storageSvc)
+	a.router = api.NewRouter(
+		modelService,
+		userModelConfigService,
+		knowledgeBaseSvc,
+		documentSvc,
+		storageSvc)
 }
 
 // initRouter 初始化路由

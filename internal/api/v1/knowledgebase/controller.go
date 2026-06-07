@@ -11,11 +11,11 @@ import (
 
 // Controller 处理知识库模块请求
 type Controller struct {
-	knowledgeBaseSvc *service.KnowledgeBaseService
+	knowledgeBaseSvc service.KnowledgeBaseServiceInterface
 }
 
 // NewController 创建知识库控制器
-func NewController(knowledgeBaseSvc *service.KnowledgeBaseService) *Controller {
+func NewController(knowledgeBaseSvc service.KnowledgeBaseServiceInterface) *Controller {
 	return &Controller{knowledgeBaseSvc: knowledgeBaseSvc}
 }
 

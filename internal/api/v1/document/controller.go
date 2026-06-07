@@ -10,11 +10,11 @@ import (
 
 // Controller 处理文档模块请求
 type Controller struct {
-	documentService *service.DocumentService
+	documentService service.DocumentServiceInterface
 }
 
 // NewController 创建文档控制器
-func NewController(documentService *service.DocumentService) *Controller {
+func NewController(documentService service.DocumentServiceInterface) *Controller {
 	return &Controller{documentService: documentService}
 }
 
