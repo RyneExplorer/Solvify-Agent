@@ -27,13 +27,11 @@ import (
 
 // App 是全局应用结构体，集中持有配置、基础设施和路由实例
 type App struct {
-	cfg                    *config.Config
-	postgresqlDB           *gorm.DB
-	redis                  *redis.Client
-	router                 *api.Router
-	server                 *http.Server
-	modelService           service.ModelServiceInterface
-	userModelConfigService service.UserModelConfigServiceInterface
+	cfg          *config.Config
+	postgresqlDB *gorm.DB
+	redis        *redis.Client
+	router       *api.Router
+	server       *http.Server
 }
 
 // NewApp 创建应用实例
@@ -197,7 +195,7 @@ func (a *App) gracefulShutdown() {
 
 	if a.postgresqlDB != nil {
 		if err := database.ClosePostgreSQL(a.postgresqlDB); err != nil {
-			logger.Error("PostgreSQL 连接关闭失败", zap.Error(err))
+			logger.Error("PostgresSQL 连接关闭失败", zap.Error(err))
 		}
 	}
 	if a.redis != nil {
