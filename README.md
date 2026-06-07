@@ -1,6 +1,6 @@
 # Solvify-Agent
 
-Solvify-Agent 是一个基于 Go + Gin + Eino 的可运行 Agent 项目初始化框架，内置“知识助理”Demo，覆盖用户提问、RAG 模拟检索、Tool 模拟调用、LLM 封装、统一响应、业务错误码、zap 日志和优雅关闭链路。
+Solvify-Agent 是一个基于 Go + Gin + Eino 的可运行 Agent 项目初始化框架，内置知识助理Demo，覆盖用户提问、RAG 模拟检索、Tool 模拟调用、LLM 封装、统一响应、业务错误码、zap 日志和优雅关闭链路。
 
 ## 目录结构
 

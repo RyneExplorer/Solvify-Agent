@@ -15,22 +15,22 @@ func Recovery(log *zap.Logger) gin.HandlerFunc {
 		log = zap.NewNop()
 	}
 
-	return func(ctx *gin.Context) {
+	return func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
 				log.Error("请求发生 panic",
 					zap.Any("error", err),
 					zap.String("stack", string(debug.Stack())),
-					zap.String("path", ctx.Request.URL.Path),
-					zap.String("method", ctx.Request.Method),
-					zap.String("ip", ctx.ClientIP()),
+					zap.String("path", c.Request.URL.Path),
+					zap.String("method", c.Request.Method),
+					zap.String("ip", c.ClientIP()),
 				)
 
-				response.InternalError(ctx, "服务内部错误")
-				ctx.Abort()
+				response.InternalError(c, "服务内部错误")
+				c.Abort()
 			}
 		}()
 
-		ctx.Next()
+		c.Next()
 	}
 }
