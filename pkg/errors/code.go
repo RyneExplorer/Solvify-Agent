@@ -21,10 +21,21 @@ const (
 	CodeAgentRunFailed  = 5002
 	CodeAgentRunTimeout = 5003
 
+	CodeKnowledgeBaseNotFound = 6001
+
 	CodeModelConfigExists = 7001
 	CodeModelConfigNotFound = 7002
 
 	CodeModelExists = 7003
+	CodeDocumentNotFound        = 8001
+	CodeDocumentFileTooLarge    = 8002
+	CodeDocumentFileTypeInvalid = 8003
+	CodeDocumentFileDuplicated  = 8004
+	CodeStorageQuotaExceeded    = 8005
+	CodeKnowledgeBaseReadonly   = 8006
+	CodeDocumentStatusInvalid   = 8007
+	CodeDocumentJobNotFound     = 8008
+
 )
 
 var codeMessages = map[int]string{
@@ -40,7 +51,18 @@ var codeMessages = map[int]string{
 	CodeToolCallFailed:   "工具调用失败",
 	CodeLLMCallFailed:    "LLM 调用失败",
 	CodeAgentRunFailed:   "Agent 执行失败",
-	CodeAgentRunTimeout:    "Agent 执行超时",
+	CodeAgentRunTimeout:  "Agent 执行超时",
+
+	CodeKnowledgeBaseNotFound: "知识库不存在",
+
+	CodeDocumentNotFound:        "文档不存在",
+	CodeDocumentFileTooLarge:    "文件大小超过限制",
+	CodeDocumentFileTypeInvalid: "文件类型不支持",
+	CodeDocumentFileDuplicated:  "同名文档已存在",
+	CodeStorageQuotaExceeded:    "存储配额不足",
+	CodeKnowledgeBaseReadonly:   "当前知识库不允许上传文档",
+	CodeDocumentStatusInvalid:   "当前文档状态不允许处理",
+	CodeDocumentJobNotFound:     "文档处理任务不存在",
 	CodeModelConfigExists:  "模型配置已存在",
 	CodeModelConfigNotFound: "模型配置不存在",
 	CodeModelExists:        "系统模型已存在",

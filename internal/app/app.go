@@ -25,16 +25,15 @@ import (
 	"solvify-agent/pkg/logger"
 )
 
-// App 是全局应用结构体，集中持有配置、依赖、路由和服务实例
+// App 是全局应用结构体，集中持有配置、基础设施和路由实例
 type App struct {
 	cfg                    *config.Config
-	log                    *zap.Logger
-	db                     *gorm.DB
-	redisClient            *redis.Client
+	postgresqlDB           *gorm.DB
+	redis                  *redis.Client
 	router                 *api.Router
+	server                 *http.Server
 	modelService           service.ModelServiceInterface
 	userModelConfigService service.UserModelConfigServiceInterface
-	server                 *http.Server
 }
 
 // NewApp 创建应用实例
@@ -109,72 +108,61 @@ func (a *App) initLogger() error {
 
 // initDatabase 初始化 PostgreSQL 和 Redis 连接
 func (a *App) initDatabase() error {
-	db, err := database.OpenPostgreSQL(&a.cfg.Database.Postgres)
+	// postgresql
+	postgresqlDB, err := database.OpenPostgreSQL(&a.cfg.Database.Postgres)
 	if err != nil {
 		return fmt.Errorf("初始化 PostgreSQL 失败: %w", err)
 	}
-	a.db = db
+	a.postgresqlDB = postgresqlDB
 
 	// 自动迁移数据库表结构
-	if err := db.AutoMigrate(
+	if err := postgresqlDB.AutoMigrate(
 		&entity.Model{},
 		&entity.UserModelConfig{},
 	); err != nil {
 		return fmt.Errorf("数据库自动迁移失败: %w", err)
 	}
 
-	client, err := database.OpenRedis(&a.cfg.Database.Redis)
+	// redis
+	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
 	if err != nil {
-		_ = database.ClosePostgreSQL(a.db)
+		_ = database.ClosePostgreSQL(a.postgresqlDB)
 		return fmt.Errorf("初始化 Redis 失败: %w", err)
 	}
-	a.redisClient = client
+	a.redis = redisClient
 	return nil
 }
 
-// initDependencies 初始化 Agent、Tool、RAG、LLM 和业务服务
+// initDependencies 初始化业务依赖并创建路由
 func (a *App) initDependencies() {
-
 	// 初始化 Repository
-	modelRepo := repository.NewModelRepository(a.db)
-
-	userModelConfigRepo := repository.NewUserModelConfigRepository(a.db)
+	knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
+	documentRepo := repository.NewDocumentRepository(a.postgresqlDB)
+	documentJobRepo := repository.NewDocumentProcessingJobRepository(a.postgresqlDB)
+	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
+	modelRepo := repository.NewModelRepository(a.postgresqlDB)
+	userModelConfigRepo := repository.NewUserModelConfigRepository(a.postgresqlDB)
 
 	// 初始化 Service
-	a.modelService = service.NewModelService(modelRepo)
-	a.userModelConfigService = service.NewUserModelConfigService(userModelConfigRepo)
+	modelService := service.NewModelService(modelRepo)
+	userModelConfigService := service.NewUserModelConfigService(userModelConfigRepo)
+	knowledgeBaseSvc := service.NewKnowledgeBaseService(knowledgeBaseRepo)
+	documentSvc := service.NewDocumentService(knowledgeBaseRepo, documentRepo, documentJobRepo, storageQuotaRepo)
+	storageSvc := service.NewStorageService(storageQuotaRepo)
 
+	// 路由
+	a.router = api.NewRouter(
+		modelService,
+		userModelConfigService,
+		knowledgeBaseSvc,
+		documentSvc,
+		storageSvc)
 }
 
-// seedDefaultModel 首次启动时从配置文件创建默认系统模型
-func (a *App) seedDefaultModel(repo repository.ModelRepo) {
-	ctx := context.Background()
-
-	// 检查是否已有模型
-	models, err := repo.List(ctx)
-	if err == nil && len(models) > 0 {
-		return // 已有模型，跳过
-	}
-
-	model := &entity.Model{
-		Name:      a.cfg.LLM.Model,
-		Provider:  a.cfg.LLM.Provider,
-		ModelID:   a.cfg.LLM.Model,
-		BaseURL:   a.cfg.LLM.BaseURL,
-		APIKey:    a.cfg.LLM.APIKey,
-		IsEnabled: true,
-	}
-	if err := repo.Create(ctx, model); err != nil {
-		logger.Warn("创建默认系统模型失败", zap.Error(err))
-		return
-	}
-	logger.Info("已创建默认系统模型", zap.String("model_id", model.ModelID))
-}
-
-// initRouter 初始化 Gin 模式和项目路由
+// initRouter 初始化路由
 func (a *App) initRouter() {
+	// 设置 Gin 模式
 	gin.SetMode(a.cfg.App.Mode)
-	a.router = api.NewRouter(a.modelService, a.userModelConfigService)
 }
 
 // initServer 初始化 HTTP Server
@@ -207,13 +195,13 @@ func (a *App) gracefulShutdown() {
 		logger.Fatal("HTTP 服务关闭失败", zap.Error(err))
 	}
 
-	if a.db != nil {
-		if err := database.ClosePostgreSQL(a.db); err != nil {
+	if a.postgresqlDB != nil {
+		if err := database.ClosePostgreSQL(a.postgresqlDB); err != nil {
 			logger.Error("PostgreSQL 连接关闭失败", zap.Error(err))
 		}
 	}
-	if a.redisClient != nil {
-		if err := database.CloseRedis(a.redisClient); err != nil {
+	if a.redis != nil {
+		if err := database.CloseRedis(a.redis); err != nil {
 			logger.Error("Redis 连接关闭失败", zap.Error(err))
 		}
 	}

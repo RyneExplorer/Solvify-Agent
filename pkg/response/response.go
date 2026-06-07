@@ -18,8 +18,8 @@ type Response struct {
 }
 
 // Success 输出成功响应
-func Success(ctx *gin.Context, data any) {
-	ctx.JSON(http.StatusOK, Response{
+func Success(c *gin.Context, data any) {
+	c.JSON(http.StatusOK, Response{
 		Code:    apperrors.CodeSuccess,
 		Message: apperrors.GetMessage(apperrors.CodeSuccess),
 		Data:    data,
@@ -27,8 +27,8 @@ func Success(ctx *gin.Context, data any) {
 }
 
 // SuccessWithMessage 输出自定义成功消息
-func SuccessWithMessage(ctx *gin.Context, message string, data any) {
-	ctx.JSON(http.StatusOK, Response{
+func SuccessWithMessage(c *gin.Context, message string, data any) {
+	c.JSON(http.StatusOK, Response{
 		Code:    apperrors.CodeSuccess,
 		Message: message,
 		Data:    data,
@@ -36,32 +36,32 @@ func SuccessWithMessage(ctx *gin.Context, message string, data any) {
 }
 
 // Error 输出指定错误码和错误消息
-func Error(ctx *gin.Context, code int, message string) {
-	ctx.JSON(http.StatusOK, Response{
+func Error(c *gin.Context, code int, message string) {
+	c.JSON(http.StatusOK, Response{
 		Code:    code,
 		Message: message,
 	})
 }
 
 // BizError 输出业务错误响应
-func BizError(ctx *gin.Context, err error) {
+func BizError(c *gin.Context, err error) {
 	var bizErr *apperrors.BizError
 	if stderrors.As(err, &bizErr) {
-		Error(ctx, bizErr.Code, bizErr.Message)
+		Error(c, bizErr.Code, bizErr.Message)
 		return
 	}
 
-	Error(ctx, apperrors.CodeInternalError, apperrors.GetMessage(apperrors.CodeInternalError))
+	Error(c, apperrors.CodeInternalError, apperrors.GetMessage(apperrors.CodeInternalError))
 }
 
 // BadRequest 输出参数错误响应
-func BadRequest(ctx *gin.Context, message string) {
-	Error(ctx, apperrors.CodeBadRequest, message)
+func BadRequest(c *gin.Context, message string) {
+	Error(c, apperrors.CodeBadRequest, message)
 }
 
 // InternalError 输出服务内部错误响应
-func InternalError(ctx *gin.Context, message string) {
-	Error(ctx, apperrors.CodeInternalError, message)
+func InternalError(c *gin.Context, message string) {
+	Error(c, apperrors.CodeInternalError, message)
 }
 
 // PageRequest 分页请求参数
