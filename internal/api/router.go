@@ -34,6 +34,7 @@ func (r *Router) Setup(engine *gin.Engine) {
 	r.knowledgeBaseCtrl.RegisterRoutes(v1)
 	r.documentCtrl.RegisterKnowledgeBaseRoutes(v1)
 	r.documentCtrl.RegisterDocumentRoutes(v1)
+	r.documentCtrl.RegisterDocumentJobRoutes(v1)
 	r.storageCtrl.RegisterRoutes(v1)
 }
 

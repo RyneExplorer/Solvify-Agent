@@ -83,13 +83,58 @@ func (ctrl *Controller) Delete(c *gin.Context) {
 	response.Success(c, gin.H{"deleted": true})
 }
 
+// Process 手动触发文档处理
+func (ctrl *Controller) Process(c *gin.Context) {
+	userID, documentID, ok := ctrl.userAndDocumentID(c)
+	if !ok {
+		return
+	}
+
+	output, err := ctrl.documentService.Process(c.Request.Context(), userID, documentID)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, output)
+}
+
+// Jobs 查询文档处理任务列表
+func (ctrl *Controller) Jobs(c *gin.Context) {
+	userID, documentID, ok := ctrl.userAndDocumentID(c)
+	if !ok {
+		return
+	}
+
+	output, err := ctrl.documentService.ListJobs(c.Request.Context(), userID, documentID)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, output)
+}
+
+// JobDetail 查询文档处理任务详情
+func (ctrl *Controller) JobDetail(c *gin.Context) {
+	userID, jobID, ok := ctrl.userAndDocumentJobID(c)
+	if !ok {
+		return
+	}
+
+	output, err := ctrl.documentService.JobDetail(c.Request.Context(), userID, jobID)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, output)
+}
+
 // userAndKnowledgeBaseID 读取当前用户和知识库 ID
 func (ctrl *Controller) userAndKnowledgeBaseID(c *gin.Context) (string, string, bool) {
 	userID, ok := apiv1.CurrentUserID(c)
 	if !ok {
 		return "", "", false
 	}
-	kbID := c.Param("kb_id")
+	kbID := c.Param("id")
 	if !apiv1.IsUUID(kbID) {
 		response.BadRequest(c, "知识库 ID 格式错误")
 		return "", "", false
@@ -109,4 +154,18 @@ func (ctrl *Controller) userAndDocumentID(c *gin.Context) (string, string, bool)
 		return "", "", false
 	}
 	return userID, documentID, true
+}
+
+// userAndDocumentJobID 读取当前用户和文档处理任务 ID
+func (ctrl *Controller) userAndDocumentJobID(c *gin.Context) (string, string, bool) {
+	userID, ok := apiv1.CurrentUserID(c)
+	if !ok {
+		return "", "", false
+	}
+	jobID := c.Param("id")
+	if !apiv1.IsUUID(jobID) {
+		response.BadRequest(c, "文档处理任务 ID 格式错误")
+		return "", "", false
+	}
+	return userID, jobID, true
 }

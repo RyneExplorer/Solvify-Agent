@@ -5,7 +5,7 @@ import (
 	"time"
 
 	requestdto "solvify-agent/internal/model/dto/request"
-	responsedto "solvify-agent/internal/model/dto/response"
+	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/repository"
 	apperrors "solvify-agent/pkg/errors"
@@ -30,7 +30,7 @@ func NewKnowledgeBaseService(knowledgeBaseRepo repository.KnowledgeBaseRepositor
 }
 
 // Create 创建本地知识库
-func (s *KnowledgeBaseService) Create(ctx context.Context, userID string, req requestdto.CreateKnowledgeBaseRequest) (responsedto.KnowledgeBaseResponse, error) {
+func (s *KnowledgeBaseService) Create(ctx context.Context, userID string, req requestdto.CreateKnowledgeBaseRequest) (dto.KnowledgeBaseResponse, error) {
 	kb := entity.KnowledgeBase{
 		UserID:      userID,
 		Name:        req.Name,
@@ -40,19 +40,19 @@ func (s *KnowledgeBaseService) Create(ctx context.Context, userID string, req re
 		Status:      knowledgeBaseStatusNormal,
 	}
 	if err := s.knowledgeBaseRepo.Create(ctx, &kb); err != nil {
-		return responsedto.KnowledgeBaseResponse{}, err
+		return dto.KnowledgeBaseResponse{}, err
 	}
 	return knowledgeBaseResponse(kb), nil
 }
 
 // List 查询当前用户正常状态的知识库
-func (s *KnowledgeBaseService) List(ctx context.Context, userID string) ([]responsedto.KnowledgeBaseResponse, error) {
+func (s *KnowledgeBaseService) List(ctx context.Context, userID string) ([]dto.KnowledgeBaseResponse, error) {
 	items, err := s.knowledgeBaseRepo.ListNormal(ctx, userID, knowledgeBaseStatusNormal)
 	if err != nil {
 		return nil, err
 	}
 
-	output := make([]responsedto.KnowledgeBaseResponse, 0, len(items))
+	output := make([]dto.KnowledgeBaseResponse, 0, len(items))
 	for _, item := range items {
 		output = append(output, knowledgeBaseResponse(item))
 	}
@@ -60,22 +60,22 @@ func (s *KnowledgeBaseService) List(ctx context.Context, userID string) ([]respo
 }
 
 // Detail 查询知识库详情
-func (s *KnowledgeBaseService) Detail(ctx context.Context, userID, kbID string) (responsedto.KnowledgeBaseResponse, error) {
+func (s *KnowledgeBaseService) Detail(ctx context.Context, userID, kbID string) (dto.KnowledgeBaseResponse, error) {
 	kb, err := s.findNormalKnowledgeBase(ctx, userID, kbID)
 	if err != nil {
-		return responsedto.KnowledgeBaseResponse{}, err
+		return dto.KnowledgeBaseResponse{}, err
 	}
 	return knowledgeBaseResponse(kb), nil
 }
 
 // Update 更新知识库基础信息
-func (s *KnowledgeBaseService) Update(ctx context.Context, userID, kbID string, req requestdto.UpdateKnowledgeBaseRequest) (responsedto.KnowledgeBaseResponse, error) {
+func (s *KnowledgeBaseService) Update(ctx context.Context, userID, kbID string, req requestdto.UpdateKnowledgeBaseRequest) (dto.KnowledgeBaseResponse, error) {
 	ok, err := s.knowledgeBaseRepo.UpdateBasic(ctx, userID, kbID, knowledgeBaseStatusNormal, req.Name, req.Category, req.Description)
 	if err != nil {
-		return responsedto.KnowledgeBaseResponse{}, err
+		return dto.KnowledgeBaseResponse{}, err
 	}
 	if !ok {
-		return responsedto.KnowledgeBaseResponse{}, apperrors.NewDefault(apperrors.CodeKnowledgeBaseNotFound)
+		return dto.KnowledgeBaseResponse{}, apperrors.NewDefault(apperrors.CodeKnowledgeBaseNotFound)
 	}
 	return s.Detail(ctx, userID, kbID)
 }
@@ -95,27 +95,27 @@ func (s *KnowledgeBaseService) Delete(ctx context.Context, userID, kbID string) 
 }
 
 // Stats 查询知识库统计数据
-func (s *KnowledgeBaseService) Stats(ctx context.Context, userID, kbID string) (responsedto.KnowledgeBaseStatsResponse, error) {
+func (s *KnowledgeBaseService) Stats(ctx context.Context, userID, kbID string) (dto.KnowledgeBaseStatsResponse, error) {
 	if _, err := s.findNormalKnowledgeBase(ctx, userID, kbID); err != nil {
-		return responsedto.KnowledgeBaseStatsResponse{}, err
+		return dto.KnowledgeBaseStatsResponse{}, err
 	}
 
 	documentCount, err := s.knowledgeBaseRepo.CountDocuments(ctx, userID, kbID, 5)
 	if err != nil {
-		return responsedto.KnowledgeBaseStatsResponse{}, err
+		return dto.KnowledgeBaseStatsResponse{}, err
 	}
 
 	storageBytes, err := s.knowledgeBaseRepo.SumDocumentStorage(ctx, userID, kbID, 5)
 	if err != nil {
-		return responsedto.KnowledgeBaseStatsResponse{}, err
+		return dto.KnowledgeBaseStatsResponse{}, err
 	}
 
 	retrievableChunkCount, err := s.knowledgeBaseRepo.CountRetrievableChunks(ctx, userID, kbID)
 	if err != nil {
-		return responsedto.KnowledgeBaseStatsResponse{}, err
+		return dto.KnowledgeBaseStatsResponse{}, err
 	}
 
-	return responsedto.KnowledgeBaseStatsResponse{
+	return dto.KnowledgeBaseStatsResponse{
 		KnowledgeBaseID:       kbID,
 		DocumentCount:         documentCount,
 		StorageBytes:          storageBytes,
@@ -136,8 +136,8 @@ func (s *KnowledgeBaseService) findNormalKnowledgeBase(ctx context.Context, user
 }
 
 // knowledgeBaseResponse 转换知识库响应 DTO
-func knowledgeBaseResponse(kb entity.KnowledgeBase) responsedto.KnowledgeBaseResponse {
-	return responsedto.KnowledgeBaseResponse{
+func knowledgeBaseResponse(kb entity.KnowledgeBase) dto.KnowledgeBaseResponse {
+	return dto.KnowledgeBaseResponse{
 		ID:             kb.ID,
 		Name:           kb.Name,
 		Category:       kb.Category,

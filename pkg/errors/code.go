@@ -29,6 +29,8 @@ const (
 	CodeDocumentFileDuplicated  = 7004
 	CodeStorageQuotaExceeded    = 7005
 	CodeKnowledgeBaseReadonly   = 7006
+	CodeDocumentStatusInvalid   = 7007
+	CodeDocumentJobNotFound     = 7008
 )
 
 var codeMessages = map[int]string{
@@ -54,6 +56,8 @@ var codeMessages = map[int]string{
 	CodeDocumentFileDuplicated:  "同名文档已存在",
 	CodeStorageQuotaExceeded:    "存储配额不足",
 	CodeKnowledgeBaseReadonly:   "当前知识库不允许上传文档",
+	CodeDocumentStatusInvalid:   "当前文档状态不允许处理",
+	CodeDocumentJobNotFound:     "文档处理任务不存在",
 }
 
 // GetMessage 获取错误码对应的文本消息

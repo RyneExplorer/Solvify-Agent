@@ -124,10 +124,11 @@ func (a *App) initDatabase() error {
 func (a *App) initDependencies() {
 	knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
 	documentRepo := repository.NewDocumentRepository(a.postgresqlDB)
+	documentJobRepo := repository.NewDocumentProcessingJobRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
 
 	knowledgeBaseSvc := service.NewKnowledgeBaseService(knowledgeBaseRepo)
-	documentSvc := service.NewDocumentService(knowledgeBaseRepo, documentRepo, storageQuotaRepo)
+	documentSvc := service.NewDocumentService(knowledgeBaseRepo, documentRepo, documentJobRepo, storageQuotaRepo)
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 
 	a.router = api.NewRouter(knowledgeBaseSvc, documentSvc, storageSvc)

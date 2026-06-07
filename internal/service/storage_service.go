@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 
-	responsedto "solvify-agent/internal/model/dto/response"
+	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/repository"
 )
 
@@ -20,10 +20,10 @@ func NewStorageService(storageQuotaRepo repository.StorageQuotaRepository) *Stor
 }
 
 // Quota 查询当前用户存储配额
-func (s *StorageService) Quota(ctx context.Context, userID string) (responsedto.StorageQuotaResponse, error) {
+func (s *StorageService) Quota(ctx context.Context, userID string) (dto.StorageQuotaResponse, error) {
 	quota, ok, err := s.storageQuotaRepo.FindByUserID(ctx, userID)
 	if err != nil {
-		return responsedto.StorageQuotaResponse{}, err
+		return dto.StorageQuotaResponse{}, err
 	}
 	if !ok {
 		return storageQuotaResponse(defaultMaxStorageBytes, 0), nil
@@ -32,12 +32,12 @@ func (s *StorageService) Quota(ctx context.Context, userID string) (responsedto.
 }
 
 // storageQuotaResponse 转换存储配额响应 DTO
-func storageQuotaResponse(maxBytes, usedBytes int64) responsedto.StorageQuotaResponse {
+func storageQuotaResponse(maxBytes, usedBytes int64) dto.StorageQuotaResponse {
 	remaining := maxBytes - usedBytes
 	if remaining < 0 {
 		remaining = 0
 	}
-	return responsedto.StorageQuotaResponse{
+	return dto.StorageQuotaResponse{
 		MaxStorageBytes:       maxBytes,
 		UsedStorageBytes:      usedBytes,
 		RemainingStorageBytes: remaining,
