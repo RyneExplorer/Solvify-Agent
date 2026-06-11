@@ -193,6 +193,41 @@ func (a *App) initAIDependencies() *rag.VectorRetriever {
 	return vectorRetriever
 }
 
+// AgentComponents 持有 Agent 相关组件
+type AgentComponents struct {
+	Retriever    rag.Retriever
+	ToolRegistry *tool.Registry
+	AgentEngine  *agent.Engine
+}
+
+// initAgentComponents 初始化 Agent 相关组件（Embedding、RAG、工具、Agent 引擎）
+func (a *App) initAgentComponents(modelRepo repository.ModelRepo) *AgentComponents {
+	vectorRetriever := a.initAIDependencies()
+
+	// 预热 LLM 客户端缓存（提前为所有已启用的系统模型创建客户端）
+	a.prewarLLVMClients(modelRepo)
+
+	// 初始化 Tool Registry
+	toolRegistry := tool.NewRegistry()
+	toolRegistry.Register(tool.NewKnowledgeSearchTool(vectorRetriever))
+	toolRegistry.Register(tool.NewFinalAnswerTool())
+	toolRegistry.Register(tool.NewWebSearchTool("", ""))
+	logger.Info("工具注册完成", zap.Int("count", len(toolRegistry.List())))
+
+	// 初始化 Agent Engine
+	agentEngine := agent.NewEngine(
+		vectorRetriever,
+		toolRegistry,
+		a.cfg.Agent,
+	)
+
+	return &AgentComponents{
+		Retriever:    vectorRetriever,
+		ToolRegistry: toolRegistry,
+		AgentEngine:  agentEngine,
+	}
+}
+
 // initDependencies 初始化业务依赖并创建路由
 func (a *App) initDependencies() {
 	// 初始化 Repository
@@ -208,25 +243,8 @@ func (a *App) initDependencies() {
 	chatSessionRepo := repository.NewChatSessionRepository(a.postgresqlDB)
 	chatMessageRepo := repository.NewChatMessageRepository(a.postgresqlDB)
 
-	vectorRetriever := a.initAIDependencies()
-
-	// 预热 LLM 客户端缓存（提前为所有已启用的系统模型创建客户端）
-	a.prewarLLVMClients(modelRepo)
-
-	// 初始化 Tool Registry
-	toolRegistry := tool.NewRegistry()
-	toolRegistry.Register(tool.NewKnowledgeSearchTool(vectorRetriever))
-	toolRegistry.Register(tool.NewFinalAnswerTool())
-	toolRegistry.Register(tool.NewWebSearchTool("", ""))
-	logger.Info("工具注册完成", zap.Int("count", len(toolRegistry.List())))
-
-	// 初始化 Agent Engine（使用 MockClient 作为默认，实际运行时由 service 层动态创建）
-	agentEngine := agent.NewEngine(
-		llm.NewMockClient("agent"),
-		vectorRetriever,
-		toolRegistry,
-		a.cfg.Agent,
-	)
+	// 初始化 Agent 组件
+	ai := a.initAgentComponents(modelRepo)
 
 	// 初始化 Service
 	modelService := service.NewModelService(modelRepo)
@@ -236,7 +254,7 @@ func (a *App) initDependencies() {
 	documentChunkSvc := service.NewDocumentChunkService(embeddingSvc)
 	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentJobRepo, storageQuotaRepo, documentChunkSvc, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
-	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, vectorRetriever, modelRepo, userModelConfigRepo, agentEngine)
+	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, ai.AgentEngine)
 
 	// 路由
 	a.router = api.NewRouter(
