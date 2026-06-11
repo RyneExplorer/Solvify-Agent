@@ -5,21 +5,25 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"solvify-agent/pkg/logger"
 )
 
 // Logger 创建 Gin 请求日志中间件
-func Logger(log *zap.Logger) gin.HandlerFunc {
-	if log == nil {
-		log = zap.NewNop()
-	}
-
+func Logger() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// 开始时间
 		start := time.Now()
 		path := c.Request.URL.Path
 		query := c.Request.URL.RawQuery
 
+		// 处理请求
 		c.Next()
 
+		// 结束时间
+		end := time.Now()
+		latency := end.Sub(start)
+
+		// 记录日志
 		fields := []zap.Field{
 			zap.String("method", c.Request.Method),
 			zap.String("path", path),
@@ -27,12 +31,14 @@ func Logger(log *zap.Logger) gin.HandlerFunc {
 			zap.Int("status", c.Writer.Status()),
 			zap.String("ip", c.ClientIP()),
 			zap.String("user_agent", c.Request.UserAgent()),
-			zap.Duration("latency", time.Since(start)),
+			zap.Duration("latency", latency),
 		}
+
+		// 获取错误信息
 		if len(c.Errors) > 0 {
 			fields = append(fields, zap.String("errors", c.Errors.String()))
 		}
 
-		log.Info("HTTP 请求完成", fields...)
+		logger.Info("HTTP 请求完成", fields...)
 	}
 }

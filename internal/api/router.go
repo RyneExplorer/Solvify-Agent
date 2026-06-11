@@ -4,10 +4,12 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"solvify-agent/internal/api/v1/chat"
+	"solvify-agent/internal/api/v1/auth"
 	"solvify-agent/internal/api/v1/document"
 	"solvify-agent/internal/api/v1/knowledgebase"
 	"solvify-agent/internal/api/v1/model"
 	"solvify-agent/internal/api/v1/storage"
+	"solvify-agent/internal/api/v1/user"
 	"solvify-agent/internal/middleware"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
@@ -15,6 +17,8 @@ import (
 
 // Router 聚合 API 模块路由
 type Router struct {
+	userCtrl          *user.Controller
+	authCtrl          *auth.Controller
 	knowledgeBaseCtrl *knowledgebase.Controller
 	documentCtrl      *document.Controller
 	storageCtrl       *storage.Controller
@@ -25,6 +29,8 @@ type Router struct {
 
 // NewRouter 创建 API 路由聚合器
 func NewRouter(
+	userService service.UserServiceInterface,
+	authService service.AuthServiceInterface,
 	modelService service.ModelServiceInterface,
 	userModelConfigService service.UserModelConfigServiceInterface,
 	knowledgeBaseSvc service.KnowledgeBaseServiceInterface,
@@ -33,6 +39,8 @@ func NewRouter(
 	chatSvc service.ChatServiceInterface,
 ) *Router {
 	return &Router{
+		userCtrl:          user.NewController(userService),
+		authCtrl:          auth.NewController(authService, userService),
 		modelCtrl:         model.NewController(modelService),
 		userModelCtrl:     model.NewUserModelController(userModelConfigService),
 		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseSvc),

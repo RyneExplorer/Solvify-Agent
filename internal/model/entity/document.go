@@ -7,14 +7,14 @@ type Document struct {
 	ID              string     `gorm:"column:id;type:uuid;default:gen_random_uuid();primaryKey"`
 	UserID          string     `gorm:"column:user_id;type:uuid;not null"`
 	KnowledgeBaseID string     `gorm:"column:knowledge_base_id;type:uuid;not null"`
-	Title           string     `gorm:"column:title;size:255;not null"`
-	FileName        string     `gorm:"column:file_name;size:255;not null"`
-	FileType        string     `gorm:"column:file_type;size:32;not null;default:''"`
+	Title           string     `gorm:"column:title;type:varchar(255);not null"`
+	FileName        string     `gorm:"column:file_name;type:varchar(255);not null"`
+	FileType        string     `gorm:"column:file_type;type:varchar(32);not null;default:''"`
 	FileSize        int64      `gorm:"column:file_size;not null;default:0"`
 	StoragePath     string     `gorm:"column:storage_path;not null;default:''"`
-	FileHash        string     `gorm:"column:file_hash;size:128;not null;default:''"`
-	SourceType      string     `gorm:"column:source_type;size:32;not null;default:upload"`
-	Status          int16      `gorm:"column:status;not null;default:1"`
+	FileHash        string     `gorm:"column:file_hash;type:varchar(128);not null;default:''"`
+	SourceType      string     `gorm:"column:source_type;type:varchar(32);not null;default:upload"`
+	Status          int        `gorm:"column:status;not null;default:1"`
 	ErrorMessage    string     `gorm:"column:error_message;not null;default:''"`
 	ReadyAt         *time.Time `gorm:"column:ready_at"`
 	CreatedAt       time.Time  `gorm:"column:created_at"`

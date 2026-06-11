@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS users
     username VARCHAR(64)  NOT NULL,                -- 用户名
     email    VARCHAR(128) NOT NULL,                -- 邮箱
     password TEXT         NOT NULL DEFAULT '',     -- 密码哈希
-    status   SMALLINT     NOT NULL DEFAULT 1,      -- 用户状态，1 正常，2 禁用，3 注销，4 待验证
+    status   INT          NOT NULL DEFAULT 1,      -- 用户状态，1 正常，2 禁用，3 注销，4 待验证
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(), -- 创建时间
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), -- 更新时间
 
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases
     source_platform VARCHAR(32)  NOT NULL DEFAULT '',      -- 同步来源平台
     document_count  INT          NOT NULL DEFAULT 0,       -- 文档数量
     storage_bytes   BIGINT       NOT NULL DEFAULT 0,       -- 已占用存储字节数
-    status          SMALLINT     NOT NULL DEFAULT 1,       -- 知识库状态，1 正常，2 已删除
+    status          INT          NOT NULL DEFAULT 1,       -- 知识库状态，1 正常，2 已删除
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),         -- 创建时间
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),         -- 更新时间
     deleted_at TIMESTAMPTZ,                                -- 删除时间
@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS documents
     storage_path  TEXT         NOT NULL DEFAULT '',       -- 文件存储路径
     file_hash     VARCHAR(128) NOT NULL DEFAULT '',       -- 原始文件内容指纹
     source_type   VARCHAR(32)  NOT NULL DEFAULT 'upload', -- 文档来源类型，upload 上传，edit 编辑，sync 同步，web_search 联网搜索
-    status        SMALLINT     NOT NULL DEFAULT 1,        -- 文档状态，1 已上传，2 处理中，3 已就绪，4 处理失败，5 已删除
+    status        INT          NOT NULL DEFAULT 1,        -- 文档状态，1 已上传，2 处理中，3 已就绪，4 处理失败，5 已删除
     error_message TEXT         NOT NULL DEFAULT '',       -- 处理失败原因
     ready_at TIMESTAMPTZ,                                 -- 文档就绪时间
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),        -- 创建时间
@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS document_processing_jobs
     user_id UUID NOT NULL,                         -- 所属用户 ID
     document_id UUID NOT NULL,                     -- 所属文档 ID
     job_type      VARCHAR(32) NOT NULL,            -- 任务类型，parse 解析，chunk 分块，embed 向量化，reindex 重建索引
-    status        SMALLINT    NOT NULL DEFAULT 1,  -- 任务状态，1 待处理，2 运行中，3 成功，4 失败
+    status        INT         NOT NULL DEFAULT 1,  -- 任务状态，1 待处理，2 运行中，3 成功，4 失败
     error_message TEXT        NOT NULL DEFAULT '', -- 任务失败原因
     started_at TIMESTAMPTZ,                        -- 开始时间
     finished_at TIMESTAMPTZ,                       -- 完成时间

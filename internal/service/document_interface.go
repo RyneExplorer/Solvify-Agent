@@ -4,6 +4,7 @@ import (
 	"context"
 	"mime/multipart"
 
+	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 )
 
@@ -16,4 +17,8 @@ type DocumentServiceInterface interface {
 	Process(ctx context.Context, userID, documentID string) (dto.DocumentProcessingJobResponse, error)
 	ListJobs(ctx context.Context, userID, documentID string) ([]dto.DocumentProcessingJobResponse, error)
 	JobDetail(ctx context.Context, userID, jobID string) (dto.DocumentProcessingJobResponse, error)
+	ListVersions(ctx context.Context, userID, documentID string) ([]dto.DocumentVersionListItemResponse, error)
+	VersionDetail(ctx context.Context, userID, documentID, versionID string) (dto.DocumentVersionDetailResponse, error)
+	CreateVersion(ctx context.Context, userID, documentID string, req requestdto.CreateDocumentVersionRequest) (dto.DocumentProcessingJobResponse, error)
+	Reindex(ctx context.Context, userID, documentID string) (dto.DocumentProcessingJobResponse, error)
 }

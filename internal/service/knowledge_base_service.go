@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	knowledgeBaseStatusNormal  int16 = 1
-	knowledgeBaseStatusDeleted int16 = 2
+	knowledgeBaseStatusNormal  int = 1
+	knowledgeBaseStatusDeleted int = 2
 
 	knowledgeBaseSourceLocal = "local"
 	deleteRetentionDays      = 30
