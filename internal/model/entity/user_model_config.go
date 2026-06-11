@@ -16,7 +16,7 @@ type UserModelConfig struct {
 	APIFormat   string         `gorm:"type:varchar(20);not null" json:"api_format"`
 	BaseURL     string         `gorm:"type:varchar(500);not null" json:"base_url"`
 	ModelID     string         `gorm:"type:varchar(100);not null" json:"model_id"`
-	APIKey      string         `gorm:"type:varchar(500)" json:"-"` // 可选，本地模型不需要
+	APIKey      string         `gorm:"type:varchar(500)" json:"api_key,omitempty"` // 可选，本地模型不需要
 	Config      datatypes.JSON `gorm:"type:jsonb" json:"config,omitempty"`
 	CreatedAt   time.Time      `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt   time.Time      `gorm:"autoUpdateTime" json:"updated_at"`

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,11 +16,16 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"solvify-agent/internal/agent"
 	"solvify-agent/internal/api"
+	"solvify-agent/internal/llm"
 	"solvify-agent/internal/middleware"
 	"solvify-agent/internal/model/entity"
+	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
+	"solvify-agent/internal/tool"
+	"solvify-agent/pkg/cache"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/database"
 	"solvify-agent/pkg/logger"
@@ -27,13 +33,11 @@ import (
 
 // App 是全局应用结构体，集中持有配置、基础设施和路由实例
 type App struct {
-	cfg                    *config.Config
-	postgresqlDB           *gorm.DB
-	redis                  *redis.Client
-	router                 *api.Router
-	server                 *http.Server
-	modelService           service.ModelServiceInterface
-	userModelConfigService service.UserModelConfigServiceInterface
+	cfg          *config.Config
+	postgresqlDB *gorm.DB
+	redis        *redis.Client
+	router       *api.Router
+	server       *http.Server
 }
 
 // NewApp 创建应用实例
@@ -106,7 +110,7 @@ func (a *App) initLogger() error {
 	return nil
 }
 
-// initDatabase 初始化 PostgreSQL 和 Redis 连接
+// initDatabase 初始化 PostgresSQL 和 Redis 连接
 func (a *App) initDatabase() error {
 	// postgresql
 	postgresqlDB, err := database.OpenPostgreSQL(&a.cfg.Database.Postgres)
@@ -119,6 +123,8 @@ func (a *App) initDatabase() error {
 	if err := postgresqlDB.AutoMigrate(
 		&entity.Model{},
 		&entity.UserModelConfig{},
+		&entity.ChatSession{},
+		&entity.ChatMessage{},
 	); err != nil {
 		return fmt.Errorf("数据库自动迁移失败: %w", err)
 	}
@@ -133,6 +139,43 @@ func (a *App) initDatabase() error {
 	return nil
 }
 
+// initAIDependencies 初始化 Embedding 和 RAG 检索器
+func (a *App) initAIDependencies() *rag.VectorRetriever {
+
+	embeddingClient, err := llm.NewEmbeddingClientFromConfig(context.Background(), &a.cfg.Embedding)
+	if err != nil {
+		logger.Fatal("初始化 Embedding 客户端失败", zap.Error(err))
+	}
+
+	// Embedding 缓存（相同文本 → 相同向量，缓存 24 小时）
+	embeddingCache := cache.New(a.redis, "emb:", 24*time.Hour)
+
+	vectorRetriever := rag.NewVectorRetriever(rag.VectorRetrieverConfig{
+		DB: a.postgresqlDB,
+		EmbeddingFunc: func(ctx context.Context, text string) ([]float64, error) {
+			// 先查缓存
+			cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
+			var vec []float64
+			if found, _ := embeddingCache.Get(ctx, cacheKey, &vec); found {
+				return vec, nil
+			}
+			// 缓存未命中，调用 API
+			vec, err := embeddingClient.Embed(ctx, text)
+			if err != nil {
+				return nil, err
+			}
+			// 写入缓存（失败不影响业务）
+			if err := embeddingCache.Set(ctx, cacheKey, vec, 0); err != nil {
+				logger.Warnf("Embedding 缓存写入失败: %v", err)
+			}
+			return vec, nil
+		},
+		ScoreThreshold: a.cfg.RAG.ScoreThreshold,
+	})
+	logger.Info("AI 依赖初始化完成")
+	return vectorRetriever
+}
+
 // initDependencies 初始化业务依赖并创建路由
 func (a *App) initDependencies() {
 	// 初始化 Repository
@@ -140,8 +183,33 @@ func (a *App) initDependencies() {
 	documentRepo := repository.NewDocumentRepository(a.postgresqlDB)
 	documentJobRepo := repository.NewDocumentProcessingJobRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
-	modelRepo := repository.NewModelRepository(a.postgresqlDB)
-	userModelConfigRepo := repository.NewUserModelConfigRepository(a.postgresqlDB)
+
+	// 模型配置缓存（10 分钟 TTL）
+	modelCache := cache.New(a.redis, "model:", 10*time.Minute)
+	modelRepo := repository.NewCachedModelRepository(repository.NewModelRepository(a.postgresqlDB), modelCache)
+	userModelConfigRepo := repository.NewCachedUserModelConfigRepository(repository.NewUserModelConfigRepository(a.postgresqlDB), modelCache)
+	chatSessionRepo := repository.NewChatSessionRepository(a.postgresqlDB)
+	chatMessageRepo := repository.NewChatMessageRepository(a.postgresqlDB)
+
+	vectorRetriever := a.initAIDependencies()
+
+	// 预热 LLM 客户端缓存（提前为所有已启用的系统模型创建客户端）
+	a.prewarLLVMClients(modelRepo)
+
+	// 初始化 Tool Registry
+	toolRegistry := tool.NewRegistry()
+	toolRegistry.Register(tool.NewKnowledgeSearchTool(vectorRetriever))
+	toolRegistry.Register(tool.NewFinalAnswerTool())
+	toolRegistry.Register(tool.NewWebSearchTool("", ""))
+	logger.Info("工具注册完成", zap.Int("count", len(toolRegistry.List())))
+
+	// 初始化 Agent Engine（使用 MockClient 作为默认，实际运行时由 service 层动态创建）
+	agentEngine := agent.NewEngine(
+		llm.NewMockClient("agent"),
+		vectorRetriever,
+		toolRegistry,
+		a.cfg.Agent,
+	)
 
 	// 初始化 Service
 	modelService := service.NewModelService(modelRepo)
@@ -149,6 +217,7 @@ func (a *App) initDependencies() {
 	knowledgeBaseSvc := service.NewKnowledgeBaseService(knowledgeBaseRepo)
 	documentSvc := service.NewDocumentService(knowledgeBaseRepo, documentRepo, documentJobRepo, storageQuotaRepo)
 	storageSvc := service.NewStorageService(storageQuotaRepo)
+	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, vectorRetriever, modelRepo, userModelConfigRepo, agentEngine)
 
 	// 路由
 	a.router = api.NewRouter(
@@ -156,7 +225,37 @@ func (a *App) initDependencies() {
 		userModelConfigService,
 		knowledgeBaseSvc,
 		documentSvc,
-		storageSvc)
+		storageSvc,
+		chatSvc)
+}
+
+// prewarLLMClients 启动时为所有已启用的系统模型预创建 LLM 客户端，避免首次请求冷启动
+func (a *App) prewarLLVMClients(modelRepo repository.ModelRepo) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	models, err := modelRepo.List(ctx)
+	if err != nil {
+		logger.Warnf("预热 LLM 客户端失败（不影响启动）: %v", err)
+		return
+	}
+
+	for _, m := range models {
+		client, err := llm.NewClientFromModelConfig(ctx, llm.ModelConfig{
+			Provider: m.Provider,
+			ModelID:  m.ModelID,
+			BaseURL:  m.BaseURL,
+			APIKey:   m.APIKey,
+		})
+		if err != nil {
+			logger.Warnf("预热模型 %s(%s) 失败: %v", m.Name, m.ModelID, err)
+			continue
+		}
+		// 触发一次轻量调用让底层 HTTP 连接池完成 TLS 握手等初始化
+		_ = client
+		logger.Infof("预热模型 %s(%s) 完成", m.Name, m.ModelID)
+	}
+	logger.Infof("LLM 客户端预热完成，共 %d 个模型", len(models))
 }
 
 // initRouter 初始化路由
@@ -197,7 +296,7 @@ func (a *App) gracefulShutdown() {
 
 	if a.postgresqlDB != nil {
 		if err := database.ClosePostgreSQL(a.postgresqlDB); err != nil {
-			logger.Error("PostgreSQL 连接关闭失败", zap.Error(err))
+			logger.Error("PostgresSQL 连接关闭失败", zap.Error(err))
 		}
 	}
 	if a.redis != nil {

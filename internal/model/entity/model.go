@@ -15,7 +15,7 @@ type Model struct {
 	Provider  string         `gorm:"type:varchar(50);not null" json:"provider"`
 	ModelID   string         `gorm:"type:varchar(100);not null" json:"model_id"`
 	BaseURL   string         `gorm:"type:varchar(500)" json:"base_url,omitempty"`
-	APIKey    string         `gorm:"type:varchar(500)" json:"-"`
+	APIKey    string         `gorm:"type:varchar(500)" json:"api_key,omitempty"`
 	IsEnabled bool           `gorm:"default:true" json:"is_enabled"`
 	Config    datatypes.JSON `gorm:"type:jsonb" json:"config,omitempty"`
 	CreatedAt time.Time      `gorm:"autoCreateTime" json:"created_at"`

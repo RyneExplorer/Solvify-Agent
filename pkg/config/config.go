@@ -45,7 +45,9 @@ type LogConfig struct {
 
 // AgentConfig 描述 Agent 行为开关
 type AgentConfig struct {
-	EnableDemo bool `mapstructure:"enable_demo"`
+	EnableDemo     bool    `mapstructure:"enable_demo"`
+	MaxIterations  int     `mapstructure:"max_iterations"`
+	ScoreThreshold float64 `mapstructure:"score_threshold"`
 }
 
 // LLMConfig 描述模型调用配置
@@ -188,7 +190,9 @@ func Default() *Config {
 			Compress:   true,
 		},
 		Agent: AgentConfig{
-			EnableDemo: true,
+			EnableDemo:     true,
+			MaxIterations:  10,
+			ScoreThreshold: 0.7,
 		},
 		LLM: LLMConfig{
 			Provider:    "mock",
