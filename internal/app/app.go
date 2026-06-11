@@ -126,9 +126,6 @@ func (a *App) initDatabase() error {
 	); err != nil {
 		return fmt.Errorf("数据库自动迁移失败: %w", err)
 	}
-	if err := a.ensureStorageQuotaUniqueIndex(postgresqlDB); err != nil {
-		return err
-	}
 
 	// redis
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
@@ -137,14 +134,6 @@ func (a *App) initDatabase() error {
 		return fmt.Errorf("初始化 Redis 失败: %w", err)
 	}
 	a.redis = redisClient
-	return nil
-}
-
-// ensureStorageQuotaUniqueIndex 确保存储配额用户唯一索引存在
-func (a *App) ensureStorageQuotaUniqueIndex(db *gorm.DB) error {
-	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS storage_quotas_user_unique ON storage_quotas(user_id)").Error; err != nil {
-		return fmt.Errorf("创建存储配额用户唯一索引失败: %w", err)
-	}
 	return nil
 }
 
@@ -158,8 +147,11 @@ func (a *App) initDependencies() {
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
 	modelRepo := repository.NewModelRepository(a.postgresqlDB)
 	userModelConfigRepo := repository.NewUserModelConfigRepository(a.postgresqlDB)
+	userRepo := repository.NewUserRepository(a.postgresqlDB)
 
 	// 初始化 Service
+	userSvc := service.NewUserService(userRepo)
+	authSvc := service.NewAuthService(userRepo, userSvc, a.redis)
 	modelService := service.NewModelService(modelRepo)
 	userModelConfigService := service.NewUserModelConfigService(userModelConfigRepo)
 	knowledgeBaseSvc := service.NewKnowledgeBaseService(knowledgeBaseRepo)
@@ -170,6 +162,8 @@ func (a *App) initDependencies() {
 
 	// 路由
 	a.router = api.NewRouter(
+		userSvc,
+		authSvc,
 		modelService,
 		userModelConfigService,
 		knowledgeBaseSvc,
@@ -186,8 +180,9 @@ func (a *App) initRouter() {
 // initServer 初始化 HTTP Server
 func (a *App) initServer() {
 	engine := gin.New()
-	engine.Use(middleware.Recovery(logger.GetLogger()))
-	engine.Use(middleware.Logger(logger.GetLogger()))
+	engine.Use(middleware.Recovery())
+	engine.Use(middleware.CORS())
+	engine.Use(middleware.Logger())
 	a.router.Setup(engine)
 
 	a.server = &http.Server{

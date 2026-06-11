@@ -10,10 +10,10 @@ import (
 // DocumentRepository 定义文档数据访问能力
 type DocumentRepository interface {
 	Create(ctx context.Context, doc *entity.Document) error
-	ListByKnowledgeBase(ctx context.Context, userID, kbID string, deletedStatus int16) ([]entity.Document, error)
-	FindByID(ctx context.Context, userID, documentID string, deletedStatus int16) (entity.Document, bool, error)
-	ExistsFileName(ctx context.Context, userID, kbID, fileName string, deletedStatus int16) (bool, error)
-	SoftDelete(ctx context.Context, userID, documentID string, deletedStatus int16, deletedAt, expiredAt time.Time) (bool, error)
-	SaveProcessResult(ctx context.Context, doc entity.Document, jobID string, version *entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus, successJobStatus int16, finishedAt time.Time) error
-	MarkProcessFailed(ctx context.Context, userID, documentID, jobID string, failedDocumentStatus, failedJobStatus int16, errorMessage string, finishedAt time.Time) error
+	ListByKnowledgeBase(ctx context.Context, userID, kbID string, deletedStatus int) ([]entity.Document, error)
+	FindByID(ctx context.Context, userID, documentID string, deletedStatus int) (entity.Document, bool, error)
+	ExistsFileName(ctx context.Context, userID, kbID, fileName string, deletedStatus int) (bool, error)
+	SoftDelete(ctx context.Context, userID, documentID string, deletedStatus int, deletedAt, expiredAt time.Time) (bool, error)
+	SaveProcessResult(ctx context.Context, doc entity.Document, jobID string, version *entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus, successJobStatus int, finishedAt time.Time) error
+	MarkProcessFailed(ctx context.Context, userID, documentID, jobID string, failedDocumentStatus, failedJobStatus int, errorMessage string, finishedAt time.Time) error
 }

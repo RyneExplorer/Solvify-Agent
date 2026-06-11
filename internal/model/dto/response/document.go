@@ -13,7 +13,7 @@ type DocumentResponse struct {
 	StoragePath     string     `json:"storage_path"`
 	FileHash        string     `json:"file_hash"`
 	SourceType      string     `json:"source_type"`
-	Status          int16      `json:"status"`
+	Status          int        `json:"status"`
 	ErrorMessage    string     `json:"error_message"`
 	ReadyAt         *time.Time `json:"ready_at"`
 	CreatedAt       time.Time  `json:"created_at"`

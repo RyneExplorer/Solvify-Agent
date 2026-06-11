@@ -7,7 +7,7 @@ type DocumentProcessingJobResponse struct {
 	ID           string     `json:"id"`
 	DocumentID   string     `json:"document_id"`
 	JobType      string     `json:"job_type"`
-	Status       int16      `json:"status"`
+	Status       int        `json:"status"`
 	ErrorMessage string     `json:"error_message"`
 	StartedAt    *time.Time `json:"started_at"`
 	FinishedAt   *time.Time `json:"finished_at"`

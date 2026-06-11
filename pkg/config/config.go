@@ -9,6 +9,7 @@ import (
 
 	"github.com/goccy/go-yaml"
 	"github.com/mitchellh/mapstructure"
+	"time"
 )
 
 const defaultConfigPath = "configs/config.yaml"
@@ -17,6 +18,7 @@ const defaultConfigPath = "configs/config.yaml"
 type Config struct {
 	App       AppConfig       `mapstructure:"app"`
 	Log       LogConfig       `mapstructure:"log"`
+	CORS      CORSConfig      `mapstructure:"cors"`
 	Agent     AgentConfig     `mapstructure:"agent"`
 	LLM       LLMConfig       `mapstructure:"llm"`
 	Embedding EmbeddingConfig `mapstructure:"embedding"`
@@ -24,6 +26,8 @@ type Config struct {
 	Tools     ToolsConfig     `mapstructure:"tools"`
 	Server    ServerConfig    `mapstructure:"server"`
 	Database  DatabaseConfig  `mapstructure:"database"`
+	JWT       JWTConfig       `mapstructure:"jwt"`
+	Email     EmailConfig     `mapstructure:"email"`
 }
 
 // AppConfig 描述应用基础信息
@@ -42,6 +46,15 @@ type LogConfig struct {
 	MaxBackups int    `mapstructure:"max_backups"`
 	MaxAge     int    `mapstructure:"max_age"`
 	Compress   bool   `mapstructure:"compress"`
+}
+type CORSConfig struct {
+	Enabled          bool     `mapstructure:"enabled"`
+	AllowOrigins     []string `mapstructure:"allow_origins"`
+	AllowMethods     []string `mapstructure:"allow_methods"`
+	AllowHeaders     []string `mapstructure:"allow_headers"`
+	ExposeHeaders    []string `mapstructure:"expose_headers"`
+	AllowCredentials bool     `mapstructure:"allow_credentials"`
+	MaxAge           int      `mapstructure:"max_age"`
 }
 
 // AgentConfig 描述 Agent 行为开关
@@ -119,6 +132,18 @@ type RedisConfig struct {
 	Password string `mapstructure:"password"`
 	DB       int    `mapstructure:"db"`
 	PoolSize int    `mapstructure:"pool_size"`
+}
+
+type JWTConfig struct {
+	Secret      string        `mapstructure:"secret"`
+	ExpireHours time.Duration `mapstructure:"expire_hours"`
+}
+
+type EmailConfig struct {
+	Host     string `mapstructure:"host"`
+	Port     int    `mapstructure:"port"`
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
 }
 
 var globalConfig *Config

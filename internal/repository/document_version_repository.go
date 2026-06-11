@@ -59,7 +59,7 @@ func (r *documentVersionRepository) FindLatestByDocument(ctx context.Context, us
 }
 
 // SaveVersionAndReindex 保存新版本并重建文档分块
-func (r *documentVersionRepository) SaveVersionAndReindex(ctx context.Context, doc entity.Document, job *entity.DocumentProcessingJob, version *entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus, successJobStatus int16, finishedAt time.Time) error {
+func (r *documentVersionRepository) SaveVersionAndReindex(ctx context.Context, doc entity.Document, job *entity.DocumentProcessingJob, version *entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus, successJobStatus int, finishedAt time.Time) error {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		nextVersionNo, err := r.nextVersionNo(tx, doc.UserID, doc.ID)
 		if err != nil {
@@ -78,7 +78,7 @@ func (r *documentVersionRepository) SaveVersionAndReindex(ctx context.Context, d
 }
 
 // ReindexVersion 基于指定版本重建文档分块
-func (r *documentVersionRepository) ReindexVersion(ctx context.Context, doc entity.Document, job *entity.DocumentProcessingJob, version entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus, successJobStatus int16, finishedAt time.Time) error {
+func (r *documentVersionRepository) ReindexVersion(ctx context.Context, doc entity.Document, job *entity.DocumentProcessingJob, version entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus, successJobStatus int, finishedAt time.Time) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return r.replaceChunksAndFinishJob(tx, doc, job, version.ID, chunks, readyStatus, successJobStatus, finishedAt)
 	})
@@ -101,7 +101,7 @@ func (r *documentVersionRepository) nextVersionNo(tx *gorm.DB, userID, documentI
 }
 
 // replaceChunksAndFinishJob 替换分块并完成 reindex 任务
-func (r *documentVersionRepository) replaceChunksAndFinishJob(tx *gorm.DB, doc entity.Document, job *entity.DocumentProcessingJob, versionID string, chunks []entity.DocumentChunk, readyStatus, successJobStatus int16, finishedAt time.Time) error {
+func (r *documentVersionRepository) replaceChunksAndFinishJob(tx *gorm.DB, doc entity.Document, job *entity.DocumentProcessingJob, versionID string, chunks []entity.DocumentChunk, readyStatus, successJobStatus int, finishedAt time.Time) error {
 	for i := range chunks {
 		chunks[i].VersionID = versionID
 	}

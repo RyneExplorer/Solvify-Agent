@@ -130,7 +130,7 @@ type DocumentChunk struct {
 	TokenCount      int            `gorm:"column:token_count;not null;default:0"`
 	PageNumber      *int           `gorm:"column:page_number"`
 	EmbeddingModel  string         `gorm:"column:embedding_model;size:128;not null;default:''"`
-	Embedding       FloatVector    `gorm:"column:embedding;type:vector(1024)"`
+	Embedding       FloatVector    `gorm:"column:embedding;type:vector(1024);-:migration"`
 	Keywords        TextArray      `gorm:"column:keywords;type:text[];default:'{}'"`
 	Metadata        datatypes.JSON `gorm:"column:metadata;type:jsonb;not null;default:'{}'"`
 	CreatedAt       time.Time      `gorm:"column:created_at"`

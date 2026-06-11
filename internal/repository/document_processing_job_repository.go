@@ -20,7 +20,7 @@ func NewDocumentProcessingJobRepository(db *gorm.DB) DocumentProcessingJobReposi
 }
 
 // CreateProcessJob 创建处理任务并更新文档状态
-func (r *documentProcessingJobRepository) CreateProcessJob(ctx context.Context, job *entity.DocumentProcessingJob, allowedDocumentStatuses []int16, processingDocumentStatus int16) (bool, error) {
+func (r *documentProcessingJobRepository) CreateProcessJob(ctx context.Context, job *entity.DocumentProcessingJob, allowedDocumentStatuses []int, processingDocumentStatus int) (bool, error) {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 1. 先按允许状态抢占文档，避免重复触发处理任务
 		result := tx.Model(&entity.Document{}).

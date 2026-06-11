@@ -58,18 +58,16 @@ type documentService struct {
 	uploadRoot          string
 }
 
-// NewDocumentService 创建文档业务服务
-func NewDocumentService(knowledgeBaseRepo repository.KnowledgeBaseRepository, documentRepo repository.DocumentRepository, documentVersionRepo repository.DocumentVersionRepository, documentJobRepo repository.DocumentProcessingJobRepository, storageQuotaRepo repository.StorageQuotaRepository) DocumentServiceInterface {
-	return NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentVersionRepo, documentJobRepo, storageQuotaRepo, NewDocumentChunkService(nil), defaultUploadRoot)
-}
-
-// NewDocumentServiceWithUploadRoot 创建指定上传目录的文档业务服务
-func NewDocumentServiceWithUploadRoot(knowledgeBaseRepo repository.KnowledgeBaseRepository, documentRepo repository.DocumentRepository, documentVersionRepo repository.DocumentVersionRepository, documentJobRepo repository.DocumentProcessingJobRepository, storageQuotaRepo repository.StorageQuotaRepository, uploadRoot string) DocumentServiceInterface {
-	return NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentVersionRepo, documentJobRepo, storageQuotaRepo, NewDocumentChunkService(nil), uploadRoot)
-}
-
 // NewDocumentServiceWithChunkService 创建指定分块服务的文档业务服务
-func NewDocumentServiceWithChunkService(knowledgeBaseRepo repository.KnowledgeBaseRepository, documentRepo repository.DocumentRepository, documentVersionRepo repository.DocumentVersionRepository, documentJobRepo repository.DocumentProcessingJobRepository, storageQuotaRepo repository.StorageQuotaRepository, chunkService DocumentChunkServiceInterface, uploadRoot string) DocumentServiceInterface {
+func NewDocumentServiceWithChunkService(
+	knowledgeBaseRepo repository.KnowledgeBaseRepository,
+	documentRepo repository.DocumentRepository,
+	documentVersionRepo repository.DocumentVersionRepository,
+	documentJobRepo repository.DocumentProcessingJobRepository,
+	storageQuotaRepo repository.StorageQuotaRepository,
+	chunkService DocumentChunkServiceInterface,
+	uploadRoot string,
+) DocumentServiceInterface {
 	return &documentService{
 		knowledgeBaseRepo:   knowledgeBaseRepo,
 		documentRepo:        documentRepo,
@@ -186,7 +184,7 @@ func (s *documentService) Process(ctx context.Context, userID, documentID string
 	}
 
 	// 1. 创建任务和文档状态变更必须一起完成，避免任务存在但文档仍显示未处理
-	ok, err := s.documentJobRepo.CreateProcessJob(ctx, &job, []int16{documentStatusUploaded, documentStatusFailed}, documentStatusProcessing)
+	ok, err := s.documentJobRepo.CreateProcessJob(ctx, &job, []int{documentStatusUploaded, documentStatusFailed}, documentStatusProcessing)
 	if err != nil {
 		return dto.DocumentProcessingJobResponse{}, err
 	}
