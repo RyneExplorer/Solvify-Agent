@@ -2,10 +2,35 @@ package errors
 
 // 错误码定义
 const (
+	// 成功
 	CodeSuccess = 0
 
-	CodeBadRequest    = 400
-	CodeInternalError = 500
+	// 通用错误 4xx
+	CodeBadRequest       = 400
+	CodeUnauthorized     = 401
+	CodeForbidden        = 403
+	CodeNotFound         = 404
+	CodeMethodNotAllowed = 405
+	CodeRequestTimeout   = 408
+	CodeConflict         = 409
+
+	// 服务器错误 5xx
+	CodeInternalError      = 500
+	CodeServiceUnavailable = 503
+
+	// 业务错误 1xxx
+	CodeUserNotFound       = 1001
+	CodeUserAlreadyExists  = 1002
+	CodeInvalidCredentials = 1003
+	CodeUserDisabled       = 1004
+	CodeInvalidToken       = 1005
+	CodeTokenExpired       = 1006
+
+	CodeInvalidCaptcha = 1007
+
+	// 参数错误
+	CodeInvalidParam = 1008
+	CodeMissingParam = 1009
 
 	CodeQuestionRequired = 2001
 	CodeParamFormatError = 2002
@@ -42,19 +67,35 @@ const (
 )
 
 var codeMessages = map[int]string{
-	CodeSuccess:          "成功",
-	CodeBadRequest:       "请求参数错误",
-	CodeInternalError:    "服务内部错误",
-	CodeQuestionRequired: "问题不能为空",
-	CodeParamFormatError: "参数格式错误",
-	CodeRAGFailed:        "RAG 检索失败",
-	CodeRAGMissed:        "RAG 未命中",
-	CodeToolNotFound:     "工具不存在",
-	CodeToolInvalidArgs:  "工具参数错误",
-	CodeToolCallFailed:   "工具调用失败",
-	CodeLLMCallFailed:    "LLM 调用失败",
-	CodeAgentRunFailed:   "Agent 执行失败",
-	CodeAgentRunTimeout:  "Agent 执行超时",
+	CodeSuccess:            "成功",
+	CodeBadRequest:         "请求参数错误",
+	CodeUnauthorized:       "未授权",
+	CodeForbidden:          "禁止访问",
+	CodeNotFound:           "资源不存在",
+	CodeMethodNotAllowed:   "方法不允许",
+	CodeRequestTimeout:     "请求超时",
+	CodeConflict:           "资源冲突",
+	CodeInternalError:      "服务内部错误",
+	CodeServiceUnavailable: "服务不可用",
+	CodeUserNotFound:       "用户不存在",
+	CodeUserAlreadyExists:  "用户已存在",
+	CodeInvalidCredentials: "用户名或密码错误",
+	CodeUserDisabled:       "用户已被禁用",
+	CodeInvalidToken:       "无效的令牌",
+	CodeTokenExpired:       "令牌已过期",
+	CodeInvalidCaptcha:     "验证码无效",
+	CodeInvalidParam:       "参数错误",
+	CodeMissingParam:       "缺少必要参数",
+	CodeQuestionRequired:   "问题不能为空",
+	CodeParamFormatError:   "参数格式错误",
+	CodeRAGFailed:          "RAG 检索失败",
+	CodeRAGMissed:          "RAG 未命中",
+	CodeToolNotFound:       "工具不存在",
+	CodeToolInvalidArgs:    "工具参数错误",
+	CodeToolCallFailed:     "工具调用失败",
+	CodeLLMCallFailed:      "LLM 调用失败",
+	CodeAgentRunFailed:     "Agent 执行失败",
+	CodeAgentRunTimeout:    "Agent 执行超时",
 
 	CodeKnowledgeBaseNotFound: "知识库不存在",
 

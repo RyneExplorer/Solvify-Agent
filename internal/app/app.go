@@ -134,9 +134,6 @@ func (a *App) initDatabase() error {
 	); err != nil {
 		return fmt.Errorf("数据库自动迁移失败: %w", err)
 	}
-	if err := a.ensureStorageQuotaUniqueIndex(postgresqlDB); err != nil {
-		return err
-	}
 
 	// redis
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
@@ -256,6 +253,7 @@ func (a *App) initDependencies() {
 	// 初始化 Repository
 	knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
 	documentRepo := repository.NewDocumentRepository(a.postgresqlDB)
+	documentVersionRepo := repository.NewDocumentVersionRepository(a.postgresqlDB)
 	documentJobRepo := repository.NewDocumentProcessingJobRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
 
@@ -273,17 +271,21 @@ func (a *App) initDependencies() {
 	ai := a.initAgentComponents()
 
 	// 初始化 Service
+	userSvc := service.NewUserService(userRepo)
+	authSvc := service.NewAuthService(userRepo, userSvc, a.redis)
 	modelService := service.NewModelService(modelRepo)
 	userModelConfigService := service.NewUserModelConfigService(userModelConfigRepo)
 	knowledgeBaseSvc := service.NewKnowledgeBaseService(knowledgeBaseRepo)
 	embeddingSvc := service.NewEmbeddingService(a.cfg.Embedding)
 	documentChunkSvc := service.NewDocumentChunkService(embeddingSvc)
-	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentJobRepo, storageQuotaRepo, documentChunkSvc, "data/uploads")
+	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentVersionRepo, documentJobRepo, storageQuotaRepo, documentChunkSvc, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, ai.AgentEngine)
 
 	// 路由
 	a.router = api.NewRouter(
+		userSvc,
+		authSvc,
 		modelService,
 		userModelConfigService,
 		knowledgeBaseSvc,
@@ -321,8 +323,9 @@ func (a *App) initRouter() {
 // initServer 初始化 HTTP Server
 func (a *App) initServer() {
 	engine := gin.New()
-	engine.Use(middleware.Recovery(logger.GetLogger()))
-	engine.Use(middleware.Logger(logger.GetLogger()))
+	engine.Use(middleware.Recovery())
+	engine.Use(middleware.CORS())
+	engine.Use(middleware.Logger())
 	a.router.Setup(engine)
 
 	a.server = &http.Server{

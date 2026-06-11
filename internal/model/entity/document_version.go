@@ -9,7 +9,7 @@ type DocumentVersion struct {
 	DocumentID    string    `gorm:"column:document_id;type:uuid;not null"`
 	VersionNo     int       `gorm:"column:version_no;not null;default:1"`
 	Content       string    `gorm:"column:content;not null;default:''"`
-	ContentHash   string    `gorm:"column:content_hash;size:128;not null;default:''"`
+	ContentHash   string    `gorm:"column:content_hash;type:varchar(128);not null;default:''"`
 	ChangeSummary string    `gorm:"column:change_summary;not null;default:''"`
 	CreatedAt     time.Time `gorm:"column:created_at"`
 }
