@@ -14,15 +14,16 @@ type SessionResponse struct {
 
 // MessageResponse 描述聊天消息响应
 type MessageResponse struct {
-	ID               string       `json:"id"`
-	SessionID        string       `json:"session_id"`
-	Role             string       `json:"role"`
-	Content          string       `json:"content"`
-	ModelID          string       `json:"model_id,omitempty"`
-	SearchMode       string       `json:"search_mode,omitempty"`
-	KnowledgeBaseIDs []string     `json:"knowledge_base_ids,omitempty"`
-	Sources          []SourceInfo `json:"sources,omitempty"`
-	CreatedAt        time.Time    `json:"created_at"`
+	ID               string          `json:"id"`
+	SessionID        string          `json:"session_id"`
+	Role             string          `json:"role"`
+	Content          string          `json:"content"`
+	ModelID          string          `json:"model_id,omitempty"`
+	SearchMode       string          `json:"search_mode,omitempty"`
+	KnowledgeBaseIDs []string        `json:"knowledge_base_ids,omitempty"`
+	Sources          []SourceInfo    `json:"sources,omitempty"`
+	ReasoningSteps   []ReasoningStep `json:"reasoning_steps,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
 }
 
 // SourceInfo 描述引用来源信息（按文档分组）
@@ -55,8 +56,9 @@ type StreamEvent struct {
 
 // ToolCallInfo 描述工具调用信息
 type ToolCallInfo struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 // ToolResultInfo 描述工具执行结果
@@ -64,6 +66,14 @@ type ToolResultInfo struct {
 	Name    string `json:"name"`
 	Content string `json:"content,omitempty"`
 	Error   string `json:"error,omitempty"`
+}
+
+// ReasoningStep 描述 Agent 推理步骤（用于持久化和历史回显）
+type ReasoningStep struct {
+	Type       string          `json:"type"`                  // "thought" / "tool_call" / "tool_result"
+	Content    string          `json:"content,omitempty"`     // 思考内容
+	ToolCalls  []ToolCallInfo  `json:"tool_calls,omitempty"`  // 工具调用
+	ToolResult *ToolResultInfo `json:"tool_result,omitempty"` // 工具结果
 }
 
 // ListSessionsResponse 描述会话列表响应

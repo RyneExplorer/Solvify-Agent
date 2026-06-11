@@ -50,6 +50,17 @@ func messageResponse(msg entity.ChatMessage) response.MessageResponse {
 		}
 	}
 
+	if len(msg.Metadata) > 0 {
+		var meta struct {
+			ReasoningSteps []response.ReasoningStep `json:"reasoning_steps"`
+		}
+		if err := json.Unmarshal(msg.Metadata, &meta); err != nil {
+			logger.Errorf("解析 Metadata 失败, messageID=%s: %v", msg.ID, err)
+		} else if len(meta.ReasoningSteps) > 0 {
+			resp.ReasoningSteps = meta.ReasoningSteps
+		}
+	}
+
 	return resp
 }
 

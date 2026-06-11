@@ -153,24 +153,27 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 	return eventCh, nil
 }
 
-// processMessage 处理消息的核心流程（可被深度模式复用）
-func (s *chatService) processMessage(ctx context.Context, userID, sessionID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	// Step 1 & 2: 并行初始化 LLM 客户端 + 加载历史对话
-	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在初始化模型..."}
+// initChatContext 并行初始化 LLM 客户端和加载历史对话
+func (s *chatService) initChatContext(ctx context.Context, userID, sessionID, modelID, modelType string) (llm.Client, []entity.ChatMessage, error) {
+	t0 := time.Now()
 	var llmClient llm.Client
 	var history []entity.ChatMessage
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		client, err := s.resolveLLMClient(gctx, userID, req.ModelID, req.ModelType)
+		t1 := time.Now()
+		client, err := s.resolveLLMClient(gctx, userID, modelID, modelType)
+		logger.Infof("[Timing] resolveLLMClient: modelID=%s, cost=%dms", modelID, time.Since(t1).Milliseconds())
 		if err != nil {
-			logger.Errorf("模型解析失败, modelID=%s, modelType=%s: %v", req.ModelID, req.ModelType, err)
+			logger.Errorf("模型解析失败, modelID=%s, modelType=%s: %v", modelID, modelType, err)
 			return fmt.Errorf("模型配置无效或无权访问")
 		}
 		llmClient = client
 		return nil
 	})
 	g.Go(func() error {
+		t1 := time.Now()
 		msg, err := s.messageRepo.FindRecent(gctx, sessionID, 5)
+		logger.Infof("[Timing] FindRecent history: cost=%dms", time.Since(t1).Milliseconds())
 		if err != nil {
 			logger.Errorf("加载历史对话失败, sessionID=%s: %v", sessionID, err)
 			return fmt.Errorf("加载历史对话失败")
@@ -179,11 +182,23 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 		return nil
 	})
 	if err := g.Wait(); err != nil {
+		return nil, nil, err
+	}
+	logger.Infof("[Timing] initChatContext 总耗时: cost=%dms", time.Since(t0).Milliseconds())
+	return llmClient, history, nil
+}
+
+// processMessage 处理消息的核心流程（快速检索模式）
+func (s *chatService) processMessage(ctx context.Context, userID, sessionID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
+	// Step 1: 并行初始化 LLM 客户端 + 加载历史对话
+	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在加载上下文..."}
+	llmClient, history, err := s.initChatContext(ctx, userID, sessionID, req.ModelID, req.ModelType)
+	if err != nil {
 		eventCh <- dto.StreamEvent{Type: "error", Error: err.Error(), Done: true}
 		return
 	}
 
-	// Step 3: 查询改写（用最近 5 条历史 + LLM 改写为独立检索查询）
+	// Step 2: 查询改写（用最近 5 条历史 + LLM 改写为独立检索查询）
 	searchQuery := req.Content
 	if len(history) > 0 {
 		rewritten, err := s.rewriteQuery(ctx, llmClient, history, req.Content)
@@ -194,7 +209,7 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 		}
 	}
 
-	// Step 4: RAG 检索（用改写后的查询做 embedding + 向量检索）
+	// Step 3: RAG 检索（用改写后的查询做 embedding + 向量检索）
 	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在检索知识库..."}
 	sources, retrieveResult, err := s.retrieveContext(ctx, userID, searchQuery, req.KnowledgeBaseIDs)
 	if err != nil {
@@ -203,16 +218,16 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 		return
 	}
 
-	// Step 5: 组装 Prompt（用原始问题，改写后的查询仅用于检索）
+	// Step 4: 组装 Prompt（用原始问题，改写后的查询仅用于检索）
 	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在整理资料..."}
 	messages := buildMessages(history, req.Content, retrieveResult)
 
-	// Step 6: LLM 流式生成
+	// Step 5: LLM 流式生成
 	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在生成回答..."}
 	assistantMsgID := uuid.New().String()
 	fullContent, err := s.streamAndCollect(ctx, llmClient, messages, assistantMsgID, sources, eventCh)
 
-	// Step 7: 保存助手消息
+	// Step 6: 保存助手消息
 	if err != nil {
 		if fullContent != "" {
 			// 用户暂停：保存已生成的部分内容
@@ -232,7 +247,7 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 		go func() {
 			saveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if err := s.saveAssistantMessage(saveCtx, sessionID, assistantMsgID, fullContent, req, sources); err != nil {
+			if err := s.saveAssistantMessage(saveCtx, sessionID, assistantMsgID, fullContent, req, sources, nil); err != nil {
 				logger.Errorf("保存助手消息失败, messageID=%s: %v", assistantMsgID, err)
 			}
 		}()
@@ -240,32 +255,24 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 }
 
 // processDeepMode 深度思考模式处理流程
-// Service 只负责：解析LLM客户端、加载历史、调用Agent、转发事件、保存消息
+// Service 只做业务编排：初始化、保存消息
+// Agent 自主决定工具调用：knowledge_search / web_search / final_answer
 func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	// 解析模型配置并创建 LLM 客户端
-	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在初始化模型..."}
-	llmClient, err := s.resolveLLMClient(ctx, userID, req.ModelID, req.ModelType)
+	// Step 1: 并行初始化 LLM 客户端 + 加载历史对话
+	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在加载上下文..."}
+	llmClient, history, err := s.initChatContext(ctx, userID, sessionID, req.ModelID, req.ModelType)
 	if err != nil {
-		logger.Errorf("模型解析失败, modelID=%s, modelType=%s: %v", req.ModelID, req.ModelType, err)
-		eventCh <- dto.StreamEvent{Type: "error", Error: "模型配置无效或无权访问", Done: true}
+		eventCh <- dto.StreamEvent{Type: "error", Error: err.Error(), Done: true}
 		return
 	}
 
-	// 加载历史对话
-	history, err := s.messageRepo.FindRecent(ctx, sessionID, 5)
-	if err != nil {
-		logger.Errorf("加载历史对话失败, sessionID=%s: %v", sessionID, err)
-		eventCh <- dto.StreamEvent{Type: "error", Error: "加载历史对话失败", Done: true}
-		return
-	}
-
-	// 委托 Agent 执行深度模式（检索→判断→搜索→ReAct 全在 Agent 层）
+	// Step 2: 委托 Agent 执行（Agent 自主决定何时检索、搜索、回答）
+	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在深度推理..."}
 	agentEventCh, err := s.agentEngine.Execute(ctx, agent.Request{
-		Query:            req.Content,
 		UserID:           userID,
-		SessionID:        sessionID,
-		KnowledgeBaseIDs: req.KnowledgeBaseIDs,
+		Query:            req.Content,
 		History:          history,
+		KnowledgeBaseIDs: req.KnowledgeBaseIDs,
 		LLMClient:        llmClient,
 	})
 	if err != nil {
@@ -274,9 +281,10 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 		return
 	}
 
-	// 转发 Agent 事件到 SSE 事件流
+	// Step 3: 转发 Agent 事件到 SSE 事件流 + 收集推理步骤
 	var fullContent string
-	var sources []dto.SourceInfo
+	var agentSources []dto.SourceInfo
+	var reasoningSteps []dto.ReasoningStep
 	for agentEvent := range agentEventCh {
 		streamEvent := dto.StreamEvent{
 			Type:    agentEvent.Type,
@@ -288,8 +296,9 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 			streamEvent.ToolCalls = make([]dto.ToolCallInfo, 0, len(agentEvent.ToolCalls))
 			for _, tc := range agentEvent.ToolCalls {
 				streamEvent.ToolCalls = append(streamEvent.ToolCalls, dto.ToolCallInfo{
-					ID:   tc.ID,
-					Name: tc.Name,
+					ID:        tc.ID,
+					Name:      tc.Name,
+					Arguments: tc.Arguments,
 				})
 			}
 		}
@@ -302,23 +311,59 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 		}
 		if len(agentEvent.Sources) > 0 {
 			streamEvent.Sources = agentEvent.Sources
-			sources = agentEvent.Sources
+			agentSources = agentEvent.Sources
 		}
 		eventCh <- streamEvent
 
-		if agentEvent.Type == "answer" {
-			fullContent = agentEvent.Content
+		// 收集推理步骤（用于持久化）
+		switch agentEvent.Type {
+		case agent.EventThought:
+			reasoningSteps = append(reasoningSteps, dto.ReasoningStep{
+				Type:    agentEvent.Type,
+				Content: agentEvent.Content,
+			})
+		case agent.EventToolCall:
+			if len(agentEvent.ToolCalls) > 0 {
+				step := dto.ReasoningStep{Type: agentEvent.Type}
+				for _, tc := range agentEvent.ToolCalls {
+					step.ToolCalls = append(step.ToolCalls, dto.ToolCallInfo{
+						ID:        tc.ID,
+						Name:      tc.Name,
+						Arguments: tc.Arguments,
+					})
+				}
+				reasoningSteps = append(reasoningSteps, step)
+			}
+		case agent.EventToolResult:
+			if agentEvent.ToolResult != nil {
+				reasoningSteps = append(reasoningSteps, dto.ReasoningStep{
+					Type: agentEvent.Type,
+					ToolResult: &dto.ToolResultInfo{
+						Name:    agentEvent.ToolResult.Name,
+						Content: agentEvent.ToolResult.Content,
+						Error:   agentEvent.ToolResult.Error,
+					},
+				})
+			}
+		case agent.EventAnswer:
+			fullContent += agentEvent.Content
 		}
 	}
 
-	// 保存助手消息
+	// Step 4: 保存助手消息（含推理步骤）
 	if fullContent != "" {
 		assistantMsgID := uuid.New().String()
 		eventCh <- dto.StreamEvent{Type: "done", MessageID: assistantMsgID, Done: true}
+		var metadata datatypes.JSON
+		if len(reasoningSteps) > 0 {
+			metadata = datatypes.JSON(mustMarshal(map[string]any{
+				"reasoning_steps": reasoningSteps,
+			}))
+		}
 		go func() {
 			saveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if err := s.saveAssistantMessage(saveCtx, sessionID, assistantMsgID, fullContent, req, sources); err != nil {
+			if err := s.saveAssistantMessage(saveCtx, sessionID, assistantMsgID, fullContent, req, agentSources, metadata); err != nil {
 				logger.Errorf("保存助手消息失败, messageID=%s: %v", assistantMsgID, err)
 			}
 		}()
@@ -357,27 +402,37 @@ func (s *chatService) saveUserMessage(ctx context.Context, sessionID string, req
 func (s *chatService) resolveLLMClient(ctx context.Context, userID, modelID, modelType string) (llm.Client, error) {
 	switch modelType {
 	case "user":
+		t0 := time.Now()
 		cfg, err := s.userModelConfigRepo.GetByID(ctx, modelID, userID)
+		logger.Infof("[Timing] userModelConfigRepo.GetByID: modelID=%s, cost=%dms", modelID, time.Since(t0).Milliseconds())
 		if err != nil {
 			return nil, fmt.Errorf("查询用户模型配置失败: %w", err)
 		}
-		return llm.NewClientFromModelConfig(ctx, llm.ModelConfig{
+		t1 := time.Now()
+		client, err := llm.NewClientFromModelConfig(ctx, llm.ModelConfig{
 			Provider: cfg.APIFormat,
 			ModelID:  cfg.ModelID,
 			BaseURL:  cfg.BaseURL,
 			APIKey:   cfg.APIKey,
 		})
+		logger.Infof("[Timing] NewClientFromModelConfig(user): cost=%dms", time.Since(t1).Milliseconds())
+		return client, err
 	case "system":
+		t0 := time.Now()
 		model, err := s.modelRepo.GetByID(ctx, modelID)
+		logger.Infof("[Timing] modelRepo.GetByID: modelID=%s, cost=%dms", modelID, time.Since(t0).Milliseconds())
 		if err != nil {
 			return nil, fmt.Errorf("查询系统模型失败: %w", err)
 		}
-		return llm.NewClientFromModelConfig(ctx, llm.ModelConfig{
+		t1 := time.Now()
+		client, err := llm.NewClientFromModelConfig(ctx, llm.ModelConfig{
 			Provider: model.Provider,
 			ModelID:  model.ModelID,
 			BaseURL:  model.BaseURL,
 			APIKey:   model.APIKey,
 		})
+		logger.Infof("[Timing] NewClientFromModelConfig(system): cost=%dms", time.Since(t1).Milliseconds())
+		return client, err
 	default:
 		return nil, fmt.Errorf("不支持的模型类型: %s", modelType)
 	}
@@ -424,7 +479,12 @@ func (s *chatService) retrieveContext(ctx context.Context, userID, question stri
 		sources = append(sources, *docMap[docID])
 	}
 
-	logger.Infof("RAG 检索完成: hit=%v, 命中 %d 篇文档", retrieveResult.Hit, len(sources))
+	logger.Infof("RAG 检索完成: hit=%v, 命中 %d 篇文档, 共 %d 个 chunk",
+		retrieveResult.Hit, len(sources), len(retrieveResult.Documents))
+	for i, src := range sources {
+		logger.Infof("  文档#%d: [%s] title=%q score=%.4f chunks=%d",
+			i, src.DocumentID, src.Title, src.Score, len(src.Chunks))
+	}
 	return sources, retrieveResult, nil
 }
 
@@ -471,7 +531,7 @@ func (s *chatService) streamAndCollect(ctx context.Context, llmClient llm.Client
 }
 
 // saveAssistantMessage 保存助手消息并更新计数
-func (s *chatService) saveAssistantMessage(ctx context.Context, sessionID, msgID, content string, req requestdto.SendMessageRequest, sources []dto.SourceInfo) error {
+func (s *chatService) saveAssistantMessage(ctx context.Context, sessionID, msgID, content string, req requestdto.SendMessageRequest, sources []dto.SourceInfo, metadata datatypes.JSON) error {
 	assistantMsg := entity.ChatMessage{
 		ID:               msgID,
 		SessionID:        sessionID,
@@ -481,6 +541,7 @@ func (s *chatService) saveAssistantMessage(ctx context.Context, sessionID, msgID
 		SearchMode:       req.SearchMode,
 		KnowledgeBaseIDs: datatypes.JSON(mustMarshal(req.KnowledgeBaseIDs)),
 		Sources:          datatypes.JSON(mustMarshal(sources)),
+		Metadata:         metadata,
 	}
 	return s.messageRepo.Create(ctx, &assistantMsg)
 }

@@ -46,6 +46,8 @@ type chunkResult struct {
 	ID              string  `gorm:"column:id"`
 	KnowledgeBaseID string  `gorm:"column:knowledge_base_id"`
 	DocumentID      string  `gorm:"column:document_id"`
+	VersionID       string  `gorm:"column:version_id"`
+	ChunkIndex      int     `gorm:"column:chunk_index"`
 	Title           string  `gorm:"column:title"`
 	Content         string  `gorm:"column:content"`
 	Score           float64 `gorm:"column:score"`
@@ -75,12 +77,14 @@ func (r *VectorRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	// 执行向量相似度搜索（子查询避免重复计算向量距离）
 	var results []chunkResult
 	err = r.db.WithContext(ctx).Raw(`
-		SELECT id, knowledge_base_id, document_id, title, content, score
+		SELECT id, knowledge_base_id, document_id, version_id, chunk_index, title, content, score
 		FROM (
 			SELECT
 				dc.id,
 				dc.knowledge_base_id,
 				dc.document_id,
+				dc.version_id,
+				dc.chunk_index,
 				COALESCE(d.title, '') as title,
 				dc.content,
 				1 - (dc.embedding <=> ?::vector) AS score
@@ -107,13 +111,17 @@ func (r *VectorRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 				ID:              item.ID,
 				KnowledgeBaseID: item.KnowledgeBaseID,
 				DocumentID:      item.DocumentID,
+				VersionID:       item.VersionID,
+				ChunkIndex:      item.ChunkIndex,
 				Title:           item.Title,
 				Content:         item.Content,
 				Score:           item.Score,
 			})
-			logger.Infof("  ✓ [%s] score=%.4f title=%q", item.DocumentID, item.Score, item.Title)
+			logger.Infof("  ✓ [%s] score=%.4f chunk#%d title=%q content=%q",
+				item.DocumentID, item.Score, item.ChunkIndex, item.Title, truncate(item.Content, 80))
 		} else {
-			logger.Infof("  ✗ [%s] score=%.4f (低于阈值 %.2f) title=%q", item.DocumentID, item.Score, r.scoreThreshold, item.Title)
+			logger.Infof("  ✗ [%s] score=%.4f chunk#%d (低于阈值 %.2f) title=%q",
+				item.DocumentID, item.Score, item.ChunkIndex, r.scoreThreshold, item.Title)
 		}
 	}
 	logger.Infof("向量检索最终结果: %d 条 (阈值=%.2f)", len(docs), r.scoreThreshold)
@@ -122,6 +130,15 @@ func (r *VectorRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 		Hit:       len(docs) > 0,
 		Documents: docs,
 	}, nil
+}
+
+// truncate 截断字符串并添加省略号
+func truncate(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen]) + "..."
 }
 
 // vectorToString 将浮点数切片转换为 PostgresSQL vector 字符串格式

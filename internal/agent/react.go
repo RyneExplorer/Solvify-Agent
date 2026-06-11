@@ -5,189 +5,124 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/cloudwego/eino/schema"
 
 	"solvify-agent/internal/llm"
 	"solvify-agent/internal/model/dto/response"
-	"solvify-agent/internal/rag"
 	"solvify-agent/internal/tool"
-	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
 )
 
-// Execute 执行 Agent 深度模式完整流程：
-// 查询改写 → 知识库检索 → 有结果直接生成 / 无结果进入 ReAct（web_search + final_answer）
-func (e *Engine) Execute(ctx context.Context, req Request) (<-chan Event, error) {
+// reActLoop ReAct 推理循环
+//
+// 流程：Think → Analyze → Act → Observe，最多 maxIter 轮
+//   - Think:   LLM 思考，决定下一步
+//   - Analyze: final_answer → 结束；无工具 → 直接输出
+//   - Act:     执行工具（knowledge_search / web_search）
+//   - Observe: 结果写入消息历史，进入下一轮
+func (e *Engine) reActLoop(ctx context.Context, req Request, eventCh chan<- Event) {
 	maxIter := e.cfg.MaxIterations
 	if maxIter <= 0 {
 		maxIter = 10
 	}
 
-	// ReAct 工具：web_search + final_answer（knowledge_search 已在前置流程完成）
-	webSearch := tool.NewWebSearchTool("", "")
-	finalAnswer := tool.NewFinalAnswerTool()
-	reactTools := []tool.Tool{webSearch, finalAnswer}
+	// 动态创建带用户上下文的 knowledge_search 工具
+	ksTool := e.knowledgeSearchFactory(req.UserID, req.KnowledgeBaseIDs)
 
-	llmTools := make([]llm.Tool, 0, len(reactTools))
-	for _, t := range reactTools {
-		llmTools = append(llmTools, llm.Tool{
-			Name:        t.Name(),
-			Description: t.Description(),
-			Parameters:  t.Parameters(),
-		})
-	}
+	// 合并工具：registry(web_search, final_answer) + 动态 knowledge_search
+	toolMap := e.registry.ToToolMap()
+	toolMap[ksTool.Name()] = ksTool
 
-	// 转换历史消息格式
-	historyMsg := make([]historyMessage, 0, len(req.History))
-	for _, msg := range req.History {
-		historyMsg = append(historyMsg, historyMessage{
-			role:    msg.Role,
-			content: msg.Content,
-		})
-	}
+	llmTools := e.registry.ToLLMTools()
+	llmTools = append(llmTools, llm.Tool{
+		Name:        ksTool.Name(),
+		Description: ksTool.Description(),
+		Parameters:  ksTool.Parameters(),
+	})
 
-	eventCh := make(chan Event, 100)
-
-	go func() {
-		defer close(eventCh)
-		e.executeFlow(ctx, flowContext{
-			req:        req,
-			reactTools: reactTools,
-			llmTools:   llmTools,
-			history:    historyMsg,
-			maxIter:    maxIter,
-			eventCh:    eventCh,
-		})
-	}()
-
-	return eventCh, nil
-}
-
-// flowContext 流程上下文
-type flowContext struct {
-	req        Request
-	reactTools []tool.Tool
-	llmTools   []llm.Tool
-	history    []historyMessage
-	maxIter    int
-	eventCh    chan<- Event
-}
-
-// executeFlow 执行深度模式完整流程
-func (e *Engine) executeFlow(ctx context.Context, fc flowContext) {
-	// Step 1: 查询改写
-	searchQuery := fc.req.Query
-	if len(fc.history) > 0 {
-		rewritten, err := e.rewriteQuery(ctx, fc.req.LLMClient, fc.history, fc.req.Query)
-		if err != nil {
-			logger.Warnf("查询改写失败，使用原始问题, sessionID=%s: %v", fc.req.SessionID, err)
-		} else if rewritten != "" {
-			searchQuery = rewritten
-		}
-	}
-
-	// Step 2: 知识库检索
-	fc.eventCh <- Event{Type: EventProgress, Content: "正在检索知识库..."}
-	retrieveResult, sources, err := e.retrieve(ctx, fc.req.UserID, searchQuery, fc.req.KnowledgeBaseIDs)
-	if err != nil {
-		logger.Errorf("知识库检索失败, sessionID=%s: %v", fc.req.SessionID, err)
-		fc.eventCh <- Event{Type: EventError, Error: "知识库检索失败", Done: true}
-		return
-	}
-
-	// Step 3: 有结果 → 直接生成
-	if retrieveResult.Hit && len(retrieveResult.Documents) > 0 {
-		fc.eventCh <- Event{Type: EventSources, Sources: sources}
-		e.generateDirectAnswer(ctx, fc.req.LLMClient, fc.req.Query, fc.history, retrieveResult, sources, fc.eventCh)
-		return
-	}
-
-	// Step 4: 知识库无结果 → 进入 ReAct（LLM 自行调用 web_search）
-	fc.eventCh <- Event{Type: EventProgress, Content: "知识库未找到相关内容，进入深度推理..."}
-	e.enterReActLoop(ctx, fc, sources)
-}
-
-// enterReActLoop 进入 ReAct 循环，LLM 自行决定是否调用 web_search
-func (e *Engine) enterReActLoop(ctx context.Context, fc flowContext, sources []response.SourceInfo) {
-	toolMap := make(map[string]tool.Tool, len(fc.reactTools))
-	for _, t := range fc.reactTools {
-		toolMap[t.Name()] = t
-	}
-
-	toolInfos := make([]toolInfo, 0, len(fc.reactTools))
-	for _, t := range fc.reactTools {
+	toolInfos := make([]toolInfo, 0, len(toolMap))
+	for _, t := range toolMap {
 		toolInfos = append(toolInfos, toolInfo{
 			name:        t.Name(),
 			description: t.Description(),
 		})
 	}
 
-	// 系统提示词告知 LLM：知识库已搜过，没有结果
+	// 构建消息列表（无预检索结果，LLM 自行决定何时调用工具）
+	history := toHistoryMessages(req.History)
 	systemPrompt := buildReActSystemPrompt(toolInfos)
-
 	messages := []*schema.Message{
 		schema.SystemMessage(systemPrompt),
+		schema.UserMessage(buildUserMessage(req.Query, history)),
 	}
-	userMsg := buildUserMessage(fc.req.Query, fc.history)
-	messages = append(messages, schema.UserMessage(userMsg))
 
-	for iteration := 0; iteration < fc.maxIter; iteration++ {
+	// 收集知识库检索来源（knowledge_search 返回的 sources）
+	var collectedSources []response.SourceInfo
+
+	// 主循环
+	for iteration := 0; iteration < maxIter; iteration++ {
 		if ctx.Err() != nil {
-			fc.eventCh <- Event{Type: EventError, Error: "请求已取消", Done: true}
+			eventCh <- Event{Type: EventError, Error: "请求已取消", Done: true}
 			return
 		}
 
 		logger.Infof("Agent 第 %d 轮迭代", iteration+1)
 
-		// Think
-		thinkResult, err := e.think(ctx, fc.req.LLMClient, messages, fc.llmTools)
+		// ── Think ──
+		thinkResult, err := e.think(ctx, req.LLMClient, messages, llmTools)
 		if err != nil {
 			logger.Errorf("Agent Think 阶段失败: %v", err)
-			fc.eventCh <- Event{Type: EventError, Error: "思考过程出错", Done: true}
+			eventCh <- Event{Type: EventError, Error: "思考过程出错", Done: true}
 			return
 		}
 
 		if thinkResult.content != "" {
-			fc.eventCh <- Event{Type: EventThought, Content: thinkResult.content}
+			eventCh <- Event{Type: EventThought, Content: thinkResult.content}
 		}
 
-		// 无工具调用 → 直接输出文字
+		// ── Analyze ──
 		if len(thinkResult.toolCalls) == 0 {
-			fc.eventCh <- Event{Type: EventAnswer, Content: thinkResult.content}
-			fc.eventCh <- Event{Type: EventDone, Done: true}
+			if len(collectedSources) > 0 {
+				eventCh <- Event{Type: EventSources, Sources: collectedSources}
+			}
+			streamAnswer(eventCh, thinkResult.content)
+			eventCh <- Event{Type: EventDone, Done: true}
 			return
 		}
 
-		// 检查 final_answer
 		for _, tc := range thinkResult.toolCalls {
 			if tc.Name == "final_answer" {
 				answer := parseFinalAnswer(tc.Arguments)
-				if len(sources) > 0 {
-					fc.eventCh <- Event{Type: EventSources, Sources: sources}
+				if len(collectedSources) > 0 {
+					eventCh <- Event{Type: EventSources, Sources: collectedSources}
 				}
-				fc.eventCh <- Event{Type: EventAnswer, Content: answer}
-				fc.eventCh <- Event{Type: EventDone, Done: true}
+				streamAnswer(eventCh, answer)
+				eventCh <- Event{Type: EventDone, Done: true}
 				return
 			}
 		}
 
-		// Act — 执行工具
+		// ── Act ──
 		toolResults := e.act(ctx, toolMap, thinkResult.toolCalls)
-
 		for _, tr := range toolResults {
-			fc.eventCh <- Event{
+			eventCh <- Event{
 				Type: EventToolResult,
 				ToolResult: &ToolResult{
 					Name:    tr.name,
-					Content: tr.content,
+					Content: truncate(tr.content, 500),
 					Error:   tr.errMsg,
 				},
 			}
+
+			// 从 knowledge_search 结果中提取来源
+			if tr.name == "knowledge_search" && tr.errMsg == "" {
+				sources := extractSourcesFromResult(tr.content)
+				collectedSources = append(collectedSources, sources...)
+			}
 		}
 
-		// Observe — 写入历史
+		// ── Observe ──
 		einoToolCalls := make([]schema.ToolCall, 0, len(thinkResult.toolCalls))
 		for _, tc := range thinkResult.toolCalls {
 			einoToolCalls = append(einoToolCalls, schema.ToolCall{
@@ -218,56 +153,35 @@ func (e *Engine) enterReActLoop(ctx context.Context, fc flowContext, sources []r
 		}
 	}
 
-	logger.Warnf("Agent 达到最大迭代次数 %d", fc.maxIter)
-	fc.eventCh <- Event{Type: EventError, Error: "达到最大思考轮次，请尝试简化问题", Done: true}
+	logger.Warnf("Agent 达到最大迭代次数 %d", maxIter)
+	eventCh <- Event{Type: EventError, Error: "达到最大思考轮次，请尝试简化问题", Done: true}
 }
 
-// rewriteQuery 用 LLM 结合历史对话改写用户问题
-func (e *Engine) rewriteQuery(ctx context.Context, llmClient llm.Client, history []historyMessage, question string) (string, error) {
-	rewriteCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	messages := buildRewritePrompt(history, question)
-	resp, err := llmClient.Generate(rewriteCtx, llm.GenerateRequest{Messages: messages})
-	if err != nil {
-		return "", err
-	}
-	if resp.Message == nil {
-		return "", nil
-	}
-	return resp.Message.Content, nil
-}
-
-// retrieve 执行知识库检索并转换为引用来源
-func (e *Engine) retrieve(ctx context.Context, userID, question string, knowledgeBaseIDs []string) (rag.Result, []response.SourceInfo, error) {
-	retrieveResult, err := e.retriever.Retrieve(ctx, rag.Query{
-		Question:         question,
-		TopK:             config.Get().RAG.TopK,
-		KnowledgeBaseIDs: knowledgeBaseIDs,
-		UserID:           userID,
-	})
-	if err != nil {
-		return rag.Result{}, nil, err
+// extractSourcesFromResult 从 knowledge_search 返回的 JSON 中提取来源信息
+func extractSourcesFromResult(content string) []response.SourceInfo {
+	var result tool.SearchResult
+	if err := json.Unmarshal([]byte(content), &result); err != nil || len(result.Sources) == 0 {
+		return nil
 	}
 
+	// 按文档分组
 	docMap := make(map[string]*response.SourceInfo)
 	docOrder := make([]string, 0)
-	for _, doc := range retrieveResult.Documents {
-		if _, exists := docMap[doc.DocumentID]; !exists {
-			docMap[doc.DocumentID] = &response.SourceInfo{
-				DocumentID:      doc.DocumentID,
-				KnowledgeBaseID: doc.KnowledgeBaseID,
-				Title:           doc.Title,
+	for _, src := range result.Sources {
+		if _, exists := docMap[src.DocumentID]; !exists {
+			docMap[src.DocumentID] = &response.SourceInfo{
+				DocumentID:      src.DocumentID,
+				KnowledgeBaseID: src.KnowledgeBaseID,
+				Title:           src.Title,
 			}
-			docOrder = append(docOrder, doc.DocumentID)
+			docOrder = append(docOrder, src.DocumentID)
 		}
-		docMap[doc.DocumentID].Chunks = append(docMap[doc.DocumentID].Chunks, response.ChunkSource{
-			ID:      doc.ID,
-			Content: doc.Content,
-			Score:   doc.Score,
+		docMap[src.DocumentID].Chunks = append(docMap[src.DocumentID].Chunks, response.ChunkSource{
+			Content: src.Content,
+			Score:   src.Score,
 		})
-		if doc.Score > docMap[doc.DocumentID].Score {
-			docMap[doc.DocumentID].Score = doc.Score
+		if src.Score > docMap[src.DocumentID].Score {
+			docMap[src.DocumentID].Score = src.Score
 		}
 	}
 
@@ -275,84 +189,7 @@ func (e *Engine) retrieve(ctx context.Context, userID, question string, knowledg
 	for _, docID := range docOrder {
 		sources = append(sources, *docMap[docID])
 	}
-
-	logger.Infof("RAG 检索完成: hit=%v, 命中 %d 篇文档", retrieveResult.Hit, len(sources))
-	return retrieveResult, sources, nil
-}
-
-// generateDirectAnswer 用检索结果直接生成答案（流式输出）
-func (e *Engine) generateDirectAnswer(ctx context.Context, llmClient llm.Client, question string, history []historyMessage, retrieveResult rag.Result, sources []response.SourceInfo, eventCh chan<- Event) {
-	messages := buildLLMMessages(history, question, retrieveResult)
-
-	stream, err := llmClient.GenerateStream(ctx, llm.GenerateRequest{Messages: messages})
-	if err != nil {
-		logger.Errorf("LLM 调用失败: %v", err)
-		eventCh <- Event{Type: EventError, Error: "LLM 调用失败", Done: true}
-		return
-	}
-
-	eventCh <- Event{Type: EventSources, Sources: sources}
-	var fullContent string
-	for chunk := range stream {
-		if chunk.Error != nil {
-			if fullContent == "" {
-				eventCh <- Event{Type: EventError, Error: chunk.Error.Error(), Done: true}
-				return
-			}
-			break
-		}
-		if chunk.Done {
-			break
-		}
-		fullContent += chunk.Content
-		eventCh <- Event{Type: EventAnswer, Content: chunk.Content}
-	}
-
-	if fullContent != "" {
-		eventCh <- Event{Type: EventDone, Done: true}
-	}
-}
-
-// buildLLMMessages 组装 LLM 消息列表（供直接生成使用）
-func buildLLMMessages(history []historyMessage, question string, retrieveResult rag.Result) []*schema.Message {
-	systemPrompt := `你是一个专业的知识问答助手。请严格遵守以下规则：
-
-## 回答规则
-1. **优先使用参考资料**：如果参考资料中包含足够的信息来回答问题，请直接基于参考资料作答，不要额外编造内容。
-2. **资料不足时适度扩展**：如果参考资料只覆盖了问题的部分方面，可以结合你的通用知识适度补充，但必须明确标注哪些内容来自参考资料、哪些是补充说明。
-3. **无相关资料时如实告知**：如果参考资料中完全没有相关信息，请明确告知用户"当前知识库中未找到相关信息"。
-4. **绝不编造或篡改**：绝对不要捏造参考资料中不存在的数据、事实或结论。
-
-## 格式要求
-- 使用 Markdown 格式输出回答
-- 引用参考资料时使用行内标注，如：（来源：文档标题）`
-
-	messages := []*schema.Message{
-		schema.SystemMessage(systemPrompt),
-	}
-
-	for _, msg := range history {
-		switch msg.role {
-		case "user":
-			messages = append(messages, schema.UserMessage(msg.content))
-		case "assistant":
-			messages = append(messages, schema.AssistantMessage(msg.content, nil))
-		}
-	}
-
-	if retrieveResult.Hit {
-		contextText := "## 参考资料\n\n"
-		for i, doc := range retrieveResult.Documents {
-			contextText += fmt.Sprintf("### [%d] %s\n\n%s\n\n", i+1, doc.Title, doc.Content)
-		}
-		questionText := fmt.Sprintf("%s\n---\n\n**问题**：%s\n\n请根据以上参考资料回答。", contextText, question)
-		messages = append(messages, schema.UserMessage(questionText))
-	} else {
-		questionText := fmt.Sprintf("**问题**：%s\n\n（当前无匹配的参考资料，请如实告知用户知识库中未找到相关信息。）", question)
-		messages = append(messages, schema.UserMessage(questionText))
-	}
-
-	return messages
+	return sources
 }
 
 // thinkResult 思考结果
@@ -361,7 +198,7 @@ type thinkResult struct {
 	toolCalls []llm.ToolCall
 }
 
-// think Phase 1: 调用 LLM 思考
+// think 调用 LLM 思考
 func (e *Engine) think(ctx context.Context, llmClient llm.Client, messages []*schema.Message, tools []llm.Tool) (thinkResult, error) {
 	resp, err := llmClient.Generate(ctx, llm.GenerateRequest{
 		Messages: messages,
@@ -371,9 +208,7 @@ func (e *Engine) think(ctx context.Context, llmClient llm.Client, messages []*sc
 		return thinkResult{}, fmt.Errorf("LLM 调用失败: %w", err)
 	}
 
-	result := thinkResult{
-		toolCalls: resp.ToolCalls,
-	}
+	result := thinkResult{toolCalls: resp.ToolCalls}
 	if resp.Message != nil {
 		result.content = resp.Message.Content
 	}
@@ -388,7 +223,7 @@ type actResult struct {
 	errMsg     string
 }
 
-// act Phase 3: 并发执行工具调用
+// act 并发执行工具调用
 func (e *Engine) act(ctx context.Context, toolMap map[string]tool.Tool, toolCalls []llm.ToolCall) []actResult {
 	results := make([]actResult, len(toolCalls))
 	var wg sync.WaitGroup
@@ -431,21 +266,15 @@ func (e *Engine) act(ctx context.Context, toolMap map[string]tool.Tool, toolCall
 	return results
 }
 
-// parseFinalAnswer 从 final_answer 工具参数中提取答案
-func parseFinalAnswer(args string) string {
-	var params struct {
-		Answer string `json:"answer"`
+// streamAnswer 将回答内容分片发送，实现流式输出效果
+func streamAnswer(ch chan<- Event, content string) {
+	const chunkSize = 20 // 每片字符数
+	runes := []rune(content)
+	for i := 0; i < len(runes); i += chunkSize {
+		end := i + chunkSize
+		if end > len(runes) {
+			end = len(runes)
+		}
+		ch <- Event{Type: EventAnswer, Content: string(runes[i:end])}
 	}
-	if err := json.Unmarshal([]byte(args), &params); err == nil && params.Answer != "" {
-		return params.Answer
-	}
-	return args
-}
-
-// truncate 截断字符串
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }

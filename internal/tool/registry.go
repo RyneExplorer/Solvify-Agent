@@ -51,6 +51,15 @@ func (r *Registry) ToLLMTools() []llm.Tool {
 	return result
 }
 
+// ToToolMap 返回工具执行映射表（name → Tool），供 Agent 并发执行工具
+func (r *Registry) ToToolMap() map[string]Tool {
+	result := make(map[string]Tool, len(r.tools))
+	for name, t := range r.tools {
+		result[name] = t
+	}
+	return result
+}
+
 // MustRegister 注册工具，如果名称重复则 panic
 func (r *Registry) MustRegister(t Tool) *Registry {
 	name := t.Name()

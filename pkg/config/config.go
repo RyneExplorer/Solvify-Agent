@@ -74,12 +74,33 @@ type EmbeddingConfig struct {
 
 // RAGConfig 描述检索增强配置
 type RAGConfig struct {
+	Enabled        bool           `mapstructure:"enabled"`
+	TopK           int            `mapstructure:"top_k"`
+	ScoreThreshold float64        `mapstructure:"score_threshold"`
+	VectorWeight   float64        `mapstructure:"vector_weight"`
+	KeywordWeight  float64        `mapstructure:"keyword_weight"`
+	RRFK           float64        `mapstructure:"rrf_k"`
+	Reranker       RerankerConfig `mapstructure:"reranker"`
+	Expander       ExpanderConfig `mapstructure:"expander"`
+}
+
+// RerankerConfig 描述重排序配置
+type RerankerConfig struct {
 	Enabled        bool    `mapstructure:"enabled"`
-	TopK           int     `mapstructure:"top_k"`
+	Endpoint       string  `mapstructure:"endpoint"`
+	Model          string  `mapstructure:"model"`
+	APIKey         string  `mapstructure:"api_key"`
+	TopN           int     `mapstructure:"top_n"`
+	Timeout        int     `mapstructure:"timeout"`
 	ScoreThreshold float64 `mapstructure:"score_threshold"`
-	VectorWeight   float64 `mapstructure:"vector_weight"`
-	KeywordWeight  float64 `mapstructure:"keyword_weight"`
-	RRFK           float64 `mapstructure:"rrf_k"`
+}
+
+// ExpanderConfig 描述相邻分块扩展配置
+type ExpanderConfig struct {
+	Enabled        bool    `mapstructure:"enabled"`
+	WindowSize     int     `mapstructure:"window_size"`
+	MaxChunkTokens int     `mapstructure:"max_chunk_tokens"`
+	DedupThreshold float64 `mapstructure:"dedup_threshold"`
 }
 
 // ToolsConfig 描述工具调用配置
@@ -212,6 +233,18 @@ func Default() *Config {
 			Enabled:        true,
 			TopK:           3,
 			ScoreThreshold: 0.7,
+			Reranker: RerankerConfig{
+				Enabled:        false,
+				TopN:           3,
+				Timeout:        5,
+				ScoreThreshold: 0.5,
+			},
+			Expander: ExpanderConfig{
+				Enabled:        false,
+				WindowSize:     1,
+				MaxChunkTokens: 1000,
+				DedupThreshold: 0.8,
+			},
 		},
 		Tools: ToolsConfig{
 			Enabled: true,
@@ -347,6 +380,33 @@ func applyEnv(cfg *Config) {
 
 	if value := os.Getenv("RAG_ENABLED"); value != "" {
 		cfg.RAG.Enabled = parseBool(value, cfg.RAG.Enabled)
+	}
+	if value := os.Getenv("RERANKER_ENABLED"); value != "" {
+		cfg.RAG.Reranker.Enabled = parseBool(value, cfg.RAG.Reranker.Enabled)
+	}
+	cfg.RAG.Reranker.Endpoint = getEnv("RERANKER_ENDPOINT", cfg.RAG.Reranker.Endpoint)
+	cfg.RAG.Reranker.Model = getEnv("RERANKER_MODEL", cfg.RAG.Reranker.Model)
+	cfg.RAG.Reranker.APIKey = getEnv("RERANKER_API_KEY", cfg.RAG.Reranker.APIKey)
+	if value := os.Getenv("RERANKER_TOP_N"); value != "" {
+		cfg.RAG.Reranker.TopN = parseInt(value, cfg.RAG.Reranker.TopN)
+	}
+	if value := os.Getenv("RERANKER_TIMEOUT"); value != "" {
+		cfg.RAG.Reranker.Timeout = parseInt(value, cfg.RAG.Reranker.Timeout)
+	}
+	if value := os.Getenv("RERANKER_SCORE_THRESHOLD"); value != "" {
+		cfg.RAG.Reranker.ScoreThreshold = parseFloat(value, cfg.RAG.Reranker.ScoreThreshold)
+	}
+	if value := os.Getenv("EXPANDER_ENABLED"); value != "" {
+		cfg.RAG.Expander.Enabled = parseBool(value, cfg.RAG.Expander.Enabled)
+	}
+	if value := os.Getenv("EXPANDER_WINDOW_SIZE"); value != "" {
+		cfg.RAG.Expander.WindowSize = parseInt(value, cfg.RAG.Expander.WindowSize)
+	}
+	if value := os.Getenv("EXPANDER_MAX_CHUNK_TOKENS"); value != "" {
+		cfg.RAG.Expander.MaxChunkTokens = parseInt(value, cfg.RAG.Expander.MaxChunkTokens)
+	}
+	if value := os.Getenv("EXPANDER_DEDUP_THRESHOLD"); value != "" {
+		cfg.RAG.Expander.DedupThreshold = parseFloat(value, cfg.RAG.Expander.DedupThreshold)
 	}
 	if value := os.Getenv("POSTGRES_ENABLE_PGVECTOR"); value != "" {
 		cfg.Database.Postgres.EnablePGVector = parseBool(value, cfg.Database.Postgres.EnablePGVector)

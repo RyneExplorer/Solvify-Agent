@@ -4,19 +4,15 @@ import (
 	"solvify-agent/internal/llm"
 	"solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
-	"solvify-agent/internal/rag"
 )
 
-// Request 描述 Agent 执行请求
+// Request 描述 Agent 执行请求（Service 只做业务编排，Agent 自主决定工具调用）
 type Request struct {
-	Query            string
-	UserID           string
-	SessionID        string
-	KnowledgeBaseIDs []string
-	History          []entity.ChatMessage
-	InitialResult    rag.Result
-	InitialSources   []response.SourceInfo
-	LLMClient        llm.Client
+	UserID           string               // 用户 ID（用于知识库检索权限）
+	Query            string               // 原始用户问题
+	History          []entity.ChatMessage // 历史对话
+	KnowledgeBaseIDs []string             // 知识库 ID 列表
+	LLMClient        llm.Client           // LLM 客户端
 }
 
 // Event 描述 Agent SSE 事件

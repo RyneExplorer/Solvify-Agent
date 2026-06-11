@@ -26,6 +26,8 @@ type Document struct {
 	ID              string
 	KnowledgeBaseID string
 	DocumentID      string
+	VersionID       string
+	ChunkIndex      int
 	Title           string
 	Content         string
 	Score           float64

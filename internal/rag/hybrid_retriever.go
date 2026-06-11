@@ -5,12 +5,33 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
+	"github.com/go-ego/gse"
 	"gorm.io/gorm"
 
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
 )
+
+var (
+	segOnce sync.Once
+	segInst gse.Segmenter
+)
+
+// getSegmenter 获取全局 gse 分词实例（懒加载，使用内嵌词典）
+func getSegmenter() *gse.Segmenter {
+	segOnce.Do(func() {
+		seg, err := gse.NewEmbed()
+		if err != nil {
+			logger.Errorf("gse 词典加载失败: %v", err)
+			return
+		}
+		segInst = seg
+		logger.Info("gse 词典加载完成")
+	})
+	return &segInst
+}
 
 // HybridRetriever 实现混合检索（向量 + 关键词 + RRF 融合）
 type HybridRetriever struct {
@@ -78,6 +99,8 @@ type scoredChunk struct {
 	ID              string  `gorm:"column:id"`
 	KnowledgeBaseID string  `gorm:"column:knowledge_base_id"`
 	DocumentID      string  `gorm:"column:document_id"`
+	VersionID       string  `gorm:"column:version_id"`
+	ChunkIndex      int     `gorm:"column:chunk_index"`
 	Title           string  `gorm:"column:title"`
 	Content         string  `gorm:"column:content"`
 	Score           float64 `gorm:"column:score"`
@@ -135,33 +158,40 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 
 	logger.Infof("向量检索命中: %d 条, 关键词检索命中: %d 条", len(vr.docs), len(kr.docs))
 
-	// RRF 融合
-	fused := r.reciprocalRankFusion(vr.docs, kr.docs)
-
-	// 过滤低分结果
-	docs := make([]Document, 0, len(fused))
-	for _, item := range fused {
-		if item.Score >= r.scoreThreshold {
-			docs = append(docs, Document{
-				ID:              item.ID,
-				KnowledgeBaseID: item.KnowledgeBaseID,
-				DocumentID:      item.DocumentID,
-				Title:           item.Title,
-				Content:         item.Content,
-				Score:           item.Score,
-			})
-			logger.Infof("  ✓ [%s] score=%.4f title=%q", item.DocumentID, item.Score, item.Title)
+	// 先按向量分数阈值过滤（阈值适用于余弦相似度，不是 RRF 分数）
+	filteredVector := make([]scoredChunk, 0, len(vr.docs))
+	for _, doc := range vr.docs {
+		if doc.Score >= r.scoreThreshold {
+			filteredVector = append(filteredVector, doc)
+			logger.Infof("  ✓ 向量 [%s] score=%.4f title=%q", doc.DocumentID, doc.Score, doc.Title)
 		} else {
-			logger.Infof("  ✗ [%s] score=%.4f (低于阈值 %.2f) title=%q", item.DocumentID, item.Score, r.scoreThreshold, item.Title)
+			logger.Infof("  ✗ 向量 [%s] score=%.4f (低于阈值 %.2f)", doc.DocumentID, doc.Score, r.scoreThreshold)
 		}
 	}
 
-	// 截取 TopK
-	if len(docs) > topK {
-		docs = docs[:topK]
+	// RRF 融合（用过滤后的向量结果 + 全部关键词结果）
+	fused := r.reciprocalRankFusion(filteredVector, kr.docs)
+
+	// 截取 TopK（RRF 已按分数排序，不再做阈值过滤）
+	docs := make([]Document, 0, len(fused))
+	for _, item := range fused {
+		if len(docs) >= topK {
+			break
+		}
+		docs = append(docs, Document{
+			ID:              item.ID,
+			KnowledgeBaseID: item.KnowledgeBaseID,
+			DocumentID:      item.DocumentID,
+			VersionID:       item.VersionID,
+			ChunkIndex:      item.ChunkIndex,
+			Title:           item.Title,
+			Content:         item.Content,
+			Score:           item.Score,
+		})
+		logger.Infof("  → RRF [%s] score=%.4f title=%q", item.DocumentID, item.Score, item.Title)
 	}
 
-	logger.Infof("混合检索最终结果: %d 条 (阈值=%.2f)", len(docs), r.scoreThreshold)
+	logger.Infof("混合检索最终结果: %d 条 (向量过滤阈值=%.2f, TopK=%d)", len(docs), r.scoreThreshold, topK)
 
 	return Result{
 		Hit:       len(docs) > 0,
@@ -181,12 +211,14 @@ func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scor
 
 	var results []scoredChunk
 	err = r.db.WithContext(ctx).Raw(`
-		SELECT id, knowledge_base_id, document_id, title, content, score, keywords
+		SELECT id, knowledge_base_id, document_id, version_id, chunk_index, title, content, score, keywords
 		FROM (
 			SELECT
 				dc.id,
 				dc.knowledge_base_id,
 				dc.document_id,
+				dc.version_id,
+				dc.chunk_index,
 				COALESCE(d.title, '') as title,
 				dc.content,
 				1 - (dc.embedding <=> ?::vector) AS score,
@@ -227,12 +259,14 @@ func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]sco
 	keywordArray := buildPostgresArray(keywords)
 
 	err := r.db.WithContext(ctx).Raw(`
-		SELECT id, knowledge_base_id, document_id, title, content, score, keywords
+		SELECT id, knowledge_base_id, document_id, version_id, chunk_index, title, content, score, keywords
 		FROM (
 			SELECT
 				dc.id,
 				dc.knowledge_base_id,
 				dc.document_id,
+				dc.version_id,
+				dc.chunk_index,
 				COALESCE(d.title, '') as title,
 				dc.content,
 				-- 计算关键词匹配分数：匹配的关键词越多，分数越高
@@ -262,12 +296,8 @@ func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]sco
 	return results, nil
 }
 
-// extractKeywords 从问题中提取关键词
+// extractKeywords 使用 gse 分词提取关键词
 func extractKeywords(question string) []string {
-	// 简单的关键词提取策略：
-	// 1. 转小写
-	// 2. 按空格和标点分词
-	// 3. 过滤停用词和短词
 	stopWords := map[string]bool{
 		"的": true, "了": true, "在": true, "是": true, "我": true,
 		"有": true, "和": true, "就": true, "不": true, "人": true,
@@ -301,23 +331,24 @@ func extractKeywords(question string) []string {
 		"their": true,
 	}
 
-	// 分词
-	words := strings.FieldsFunc(strings.ToLower(question), func(r rune) bool {
-		return r == ' ' || r == ',' || r == '.' || r == '?' || r == '!' ||
-			r == ';' || r == ':' || r == '"' || r == '\'' || r == '(' ||
-			r == ')' || r == '[' || r == ']' || r == '{' || r == '}' ||
-			r == '/' || r == '\\' || r == '|' || r == '@' || r == '#' ||
-			r == '$' || r == '%' || r == '^' || r == '&' || r == '*' ||
-			r == '-' || r == '_' || r == '+' || r == '=' || r == '~' ||
-			r == '`' || r == '<' || r == '>'
-	})
+	seg := getSegmenter()
+	words := seg.Cut(question, true)
 
 	var keywords []string
-	for _, word := range words {
-		// 过滤停用词和短词
-		if len(word) >= 2 && !stopWords[word] {
-			keywords = append(keywords, word)
+	seen := make(map[string]bool)
+	for _, w := range words {
+		w = strings.ToLower(strings.TrimSpace(w))
+		if w == "" || len(w) < 2 {
+			continue
 		}
+		if stopWords[w] {
+			continue
+		}
+		if seen[w] {
+			continue
+		}
+		seen[w] = true
+		keywords = append(keywords, w)
 	}
 
 	return keywords
@@ -355,6 +386,8 @@ func (r *HybridRetriever) reciprocalRankFusion(vectorResults, keywordResults []s
 				ID:              doc.ID,
 				KnowledgeBaseID: doc.KnowledgeBaseID,
 				DocumentID:      doc.DocumentID,
+				VersionID:       doc.VersionID,
+				ChunkIndex:      doc.ChunkIndex,
 				Title:           doc.Title,
 				Content:         doc.Content,
 				Keywords:        doc.Keywords,
@@ -372,6 +405,8 @@ func (r *HybridRetriever) reciprocalRankFusion(vectorResults, keywordResults []s
 				ID:              doc.ID,
 				KnowledgeBaseID: doc.KnowledgeBaseID,
 				DocumentID:      doc.DocumentID,
+				VersionID:       doc.VersionID,
+				ChunkIndex:      doc.ChunkIndex,
 				Title:           doc.Title,
 				Content:         doc.Content,
 				Keywords:        doc.Keywords,

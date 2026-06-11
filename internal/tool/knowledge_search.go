@@ -49,6 +49,21 @@ func (t *KnowledgeSearchTool) Parameters() map[string]any {
 	}
 }
 
+// SearchResult 知识库搜索结果（同时包含内容和来源元数据）
+type SearchResult struct {
+	Content string           `json:"content"`
+	Sources []SourceDocument `json:"sources"`
+}
+
+// SourceDocument 来源文档信息
+type SourceDocument struct {
+	DocumentID      string  `json:"document_id"`
+	KnowledgeBaseID string  `json:"knowledge_base_id"`
+	Title           string  `json:"title"`
+	Score           float64 `json:"score"`
+	Content         string  `json:"content"`
+}
+
 func (t *KnowledgeSearchTool) Execute(ctx context.Context, args string) (string, error) {
 	var params struct {
 		Query string `json:"query"`
@@ -74,9 +89,23 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args string) (string,
 		return "未找到相关内容", nil
 	}
 
-	var sb strings.Builder
+	var contentBuilder strings.Builder
+	var sources []SourceDocument
 	for i, doc := range result.Documents {
-		sb.WriteString(fmt.Sprintf("[%d] %s\n%s\n\n", i+1, doc.Title, doc.Content))
+		contentBuilder.WriteString(fmt.Sprintf("[%d] %s\n%s\n\n", i+1, doc.Title, doc.Content))
+		sources = append(sources, SourceDocument{
+			DocumentID:      doc.DocumentID,
+			KnowledgeBaseID: doc.KnowledgeBaseID,
+			Title:           doc.Title,
+			Score:           doc.Score,
+			Content:         doc.Content,
+		})
 	}
-	return sb.String(), nil
+
+	searchResult := SearchResult{
+		Content: contentBuilder.String(),
+		Sources: sources,
+	}
+	data, _ := json.Marshal(searchResult)
+	return string(data), nil
 }

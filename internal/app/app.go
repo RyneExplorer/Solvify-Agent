@@ -156,8 +156,8 @@ func (a *App) ensureStorageQuotaUniqueIndex(db *gorm.DB) error {
 	return nil
 }
 
-// initAIDependencies 初始化 Embedding 和 RAG 检索器
-func (a *App) initAIDependencies() *rag.VectorRetriever {
+// initAIDependencies 初始化 Embedding 和 RAG 检索器（含可选装饰器链）
+func (a *App) initAIDependencies() rag.Retriever {
 
 	embeddingClient, err := llm.NewEmbeddingClientFromConfig(context.Background(), &a.cfg.Embedding)
 	if err != nil {
@@ -167,30 +167,52 @@ func (a *App) initAIDependencies() *rag.VectorRetriever {
 	// Embedding 缓存（相同文本 → 相同向量，缓存 24 小时）
 	embeddingCache := cache.New(a.redis, "emb:", 24*time.Hour)
 
-	vectorRetriever := rag.NewVectorRetriever(rag.VectorRetrieverConfig{
-		DB: a.postgresqlDB,
-		EmbeddingFunc: func(ctx context.Context, text string) ([]float64, error) {
-			// 先查缓存
-			cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
-			var vec []float64
-			if found, _ := embeddingCache.Get(ctx, cacheKey, &vec); found {
-				return vec, nil
-			}
-			// 缓存未命中，调用 API
-			vec, err := embeddingClient.Embed(ctx, text)
-			if err != nil {
-				return nil, err
-			}
-			// 写入缓存（失败不影响业务）
-			if err := embeddingCache.Set(ctx, cacheKey, vec, 0); err != nil {
-				logger.Warnf("Embedding 缓存写入失败: %v", err)
-			}
+	embeddingFunc := func(ctx context.Context, text string) ([]float64, error) {
+		cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
+		var vec []float64
+		if found, _ := embeddingCache.Get(ctx, cacheKey, &vec); found {
+			logger.Infof("[Embedding] 缓存命中: key=%s text=%q dim=%d", cacheKey[:8], text, len(vec))
 			return vec, nil
-		},
+		}
+		logger.Infof("[Embedding] 缓存未命中: key=%s text=%q, 调用 API...", cacheKey[:8], text)
+		vec, err := embeddingClient.Embed(ctx, text)
+		if err != nil {
+			logger.Errorf("[Embedding] API 调用失败: %v", err)
+			return nil, err
+		}
+		logger.Infof("[Embedding] API 返回: dim=%d", len(vec))
+		if err := embeddingCache.Set(ctx, cacheKey, vec, 0); err != nil {
+			logger.Warnf("[Embedding] 缓存写入失败: %v", err)
+		} else {
+			logger.Infof("[Embedding] 已写入缓存: key=%s", cacheKey[:8])
+		}
+		return vec, nil
+	}
+
+	// 使用混合检索器（向量 + 关键词 + RRF 融合）
+	var retriever rag.Retriever = rag.NewHybridRetriever(rag.HybridRetrieverConfig{
+		DB:             a.postgresqlDB,
+		EmbeddingFunc:  embeddingFunc,
 		ScoreThreshold: a.cfg.RAG.ScoreThreshold,
+		VectorWeight:   a.cfg.RAG.VectorWeight,
+		KeywordWeight:  a.cfg.RAG.KeywordWeight,
+		RRFK:           a.cfg.RAG.RRFK,
 	})
+
+	// 可选：Rerank 重排序装饰器
+	if a.cfg.RAG.Reranker.Enabled {
+		retriever = rag.NewRerankRetrieverFromConfig(retriever)
+		logger.Info("Rerank 重排序已启用")
+	}
+
+	// 可选：相邻分块扩展装饰器
+	if a.cfg.RAG.Expander.Enabled {
+		retriever = rag.NewExpandRetrieverFromConfig(retriever, a.postgresqlDB)
+		logger.Info("相邻分块扩展已启用")
+	}
+
 	logger.Info("AI 依赖初始化完成")
-	return vectorRetriever
+	return retriever
 }
 
 // AgentComponents 持有 Agent 相关组件
@@ -201,23 +223,24 @@ type AgentComponents struct {
 }
 
 // initAgentComponents 初始化 Agent 相关组件（Embedding、RAG、工具、Agent 引擎）
-func (a *App) initAgentComponents(modelRepo repository.ModelRepo) *AgentComponents {
+func (a *App) initAgentComponents() *AgentComponents {
 	vectorRetriever := a.initAIDependencies()
 
-	// 预热 LLM 客户端缓存（提前为所有已启用的系统模型创建客户端）
-	a.prewarLLVMClients(modelRepo)
-
-	// 初始化 Tool Registry
+	// 初始化 Tool Registry（只注册全局工具，knowledge_search 由 Agent 按请求动态创建）
 	toolRegistry := tool.NewRegistry()
-	toolRegistry.Register(tool.NewKnowledgeSearchTool(vectorRetriever))
 	toolRegistry.Register(tool.NewFinalAnswerTool())
 	toolRegistry.Register(tool.NewWebSearchTool("", ""))
 	logger.Info("工具注册完成", zap.Int("count", len(toolRegistry.List())))
 
+	// knowledge_search 工厂：每次 Agent 请求创建带用户上下文的工具实例
+	ksFactory := agent.KnowledgeSearchFactory(func(userID string, kbIDs []string) *tool.KnowledgeSearchTool {
+		return tool.NewKnowledgeSearchTool(vectorRetriever).WithContext(userID, kbIDs)
+	})
+
 	// 初始化 Agent Engine
 	agentEngine := agent.NewEngine(
-		vectorRetriever,
 		toolRegistry,
+		ksFactory,
 		a.cfg.Agent,
 	)
 
@@ -243,8 +266,11 @@ func (a *App) initDependencies() {
 	chatSessionRepo := repository.NewChatSessionRepository(a.postgresqlDB)
 	chatMessageRepo := repository.NewChatMessageRepository(a.postgresqlDB)
 
+	// 预热所有已启用系统模型的 LLM 客户端（消除首次请求冷启动）
+	a.prewarmModelClients(modelRepo)
+
 	// 初始化 Agent 组件
-	ai := a.initAgentComponents(modelRepo)
+	ai := a.initAgentComponents()
 
 	// 初始化 Service
 	modelService := service.NewModelService(modelRepo)
@@ -266,33 +292,24 @@ func (a *App) initDependencies() {
 		chatSvc)
 }
 
-// prewarLLMClients 启动时为所有已启用的系统模型预创建 LLM 客户端，避免首次请求冷启动
-func (a *App) prewarLLVMClients(modelRepo repository.ModelRepo) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	models, err := modelRepo.List(ctx)
+// prewarmModelClients 启动时预创建所有已启用系统模型的 LLM 客户端
+func (a *App) prewarmModelClients(modelRepo repository.ModelRepo) {
+	models, err := modelRepo.List(context.Background())
 	if err != nil {
-		logger.Warnf("预热 LLM 客户端失败（不影响启动）: %v", err)
+		logger.Warnf("预热模型客户端: 查询系统模型列表失败: %v", err)
 		return
 	}
 
+	infos := make([]llm.SystemModelInfo, 0, len(models))
 	for _, m := range models {
-		client, err := llm.NewClientFromModelConfig(ctx, llm.ModelConfig{
-			Provider: m.Provider,
-			ModelID:  m.ModelID,
-			BaseURL:  m.BaseURL,
-			APIKey:   m.APIKey,
+		infos = append(infos, llm.SystemModelInfo{
+			ModelID: m.ModelID,
+			BaseURL: m.BaseURL,
+			APIKey:  m.APIKey,
 		})
-		if err != nil {
-			logger.Warnf("预热模型 %s(%s) 失败: %v", m.Name, m.ModelID, err)
-			continue
-		}
-		// 触发一次轻量调用让底层 HTTP 连接池完成 TLS 握手等初始化
-		_ = client
-		logger.Infof("预热模型 %s(%s) 完成", m.Name, m.ModelID)
 	}
-	logger.Infof("LLM 客户端预热完成，共 %d 个模型", len(models))
+	logger.Infof("预热模型客户端: 从数据库加载到 %d 个已启用系统模型", len(infos))
+	llm.PrewarmClients(context.Background(), infos)
 }
 
 // initRouter 初始化路由

@@ -2,7 +2,11 @@ package llm
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
+	"net"
+	"net/http"
+	"sync"
 	"time"
 
 	einoOpenai "github.com/cloudwego/eino-ext/components/model/openai"
@@ -10,6 +14,35 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/eino-contrib/jsonschema"
 )
+
+// sharedHTTPClient 所有 LLM 客户端共享的 HTTP 连接池
+// 同 Host 的模型（如多个 OpenAI 模型）复用 TCP/TLS 连接，消除重复握手开销
+var (
+	sharedHTTPClientOnce sync.Once
+	sharedHTTPClient     *http.Client
+)
+
+func getSharedHTTPClient() *http.Client {
+	sharedHTTPClientOnce.Do(func() {
+		sharedHTTPClient = &http.Client{
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout:   10 * time.Second,
+					KeepAlive: 60 * time.Second, // TCP keep-alive 探活
+				}).DialContext,
+				TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   20,               // 同 Host 最多保持 20 个空闲连接
+				MaxConnsPerHost:       50,               // 同 Host 最多 50 个并发连接
+				IdleConnTimeout:       10 * time.Minute, // 空闲连接保活 10 分钟
+				TLSHandshakeTimeout:   5 * time.Second,
+				ResponseHeaderTimeout: 60 * time.Second,
+				ForceAttemptHTTP2:     true, // 启用 HTTP/2 多路复用
+			},
+		}
+	})
+	return sharedHTTPClient
+}
 
 // OpenAIClient 基于 eino-ext 实现 OpenAI 兼容 API 客户端
 type OpenAIClient struct {
@@ -30,9 +63,10 @@ type OpenAIClientConfig struct {
 // NewOpenAIClient 创建 OpenAI 兼容客户端
 func NewOpenAIClient(ctx context.Context, cfg OpenAIClientConfig) (*OpenAIClient, error) {
 	config := &einoOpenai.ChatModelConfig{
-		APIKey:  cfg.APIKey,
-		BaseURL: cfg.BaseURL,
-		Model:   cfg.Model,
+		APIKey:     cfg.APIKey,
+		BaseURL:    cfg.BaseURL,
+		Model:      cfg.Model,
+		HTTPClient: getSharedHTTPClient(),
 	}
 
 	if cfg.Temperature > 0 {
