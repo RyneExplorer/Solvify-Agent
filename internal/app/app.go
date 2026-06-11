@@ -145,7 +145,6 @@ func (a *App) initDatabase() error {
 	return nil
 }
 
-
 // initAIDependencies 初始化 Embedding 和 RAG 检索器（含可选装饰器链）
 func (a *App) initAIDependencies() rag.Retriever {
 
@@ -249,8 +248,6 @@ func (a *App) initDependencies() {
 	documentVersionRepo := repository.NewDocumentVersionRepository(a.postgresqlDB)
 	documentJobRepo := repository.NewDocumentProcessingJobRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
-	modelRepo := repository.NewModelRepository(a.postgresqlDB)
-	userModelConfigRepo := repository.NewUserModelConfigRepository(a.postgresqlDB)
 	userRepo := repository.NewUserRepository(a.postgresqlDB)
 
 	// 模型配置缓存（10 分钟 TTL）
