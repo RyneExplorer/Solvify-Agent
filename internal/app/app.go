@@ -153,6 +153,7 @@ func (a *App) initDependencies() {
 	// 初始化 Repository
 	knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
 	documentRepo := repository.NewDocumentRepository(a.postgresqlDB)
+	documentVersionRepo := repository.NewDocumentVersionRepository(a.postgresqlDB)
 	documentJobRepo := repository.NewDocumentProcessingJobRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
 	modelRepo := repository.NewModelRepository(a.postgresqlDB)
@@ -164,7 +165,7 @@ func (a *App) initDependencies() {
 	knowledgeBaseSvc := service.NewKnowledgeBaseService(knowledgeBaseRepo)
 	embeddingSvc := service.NewEmbeddingService(a.cfg.Embedding)
 	documentChunkSvc := service.NewDocumentChunkService(embeddingSvc)
-	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentJobRepo, storageQuotaRepo, documentChunkSvc, "data/uploads")
+	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentVersionRepo, documentJobRepo, storageQuotaRepo, documentChunkSvc, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 
 	// 路由
