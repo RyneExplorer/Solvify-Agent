@@ -10,7 +10,7 @@ import (
 )
 
 // SaveProcessResult 保存文档处理成功结果
-func (r *documentRepository) SaveProcessResult(ctx context.Context, doc entity.Document, jobID string, version *entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus, successJobStatus int16, finishedAt time.Time) error {
+func (r *documentRepository) SaveProcessResult(ctx context.Context, doc entity.Document, jobID string, version *entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus, successJobStatus int, finishedAt time.Time) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(version).Error; err != nil {
 			return err
@@ -44,7 +44,7 @@ func (r *documentRepository) SaveProcessResult(ctx context.Context, doc entity.D
 }
 
 // MarkProcessFailed 标记文档处理失败
-func (r *documentRepository) MarkProcessFailed(ctx context.Context, userID, documentID, jobID string, failedDocumentStatus, failedJobStatus int16, errorMessage string, finishedAt time.Time) error {
+func (r *documentRepository) MarkProcessFailed(ctx context.Context, userID, documentID, jobID string, failedDocumentStatus, failedJobStatus int, errorMessage string, finishedAt time.Time) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&entity.Document{}).
 			Where("id = ? AND user_id = ?", documentID, userID).

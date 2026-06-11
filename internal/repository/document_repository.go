@@ -36,7 +36,7 @@ func (r *documentRepository) Create(ctx context.Context, doc *entity.Document) e
 }
 
 // ListByKnowledgeBase 查询知识库下未删除文档
-func (r *documentRepository) ListByKnowledgeBase(ctx context.Context, userID, kbID string, deletedStatus int16) ([]entity.Document, error) {
+func (r *documentRepository) ListByKnowledgeBase(ctx context.Context, userID, kbID string, deletedStatus int) ([]entity.Document, error) {
 	var items []entity.Document
 	err := r.db.WithContext(ctx).
 		Where("user_id = ? AND knowledge_base_id = ? AND status <> ?", userID, kbID, deletedStatus).
@@ -46,7 +46,7 @@ func (r *documentRepository) ListByKnowledgeBase(ctx context.Context, userID, kb
 }
 
 // FindByID 查询当前用户未删除文档
-func (r *documentRepository) FindByID(ctx context.Context, userID, documentID string, deletedStatus int16) (entity.Document, bool, error) {
+func (r *documentRepository) FindByID(ctx context.Context, userID, documentID string, deletedStatus int) (entity.Document, bool, error) {
 	var doc entity.Document
 	err := r.db.WithContext(ctx).
 		Where("id = ? AND user_id = ? AND status <> ?", documentID, userID, deletedStatus).
@@ -58,7 +58,7 @@ func (r *documentRepository) FindByID(ctx context.Context, userID, documentID st
 }
 
 // ExistsFileName 判断知识库下是否存在同名未删除文档
-func (r *documentRepository) ExistsFileName(ctx context.Context, userID, kbID, fileName string, deletedStatus int16) (bool, error) {
+func (r *documentRepository) ExistsFileName(ctx context.Context, userID, kbID, fileName string, deletedStatus int) (bool, error) {
 	var count int64
 	err := r.db.WithContext(ctx).
 		Model(&entity.Document{}).
@@ -68,7 +68,7 @@ func (r *documentRepository) ExistsFileName(ctx context.Context, userID, kbID, f
 }
 
 // SoftDelete 软删除文档
-func (r *documentRepository) SoftDelete(ctx context.Context, userID, documentID string, deletedStatus int16, deletedAt, expiredAt time.Time) (bool, error) {
+func (r *documentRepository) SoftDelete(ctx context.Context, userID, documentID string, deletedStatus int, deletedAt, expiredAt time.Time) (bool, error) {
 	result := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var doc entity.Document
 		if err := tx.Where("id = ? AND user_id = ? AND status <> ?", documentID, userID, deletedStatus).First(&doc).Error; err != nil {

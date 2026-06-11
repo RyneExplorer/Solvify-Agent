@@ -15,6 +15,10 @@ func (ctrl *Controller) RegisterDocumentRoutes(router *gin.RouterGroup) {
 	group.GET("/:id", ctrl.Detail)
 	group.DELETE("/:id", ctrl.Delete)
 	group.POST("/:id/process", ctrl.Process)
+	group.GET("/:id/versions", ctrl.Versions)
+	group.GET("/:id/versions/:version_id", ctrl.VersionDetail)
+	group.POST("/:id/versions", ctrl.CreateVersion)
+	group.POST("/:id/reindex", ctrl.Reindex)
 	group.GET("/:id/jobs", ctrl.Jobs)
 }
 

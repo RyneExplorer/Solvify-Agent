@@ -59,6 +59,21 @@ func BadRequest(c *gin.Context, message string) {
 	Error(c, apperrors.CodeBadRequest, message)
 }
 
+// Unauthorized 401 错误
+func Unauthorized(c *gin.Context, message string) {
+	Error(c, apperrors.CodeUnauthorized, message)
+}
+
+// Forbidden 403 错误
+func Forbidden(c *gin.Context, message string) {
+	Error(c, apperrors.CodeForbidden, message)
+}
+
+// NotFound 404 错误
+func NotFound(c *gin.Context, message string) {
+	Error(c, apperrors.CodeNotFound, message)
+}
+
 // InternalError 输出服务内部错误响应
 func InternalError(c *gin.Context, message string) {
 	Error(c, apperrors.CodeInternalError, message)

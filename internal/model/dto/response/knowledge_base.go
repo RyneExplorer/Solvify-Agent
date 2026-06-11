@@ -12,7 +12,7 @@ type KnowledgeBaseResponse struct {
 	SourcePlatform string    `json:"source_platform"`
 	DocumentCount  int       `json:"document_count"`
 	StorageBytes   int64     `json:"storage_bytes"`
-	Status         int16     `json:"status"`
+	Status         int       `json:"status"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }

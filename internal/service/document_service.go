@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/repository"
@@ -29,6 +30,7 @@ const (
 	documentSourceUpload = "upload"
 
 	documentJobTypeProcess   = "process"
+	documentJobTypeReindex   = "reindex"
 	documentJobStatusPending = 1
 	documentJobStatusSuccess = 3
 	documentJobStatusFailed  = 4
@@ -47,33 +49,33 @@ var allowedDocumentFileTypes = map[string]struct{}{
 
 // documentService 封装文档业务用例实现
 type documentService struct {
-	knowledgeBaseRepo repository.KnowledgeBaseRepository
-	documentRepo      repository.DocumentRepository
-	documentJobRepo   repository.DocumentProcessingJobRepository
-	storageQuotaRepo  repository.StorageQuotaRepository
-	chunkService      DocumentChunkServiceInterface
-	uploadRoot        string
-}
-
-// NewDocumentService 创建文档业务服务
-func NewDocumentService(knowledgeBaseRepo repository.KnowledgeBaseRepository, documentRepo repository.DocumentRepository, documentJobRepo repository.DocumentProcessingJobRepository, storageQuotaRepo repository.StorageQuotaRepository) DocumentServiceInterface {
-	return NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentJobRepo, storageQuotaRepo, NewDocumentChunkService(nil), defaultUploadRoot)
-}
-
-// NewDocumentServiceWithUploadRoot 创建指定上传目录的文档业务服务
-func NewDocumentServiceWithUploadRoot(knowledgeBaseRepo repository.KnowledgeBaseRepository, documentRepo repository.DocumentRepository, documentJobRepo repository.DocumentProcessingJobRepository, storageQuotaRepo repository.StorageQuotaRepository, uploadRoot string) DocumentServiceInterface {
-	return NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentJobRepo, storageQuotaRepo, NewDocumentChunkService(nil), uploadRoot)
+	knowledgeBaseRepo   repository.KnowledgeBaseRepository
+	documentRepo        repository.DocumentRepository
+	documentVersionRepo repository.DocumentVersionRepository
+	documentJobRepo     repository.DocumentProcessingJobRepository
+	storageQuotaRepo    repository.StorageQuotaRepository
+	chunkService        DocumentChunkServiceInterface
+	uploadRoot          string
 }
 
 // NewDocumentServiceWithChunkService 创建指定分块服务的文档业务服务
-func NewDocumentServiceWithChunkService(knowledgeBaseRepo repository.KnowledgeBaseRepository, documentRepo repository.DocumentRepository, documentJobRepo repository.DocumentProcessingJobRepository, storageQuotaRepo repository.StorageQuotaRepository, chunkService DocumentChunkServiceInterface, uploadRoot string) DocumentServiceInterface {
+func NewDocumentServiceWithChunkService(
+	knowledgeBaseRepo repository.KnowledgeBaseRepository,
+	documentRepo repository.DocumentRepository,
+	documentVersionRepo repository.DocumentVersionRepository,
+	documentJobRepo repository.DocumentProcessingJobRepository,
+	storageQuotaRepo repository.StorageQuotaRepository,
+	chunkService DocumentChunkServiceInterface,
+	uploadRoot string,
+) DocumentServiceInterface {
 	return &documentService{
-		knowledgeBaseRepo: knowledgeBaseRepo,
-		documentRepo:      documentRepo,
-		documentJobRepo:   documentJobRepo,
-		storageQuotaRepo:  storageQuotaRepo,
-		chunkService:      chunkService,
-		uploadRoot:        uploadRoot,
+		knowledgeBaseRepo:   knowledgeBaseRepo,
+		documentRepo:        documentRepo,
+		documentVersionRepo: documentVersionRepo,
+		documentJobRepo:     documentJobRepo,
+		storageQuotaRepo:    storageQuotaRepo,
+		chunkService:        chunkService,
+		uploadRoot:          uploadRoot,
 	}
 }
 
@@ -182,7 +184,7 @@ func (s *documentService) Process(ctx context.Context, userID, documentID string
 	}
 
 	// 1. 创建任务和文档状态变更必须一起完成，避免任务存在但文档仍显示未处理
-	ok, err := s.documentJobRepo.CreateProcessJob(ctx, &job, []int16{documentStatusUploaded, documentStatusFailed}, documentStatusProcessing)
+	ok, err := s.documentJobRepo.CreateProcessJob(ctx, &job, []int{documentStatusUploaded, documentStatusFailed}, documentStatusProcessing)
 	if err != nil {
 		return dto.DocumentProcessingJobResponse{}, err
 	}
@@ -235,6 +237,100 @@ func (s *documentService) JobDetail(ctx context.Context, userID, jobID string) (
 	if !ok {
 		return dto.DocumentProcessingJobResponse{}, apperrors.NewDefault(apperrors.CodeDocumentJobNotFound)
 	}
+	return documentProcessingJobResponse(job), nil
+}
+
+// ListVersions 查询文档版本列表
+func (s *documentService) ListVersions(ctx context.Context, userID, documentID string) ([]dto.DocumentVersionListItemResponse, error) {
+	if _, err := s.findDocument(ctx, userID, documentID); err != nil {
+		return nil, err
+	}
+	items, err := s.documentVersionRepo.ListByDocument(ctx, userID, documentID)
+	if err != nil {
+		return nil, err
+	}
+	output := make([]dto.DocumentVersionListItemResponse, 0, len(items))
+	for _, item := range items {
+		output = append(output, documentVersionListItemResponse(item))
+	}
+	return output, nil
+}
+
+// VersionDetail 查询文档版本详情
+func (s *documentService) VersionDetail(ctx context.Context, userID, documentID, versionID string) (dto.DocumentVersionDetailResponse, error) {
+	if _, err := s.findDocument(ctx, userID, documentID); err != nil {
+		return dto.DocumentVersionDetailResponse{}, err
+	}
+	version, ok, err := s.documentVersionRepo.FindByID(ctx, userID, documentID, versionID)
+	if err != nil {
+		return dto.DocumentVersionDetailResponse{}, err
+	}
+	if !ok {
+		return dto.DocumentVersionDetailResponse{}, apperrors.New(apperrors.CodeDocumentNotFound, "文档版本不存在")
+	}
+	return documentVersionDetailResponse(version), nil
+}
+
+// CreateVersion 保存文档新版本并重建索引
+func (s *documentService) CreateVersion(ctx context.Context, userID, documentID string, req requestdto.CreateDocumentVersionRequest) (dto.DocumentProcessingJobResponse, error) {
+	doc, err := s.findEditableDocument(ctx, userID, documentID)
+	if err != nil {
+		return dto.DocumentProcessingJobResponse{}, err
+	}
+	content := strings.TrimSpace(req.Content)
+	if content == "" {
+		return dto.DocumentProcessingJobResponse{}, apperrors.New(apperrors.CodeBadRequest, "文档正文不能为空")
+	}
+
+	version := entity.DocumentVersion{
+		ID:            uuid.NewString(),
+		UserID:        doc.UserID,
+		DocumentID:    doc.ID,
+		Content:       content,
+		ContentHash:   hashText(content),
+		ChangeSummary: strings.TrimSpace(req.ChangeSummary),
+	}
+	job, chunks, finishedAt, err := s.buildReindexPayload(ctx, doc, version.ID, content)
+	if err != nil {
+		return dto.DocumentProcessingJobResponse{}, err
+	}
+
+	// 1. 新版本、任务和 chunks 替换必须作为一个数据库结果提交
+	if err := s.documentVersionRepo.SaveVersionAndReindex(ctx, doc, &job, &version, chunks, documentStatusReady, documentJobStatusSuccess, finishedAt); err != nil {
+		return dto.DocumentProcessingJobResponse{}, err
+	}
+	job.Status = documentJobStatusSuccess
+	job.StartedAt = &finishedAt
+	job.FinishedAt = &finishedAt
+	return documentProcessingJobResponse(job), nil
+}
+
+// Reindex 基于最新版本重建文档分块
+func (s *documentService) Reindex(ctx context.Context, userID, documentID string) (dto.DocumentProcessingJobResponse, error) {
+	doc, err := s.findEditableDocument(ctx, userID, documentID)
+	if err != nil {
+		return dto.DocumentProcessingJobResponse{}, err
+	}
+	version, ok, err := s.documentVersionRepo.FindLatestByDocument(ctx, userID, documentID)
+	if err != nil {
+		return dto.DocumentProcessingJobResponse{}, err
+	}
+	if !ok {
+		return dto.DocumentProcessingJobResponse{}, apperrors.New(apperrors.CodeDocumentStatusInvalid, "文档版本不存在，无法重新向量化")
+	}
+
+	job, chunks, finishedAt, err := s.buildReindexPayload(ctx, doc, version.ID, version.Content)
+	if err != nil {
+		return dto.DocumentProcessingJobResponse{}, err
+	}
+
+	// 1. 手动 reindex 不新增版本，只替换当前文档可检索 chunks
+	if err := s.documentVersionRepo.ReindexVersion(ctx, doc, &job, version, chunks, documentStatusReady, documentJobStatusSuccess, finishedAt); err != nil {
+		return dto.DocumentProcessingJobResponse{}, err
+	}
+	job.Status = documentJobStatusSuccess
+	job.StartedAt = &finishedAt
+	job.FinishedAt = &finishedAt
 	return documentProcessingJobResponse(job), nil
 }
 
@@ -395,6 +491,52 @@ func (s *documentService) findDocument(ctx context.Context, userID, documentID s
 	return doc, nil
 }
 
+// findEditableDocument 查询允许在线编辑的文档
+func (s *documentService) findEditableDocument(ctx context.Context, userID, documentID string) (entity.Document, error) {
+	doc, err := s.findDocument(ctx, userID, documentID)
+	if err != nil {
+		return entity.Document{}, err
+	}
+	if doc.Status != documentStatusReady {
+		return entity.Document{}, apperrors.NewDefault(apperrors.CodeDocumentStatusInvalid)
+	}
+	if _, err := s.findWritableKnowledgeBase(ctx, userID, doc.KnowledgeBaseID); err != nil {
+		return entity.Document{}, err
+	}
+	return doc, nil
+}
+
+// buildReindexPayload 构建 reindex 任务和分块数据
+func (s *documentService) buildReindexPayload(ctx context.Context, doc entity.Document, versionID, content string) (entity.DocumentProcessingJob, []entity.DocumentChunk, time.Time, error) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return entity.DocumentProcessingJob{}, nil, time.Time{}, apperrors.New(apperrors.CodeBadRequest, "文档正文不能为空")
+	}
+
+	// 1. 先基于版本正文生成 chunks，失败时不写入任何版本或任务数据
+	chunks, err := s.chunkService.BuildChunks(ctx, doc, versionID, s.chunkService.SplitContent(content))
+	if err != nil {
+		return entity.DocumentProcessingJob{}, nil, time.Time{}, err
+	}
+	if len(chunks) == 0 {
+		return entity.DocumentProcessingJob{}, nil, time.Time{}, apperrors.New(apperrors.CodeDocumentStatusInvalid, "文档分块为空，无法重新向量化")
+	}
+
+	// 2. 任务时间使用同一时间点，保持同步处理结果一致
+	finishedAt := time.Now()
+	job := entity.DocumentProcessingJob{
+		ID:           uuid.NewString(),
+		UserID:       doc.UserID,
+		DocumentID:   doc.ID,
+		JobType:      documentJobTypeReindex,
+		Status:       documentJobStatusPending,
+		ErrorMessage: "",
+		StartedAt:    &finishedAt,
+		FinishedAt:   &finishedAt,
+	}
+	return job, chunks, finishedAt, nil
+}
+
 // documentFileType 提取文档扩展名
 func documentFileType(fileName string) string {
 	return strings.TrimPrefix(strings.ToLower(filepath.Ext(fileName)), ".")
@@ -434,5 +576,30 @@ func documentProcessingJobResponse(job entity.DocumentProcessingJob) dto.Documen
 		FinishedAt:   job.FinishedAt,
 		CreatedAt:    job.CreatedAt,
 		UpdatedAt:    job.UpdatedAt,
+	}
+}
+
+// documentVersionListItemResponse 转换文档版本列表响应 DTO
+func documentVersionListItemResponse(version entity.DocumentVersion) dto.DocumentVersionListItemResponse {
+	return dto.DocumentVersionListItemResponse{
+		ID:            version.ID,
+		DocumentID:    version.DocumentID,
+		VersionNo:     version.VersionNo,
+		ContentHash:   version.ContentHash,
+		ChangeSummary: version.ChangeSummary,
+		CreatedAt:     version.CreatedAt,
+	}
+}
+
+// documentVersionDetailResponse 转换文档版本详情响应 DTO
+func documentVersionDetailResponse(version entity.DocumentVersion) dto.DocumentVersionDetailResponse {
+	return dto.DocumentVersionDetailResponse{
+		ID:            version.ID,
+		DocumentID:    version.DocumentID,
+		VersionNo:     version.VersionNo,
+		Content:       version.Content,
+		ContentHash:   version.ContentHash,
+		ChangeSummary: version.ChangeSummary,
+		CreatedAt:     version.CreatedAt,
 	}
 }
