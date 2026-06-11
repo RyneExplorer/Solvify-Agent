@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/repository"
@@ -20,6 +22,7 @@ import (
 const (
 	documentStatusUploaded   = 1
 	documentStatusProcessing = 2
+	documentStatusReady      = 3
 	documentStatusFailed     = 4
 	documentStatusDeleted    = 5
 
@@ -27,6 +30,10 @@ const (
 
 	documentJobTypeProcess   = "process"
 	documentJobStatusPending = 1
+	documentJobStatusSuccess = 3
+	documentJobStatusFailed  = 4
+
+	documentVersionInitialNo = 1
 
 	maxDocumentFileSize = 100 * 1024 * 1024
 	defaultUploadRoot   = "data/uploads"
@@ -44,21 +51,28 @@ type documentService struct {
 	documentRepo      repository.DocumentRepository
 	documentJobRepo   repository.DocumentProcessingJobRepository
 	storageQuotaRepo  repository.StorageQuotaRepository
+	chunkService      DocumentChunkServiceInterface
 	uploadRoot        string
 }
 
 // NewDocumentService 创建文档业务服务
 func NewDocumentService(knowledgeBaseRepo repository.KnowledgeBaseRepository, documentRepo repository.DocumentRepository, documentJobRepo repository.DocumentProcessingJobRepository, storageQuotaRepo repository.StorageQuotaRepository) DocumentServiceInterface {
-	return NewDocumentServiceWithUploadRoot(knowledgeBaseRepo, documentRepo, documentJobRepo, storageQuotaRepo, defaultUploadRoot)
+	return NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentJobRepo, storageQuotaRepo, NewDocumentChunkService(nil), defaultUploadRoot)
 }
 
 // NewDocumentServiceWithUploadRoot 创建指定上传目录的文档业务服务
 func NewDocumentServiceWithUploadRoot(knowledgeBaseRepo repository.KnowledgeBaseRepository, documentRepo repository.DocumentRepository, documentJobRepo repository.DocumentProcessingJobRepository, storageQuotaRepo repository.StorageQuotaRepository, uploadRoot string) DocumentServiceInterface {
+	return NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentJobRepo, storageQuotaRepo, NewDocumentChunkService(nil), uploadRoot)
+}
+
+// NewDocumentServiceWithChunkService 创建指定分块服务的文档业务服务
+func NewDocumentServiceWithChunkService(knowledgeBaseRepo repository.KnowledgeBaseRepository, documentRepo repository.DocumentRepository, documentJobRepo repository.DocumentProcessingJobRepository, storageQuotaRepo repository.StorageQuotaRepository, chunkService DocumentChunkServiceInterface, uploadRoot string) DocumentServiceInterface {
 	return &documentService{
 		knowledgeBaseRepo: knowledgeBaseRepo,
 		documentRepo:      documentRepo,
 		documentJobRepo:   documentJobRepo,
 		storageQuotaRepo:  storageQuotaRepo,
+		chunkService:      chunkService,
 		uploadRoot:        uploadRoot,
 	}
 }
@@ -159,6 +173,7 @@ func (s *documentService) Process(ctx context.Context, userID, documentID string
 	}
 
 	job := entity.DocumentProcessingJob{
+		ID:           uuid.NewString(),
 		UserID:       userID,
 		DocumentID:   documentID,
 		JobType:      documentJobTypeProcess,
@@ -174,6 +189,24 @@ func (s *documentService) Process(ctx context.Context, userID, documentID string
 	if !ok {
 		return dto.DocumentProcessingJobResponse{}, apperrors.NewDefault(apperrors.CodeDocumentStatusInvalid)
 	}
+
+	if err := s.processDocumentContent(ctx, doc, job.ID); err != nil {
+		finishedAt := time.Now()
+		errorMessage := err.Error()
+		if markErr := s.documentRepo.MarkProcessFailed(ctx, userID, documentID, job.ID, documentStatusFailed, documentJobStatusFailed, errorMessage, finishedAt); markErr != nil {
+			return dto.DocumentProcessingJobResponse{}, markErr
+		}
+		job.Status = documentJobStatusFailed
+		job.ErrorMessage = errorMessage
+		job.StartedAt = &finishedAt
+		job.FinishedAt = &finishedAt
+		return documentProcessingJobResponse(job), nil
+	}
+
+	finishedAt := time.Now()
+	job.Status = documentJobStatusSuccess
+	job.StartedAt = &finishedAt
+	job.FinishedAt = &finishedAt
 	return documentProcessingJobResponse(job), nil
 }
 
@@ -203,6 +236,52 @@ func (s *documentService) JobDetail(ctx context.Context, userID, jobID string) (
 		return dto.DocumentProcessingJobResponse{}, apperrors.NewDefault(apperrors.CodeDocumentJobNotFound)
 	}
 	return documentProcessingJobResponse(job), nil
+}
+
+// processDocumentContent 处理文档正文、版本和分块入库
+func (s *documentService) processDocumentContent(ctx context.Context, doc entity.Document, jobID string) error {
+	if !s.chunkService.SupportsFileType(doc.FileType) {
+		return apperrors.New(apperrors.CodeDocumentStatusInvalid, "当前文件类型暂不支持自动解析")
+	}
+
+	// 1. 读取原始文件并解析为正文，当前阶段只支持文本类文件
+	contentBytes, err := os.ReadFile(doc.StoragePath)
+	if err != nil {
+		return apperrors.NewWithErr(apperrors.CodeInternalError, "读取文档文件失败", err)
+	}
+	content := s.chunkService.NormalizeContent(string(contentBytes), doc.FileType)
+	if content == "" {
+		return apperrors.New(apperrors.CodeDocumentStatusInvalid, "文档正文为空，无法处理")
+	}
+
+	// 2. 基于正文创建首个版本，并按固定窗口切出带 overlap 的 chunks
+	contentHash := hashText(content)
+	version := entity.DocumentVersion{
+		ID:            uuid.NewString(),
+		UserID:        doc.UserID,
+		DocumentID:    doc.ID,
+		VersionNo:     documentVersionInitialNo,
+		Content:       content,
+		ContentHash:   contentHash,
+		ChangeSummary: "首次解析生成版本",
+	}
+	chunks, err := s.chunkService.BuildChunks(ctx, doc, version.ID, s.chunkService.SplitContent(content))
+	if err != nil {
+		return err
+	}
+	if len(chunks) == 0 {
+		return apperrors.New(apperrors.CodeDocumentStatusInvalid, "文档分块为空，无法处理")
+	}
+
+	// 3. 版本、分块、文档状态和任务状态必须在同一个事务中写入
+	finishedAt := time.Now()
+	return s.documentRepo.SaveProcessResult(ctx, doc, jobID, &version, chunks, documentStatusReady, documentJobStatusSuccess, finishedAt)
+}
+
+// hashText 计算正文哈希
+func hashText(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
 }
 
 // findWritableKnowledgeBase 查询可上传的本地知识库

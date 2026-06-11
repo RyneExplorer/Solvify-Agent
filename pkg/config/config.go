@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/goccy/go-yaml"
 	"github.com/mitchellh/mapstructure"
@@ -146,6 +147,7 @@ func Load(configPath string) (*Config, error) {
 		}
 	}
 
+	loadDotEnv(".env")
 	applyEnv(cfg)
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -203,8 +205,8 @@ func Default() *Config {
 		},
 		Embedding: EmbeddingConfig{
 			Provider:  "openai",
-			Model:     "text-embedding-3-small",
-			Dimension: 1536,
+			Model:     "text-embedding-v4",
+			Dimension: 1024,
 		},
 		RAG: RAGConfig{
 			Enabled:        true,
@@ -324,6 +326,12 @@ func applyEnv(cfg *Config) {
 	cfg.Embedding.Model = getEnv("EMBEDDING_MODEL", cfg.Embedding.Model)
 	cfg.Embedding.APIKey = getEnv("EMBEDDING_API_KEY", cfg.Embedding.APIKey)
 	cfg.Embedding.BaseURL = getEnv("EMBEDDING_BASE_URL", cfg.Embedding.BaseURL)
+	if cfg.Embedding.APIKey == "" {
+		cfg.Embedding.APIKey = getEnv("DASHSCOPE_API_KEY", cfg.Embedding.APIKey)
+	}
+	if cfg.Embedding.BaseURL == "" {
+		cfg.Embedding.BaseURL = getEnv("DASHSCOPE_BASE_URL", cfg.Embedding.BaseURL)
+	}
 	if value := os.Getenv("EMBEDDING_DIMENSION"); value != "" {
 		cfg.Embedding.Dimension = parseInt(value, cfg.Embedding.Dimension)
 	}
@@ -393,6 +401,29 @@ func getEnv(key string, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// loadDotEnv 加载本地 .env 文件且不覆盖已有环境变量
+func loadDotEnv(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+		if key != "" && os.Getenv(key) == "" {
+			_ = os.Setenv(key, value)
+		}
+	}
 }
 
 // parseBool 解析布尔环境变量并在失败时保留原值

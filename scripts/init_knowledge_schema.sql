@@ -146,6 +146,7 @@ CREATE TABLE IF NOT EXISTS document_chunks
     page_number     INT,                              -- 来源页码
     embedding_model VARCHAR(128) NOT NULL DEFAULT '', -- 向量模型名称
     embedding vector(1024),                           -- 分块向量数据
+    keywords TEXT[] NOT NULL DEFAULT '{}'::text[],    -- 分块关键词
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,      -- 分块扩展元数据
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),    -- 创建时间
 
@@ -165,6 +166,7 @@ COMMENT ON COLUMN document_chunks.token_count IS '分块 token 数';
 COMMENT ON COLUMN document_chunks.page_number IS '来源页码';
 COMMENT ON COLUMN document_chunks.embedding_model IS '向量模型名称';
 COMMENT ON COLUMN document_chunks.embedding IS '分块向量数据';
+COMMENT ON COLUMN document_chunks.keywords IS '分块关键词';
 COMMENT ON COLUMN document_chunks.metadata IS '分块扩展元数据';
 COMMENT ON COLUMN document_chunks.created_at IS '创建时间';
 
