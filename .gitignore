@@ -35,5 +35,8 @@ Thumbs.db
 tmp/
 tasks/
 
+docs/superpowers
 design/
 .claude/
+leetcode/
+

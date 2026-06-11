@@ -51,15 +51,19 @@ const (
 	CodeModelConfigExists   = 7001
 	CodeModelConfigNotFound = 7002
 
-	CodeModelExists             = 7003
-	CodeDocumentNotFound        = 8001
-	CodeDocumentFileTooLarge    = 8002
-	CodeDocumentFileTypeInvalid = 8003
-	CodeDocumentFileDuplicated  = 8004
-	CodeStorageQuotaExceeded    = 8005
-	CodeKnowledgeBaseReadonly   = 8006
-	CodeDocumentStatusInvalid   = 8007
-	CodeDocumentJobNotFound     = 8008
+	CodeModelExists = 7003
+
+	CodeSessionNotFound = 8001
+	CodeSessionClosed   = 8002
+
+	CodeDocumentNotFound        = 9001
+	CodeDocumentFileTooLarge    = 9002
+	CodeDocumentFileTypeInvalid = 9003
+	CodeDocumentFileDuplicated  = 9004
+	CodeStorageQuotaExceeded    = 9005
+	CodeKnowledgeBaseReadonly   = 9006
+	CodeDocumentStatusInvalid   = 9007
+	CodeDocumentJobNotFound     = 9008
 )
 
 var codeMessages = map[int]string{
@@ -106,6 +110,9 @@ var codeMessages = map[int]string{
 	CodeModelConfigExists:       "模型配置已存在",
 	CodeModelConfigNotFound:     "模型配置不存在",
 	CodeModelExists:             "系统模型已存在",
+
+	CodeSessionNotFound: "会话不存在",
+	CodeSessionClosed:   "会话已关闭",
 }
 
 // GetMessage 获取错误码对应的文本消息

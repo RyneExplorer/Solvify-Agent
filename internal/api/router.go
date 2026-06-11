@@ -3,6 +3,7 @@ package api
 import (
 	"github.com/gin-gonic/gin"
 
+	"solvify-agent/internal/api/v1/chat"
 	"solvify-agent/internal/api/v1/auth"
 	"solvify-agent/internal/api/v1/document"
 	"solvify-agent/internal/api/v1/knowledgebase"
@@ -23,6 +24,7 @@ type Router struct {
 	storageCtrl       *storage.Controller
 	modelCtrl         *model.Controller
 	userModelCtrl     *model.UserModelController
+	chatCtrl          *chat.Controller
 }
 
 // NewRouter 创建 API 路由聚合器
@@ -34,6 +36,7 @@ func NewRouter(
 	knowledgeBaseSvc service.KnowledgeBaseServiceInterface,
 	documentSvc service.DocumentServiceInterface,
 	storageSvc service.StorageServiceInterface,
+	chatSvc service.ChatServiceInterface,
 ) *Router {
 	return &Router{
 		userCtrl:          user.NewController(userService),
@@ -43,11 +46,15 @@ func NewRouter(
 		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseSvc),
 		documentCtrl:      document.NewController(documentSvc),
 		storageCtrl:       storage.NewController(storageSvc),
+		chatCtrl:          chat.NewController(chatSvc),
 	}
 }
 
 // Setup 注册项目 HTTP 路由
 func (r *Router) Setup(engine *gin.Engine) {
+	// 全局 CORS 中间件
+	engine.Use(middleware.CORS())
+
 	engine.GET("/health", r.health)
 
 	v1 := engine.Group("/api/v1")
@@ -59,6 +66,9 @@ func (r *Router) Setup(engine *gin.Engine) {
 	// 模型管理
 	r.modelCtrl.RegisterRoutes(user)
 	r.userModelCtrl.RegisterRoutes(user)
+
+	// 聊天
+	r.chatCtrl.RegisterRoutes(user)
 
 	r.knowledgeBaseCtrl.RegisterRoutes(v1)
 	r.documentCtrl.RegisterKnowledgeBaseRoutes(v1)
