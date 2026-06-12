@@ -20,6 +20,7 @@ import (
 	"solvify-agent/internal/api"
 	"solvify-agent/internal/llm"
 	"solvify-agent/internal/middleware"
+	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
@@ -109,7 +110,7 @@ func (a *App) initLogger() error {
 	return nil
 }
 
-// initDatabase 初始化 PostgreSQL 和 Redis 连接
+// initDatabase 初始化 PostgresSQL 和 Redis 连接
 func (a *App) initDatabase() error {
 	// postgresql
 	postgresqlDB, err := database.OpenPostgreSQL(&a.cfg.Database.Postgres)
@@ -119,20 +120,20 @@ func (a *App) initDatabase() error {
 	a.postgresqlDB = postgresqlDB
 
 	// 自动迁移数据库表结构
-	//if err := postgresqlDB.AutoMigrate(
-	//	&entity.Model{},
-	//	&entity.UserModelConfig{},
-	//	&entity.KnowledgeBase{},
-	//	&entity.StorageQuota{},
-	//	&entity.Document{},
-	//	&entity.DocumentProcessingJob{},
-	//	&entity.DocumentVersion{},
-	//	&entity.DocumentChunk{},
-	//	&entity.ChatSession{},
-	//	&entity.ChatMessage{},
-	//); err != nil {
-	//	return fmt.Errorf("数据库自动迁移失败: %w", err)
-	//}
+	if err := postgresqlDB.AutoMigrate(
+		&entity.Model{},
+		&entity.UserModelConfig{},
+		&entity.KnowledgeBase{},
+		&entity.StorageQuota{},
+		&entity.Document{},
+		&entity.DocumentProcessingJob{},
+		&entity.DocumentVersion{},
+		&entity.DocumentChunk{},
+		&entity.ChatSession{},
+		&entity.ChatMessage{},
+	); err != nil {
+		return fmt.Errorf("数据库自动迁移失败: %w", err)
+	}
 
 	// redis
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
@@ -144,8 +145,16 @@ func (a *App) initDatabase() error {
 	return nil
 }
 
+// ensureStorageQuotaUniqueIndex 确保存储配额用户唯一索引存在
+func (a *App) ensureStorageQuotaUniqueIndex(db *gorm.DB) error {
+	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS storage_quotas_user_unique ON storage_quotas(user_id)").Error; err != nil {
+		return fmt.Errorf("创建存储配额用户唯一索引失败: %w", err)
+	}
+	return nil
+}
 // initEmbedding 初始化 Embedding 客户端，返回带缓存的向量化函数
 func (a *App) initEmbedding() rag.EmbeddingFunc {
+
 	embeddingClient, err := llm.NewEmbeddingClientFromConfig(context.Background(), &a.cfg.Embedding)
 	if err != nil {
 		logger.Fatal("初始化 Embedding 客户端失败", zap.Error(err))
