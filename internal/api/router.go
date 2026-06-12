@@ -3,8 +3,8 @@ package api
 import (
 	"github.com/gin-gonic/gin"
 
-	"solvify-agent/internal/api/v1/chat"
 	"solvify-agent/internal/api/v1/auth"
+	"solvify-agent/internal/api/v1/chat"
 	"solvify-agent/internal/api/v1/document"
 	"solvify-agent/internal/api/v1/knowledgebase"
 	"solvify-agent/internal/api/v1/model"
