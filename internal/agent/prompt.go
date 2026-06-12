@@ -6,8 +6,8 @@ import (
 )
 
 // buildReActSystemPrompt 构建 ReAct 循环系统提示词
-// 无预检索结果，LLM 自行决定何时调用工具获取信息
-func buildReActSystemPrompt(tools []toolInfo) string {
+// 支持注入执行计划和搜索记忆
+func buildReActSystemPrompt(tools []toolInfo, plan *Plan, memory *Memory) string {
 	var sb strings.Builder
 
 	sb.WriteString(`你是 Solvify 知识助理，一个专业的 AI 助手。
@@ -38,8 +38,23 @@ func buildReActSystemPrompt(tools []toolInfo) string {
 - 使用中文回答
 - 使用 Markdown 格式（标题、列表、加粗等）
 - 必须使用 final_answer 工具提交最终答案
-- 如果搜索后仍然无法回答，诚实说明原因
-- 不要编造信息`)
+- 如果工具执行失败或搜索无结果，用你自己的知识尽力回答，不要直接说"我无法回答"
+- 不要编造信息
+- 调用 final_answer 时，请提供 confidence 字段表示你对答案的置信度（0-1）`)
+
+	// 注入执行计划
+	if planSection := formatPlanForPrompt(plan); planSection != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(planSection)
+	}
+
+	// 注入搜索记忆
+	if memory != nil {
+		if memSummary := memory.Summary(); memSummary != "" {
+			sb.WriteString("\n\n## 搜索记忆\n")
+			sb.WriteString(memSummary)
+		}
+	}
 
 	return sb.String()
 }
@@ -57,11 +72,7 @@ func buildUserMessage(query string, history []historyMessage) string {
 		if msg.role == "assistant" {
 			role = "助手"
 		}
-		content := msg.content
-		if len(content) > 200 {
-			content = content[:200] + "..."
-		}
-		sb.WriteString(fmt.Sprintf("%s: %s\n", role, content))
+		sb.WriteString(fmt.Sprintf("%s: %s\n", role, msg.content))
 	}
 	sb.WriteString(fmt.Sprintf("\n当前问题：%s", query))
 	return sb.String()
