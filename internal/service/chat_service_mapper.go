@@ -5,6 +5,7 @@ import (
 
 	"solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
+	"solvify-agent/internal/rag"
 	"solvify-agent/pkg/logger"
 )
 
@@ -72,4 +73,34 @@ func mustMarshal(v any) []byte {
 		return []byte("null")
 	}
 	return data
+}
+
+// groupDocumentsToSources 将检索结果按文档分组为来源信息
+func groupDocumentsToSources(docs []rag.Document) []response.SourceInfo {
+	docMap := make(map[string]*response.SourceInfo)
+	docOrder := make([]string, 0)
+	for _, doc := range docs {
+		if _, exists := docMap[doc.DocumentID]; !exists {
+			docMap[doc.DocumentID] = &response.SourceInfo{
+				DocumentID:      doc.DocumentID,
+				KnowledgeBaseID: doc.KnowledgeBaseID,
+				Title:           doc.Title,
+			}
+			docOrder = append(docOrder, doc.DocumentID)
+		}
+		docMap[doc.DocumentID].Chunks = append(docMap[doc.DocumentID].Chunks, response.ChunkSource{
+			ID:      doc.ID,
+			Content: doc.Content,
+			Score:   doc.Score,
+		})
+		if doc.Score > docMap[doc.DocumentID].Score {
+			docMap[doc.DocumentID].Score = doc.Score
+		}
+	}
+
+	sources := make([]response.SourceInfo, 0, len(docMap))
+	for _, docID := range docOrder {
+		sources = append(sources, *docMap[docID])
+	}
+	return sources
 }

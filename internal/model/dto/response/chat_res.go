@@ -70,8 +70,8 @@ type ToolResultInfo struct {
 
 // ReasoningStep 描述 Agent 推理步骤（用于持久化和历史回显）
 type ReasoningStep struct {
-	Type       string          `json:"type"`                  // "thought" / "tool_call" / "tool_result"
-	Content    string          `json:"content,omitempty"`     // 思考内容
+	Type       string          `json:"type"`                  // "status" / "tool_call" / "tool_result"
+	Content    string          `json:"content,omitempty"`     // 状态描述 / 工具结果摘要
 	ToolCalls  []ToolCallInfo  `json:"tool_calls,omitempty"`  // 工具调用
 	ToolResult *ToolResultInfo `json:"tool_result,omitempty"` // 工具结果
 }
