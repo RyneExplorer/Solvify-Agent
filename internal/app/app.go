@@ -152,6 +152,7 @@ func (a *App) ensureStorageQuotaUniqueIndex(db *gorm.DB) error {
 	}
 	return nil
 }
+
 // initEmbedding 初始化 Embedding 客户端，返回带缓存的向量化函数
 func (a *App) initEmbedding() rag.EmbeddingFunc {
 
@@ -228,7 +229,6 @@ func (a *App) initAgentComponents() *AgentComponents {
 
 	// 初始化 Tool Registry（注册所有内置工具）
 	toolRegistry := tool.NewRegistry()
-	toolRegistry.Register(tool.NewFinalAnswerTool())
 	toolRegistry.Register(tool.NewWebSearchTool(a.cfg.Tools.WebSearch.APIKey, a.cfg.Tools.WebSearch.BaseURL))
 	logger.Info("工具注册完成", zap.Int("count", len(toolRegistry.List())))
 

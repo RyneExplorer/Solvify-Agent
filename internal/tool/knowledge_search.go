@@ -64,6 +64,34 @@ type SourceDocument struct {
 	Content         string  `json:"content"`
 }
 
+func (t *KnowledgeSearchTool) StartReport(args string) ProgressReport {
+	var params struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal([]byte(args), &params); err == nil && params.Query != "" {
+		return ProgressReport{Title: "正在检索知识库", Detail: params.Query, Status: "running"}
+	}
+	return ProgressReport{Title: "正在检索知识库", Status: "running"}
+}
+
+func (t *KnowledgeSearchTool) ResultReport(result string, execErr error) ProgressReport {
+	if execErr != nil {
+		return ProgressReport{Title: "知识库查询失败", Detail: "正在尝试重新获取信息", Status: "error"}
+	}
+	if strings.Contains(result, "未找到相关内容") {
+		return ProgressReport{Title: "未找到相关知识", Detail: "知识库中暂无相关信息", Status: "warning"}
+	}
+	var sr SearchResult
+	if err := json.Unmarshal([]byte(result), &sr); err == nil {
+		return ProgressReport{
+			Title:  "找到相关资料",
+			Detail: fmt.Sprintf("发现%d条相关资料，正在整理...", len(sr.Sources)),
+			Status: "success",
+		}
+	}
+	return ProgressReport{Title: "知识库检索完成", Status: "success"}
+}
+
 func (t *KnowledgeSearchTool) Execute(ctx context.Context, args string) (string, error) {
 	var params struct {
 		Query string `json:"query"`

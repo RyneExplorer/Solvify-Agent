@@ -19,8 +19,15 @@ type Request struct {
 
 // Plan Planner 生成的执行计划
 type Plan struct {
-	Goal  string   `json:"goal"`
-	Steps []string `json:"steps"`
+	Goal        string      `json:"goal"`
+	Steps       []string    `json:"steps"`
+	FirstAction *PlanAction `json:"first_action,omitempty"`
+}
+
+// PlanAction 计划中建议的首个工具调用
+type PlanAction struct {
+	Tool  string `json:"tool"`
+	Query string `json:"query"`
 }
 
 // Memory 搜索记忆（请求级生命周期，避免重复搜索）
@@ -57,30 +64,29 @@ func (m *Memory) Summary() string {
 
 // Event 描述 Agent SSE 事件
 type Event struct {
-	Type       string                `json:"type"`
-	Content    string                `json:"content,omitempty"`
-	ToolCalls  []llm.ToolCall        `json:"tool_calls,omitempty"`
-	ToolResult *ToolResult           `json:"tool_result,omitempty"`
-	Sources    []response.SourceInfo `json:"sources,omitempty"`
-	MessageID  string                `json:"message_id,omitempty"`
-	Error      string                `json:"error,omitempty"`
-	Done       bool                  `json:"done"`
-}
-
-// ToolResult 描述工具执行结果
-type ToolResult struct {
-	Name    string `json:"name"`
-	Content string `json:"content"`
-	Error   string `json:"error,omitempty"`
+	Type      string                `json:"type"`
+	Title     string                `json:"title,omitempty"`
+	Detail    string                `json:"detail,omitempty"`
+	Status    string                `json:"status,omitempty"`
+	Content   string                `json:"content,omitempty"`
+	Sources   []response.SourceInfo `json:"sources,omitempty"`
+	MessageID string                `json:"message_id,omitempty"`
+	Error     string                `json:"error,omitempty"`
+	Done      bool                  `json:"done"`
 }
 
 // 事件类型常量
 const (
-	EventStatus     = "status"       // 推理摘要（替代 EventThought）
-	EventToolCall   = "tool_call"    // 工具调用
-	EventToolResult = "tool_result"  // 工具结果
-	EventAnswer     = "answer"       // 最终答案
-	EventSources    = "sources"      // 来源信息
-	EventDone       = "done"
-	EventError      = "error"
+	EventThinking   = "thinking"    // 思考/分析阶段
+	EventPlan       = "plan"        // 执行计划
+	EventToolCall   = "tool_call"   // 工具调用
+	EventToolResult = "tool_result" // 工具结果
+	EventWarning    = "warning"     // 警告（如未找到结果、功能不可用）
+	EventError      = "error"       // 错误
+	EventAnswer     = "answer"      // 最终答案
+	EventSources    = "sources"     // 来源信息
+	EventDone       = "done"        // 完成
+
+	// 兼容旧常量
+	EventStatus = EventThinking
 )

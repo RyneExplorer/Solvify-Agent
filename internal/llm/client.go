@@ -83,9 +83,6 @@ func (c *MockClient) Generate(ctx context.Context, req GenerateRequest) (Generat
 	// 如果有工具且问题包含特定关键词，模拟工具调用
 	if len(req.Tools) > 0 {
 		for _, tool := range req.Tools {
-			if tool.Name == "final_answer" {
-				continue
-			}
 			if strings.Contains(question, tool.Name) || strings.Contains(question, "搜索") || strings.Contains(question, "search") {
 				return GenerateResponse{
 					Message: schema.AssistantMessage("", []schema.ToolCall{

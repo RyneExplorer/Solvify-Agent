@@ -118,7 +118,7 @@ type ExpanderConfig struct {
 
 // ToolsConfig 描述工具调用配置
 type ToolsConfig struct {
-	Enabled   bool           `mapstructure:"enabled"`
+	Enabled   bool            `mapstructure:"enabled"`
 	WebSearch WebSearchConfig `mapstructure:"web_search"`
 }
 
@@ -246,7 +246,7 @@ func Default() *Config {
 		},
 		Agent: AgentConfig{
 			EnableDemo:     true,
-			MaxIterations:  10,
+			MaxIterations:  4,
 			ScoreThreshold: 0.7,
 		},
 		LLM: LLMConfig{

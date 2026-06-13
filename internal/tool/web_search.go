@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // WebSearchTool 网络搜索工具
@@ -36,6 +37,26 @@ func (t *WebSearchTool) Parameters() map[string]any {
 			"required":    true,
 		},
 	}
+}
+
+func (t *WebSearchTool) StartReport(args string) ProgressReport {
+	var params struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal([]byte(args), &params); err == nil && params.Query != "" {
+		return ProgressReport{Title: "正在联网搜索", Detail: params.Query, Status: "running"}
+	}
+	return ProgressReport{Title: "正在联网搜索", Status: "running"}
+}
+
+func (t *WebSearchTool) ResultReport(result string, execErr error) ProgressReport {
+	if execErr != nil {
+		return ProgressReport{Title: "网络搜索失败", Detail: "继续使用知识库信息回答", Status: "warning"}
+	}
+	if strings.Contains(result, "暂未配置") || strings.Contains(result, "暂未实现") {
+		return ProgressReport{Title: "网络搜索不可用", Detail: "继续使用知识库信息回答", Status: "warning"}
+	}
+	return ProgressReport{Title: "联网搜索完成", Detail: "已获取相关信息", Status: "success"}
 }
 
 func (t *WebSearchTool) Execute(_ context.Context, args string) (string, error) {

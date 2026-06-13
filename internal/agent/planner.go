@@ -18,10 +18,16 @@ const plannerSystemPrompt = `你是一个任务规划助手。根据用户问题
 1. 分析用户问题的核心目标
 2. 将问题拆解为 2-5 个可执行步骤
 3. 每个步骤应该是具体的搜索或分析动作
-4. 只输出 JSON，不要输出任何解释
+4. 如果第一步需要检索知识库，在 first_action 中指定要使用的搜索工具和关键词
+5. 只输出 JSON，不要输出任何解释
 
 输出格式：
-{"goal":"...","steps":["步骤1","步骤2",...]}`
+{"goal":"...","steps":["步骤1","步骤2",...],"first_action":{"tool":"knowledge_search","query":"搜索关键词"}}
+
+说明：
+- first_action 可选，仅当第一步是搜索时填写
+- tool 只能是 knowledge_search 或 web_search
+- 如果不需要立即搜索，省略 first_action 字段`
 
 // buildPlannerUserMessage 构建 Planner 的用户消息
 func buildPlannerUserMessage(query string, history []historyMessage) string {
@@ -80,6 +86,9 @@ func formatPlanForPrompt(plan *Plan) string {
 	sb.WriteString(fmt.Sprintf("## 执行计划\n目标：%s\n步骤：\n", plan.Goal))
 	for i, step := range plan.Steps {
 		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, step))
+	}
+	if plan.FirstAction != nil {
+		sb.WriteString(fmt.Sprintf("\n首步检索（%s: %s）已自动执行，结果已在上下文中，请直接参考。", plan.FirstAction.Tool, plan.FirstAction.Query))
 	}
 	sb.WriteString("\n请按照计划有序执行，避免重复搜索。")
 	return sb.String()

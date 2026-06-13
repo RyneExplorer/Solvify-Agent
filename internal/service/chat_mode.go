@@ -22,9 +22,9 @@ import (
 
 // processMessage 处理消息的核心流程（快速检索模式）
 func (s *chatService) processMessage(ctx context.Context, userID, sessionID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	// Step 1: 并行初始化 LLM 客户端 + 加载历史对话
+	// Step 1: 并行初始化 LLM 客户端 + 加载历史对话（快速模式历史 token 上限 600）
 	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在加载上下文..."}
-	llmClient, history, err := s.initChatContext(ctx, userID, sessionID, req.ModelID, req.ModelType)
+	llmClient, history, err := s.initChatContext(ctx, userID, sessionID, req.ModelID, req.ModelType, 600)
 	if err != nil {
 		eventCh <- dto.StreamEvent{Type: "error", Error: err.Error(), Done: true}
 		return
@@ -33,6 +33,7 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 	// Step 2: 查询改写（用历史 + LLM 改写为独立检索查询）
 	searchQuery := req.Content
 	if len(history) > 0 {
+		eventCh <- dto.StreamEvent{Type: "progress", Content: "正在理解问题..."}
 		rewritten, err := s.rewriteQuery(ctx, llmClient, history, req.Content)
 		if err != nil {
 			logger.Warnf("查询改写失败，使用原始问题, sessionID=%s: %v", sessionID, err)
@@ -55,7 +56,6 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 	messages := buildMessages(history, req.Content, retrieveResult)
 
 	// Step 5: LLM 流式生成
-	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在生成回答..."}
 	assistantMsgID := uuid.New().String()
 	fullContent, err := s.streamAndCollect(ctx, llmClient, messages, assistantMsgID, sources, eventCh)
 
@@ -72,11 +72,11 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 
 // processDeepMode 深度思考模式处理流程
 // Service 只做业务编排：初始化、保存消息
-// Agent 自主决定工具调用：knowledge_search / web_search / final_answer
+// Agent 自主决定工具调用：knowledge_search / web_search
 func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	// Step 1: 并行初始化 LLM 客户端 + 加载历史对话
+	// Step 1: 并行初始化 LLM 客户端 + 加载历史对话（深度模式保留 2000 tokens）
 	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在加载上下文..."}
-	llmClient, history, err := s.initChatContext(ctx, userID, sessionID, req.ModelID, req.ModelType)
+	llmClient, history, err := s.initChatContext(ctx, userID, sessionID, req.ModelID, req.ModelType, 2000)
 	if err != nil {
 		eventCh <- dto.StreamEvent{Type: "error", Error: err.Error(), Done: true}
 		return
@@ -131,7 +131,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 
 // emitDoneAndSave 发送 done 事件并异步保存助手消息
 func emitDoneAndSave(s *chatService, eventCh chan<- dto.StreamEvent, sessionID, msgID, content string, req requestdto.SendMessageRequest, sources []dto.SourceInfo, metadata datatypes.JSON) {
-	eventCh <- dto.StreamEvent{Type: "done", MessageID: msgID, Done: true}
+	eventCh <- dto.StreamEvent{Type: "done", MessageID: msgID, Sources: sources, Done: true}
 	go func() {
 		saveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -179,6 +179,7 @@ func (s *chatService) retrieveContext(ctx context.Context, userID, question stri
 
 // streamAndCollect 流式生成并推送 SSE 事件，返回已收集的内容（用户暂停时返回部分内容）
 func (s *chatService) streamAndCollect(ctx context.Context, llmClient llm.Client, messages []*schema.Message, assistantMsgID string, sources []dto.SourceInfo, eventCh chan<- dto.StreamEvent) (string, error) {
+	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在生成回答..."}
 	stream, err := llmClient.GenerateStream(ctx, llm.GenerateRequest{Messages: messages})
 	if err != nil {
 		logger.Errorf("LLM 调用失败: %v", err)
@@ -188,7 +189,6 @@ func (s *chatService) streamAndCollect(ctx context.Context, llmClient llm.Client
 
 	eventCh <- dto.StreamEvent{
 		Type:      "start",
-		Sources:   sources,
 		MessageID: assistantMsgID,
 	}
 
@@ -206,6 +206,9 @@ func (s *chatService) streamAndCollect(ctx context.Context, llmClient llm.Client
 		if chunk.Done {
 			break
 		}
+		if chunk.Content == "" {
+			continue
+		}
 		fullContent += chunk.Content
 		eventCh <- dto.StreamEvent{
 			Type:    "content",
@@ -220,26 +223,12 @@ func (s *chatService) streamAndCollect(ctx context.Context, llmClient llm.Client
 func toStreamEvent(e agent.Event) dto.StreamEvent {
 	se := dto.StreamEvent{
 		Type:    e.Type,
+		Title:   e.Title,
+		Detail:  e.Detail,
+		Status:  e.Status,
 		Content: e.Content,
 		Error:   e.Error,
 		Done:    e.Done,
-	}
-	if len(e.ToolCalls) > 0 {
-		se.ToolCalls = make([]dto.ToolCallInfo, 0, len(e.ToolCalls))
-		for _, tc := range e.ToolCalls {
-			se.ToolCalls = append(se.ToolCalls, dto.ToolCallInfo{
-				ID:        tc.ID,
-				Name:      tc.Name,
-				Arguments: tc.Arguments,
-			})
-		}
-	}
-	if e.ToolResult != nil {
-		se.ToolResult = &dto.ToolResultInfo{
-			Name:    e.ToolResult.Name,
-			Content: e.ToolResult.Content,
-			Error:   e.ToolResult.Error,
-		}
 	}
 	if len(e.Sources) > 0 {
 		se.Sources = e.Sources
@@ -250,31 +239,8 @@ func toStreamEvent(e agent.Event) dto.StreamEvent {
 // collectReasoningStep 从 Agent 事件中收集推理步骤（用于持久化）
 func collectReasoningStep(e agent.Event) *dto.ReasoningStep {
 	switch e.Type {
-	case agent.EventStatus:
-		return &dto.ReasoningStep{Type: e.Type, Content: e.Content}
-	case agent.EventToolCall:
-		if len(e.ToolCalls) == 0 {
-			return nil
-		}
-		step := &dto.ReasoningStep{Type: e.Type}
-		for _, tc := range e.ToolCalls {
-			step.ToolCalls = append(step.ToolCalls, dto.ToolCallInfo{
-				ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments,
-			})
-		}
-		return step
-	case agent.EventToolResult:
-		if e.ToolResult == nil {
-			return nil
-		}
-		return &dto.ReasoningStep{
-			Type: e.Type,
-			ToolResult: &dto.ToolResultInfo{
-				Name:    e.ToolResult.Name,
-				Content: e.ToolResult.Content,
-				Error:   e.ToolResult.Error,
-			},
-		}
+	case agent.EventThinking, agent.EventPlan, agent.EventToolCall, agent.EventToolResult, agent.EventWarning:
+		return &dto.ReasoningStep{Type: e.Type, Content: e.Title}
 	default:
 		return nil
 	}

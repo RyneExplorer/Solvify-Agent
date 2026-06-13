@@ -158,7 +158,7 @@ func (s *chatService) GetMessages(ctx context.Context, userID, sessionID string)
 // ─── 共享内部方法 ───────────────────────────────────────────
 
 // initChatContext 并行初始化 LLM 客户端和加载历史对话
-func (s *chatService) initChatContext(ctx context.Context, userID, sessionID, modelID, modelType string) (llm.Client, []entity.ChatMessage, error) {
+func (s *chatService) initChatContext(ctx context.Context, userID, sessionID, modelID, modelType string, maxHistoryTokens int) (llm.Client, []entity.ChatMessage, error) {
 	t0 := time.Now()
 	var llmClient llm.Client
 	var history []entity.ChatMessage
@@ -184,7 +184,7 @@ func (s *chatService) initChatContext(ctx context.Context, userID, sessionID, mo
 			logger.Errorf("加载历史对话失败, sessionID=%s: %v", sessionID, err)
 			return fmt.Errorf("加载历史对话失败")
 		}
-		history = truncateHistoryByTokens(msg, 2000)
+		history = truncateHistoryByTokens(msg, maxHistoryTokens)
 		logger.Infof("历史消息: 加载 %d 条, 截断后保留 %d 条", len(msg), len(history))
 		return nil
 	})

@@ -8,7 +8,7 @@ import (
 
 // Execute 执行 Agent 推理循环
 //
-// Agent 自主决定工具调用时机：knowledge_search / web_search / final_answer
+// Agent 自主决定工具调用时机：knowledge_search / web_search
 // 不做预检索，所有信息获取由 LLM 通过工具调用完成
 func (e *Engine) Execute(ctx context.Context, req Request) (<-chan Event, error) {
 	eventCh := make(chan Event, 100)

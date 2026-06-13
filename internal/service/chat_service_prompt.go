@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	maxContextChars = 3000 // 检索结果最大字符数，防止超出模型上下文窗口
+	maxContextChars = 2000 // 检索结果最大字符数，防止超出模型上下文窗口
 )
 
 // buildRewritePrompt 组装查询改写 Prompt
