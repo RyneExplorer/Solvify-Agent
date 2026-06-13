@@ -16,16 +16,25 @@ import (
 
 // reActLoop ReAct 推理循环
 //
-// 流程：Think → Analyze → Act → Observe，最多 maxIter 轮
-//   - Think:   LLM 思考，决定下一步
-//   - Analyze: final_answer → 结束；无工具 → 直接输出
-//   - Act:     执行工具（knowledge_search / web_search）
-//   - Observe: 结果写入消息历史，进入下一轮
+// 流程：Planner → Think → Analyze → Act → Observe，最多 maxIter 轮
+//   - Planner:  独立 LLM 调用生成执行计划
+//   - Think:    LLM 思考，参考计划和 Memory 决定下一步
+//   - Analyze:  final_answer → 结束；无工具 → 直接输出
+//   - Act:      执行工具（knowledge_search / web_search）
+//   - Observe:  截断摘要写入历史，更新 Memory
 func (e *Engine) reActLoop(ctx context.Context, req Request, eventCh chan<- Event) {
 	maxIter := e.cfg.MaxIterations
 	if maxIter <= 0 {
-		maxIter = 10
+		maxIter = 5
 	}
+
+	// ── Planner ──
+	eventCh <- Event{Type: EventStatus, Content: "正在分析问题"}
+	history := toHistoryMessages(req.History)
+	plan := e.plan(ctx, req.LLMClient, req.Query, history)
+
+	// 初始化 Memory
+	memory := &Memory{}
 
 	// 动态创建带用户上下文的 knowledge_search 工具
 	ksTool := e.knowledgeSearchFactory(req.UserID, req.KnowledgeBaseIDs)
@@ -49,15 +58,14 @@ func (e *Engine) reActLoop(ctx context.Context, req Request, eventCh chan<- Even
 		})
 	}
 
-	// 构建消息列表（无预检索结果，LLM 自行决定何时调用工具）
-	history := toHistoryMessages(req.History)
-	systemPrompt := buildReActSystemPrompt(toolInfos)
+	// 构建消息列表（注入计划和 Memory）
+	systemPrompt := buildReActSystemPrompt(toolInfos, plan, memory)
 	messages := []*schema.Message{
 		schema.SystemMessage(systemPrompt),
 		schema.UserMessage(buildUserMessage(req.Query, history)),
 	}
 
-	// 收集知识库检索来源（knowledge_search 返回的 sources）
+	// 收集知识库检索来源
 	var collectedSources []response.SourceInfo
 
 	// 主循环
@@ -77,15 +85,13 @@ func (e *Engine) reActLoop(ctx context.Context, req Request, eventCh chan<- Even
 			return
 		}
 
-		if thinkResult.content != "" {
-			eventCh <- Event{Type: EventThought, Content: thinkResult.content}
-		}
-
 		// ── Analyze ──
 		if len(thinkResult.toolCalls) == 0 {
+			// 无工具调用，直接输出内容
 			if len(collectedSources) > 0 {
 				eventCh <- Event{Type: EventSources, Sources: collectedSources}
 			}
+			eventCh <- Event{Type: EventStatus, Content: "正在生成最终答案"}
 			streamAnswer(eventCh, thinkResult.content)
 			eventCh <- Event{Type: EventDone, Done: true}
 			return
@@ -93,10 +99,12 @@ func (e *Engine) reActLoop(ctx context.Context, req Request, eventCh chan<- Even
 
 		for _, tc := range thinkResult.toolCalls {
 			if tc.Name == "final_answer" {
-				answer := parseFinalAnswer(tc.Arguments)
+				answer, confidence := parseFinalAnswerWithConfidence(tc.Arguments)
+				logger.Infof("Agent final_answer confidence=%.2f", confidence)
 				if len(collectedSources) > 0 {
 					eventCh <- Event{Type: EventSources, Sources: collectedSources}
 				}
+				eventCh <- Event{Type: EventStatus, Content: "正在生成最终答案"}
 				streamAnswer(eventCh, answer)
 				eventCh <- Event{Type: EventDone, Done: true}
 				return
@@ -104,25 +112,46 @@ func (e *Engine) reActLoop(ctx context.Context, req Request, eventCh chan<- Even
 		}
 
 		// ── Act ──
+		// 发送 Status 事件（推理摘要）
+		for _, tc := range thinkResult.toolCalls {
+			if tc.Name == "knowledge_search" {
+				query := extractQueryFromArgs(tc.Arguments)
+				eventCh <- Event{Type: EventStatus, Content: fmt.Sprintf("正在查询：%s", query)}
+			}
+		}
+		// 发送 tool_call 事件（详细信息）
+		eventCh <- Event{
+			Type:      EventToolCall,
+			ToolCalls: thinkResult.toolCalls,
+		}
+
 		toolResults := e.act(ctx, toolMap, thinkResult.toolCalls)
 		for _, tr := range toolResults {
+			// 发送工具结果摘要
+			summary := buildToolResultSummary(tr)
 			eventCh <- Event{
 				Type: EventToolResult,
 				ToolResult: &ToolResult{
 					Name:    tr.name,
-					Content: truncate(tr.content, 500),
+					Content: summary,
 					Error:   tr.errMsg,
 				},
 			}
 
-			// 从 knowledge_search 结果中提取来源
+			// 更新 Memory
 			if tr.name == "knowledge_search" && tr.errMsg == "" {
+				query := extractQueryFromToolCalls(thinkResult.toolCalls, tr.toolCallID)
+				memory.AddSearch(query)
+				memory.AddFinding(truncate(summary, 200))
+
+				// 提取来源
 				sources := extractSourcesFromResult(tr.content)
 				collectedSources = append(collectedSources, sources...)
 			}
 		}
 
 		// ── Observe ──
+		// 将工具调用结果写入消息历史（截断摘要）
 		einoToolCalls := make([]schema.ToolCall, 0, len(thinkResult.toolCalls))
 		for _, tc := range thinkResult.toolCalls {
 			einoToolCalls = append(einoToolCalls, schema.ToolCall{
@@ -141,7 +170,7 @@ func (e *Engine) reActLoop(ctx context.Context, req Request, eventCh chan<- Even
 		})
 
 		for _, tr := range toolResults {
-			content := tr.content
+			content := truncate(tr.content, 500)
 			if tr.errMsg != "" {
 				content = fmt.Sprintf("工具执行失败: %s", tr.errMsg)
 			}
@@ -151,10 +180,50 @@ func (e *Engine) reActLoop(ctx context.Context, req Request, eventCh chan<- Even
 				ToolCallID: tr.toolCallID,
 			})
 		}
+
+		// 更新 system prompt（注入最新 Memory）
+		if memSummary := memory.Summary(); memSummary != "" {
+			messages[0] = schema.SystemMessage(buildReActSystemPrompt(toolInfos, plan, memory))
+		}
 	}
 
 	logger.Warnf("Agent 达到最大迭代次数 %d", maxIter)
 	eventCh <- Event{Type: EventError, Error: "达到最大思考轮次，请尝试简化问题", Done: true}
+}
+
+// extractQueryFromArgs 从工具参数 JSON 中提取 query 字段
+func extractQueryFromArgs(args string) string {
+	var params struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal([]byte(args), &params); err == nil {
+		return params.Query
+	}
+	return args
+}
+
+// extractQueryFromToolCalls 从工具调用列表中找到指定 toolCallID 的 query
+func extractQueryFromToolCalls(toolCalls []llm.ToolCall, toolCallID string) string {
+	for _, tc := range toolCalls {
+		if tc.ID == toolCallID {
+			return extractQueryFromArgs(tc.Arguments)
+		}
+	}
+	return ""
+}
+
+// buildToolResultSummary 构建工具结果摘要
+func buildToolResultSummary(tr actResult) string {
+	if tr.errMsg != "" {
+		return fmt.Sprintf("工具执行失败: %s", tr.errMsg)
+	}
+	if tr.name == "knowledge_search" {
+		var result tool.SearchResult
+		if err := json.Unmarshal([]byte(tr.content), &result); err == nil {
+			return fmt.Sprintf("找到 %d 条相关资料", len(result.Sources))
+		}
+	}
+	return truncate(tr.content, 200)
 }
 
 // extractSourcesFromResult 从 knowledge_search 返回的 JSON 中提取来源信息
@@ -223,7 +292,7 @@ type actResult struct {
 	errMsg     string
 }
 
-// act 并发执行工具调用
+// act 并发执行工具调用（失败自动重试一次）
 func (e *Engine) act(ctx context.Context, toolMap map[string]tool.Tool, toolCalls []llm.ToolCall) []actResult {
 	results := make([]actResult, len(toolCalls))
 	var wg sync.WaitGroup
@@ -246,12 +315,18 @@ func (e *Engine) act(ctx context.Context, toolMap map[string]tool.Tool, toolCall
 			logger.Infof("执行工具: %s, 参数: %s", call.Name, truncate(call.Arguments, 100))
 			content, err := t.Execute(ctx, call.Arguments)
 			if err != nil {
-				results[idx] = actResult{
-					toolCallID: call.ID,
-					name:       call.Name,
-					errMsg:     err.Error(),
+				// 自动重试一次
+				logger.Warnf("工具 %s 首次执行失败: %v，重试中...", call.Name, err)
+				content, err = t.Execute(ctx, call.Arguments)
+				if err != nil {
+					logger.Errorf("工具 %s 重试仍然失败: %v", call.Name, err)
+					results[idx] = actResult{
+						toolCallID: call.ID,
+						name:       call.Name,
+						errMsg:     err.Error(),
+					}
+					return
 				}
-				return
 			}
 
 			results[idx] = actResult{

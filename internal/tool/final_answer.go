@@ -29,12 +29,17 @@ func (t *FinalAnswerTool) Parameters() map[string]any {
 			"description": "最终答案内容，使用 Markdown 格式",
 			"required":    true,
 		},
+		"confidence": map[string]any{
+			"type":        "number",
+			"description": "对答案的置信度，0-1 之间。0.85 以上表示信息充分，可以结束推理。",
+		},
 	}
 }
 
 func (t *FinalAnswerTool) Execute(_ context.Context, args string) (string, error) {
 	var params struct {
-		Answer string `json:"answer"`
+		Answer     string  `json:"answer"`
+		Confidence float64 `json:"confidence"`
 	}
 	if err := json.Unmarshal([]byte(args), &params); err != nil {
 		return "", fmt.Errorf("参数解析失败: %w", err)

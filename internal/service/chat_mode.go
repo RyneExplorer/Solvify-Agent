@@ -1,0 +1,281 @@
+package service
+
+import (
+	"context"
+	"time"
+
+	"github.com/cloudwego/eino/schema"
+	"github.com/google/uuid"
+	"gorm.io/datatypes"
+
+	"solvify-agent/internal/agent"
+	"solvify-agent/internal/llm"
+	requestdto "solvify-agent/internal/model/dto/request"
+	dto "solvify-agent/internal/model/dto/response"
+	"solvify-agent/internal/model/entity"
+	"solvify-agent/internal/rag"
+	"solvify-agent/pkg/config"
+	"solvify-agent/pkg/logger"
+)
+
+// ─── 快速检索模式 ───────────────────────────────────────────
+
+// processMessage 处理消息的核心流程（快速检索模式）
+func (s *chatService) processMessage(ctx context.Context, userID, sessionID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
+	// Step 1: 并行初始化 LLM 客户端 + 加载历史对话
+	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在加载上下文..."}
+	llmClient, history, err := s.initChatContext(ctx, userID, sessionID, req.ModelID, req.ModelType)
+	if err != nil {
+		eventCh <- dto.StreamEvent{Type: "error", Error: err.Error(), Done: true}
+		return
+	}
+
+	// Step 2: 查询改写（用历史 + LLM 改写为独立检索查询）
+	searchQuery := req.Content
+	if len(history) > 0 {
+		rewritten, err := s.rewriteQuery(ctx, llmClient, history, req.Content)
+		if err != nil {
+			logger.Warnf("查询改写失败，使用原始问题, sessionID=%s: %v", sessionID, err)
+		} else if rewritten != "" {
+			searchQuery = rewritten
+		}
+	}
+
+	// Step 3: RAG 检索（用改写后的查询做 embedding + 向量检索）
+	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在检索知识库..."}
+	sources, retrieveResult, err := s.retrieveContext(ctx, userID, searchQuery, req.KnowledgeBaseIDs)
+	if err != nil {
+		logger.Errorf("知识库检索失败, sessionID=%s: %v", sessionID, err)
+		eventCh <- dto.StreamEvent{Type: "error", Error: "知识库检索失败", Done: true}
+		return
+	}
+
+	// Step 4: 组装 Prompt（用原始问题，改写后的查询仅用于检索）
+	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在整理资料..."}
+	messages := buildMessages(history, req.Content, retrieveResult)
+
+	// Step 5: LLM 流式生成
+	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在生成回答..."}
+	assistantMsgID := uuid.New().String()
+	fullContent, err := s.streamAndCollect(ctx, llmClient, messages, assistantMsgID, sources, eventCh)
+
+	// Step 6: 保存助手消息
+	if err != nil && fullContent == "" {
+		return
+	}
+	if fullContent != "" {
+		emitDoneAndSave(s, eventCh, sessionID, assistantMsgID, fullContent, req, sources, nil)
+	}
+}
+
+// ─── 深度思考模式 ───────────────────────────────────────────
+
+// processDeepMode 深度思考模式处理流程
+// Service 只做业务编排：初始化、保存消息
+// Agent 自主决定工具调用：knowledge_search / web_search / final_answer
+func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
+	// Step 1: 并行初始化 LLM 客户端 + 加载历史对话
+	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在加载上下文..."}
+	llmClient, history, err := s.initChatContext(ctx, userID, sessionID, req.ModelID, req.ModelType)
+	if err != nil {
+		eventCh <- dto.StreamEvent{Type: "error", Error: err.Error(), Done: true}
+		return
+	}
+
+	// Step 2: 委托 Agent 执行（Agent 自主决定何时检索、搜索、回答）
+	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在深度推理..."}
+	agentEventCh, err := s.agentEngine.Execute(ctx, agent.Request{
+		UserID:           userID,
+		Query:            req.Content,
+		History:          history,
+		KnowledgeBaseIDs: req.KnowledgeBaseIDs,
+		LLMClient:        llmClient,
+	})
+	if err != nil {
+		logger.Errorf("Agent 执行失败, sessionID=%s: %v", sessionID, err)
+		eventCh <- dto.StreamEvent{Type: "error", Error: "深度思考模式执行失败", Done: true}
+		return
+	}
+
+	// Step 3: 转发 Agent 事件到 SSE 事件流 + 收集推理步骤
+	var fullContent string
+	var agentSources []dto.SourceInfo
+	var reasoningSteps []dto.ReasoningStep
+	for agentEvent := range agentEventCh {
+		eventCh <- toStreamEvent(agentEvent)
+		if len(agentEvent.Sources) > 0 {
+			agentSources = agentEvent.Sources
+		}
+		if step := collectReasoningStep(agentEvent); step != nil {
+			reasoningSteps = append(reasoningSteps, *step)
+		}
+		if agentEvent.Type == agent.EventAnswer {
+			fullContent += agentEvent.Content
+		}
+	}
+
+	// Step 4: 保存助手消息（含推理步骤）
+	if fullContent == "" {
+		return
+	}
+	var metadata datatypes.JSON
+	if len(reasoningSteps) > 0 {
+		metadata = datatypes.JSON(mustMarshal(map[string]any{
+			"reasoning_steps": reasoningSteps,
+		}))
+	}
+	emitDoneAndSave(s, eventCh, sessionID, uuid.New().String(), fullContent, req, agentSources, metadata)
+}
+
+// ─── 共享辅助函数 ───────────────────────────────────────────
+
+// emitDoneAndSave 发送 done 事件并异步保存助手消息
+func emitDoneAndSave(s *chatService, eventCh chan<- dto.StreamEvent, sessionID, msgID, content string, req requestdto.SendMessageRequest, sources []dto.SourceInfo, metadata datatypes.JSON) {
+	eventCh <- dto.StreamEvent{Type: "done", MessageID: msgID, Done: true}
+	go func() {
+		saveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.saveAssistantMessage(saveCtx, sessionID, msgID, content, req, sources, metadata); err != nil {
+			logger.Errorf("保存助手消息失败, messageID=%s: %v", msgID, err)
+		}
+	}()
+}
+
+// rewriteQuery 用 LLM 结合历史对话改写用户问题，生成更适合检索的独立查询
+func (s *chatService) rewriteQuery(ctx context.Context, llmClient llm.Client, history []entity.ChatMessage, question string) (string, error) {
+	rewriteCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	messages := buildRewritePrompt(history, question)
+	resp, err := llmClient.Generate(rewriteCtx, llm.GenerateRequest{Messages: messages})
+	if err != nil {
+		return "", err
+	}
+	if resp.Message == nil {
+		return "", nil
+	}
+	return resp.Message.Content, nil
+}
+
+// retrieveContext 执行 RAG 检索并转换为引用来源
+func (s *chatService) retrieveContext(ctx context.Context, userID, question string, knowledgeBaseIDs []string) ([]dto.SourceInfo, rag.Result, error) {
+	logger.Infof("RAG 检索开始: userID=%s, question=%q, kbIDs=%v", userID, question, knowledgeBaseIDs)
+	retrieveResult, err := s.retriever.Retrieve(ctx, rag.Query{
+		Question:         question,
+		TopK:             config.Get().RAG.TopK,
+		KnowledgeBaseIDs: knowledgeBaseIDs,
+		UserID:           userID,
+	})
+	if err != nil {
+		return nil, rag.Result{}, err
+	}
+
+	sources := groupDocumentsToSources(retrieveResult.Documents)
+
+	logger.Infof("RAG 检索完成: hit=%v, 命中 %d 篇文档, 共 %d 个 chunk",
+		retrieveResult.Hit, len(sources), len(retrieveResult.Documents))
+	return sources, retrieveResult, nil
+}
+
+// streamAndCollect 流式生成并推送 SSE 事件，返回已收集的内容（用户暂停时返回部分内容）
+func (s *chatService) streamAndCollect(ctx context.Context, llmClient llm.Client, messages []*schema.Message, assistantMsgID string, sources []dto.SourceInfo, eventCh chan<- dto.StreamEvent) (string, error) {
+	stream, err := llmClient.GenerateStream(ctx, llm.GenerateRequest{Messages: messages})
+	if err != nil {
+		logger.Errorf("LLM 调用失败: %v", err)
+		eventCh <- dto.StreamEvent{Type: "error", Error: "LLM 调用失败", Done: true}
+		return "", err
+	}
+
+	eventCh <- dto.StreamEvent{
+		Type:      "start",
+		Sources:   sources,
+		MessageID: assistantMsgID,
+	}
+
+	var fullContent string
+	for chunk := range stream {
+		if chunk.Error != nil {
+			if ctx.Err() != nil {
+				logger.Infof("用户暂停，已收集 %d 字符", len(fullContent))
+				return fullContent, chunk.Error
+			}
+			logger.Errorf("LLM 流式生成错误: %v", chunk.Error)
+			eventCh <- dto.StreamEvent{Type: "error", Error: chunk.Error.Error(), Done: true}
+			return fullContent, chunk.Error
+		}
+		if chunk.Done {
+			break
+		}
+		fullContent += chunk.Content
+		eventCh <- dto.StreamEvent{
+			Type:    "content",
+			Content: chunk.Content,
+		}
+	}
+
+	return fullContent, nil
+}
+
+// toStreamEvent 将 Agent 事件转换为 SSE 流式事件
+func toStreamEvent(e agent.Event) dto.StreamEvent {
+	se := dto.StreamEvent{
+		Type:    e.Type,
+		Content: e.Content,
+		Error:   e.Error,
+		Done:    e.Done,
+	}
+	if len(e.ToolCalls) > 0 {
+		se.ToolCalls = make([]dto.ToolCallInfo, 0, len(e.ToolCalls))
+		for _, tc := range e.ToolCalls {
+			se.ToolCalls = append(se.ToolCalls, dto.ToolCallInfo{
+				ID:        tc.ID,
+				Name:      tc.Name,
+				Arguments: tc.Arguments,
+			})
+		}
+	}
+	if e.ToolResult != nil {
+		se.ToolResult = &dto.ToolResultInfo{
+			Name:    e.ToolResult.Name,
+			Content: e.ToolResult.Content,
+			Error:   e.ToolResult.Error,
+		}
+	}
+	if len(e.Sources) > 0 {
+		se.Sources = e.Sources
+	}
+	return se
+}
+
+// collectReasoningStep 从 Agent 事件中收集推理步骤（用于持久化）
+func collectReasoningStep(e agent.Event) *dto.ReasoningStep {
+	switch e.Type {
+	case agent.EventStatus:
+		return &dto.ReasoningStep{Type: e.Type, Content: e.Content}
+	case agent.EventToolCall:
+		if len(e.ToolCalls) == 0 {
+			return nil
+		}
+		step := &dto.ReasoningStep{Type: e.Type}
+		for _, tc := range e.ToolCalls {
+			step.ToolCalls = append(step.ToolCalls, dto.ToolCallInfo{
+				ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments,
+			})
+		}
+		return step
+	case agent.EventToolResult:
+		if e.ToolResult == nil {
+			return nil
+		}
+		return &dto.ReasoningStep{
+			Type: e.Type,
+			ToolResult: &dto.ToolResultInfo{
+				Name:    e.ToolResult.Name,
+				Content: e.ToolResult.Content,
+				Error:   e.ToolResult.Error,
+			},
+		}
+	default:
+		return nil
+	}
+}

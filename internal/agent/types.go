@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"strings"
+
 	"solvify-agent/internal/llm"
 	"solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
@@ -13,6 +15,44 @@ type Request struct {
 	History          []entity.ChatMessage // 历史对话
 	KnowledgeBaseIDs []string             // 知识库 ID 列表
 	LLMClient        llm.Client           // LLM 客户端
+}
+
+// Plan Planner 生成的执行计划
+type Plan struct {
+	Goal  string   `json:"goal"`
+	Steps []string `json:"steps"`
+}
+
+// Memory 搜索记忆（请求级生命周期，避免重复搜索）
+type Memory struct {
+	Searches []string // 已搜索的查询
+	Findings []string // 已发现的关键信息摘要
+}
+
+// AddSearch 记录一次搜索
+func (m *Memory) AddSearch(query string) {
+	m.Searches = append(m.Searches, query)
+}
+
+// AddFinding 记录一条发现
+func (m *Memory) AddFinding(finding string) {
+	m.Findings = append(m.Findings, finding)
+}
+
+// Summary 返回记忆摘要，用于注入 prompt
+func (m *Memory) Summary() string {
+	if len(m.Searches) == 0 && len(m.Findings) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	if len(m.Searches) > 0 {
+		sb.WriteString("已搜索：" + strings.Join(m.Searches, "、") + "\n")
+	}
+	if len(m.Findings) > 0 {
+		sb.WriteString("已发现：" + strings.Join(m.Findings, "；") + "\n")
+	}
+	sb.WriteString("\n请避免重复搜索，基于已有信息继续推理。")
+	return sb.String()
 }
 
 // Event 描述 Agent SSE 事件
@@ -36,12 +76,11 @@ type ToolResult struct {
 
 // 事件类型常量
 const (
-	EventThought    = "thought"
-	EventToolCall   = "tool_call"
-	EventToolResult = "tool_result"
-	EventAnswer     = "answer"
-	EventSources    = "sources"
-	EventProgress   = "progress"
+	EventStatus     = "status"       // 推理摘要（替代 EventThought）
+	EventToolCall   = "tool_call"    // 工具调用
+	EventToolResult = "tool_result"  // 工具结果
+	EventAnswer     = "answer"       // 最终答案
+	EventSources    = "sources"      // 来源信息
 	EventDone       = "done"
 	EventError      = "error"
 )

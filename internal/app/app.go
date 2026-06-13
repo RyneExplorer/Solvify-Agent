@@ -152,9 +152,8 @@ func (a *App) ensureStorageQuotaUniqueIndex(db *gorm.DB) error {
 	}
 	return nil
 }
-
-// initAIDependencies 初始化 Embedding 和 RAG 检索器（含可选装饰器链）
-func (a *App) initAIDependencies() rag.Retriever {
+// initEmbedding 初始化 Embedding 客户端，返回带缓存的向量化函数
+func (a *App) initEmbedding() rag.EmbeddingFunc {
 
 	embeddingClient, err := llm.NewEmbeddingClientFromConfig(context.Background(), &a.cfg.Embedding)
 	if err != nil {
@@ -164,7 +163,7 @@ func (a *App) initAIDependencies() rag.Retriever {
 	// Embedding 缓存（相同文本 → 相同向量，缓存 24 小时）
 	embeddingCache := cache.New(a.redis, "emb:", 24*time.Hour)
 
-	embeddingFunc := func(ctx context.Context, text string) ([]float64, error) {
+	return func(ctx context.Context, text string) ([]float64, error) {
 		cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
 		var vec []float64
 		if found, _ := embeddingCache.Get(ctx, cacheKey, &vec); found {
@@ -185,7 +184,10 @@ func (a *App) initAIDependencies() rag.Retriever {
 		}
 		return vec, nil
 	}
+}
 
+// initRetriever 初始化 RAG 检索器（混合检索 + 可选装饰器链）
+func (a *App) initRetriever(embeddingFunc rag.EmbeddingFunc) rag.Retriever {
 	// 使用混合检索器（向量 + 关键词 + RRF 融合）
 	var retriever rag.Retriever = rag.NewHybridRetriever(rag.HybridRetrieverConfig{
 		DB:             a.postgresqlDB,
@@ -208,7 +210,7 @@ func (a *App) initAIDependencies() rag.Retriever {
 		logger.Info("相邻分块扩展已启用")
 	}
 
-	logger.Info("AI 依赖初始化完成")
+	logger.Info("RAG 检索器初始化完成")
 	return retriever
 }
 
@@ -221,12 +223,13 @@ type AgentComponents struct {
 
 // initAgentComponents 初始化 Agent 相关组件（Embedding、RAG、工具、Agent 引擎）
 func (a *App) initAgentComponents() *AgentComponents {
-	vectorRetriever := a.initAIDependencies()
+	embeddingFunc := a.initEmbedding()
+	vectorRetriever := a.initRetriever(embeddingFunc)
 
-	// 初始化 Tool Registry（只注册全局工具，knowledge_search 由 Agent 按请求动态创建）
+	// 初始化 Tool Registry（注册所有内置工具）
 	toolRegistry := tool.NewRegistry()
 	toolRegistry.Register(tool.NewFinalAnswerTool())
-	toolRegistry.Register(tool.NewWebSearchTool("", ""))
+	toolRegistry.Register(tool.NewWebSearchTool(a.cfg.Tools.WebSearch.APIKey, a.cfg.Tools.WebSearch.BaseURL))
 	logger.Info("工具注册完成", zap.Int("count", len(toolRegistry.List())))
 
 	// knowledge_search 工厂：每次 Agent 请求创建带用户上下文的工具实例
@@ -256,6 +259,7 @@ func (a *App) initDependencies() {
 	documentVersionRepo := repository.NewDocumentVersionRepository(a.postgresqlDB)
 	documentJobRepo := repository.NewDocumentProcessingJobRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
+	userRepo := repository.NewUserRepository(a.postgresqlDB)
 
 	// 模型配置缓存（10 分钟 TTL）
 	modelCache := cache.New(a.redis, "model:", 10*time.Minute)
