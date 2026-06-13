@@ -401,7 +401,7 @@ type quoteInfo struct {
 
 // parseQuotesFromAnswer 从答案文本中解析出所有引用
 // 格式：[文档标题]{引用原文}
-var quoteRegex = regexp.MustCompile(`\[([^\]]+)\]\{([^}]+)\}`)
+var quoteRegex = regexp.MustCompile(`\[([^]]+)]\{([^}]+)}`)
 
 func parseQuotesFromAnswer(answer string) []quoteInfo {
 	matches := quoteRegex.FindAllStringSubmatch(answer, -1)

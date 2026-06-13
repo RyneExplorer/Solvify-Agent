@@ -57,7 +57,7 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 
 	// Step 5: LLM 流式生成
 	assistantMsgID := uuid.New().String()
-	fullContent, err := s.streamAndCollect(ctx, llmClient, messages, assistantMsgID, sources, eventCh)
+	fullContent, err := s.streamAndCollect(ctx, llmClient, messages, assistantMsgID, eventCh)
 
 	// Step 6: 保存助手消息
 	if err != nil && fullContent == "" {
@@ -178,7 +178,7 @@ func (s *chatService) retrieveContext(ctx context.Context, userID, question stri
 }
 
 // streamAndCollect 流式生成并推送 SSE 事件，返回已收集的内容（用户暂停时返回部分内容）
-func (s *chatService) streamAndCollect(ctx context.Context, llmClient llm.Client, messages []*schema.Message, assistantMsgID string, sources []dto.SourceInfo, eventCh chan<- dto.StreamEvent) (string, error) {
+func (s *chatService) streamAndCollect(ctx context.Context, llmClient llm.Client, messages []*schema.Message, assistantMsgID string, eventCh chan<- dto.StreamEvent) (string, error) {
 	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在生成回答..."}
 	stream, err := llmClient.GenerateStream(ctx, llm.GenerateRequest{Messages: messages})
 	if err != nil {

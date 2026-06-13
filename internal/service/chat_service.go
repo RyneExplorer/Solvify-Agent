@@ -24,7 +24,6 @@ import (
 
 const (
 	sessionStatusActive = "active"
-	sessionStatusClosed = "closed"
 )
 
 // chatService 封装聊天业务用例实现

@@ -87,6 +87,4 @@ const (
 	EventSources    = "sources"     // 来源信息
 	EventDone       = "done"        // 完成
 
-	// 兼容旧常量
-	EventStatus = EventThinking
 )
