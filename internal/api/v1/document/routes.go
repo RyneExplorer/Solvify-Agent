@@ -27,3 +27,9 @@ func (ctrl *Controller) RegisterDocumentJobRoutes(router *gin.RouterGroup) {
 	group := router.Group("/document-jobs")
 	group.GET("/:id", ctrl.JobDetail)
 }
+
+// RegisterChunkRoutes 注册 chunk 独立路由
+func (ctrl *Controller) RegisterChunkRoutes(router *gin.RouterGroup) {
+	group := router.Group("/chunks")
+	group.GET("/:id", ctrl.ChunkDetail)
+}

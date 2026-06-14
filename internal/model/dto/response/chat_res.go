@@ -38,42 +38,40 @@ type SourceInfo struct {
 // ChunkSource 描述单个分块的引用信息
 type ChunkSource struct {
 	ID      string  `json:"id"`
+	Quote   string  `json:"quote,omitempty"` // LLM 指出的精确引用句子
 	Content string  `json:"content"`
 	Score   float64 `json:"score"`
 }
 
 // StreamEvent 描述 SSE 流式事件
 type StreamEvent struct {
-	Type       string          `json:"type"`
-	Content    string          `json:"content,omitempty"`
-	Sources    []SourceInfo    `json:"sources,omitempty"`
-	ToolCalls  []ToolCallInfo  `json:"tool_calls,omitempty"`
-	ToolResult *ToolResultInfo `json:"tool_result,omitempty"`
-	MessageID  string          `json:"message_id,omitempty"`
-	Done       bool            `json:"done"`
-	Error      string          `json:"error,omitempty"`
+	Type    string       `json:"type"`
+	Title   string       `json:"title,omitempty"`
+	Detail  string       `json:"detail,omitempty"`
+	Status  string       `json:"status,omitempty"`
+	Content string       `json:"content,omitempty"`
+	Sources []SourceInfo `json:"sources,omitempty"`
+	// citation 事件字段
+	CitationID       string `json:"citation_id,omitempty"`
+	CitationChunkID  string `json:"chunk_id,omitempty"`
+	CitationFileName string `json:"file_name,omitempty"`
+	CitationContent  string `json:"citation_content,omitempty"`
+	MessageID        string `json:"message_id,omitempty"`
+	Done             bool   `json:"done"`
+	Error            string `json:"error,omitempty"`
 }
 
-// ToolCallInfo 描述工具调用信息
-type ToolCallInfo struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Arguments string `json:"arguments,omitempty"`
-}
-
-// ToolResultInfo 描述工具执行结果
-type ToolResultInfo struct {
-	Name    string `json:"name"`
-	Content string `json:"content,omitempty"`
-	Error   string `json:"error,omitempty"`
+// CitationInfo 描述引用信息（前端 hover 用）
+type CitationInfo struct {
+	ChunkID  string `json:"chunk_id"`
+	FileName string `json:"file_name"`
+	Content  string `json:"content"`
 }
 
 // ReasoningStep 描述 Agent 推理步骤（用于持久化和历史回显）
 type ReasoningStep struct {
-	Type       string          `json:"type"`                  // "status" / "tool_call" / "tool_result"
-	Content    string          `json:"content,omitempty"`     // 状态描述 / 工具结果摘要
-	ToolCalls  []ToolCallInfo  `json:"tool_calls,omitempty"`  // 工具调用
-	ToolResult *ToolResultInfo `json:"tool_result,omitempty"` // 工具结果
+	Type    string `json:"type"`              // "thinking" / "tool_call" / "tool_result" / "warning"
+	Content string `json:"content,omitempty"` // 步骤标题
 }
 
 // ListSessionsResponse 描述会话列表响应

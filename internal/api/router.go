@@ -11,6 +11,7 @@ import (
 	"solvify-agent/internal/api/v1/storage"
 	"solvify-agent/internal/api/v1/user"
 	"solvify-agent/internal/middleware"
+	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
 )
@@ -37,6 +38,7 @@ func NewRouter(
 	documentSvc service.DocumentServiceInterface,
 	storageSvc service.StorageServiceInterface,
 	chatSvc service.ChatServiceInterface,
+	chunkRepo repository.ChunkRepository,
 ) *Router {
 	return &Router{
 		userCtrl:          user.NewController(userService),
@@ -44,7 +46,7 @@ func NewRouter(
 		modelCtrl:         model.NewController(modelService),
 		userModelCtrl:     model.NewUserModelController(userModelConfigService),
 		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseSvc),
-		documentCtrl:      document.NewController(documentSvc),
+		documentCtrl:      document.NewController(documentSvc, chunkRepo),
 		storageCtrl:       storage.NewController(storageSvc),
 		chatCtrl:          chat.NewController(chatSvc),
 	}
@@ -74,6 +76,7 @@ func (r *Router) Setup(engine *gin.Engine) {
 	r.documentCtrl.RegisterKnowledgeBaseRoutes(v1)
 	r.documentCtrl.RegisterDocumentRoutes(v1)
 	r.documentCtrl.RegisterDocumentJobRoutes(v1)
+	r.documentCtrl.RegisterChunkRoutes(v1)
 	r.storageCtrl.RegisterRoutes(v1)
 }
 
