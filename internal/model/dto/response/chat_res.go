@@ -45,15 +45,27 @@ type ChunkSource struct {
 
 // StreamEvent 描述 SSE 流式事件
 type StreamEvent struct {
-	Type      string       `json:"type"`
-	Title     string       `json:"title,omitempty"`
-	Detail    string       `json:"detail,omitempty"`
-	Status    string       `json:"status,omitempty"`
-	Content   string       `json:"content,omitempty"` // answer 事件的增量内容
-	Sources   []SourceInfo `json:"sources,omitempty"`
-	MessageID string       `json:"message_id,omitempty"`
-	Done      bool         `json:"done"`
-	Error     string       `json:"error,omitempty"`
+	Type    string       `json:"type"`
+	Title   string       `json:"title,omitempty"`
+	Detail  string       `json:"detail,omitempty"`
+	Status  string       `json:"status,omitempty"`
+	Content string       `json:"content,omitempty"`
+	Sources []SourceInfo `json:"sources,omitempty"`
+	// citation 事件字段
+	CitationID       string `json:"citation_id,omitempty"`
+	CitationChunkID  string `json:"chunk_id,omitempty"`
+	CitationFileName string `json:"file_name,omitempty"`
+	CitationContent  string `json:"citation_content,omitempty"`
+	MessageID        string `json:"message_id,omitempty"`
+	Done             bool   `json:"done"`
+	Error            string `json:"error,omitempty"`
+}
+
+// CitationInfo 描述引用信息（前端 hover 用）
+type CitationInfo struct {
+	ChunkID  string `json:"chunk_id"`
+	FileName string `json:"file_name"`
+	Content  string `json:"content"`
 }
 
 // ReasoningStep 描述 Agent 推理步骤（用于持久化和历史回显）

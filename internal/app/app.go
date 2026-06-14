@@ -217,9 +217,8 @@ func (a *App) initRetriever(embeddingFunc rag.EmbeddingFunc) rag.Retriever {
 
 // AgentComponents 持有 Agent 相关组件
 type AgentComponents struct {
-	Retriever    rag.Retriever
-	ToolRegistry *tool.Registry
-	AgentEngine  *agent.Engine
+	Retriever   rag.Retriever
+	AgentEngine *agent.Engine
 }
 
 // initAgentComponents 初始化 Agent 相关组件（Embedding、RAG、工具、Agent 引擎）
@@ -227,27 +226,24 @@ func (a *App) initAgentComponents() *AgentComponents {
 	embeddingFunc := a.initEmbedding()
 	vectorRetriever := a.initRetriever(embeddingFunc)
 
-	// 初始化 Tool Registry（注册所有内置工具）
-	toolRegistry := tool.NewRegistry()
-	toolRegistry.Register(tool.NewWebSearchTool(a.cfg.Tools.WebSearch.APIKey, a.cfg.Tools.WebSearch.BaseURL))
-	logger.Info("工具注册完成", zap.Int("count", len(toolRegistry.List())))
-
 	// knowledge_search 工厂：每次 Agent 请求创建带用户上下文的工具实例
 	ksFactory := agent.KnowledgeSearchFactory(func(userID string, kbIDs []string) *tool.KnowledgeSearchTool {
 		return tool.NewKnowledgeSearchTool(vectorRetriever).WithContext(userID, kbIDs)
 	})
 
-	// 初始化 Agent Engine
+	// web_search 工具
+	webSearchTool := tool.NewWebSearchTool(a.cfg.Tools.WebSearch.APIKey, a.cfg.Tools.WebSearch.BaseURL)
+
+	// 初始化 Agent Engine（eino ReAct Agent）
 	agentEngine := agent.NewEngine(
-		toolRegistry,
 		ksFactory,
+		webSearchTool,
 		a.cfg.Agent,
 	)
 
 	return &AgentComponents{
-		Retriever:    vectorRetriever,
-		ToolRegistry: toolRegistry,
-		AgentEngine:  agentEngine,
+		Retriever:   vectorRetriever,
+		AgentEngine: agentEngine,
 	}
 }
 
@@ -287,6 +283,7 @@ func (a *App) initDependencies() {
 	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, ai.AgentEngine)
 
 	// 路由
+	chunkRepo := repository.NewChunkRepository(a.postgresqlDB)
 	a.router = api.NewRouter(
 		userSvc,
 		authSvc,
@@ -295,7 +292,8 @@ func (a *App) initDependencies() {
 		knowledgeBaseSvc,
 		documentSvc,
 		storageSvc,
-		chatSvc)
+		chatSvc,
+		chunkRepo)
 }
 
 // prewarmModelClients 启动时预创建所有已启用系统模型的 LLM 客户端

@@ -156,22 +156,22 @@ func (s *chatService) GetMessages(ctx context.Context, userID, sessionID string)
 
 // ─── 共享内部方法 ───────────────────────────────────────────
 
-// initChatContext 并行初始化 LLM 客户端和加载历史对话
-func (s *chatService) initChatContext(ctx context.Context, userID, sessionID, modelID, modelType string, maxHistoryTokens int) (llm.Client, []entity.ChatMessage, error) {
+// initContext 并行加载模型客户端和历史对话，两种模式共用
+func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelID, modelType string, maxHistoryTokens int) (*llm.OpenAIClient, []entity.ChatMessage, error) {
 	t0 := time.Now()
-	var llmClient llm.Client
+	var client *llm.OpenAIClient
 	var history []entity.ChatMessage
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
 		t1 := time.Now()
-		client, err := s.resolveLLMClient(gctx, userID, modelID, modelType)
-		logger.Infof("[Timing] resolveLLMClient: modelID=%s, cost=%dms", modelID, time.Since(t1).Milliseconds())
+		c, err := s.resolveClient(gctx, userID, modelID, modelType)
+		logger.Infof("[Timing] resolveClient: modelID=%s, cost=%dms", modelID, time.Since(t1).Milliseconds())
 		if err != nil {
 			logger.Errorf("模型解析失败, modelID=%s, modelType=%s: %v", modelID, modelType, err)
 			return fmt.Errorf("模型配置无效或无权访问")
 		}
-		llmClient = client
+		client = c
 		return nil
 	})
 
@@ -191,8 +191,31 @@ func (s *chatService) initChatContext(ctx context.Context, userID, sessionID, mo
 	if err := g.Wait(); err != nil {
 		return nil, nil, err
 	}
-	logger.Infof("[Timing] initChatContext 总耗时: cost=%dms", time.Since(t0).Milliseconds())
-	return llmClient, history, nil
+	logger.Infof("[Timing] initContext 总耗时: cost=%dms", time.Since(t0).Milliseconds())
+	return client, history, nil
+}
+
+// resolveClient 根据模型配置解析 LLM 客户端
+func (s *chatService) resolveClient(ctx context.Context, userID, modelID, modelType string) (*llm.OpenAIClient, error) {
+	var cfg llm.ModelConfig
+	switch modelType {
+	case "user":
+		uc, err := s.userModelConfigRepo.GetByID(ctx, modelID, userID)
+		if err != nil {
+			return nil, fmt.Errorf("查询用户模型配置失败: %w", err)
+		}
+		cfg = llm.ModelConfig{Provider: uc.APIFormat, ModelID: uc.ModelID, BaseURL: uc.BaseURL, APIKey: uc.APIKey, Config: uc.Config}
+	case "system":
+		m, err := s.modelRepo.GetByID(ctx, modelID)
+		if err != nil {
+			return nil, fmt.Errorf("查询系统模型失败: %w", err)
+		}
+		cfg = llm.ModelConfig{Provider: m.Provider, ModelID: m.ModelID, BaseURL: m.BaseURL, APIKey: m.APIKey, Config: m.Config}
+	default:
+		return nil, fmt.Errorf("不支持的模型类型: %s", modelType)
+	}
+
+	return llm.NewClientFromModelConfig(ctx, cfg)
 }
 
 func (s *chatService) validateSession(ctx context.Context, userID, sessionID string) error {
@@ -234,45 +257,6 @@ func (s *chatService) saveAssistantMessage(ctx context.Context, sessionID, msgID
 		Metadata:         metadata,
 	}
 	return s.messageRepo.Create(ctx, &assistantMsg)
-}
-
-func (s *chatService) resolveLLMClient(ctx context.Context, userID, modelID, modelType string) (llm.Client, error) {
-	switch modelType {
-	case "user":
-		t0 := time.Now()
-		cfg, err := s.userModelConfigRepo.GetByID(ctx, modelID, userID)
-		logger.Infof("[Timing] userModelConfigRepo.GetByID: modelID=%s, cost=%dms", modelID, time.Since(t0).Milliseconds())
-		if err != nil {
-			return nil, fmt.Errorf("查询用户模型配置失败: %w", err)
-		}
-		t1 := time.Now()
-		client, err := llm.NewClientFromModelConfig(ctx, llm.ModelConfig{
-			Provider: cfg.APIFormat,
-			ModelID:  cfg.ModelID,
-			BaseURL:  cfg.BaseURL,
-			APIKey:   cfg.APIKey,
-		})
-		logger.Infof("[Timing] NewClientFromModelConfig(user): cost=%dms", time.Since(t1).Milliseconds())
-		return client, err
-	case "system":
-		t0 := time.Now()
-		model, err := s.modelRepo.GetByID(ctx, modelID)
-		logger.Infof("[Timing] modelRepo.GetByID: modelID=%s, cost=%dms", modelID, time.Since(t0).Milliseconds())
-		if err != nil {
-			return nil, fmt.Errorf("查询系统模型失败: %w", err)
-		}
-		t1 := time.Now()
-		client, err := llm.NewClientFromModelConfig(ctx, llm.ModelConfig{
-			Provider: model.Provider,
-			ModelID:  model.ModelID,
-			BaseURL:  model.BaseURL,
-			APIKey:   model.APIKey,
-		})
-		logger.Infof("[Timing] NewClientFromModelConfig(system): cost=%dms", time.Since(t1).Milliseconds())
-		return client, err
-	default:
-		return nil, fmt.Errorf("不支持的模型类型: %s", modelType)
-	}
 }
 
 // truncateHistoryByTokens 按 token 预算截断历史消息（从最新消息向前保留）
