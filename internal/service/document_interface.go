@@ -10,7 +10,7 @@ import (
 
 // DocumentServiceInterface 定义文档服务接口
 type DocumentServiceInterface interface {
-	Upload(ctx context.Context, userID, kbID string, fileHeader *multipart.FileHeader) (dto.DocumentResponse, error)
+	Upload(ctx context.Context, userID, kbID string, fileHeader *multipart.FileHeader) (dto.UploadDocumentResponse, error)
 	List(ctx context.Context, userID, kbID string) ([]dto.DocumentResponse, error)
 	Detail(ctx context.Context, userID, documentID string) (dto.DocumentResponse, error)
 	Delete(ctx context.Context, userID, documentID string) error

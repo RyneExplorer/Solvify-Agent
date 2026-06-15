@@ -22,6 +22,12 @@ type DocumentResponse struct {
 	DeleteExpiredAt *time.Time `json:"delete_expired_at"`
 }
 
+// UploadDocumentResponse 描述文档上传并触发处理响应
+type UploadDocumentResponse struct {
+	Document DocumentResponse              `json:"document"`
+	Job      DocumentProcessingJobResponse `json:"job"`
+}
+
 // DocumentVersionListItemResponse 描述文档版本列表项响应
 type DocumentVersionListItemResponse struct {
 	ID            string    `json:"id"`

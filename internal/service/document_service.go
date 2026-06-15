@@ -32,6 +32,7 @@ const (
 	documentJobTypeProcess   = "process"
 	documentJobTypeReindex   = "reindex"
 	documentJobStatusPending = 1
+	documentJobStatusRunning = 2
 	documentJobStatusSuccess = 3
 	documentJobStatusFailed  = 4
 
@@ -79,25 +80,25 @@ func NewDocumentServiceWithChunkService(
 	}
 }
 
-// Upload 上传文档并写入文档表
-func (s *documentService) Upload(ctx context.Context, userID, kbID string, fileHeader *multipart.FileHeader) (dto.DocumentResponse, error) {
+// Upload 上传文档并自动触发异步处理
+func (s *documentService) Upload(ctx context.Context, userID, kbID string, fileHeader *multipart.FileHeader) (dto.UploadDocumentResponse, error) {
 	if fileHeader == nil {
-		return dto.DocumentResponse{}, apperrors.New(apperrors.CodeBadRequest, "上传文件不能为空")
+		return dto.UploadDocumentResponse{}, apperrors.New(apperrors.CodeBadRequest, "上传文件不能为空")
 	}
 
 	// 1. 先校验知识库写入权限和文件业务约束
 	kb, err := s.findWritableKnowledgeBase(ctx, userID, kbID)
 	if err != nil {
-		return dto.DocumentResponse{}, err
+		return dto.UploadDocumentResponse{}, err
 	}
 	if err := s.validateFile(ctx, userID, kb.ID, fileHeader); err != nil {
-		return dto.DocumentResponse{}, err
+		return dto.UploadDocumentResponse{}, err
 	}
 
 	// 2. 文件保存成功后再创建文档记录，避免数据库记录指向不存在的文件
 	storagePath, fileHash, err := s.saveFile(userID, kb.ID, fileHeader)
 	if err != nil {
-		return dto.DocumentResponse{}, err
+		return dto.UploadDocumentResponse{}, err
 	}
 
 	doc := entity.Document{
@@ -115,14 +116,24 @@ func (s *documentService) Upload(ctx context.Context, userID, kbID string, fileH
 	}
 	if err := s.documentRepo.Create(ctx, &doc); err != nil {
 		_ = os.Remove(storagePath)
-		return dto.DocumentResponse{}, err
+		return dto.UploadDocumentResponse{}, err
 	}
 
 	// 3. 配额是上传业务的内部副作用，不单独开放写接口
 	if err := s.storageQuotaRepo.AddUsedStorage(ctx, userID, defaultMaxStorageBytes, fileHeader.Size); err != nil {
-		return dto.DocumentResponse{}, err
+		return dto.UploadDocumentResponse{}, err
 	}
-	return documentResponse(doc), nil
+
+	// 4. 上传完成后自动创建处理任务，用户无需再手动触发 process
+	job, err := s.createAsyncProcessJob(ctx, doc, []int{documentStatusUploaded})
+	if err != nil {
+		return dto.UploadDocumentResponse{}, err
+	}
+	doc.Status = documentStatusProcessing
+	return dto.UploadDocumentResponse{
+		Document: documentResponse(doc),
+		Job:      documentProcessingJobResponse(job),
+	}, nil
 }
 
 // List 查询知识库下文档列表
@@ -174,42 +185,56 @@ func (s *documentService) Process(ctx context.Context, userID, documentID string
 		return dto.DocumentProcessingJobResponse{}, apperrors.NewDefault(apperrors.CodeDocumentStatusInvalid)
 	}
 
+	job, err := s.createAsyncProcessJob(ctx, doc, []int{documentStatusUploaded, documentStatusFailed})
+	if err != nil {
+		return dto.DocumentProcessingJobResponse{}, err
+	}
+	return documentProcessingJobResponse(job), nil
+}
+
+// createAsyncProcessJob 创建异步处理任务并启动后台处理
+func (s *documentService) createAsyncProcessJob(ctx context.Context, doc entity.Document, allowedDocumentStatuses []int) (entity.DocumentProcessingJob, error) {
 	job := entity.DocumentProcessingJob{
 		ID:           uuid.NewString(),
-		UserID:       userID,
-		DocumentID:   documentID,
+		UserID:       doc.UserID,
+		DocumentID:   doc.ID,
 		JobType:      documentJobTypeProcess,
 		Status:       documentJobStatusPending,
 		ErrorMessage: "",
 	}
 
 	// 1. 创建任务和文档状态变更必须一起完成，避免任务存在但文档仍显示未处理
-	ok, err := s.documentJobRepo.CreateProcessJob(ctx, &job, []int{documentStatusUploaded, documentStatusFailed}, documentStatusProcessing)
+	ok, err := s.documentJobRepo.CreateProcessJob(ctx, &job, allowedDocumentStatuses, documentStatusProcessing)
 	if err != nil {
-		return dto.DocumentProcessingJobResponse{}, err
+		return entity.DocumentProcessingJob{}, err
 	}
 	if !ok {
-		return dto.DocumentProcessingJobResponse{}, apperrors.NewDefault(apperrors.CodeDocumentStatusInvalid)
+		return entity.DocumentProcessingJob{}, apperrors.NewDefault(apperrors.CodeDocumentStatusInvalid)
 	}
 
-	if err := s.processDocumentContent(ctx, doc, job.ID); err != nil {
-		finishedAt := time.Now()
-		errorMessage := err.Error()
-		if markErr := s.documentRepo.MarkProcessFailed(ctx, userID, documentID, job.ID, documentStatusFailed, documentJobStatusFailed, errorMessage, finishedAt); markErr != nil {
-			return dto.DocumentProcessingJobResponse{}, markErr
-		}
-		job.Status = documentJobStatusFailed
-		job.ErrorMessage = errorMessage
-		job.StartedAt = &finishedAt
-		job.FinishedAt = &finishedAt
-		return documentProcessingJobResponse(job), nil
+	go s.runProcessJob(doc, job.ID)
+	return job, nil
+}
+
+// runProcessJob 异步执行文档处理任务
+func (s *documentService) runProcessJob(doc entity.Document, jobID string) {
+	ctx := context.Background()
+	startedAt := time.Now()
+
+	// 1. 先把任务从待处理推进到运行中，避免后台处理状态和任务状态脱节
+	ok, err := s.documentJobRepo.MarkRunning(ctx, doc.UserID, jobID, documentJobStatusPending, documentJobStatusRunning, startedAt)
+	if err != nil {
+		_ = s.documentRepo.MarkProcessFailed(ctx, doc.UserID, doc.ID, jobID, documentStatusFailed, documentJobStatusFailed, "文档处理任务启动失败", time.Now())
+		return
+	}
+	if !ok {
+		return
 	}
 
-	finishedAt := time.Now()
-	job.Status = documentJobStatusSuccess
-	job.StartedAt = &finishedAt
-	job.FinishedAt = &finishedAt
-	return documentProcessingJobResponse(job), nil
+	// 2. 后台处理失败时只更新文档和任务状态，HTTP 请求已提前返回
+	if err := s.processDocumentContent(ctx, doc, jobID); err != nil {
+		_ = s.documentRepo.MarkProcessFailed(ctx, doc.UserID, doc.ID, jobID, documentStatusFailed, documentJobStatusFailed, err.Error(), time.Now())
+	}
 }
 
 // ListJobs 查询文档处理任务列表

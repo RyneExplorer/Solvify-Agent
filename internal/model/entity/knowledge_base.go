@@ -10,7 +10,7 @@ type KnowledgeBase struct {
 	Category        string     `gorm:"column:category;type:varchar(128);not null;default:''"`
 	Description     string     `gorm:"column:description"`
 	SourceType      string     `gorm:"column:source_type;type:varchar(32);not null;default:local"`
-	SourcePlatform  string     `gorm:"column:source_platform;size:32;not null;default:''"`
+	SourcePlatform  string     `gorm:"column:source_platform;type:varchar(255);not null;default:''"`
 	DocumentCount   int        `gorm:"column:document_count;not null;default:0"`
 	StorageBytes    int64      `gorm:"column:storage_bytes;not null;default:0"`
 	Status          int        `gorm:"column:status;not null;default:1"`
