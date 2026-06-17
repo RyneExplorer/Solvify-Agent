@@ -9,6 +9,7 @@ import (
 	"solvify-agent/internal/api/v1/knowledgebase"
 	"solvify-agent/internal/api/v1/model"
 	"solvify-agent/internal/api/v1/storage"
+	"solvify-agent/internal/api/v1/tool"
 	"solvify-agent/internal/api/v1/user"
 	"solvify-agent/internal/middleware"
 	"solvify-agent/internal/repository"
@@ -26,6 +27,7 @@ type Router struct {
 	modelCtrl         *model.Controller
 	userModelCtrl     *model.UserModelController
 	chatCtrl          *chat.Controller
+	toolCtrl          *tool.Controller
 }
 
 // NewRouter 创建 API 路由聚合器
@@ -39,6 +41,9 @@ func NewRouter(
 	storageSvc service.StorageServiceInterface,
 	chatSvc service.ChatServiceInterface,
 	chunkRepo repository.ChunkRepository,
+	toolTypeService service.ToolTypeService,
+	toolProviderService service.ToolProviderService,
+	userToolConfigService service.UserToolConfigService,
 ) *Router {
 	return &Router{
 		userCtrl:          user.NewController(userService),
@@ -49,6 +54,7 @@ func NewRouter(
 		documentCtrl:      document.NewController(documentSvc, chunkRepo),
 		storageCtrl:       storage.NewController(storageSvc),
 		chatCtrl:          chat.NewController(chatSvc),
+		toolCtrl:          tool.NewController(toolTypeService, toolProviderService, userToolConfigService),
 	}
 }
 
@@ -78,6 +84,7 @@ func (r *Router) Setup(engine *gin.Engine) {
 	r.documentCtrl.RegisterDocumentJobRoutes(v1)
 	r.documentCtrl.RegisterChunkRoutes(v1)
 	r.storageCtrl.RegisterRoutes(v1)
+	r.toolCtrl.RegisterRoutes(user)
 }
 
 // health 返回服务健康状态

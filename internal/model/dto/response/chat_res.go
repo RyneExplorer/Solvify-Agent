@@ -70,8 +70,10 @@ type CitationInfo struct {
 
 // ReasoningStep 描述 Agent 推理步骤（用于持久化和历史回显）
 type ReasoningStep struct {
-	Type    string `json:"type"`              // "thinking" / "tool_call" / "tool_result" / "warning"
+	Type    string `json:"type"`              // "thinking" / "tool_call" / "tool_result" / "plan" / "warning"
 	Content string `json:"content,omitempty"` // 步骤标题
+	Detail  string `json:"detail,omitempty"`  // 步骤详情（如工具查询关键词、检索结果摘要、计划描述等）
+	Status  string `json:"status,omitempty"`  // 步骤状态 "running" / "success" / "error"
 }
 
 // ListSessionsResponse 描述会话列表响应
