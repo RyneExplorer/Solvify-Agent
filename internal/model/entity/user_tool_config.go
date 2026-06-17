@@ -31,6 +31,6 @@ func (c *UserToolConfig) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
-func (UserToolConfig) TableName() string {
+func (*UserToolConfig) TableName() string {
 	return "user_tool_configs"
 }

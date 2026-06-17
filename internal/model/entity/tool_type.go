@@ -26,6 +26,6 @@ func (t *ToolType) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
-func (ToolType) TableName() string {
+func (*ToolType) TableName() string {
 	return "tool_types"
 }

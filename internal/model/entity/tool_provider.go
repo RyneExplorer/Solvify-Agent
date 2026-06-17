@@ -32,6 +32,6 @@ func (p *ToolProvider) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
-func (ToolProvider) TableName() string {
+func (*ToolProvider) TableName() string {
 	return "tool_providers"
 }
