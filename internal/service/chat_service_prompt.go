@@ -10,11 +10,11 @@ import (
 )
 
 const (
-	maxContextChars       = 3000 // 检索结果最大字符数，防止超出模型上下文窗口
-	maxRewriteHistoryChar = 200  // 改写 prompt 中每条历史消息最大字符数
+	maxContextChars = 2000 // 检索结果最大字符数，防止超出模型上下文窗口
 )
 
-// buildRewritePrompt 组装查询改写 Prompt（取最近 5 条消息）
+// buildRewritePrompt 组装查询改写 Prompt
+// 历史消息已在 service 层按 token 预算截断，此处直接使用
 func buildRewritePrompt(history []entity.ChatMessage, question string) []*schema.Message {
 	systemPrompt := `你是一个查询改写助手。根据历史对话，将用户最新的问题改写为独立的、完整的检索查询。
 
@@ -24,22 +24,13 @@ func buildRewritePrompt(history []entity.ChatMessage, question string) []*schema
 3. 如果问题已经是独立完整的，直接返回原问题
 4. 只输出改写后的查询，不要输出任何解释`
 
-	start := 0
-	if len(history) > 5 {
-		start = len(history) - 5
-	}
-
 	var historyText string
-	for _, msg := range history[start:] {
-		content := msg.Content
-		if len(content) > maxRewriteHistoryChar {
-			content = content[:maxRewriteHistoryChar] + "..."
-		}
+	for _, msg := range history {
 		switch msg.Role {
 		case "user":
-			historyText += "用户: " + content + "\n"
+			historyText += "用户: " + msg.Content + "\n"
 		case "assistant":
-			historyText += "助手: " + content + "\n"
+			historyText += "助手: " + msg.Content + "\n"
 		}
 	}
 

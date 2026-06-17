@@ -149,11 +149,19 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	vr := <-vectorCh
 	kr := <-keywordCh
 
+	// 向量检索失败时降级：仅用关键词结果，不阻断检索
 	if vr.err != nil {
-		return Result{}, fmt.Errorf("向量检索失败: %w", vr.err)
+		logger.Warnf("向量检索失败，降级为纯关键词检索: %v", vr.err)
+		vr.docs = nil // 清空，后续只用关键词结果
 	}
 	if kr.err != nil {
-		return Result{}, fmt.Errorf("关键词检索失败: %w", kr.err)
+		logger.Warnf("关键词检索失败，降级为纯向量检索: %v", kr.err)
+		kr.docs = nil
+	}
+
+	// 两种检索都失败才报错
+	if vr.err != nil && kr.err != nil {
+		return Result{}, fmt.Errorf("混合检索完全失败: 向量(%v), 关键词(%v)", vr.err, kr.err)
 	}
 
 	logger.Infof("向量检索命中: %d 条, 关键词检索命中: %d 条", len(vr.docs), len(kr.docs))
@@ -242,6 +250,7 @@ func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scor
 }
 
 // keywordSearch 执行关键词检索
+// 优化：GIN 索引加速 && overlap 过滤（主收益），unnest 仅对过滤后的少量行计算分数
 func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]scoredChunk, error) {
 	// 从问题中提取关键词（简单的分词策略）
 	keywords := extractKeywords(query.Question)
@@ -251,8 +260,6 @@ func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]sco
 
 	topK := query.TopK * 2 // 多召回一些用于融合
 
-	// 使用 PostgreSQL 数组操作符进行关键词匹配
-	// 使用 && 操作符检查数组是否有交集
 	var results []scoredChunk
 
 	// 构建关键词数组字面量
@@ -269,9 +276,10 @@ func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]sco
 				dc.chunk_index,
 				COALESCE(d.title, '') as title,
 				dc.content,
-				-- 计算关键词匹配分数：匹配的关键词越多，分数越高
+				-- 计算匹配关键词占比：匹配数 / 查询关键词总数
+				-- unnest 仅在 && 过滤后的少量行上执行，GIN 索引保证过滤极快
 				(
-					SELECT COUNT(*)::float / GREATEST(array_length(?::text[], 1), 1)
+					SELECT COUNT(*)::float / GREATEST(cardinality(?::text[]), 1)
 					FROM unnest(dc.keywords) AS kw
 					WHERE kw = ANY(?::text[])
 				) AS score,
@@ -280,7 +288,7 @@ func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]sco
 			LEFT JOIN documents d ON d.id = dc.document_id
 			WHERE dc.knowledge_base_id IN (?)
 				AND dc.keywords IS NOT NULL
-				AND dc.keywords && ?::text[]
+				AND dc.keywords && ?::text[]    -- GIN 索引加速：先快速过滤有交集的 chunk
 				AND dc.user_id = ?
 			ORDER BY score DESC
 			LIMIT ?

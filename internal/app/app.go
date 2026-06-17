@@ -20,11 +20,11 @@ import (
 	"solvify-agent/internal/api"
 	"solvify-agent/internal/llm"
 	"solvify-agent/internal/middleware"
-	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
 	"solvify-agent/internal/tool"
+	"solvify-agent/internal/tool/providers"
 	"solvify-agent/pkg/cache"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/database"
@@ -119,21 +119,24 @@ func (a *App) initDatabase() error {
 	}
 	a.postgresqlDB = postgresqlDB
 
-	// 自动迁移数据库表结构
-	if err := postgresqlDB.AutoMigrate(
-		&entity.Model{},
-		&entity.UserModelConfig{},
-		&entity.KnowledgeBase{},
-		&entity.StorageQuota{},
-		&entity.Document{},
-		&entity.DocumentProcessingJob{},
-		&entity.DocumentVersion{},
-		&entity.DocumentChunk{},
-		&entity.ChatSession{},
-		&entity.ChatMessage{},
-	); err != nil {
-		return fmt.Errorf("数据库自动迁移失败: %w", err)
-	}
+	//// 自动迁移数据库表结构
+	//if err := postgresqlDB.AutoMigrate(
+	//	&entity.Model{},
+	//	&entity.UserModelConfig{},
+	//	&entity.KnowledgeBase{},
+	//	&entity.StorageQuota{},
+	//	&entity.Document{},
+	//	&entity.DocumentProcessingJob{},
+	//	&entity.DocumentVersion{},
+	//	&entity.DocumentChunk{},
+	//	&entity.ChatSession{},
+	//	&entity.ChatMessage{},
+	//	&entity.ToolType{},
+	//	&entity.ToolProvider{},
+	//	&entity.UserToolConfig{},
+	//); err != nil {
+	//	return fmt.Errorf("数据库自动迁移失败: %w", err)
+	//}
 
 	// redis
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
@@ -153,8 +156,8 @@ func (a *App) ensureStorageQuotaUniqueIndex(db *gorm.DB) error {
 	return nil
 }
 
-// initAIDependencies 初始化 Embedding 和 RAG 检索器（含可选装饰器链）
-func (a *App) initAIDependencies() rag.Retriever {
+// initEmbedding 初始化 Embedding 客户端，返回带缓存的向量化函数
+func (a *App) initEmbedding() rag.EmbeddingFunc {
 
 	embeddingClient, err := llm.NewEmbeddingClientFromConfig(context.Background(), &a.cfg.Embedding)
 	if err != nil {
@@ -164,7 +167,7 @@ func (a *App) initAIDependencies() rag.Retriever {
 	// Embedding 缓存（相同文本 → 相同向量，缓存 24 小时）
 	embeddingCache := cache.New(a.redis, "emb:", 24*time.Hour)
 
-	embeddingFunc := func(ctx context.Context, text string) ([]float64, error) {
+	return func(ctx context.Context, text string) ([]float64, error) {
 		cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
 		var vec []float64
 		if found, _ := embeddingCache.Get(ctx, cacheKey, &vec); found {
@@ -185,7 +188,10 @@ func (a *App) initAIDependencies() rag.Retriever {
 		}
 		return vec, nil
 	}
+}
 
+// initRetriever 初始化 RAG 检索器（混合检索 + 可选装饰器链）
+func (a *App) initRetriever(embeddingFunc rag.EmbeddingFunc) rag.Retriever {
 	// 使用混合检索器（向量 + 关键词 + RRF 融合）
 	var retriever rag.Retriever = rag.NewHybridRetriever(rag.HybridRetrieverConfig{
 		DB:             a.postgresqlDB,
@@ -208,43 +214,37 @@ func (a *App) initAIDependencies() rag.Retriever {
 		logger.Info("相邻分块扩展已启用")
 	}
 
-	logger.Info("AI 依赖初始化完成")
+	logger.Info("RAG 检索器初始化完成")
 	return retriever
 }
 
 // AgentComponents 持有 Agent 相关组件
 type AgentComponents struct {
-	Retriever    rag.Retriever
-	ToolRegistry *tool.Registry
-	AgentEngine  *agent.Engine
+	Retriever   rag.Retriever
+	AgentEngine *agent.Engine
 }
 
 // initAgentComponents 初始化 Agent 相关组件（Embedding、RAG、工具、Agent 引擎）
-func (a *App) initAgentComponents() *AgentComponents {
-	vectorRetriever := a.initAIDependencies()
-
-	// 初始化 Tool Registry（只注册全局工具，knowledge_search 由 Agent 按请求动态创建）
-	toolRegistry := tool.NewRegistry()
-	toolRegistry.Register(tool.NewFinalAnswerTool())
-	toolRegistry.Register(tool.NewWebSearchTool("", ""))
-	logger.Info("工具注册完成", zap.Int("count", len(toolRegistry.List())))
+func (a *App) initAgentComponents(toolFactory tool.ToolFactory) *AgentComponents {
+	embeddingFunc := a.initEmbedding()
+	vectorRetriever := a.initRetriever(embeddingFunc)
 
 	// knowledge_search 工厂：每次 Agent 请求创建带用户上下文的工具实例
 	ksFactory := agent.KnowledgeSearchFactory(func(userID string, kbIDs []string) *tool.KnowledgeSearchTool {
 		return tool.NewKnowledgeSearchTool(vectorRetriever).WithContext(userID, kbIDs)
 	})
 
-	// 初始化 Agent Engine
+	// 初始化 Agent Engine（eino ReAct Agent）
+	// 用户配置的工具（web_search 等）通过 ToolFactory 从 DB/Redis 动态加载
 	agentEngine := agent.NewEngine(
-		toolRegistry,
 		ksFactory,
+		toolFactory,
 		a.cfg.Agent,
 	)
 
 	return &AgentComponents{
-		Retriever:    vectorRetriever,
-		ToolRegistry: toolRegistry,
-		AgentEngine:  agentEngine,
+		Retriever:   vectorRetriever,
+		AgentEngine: agentEngine,
 	}
 }
 
@@ -256,6 +256,7 @@ func (a *App) initDependencies() {
 	documentVersionRepo := repository.NewDocumentVersionRepository(a.postgresqlDB)
 	documentJobRepo := repository.NewDocumentProcessingJobRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
+	userRepo := repository.NewUserRepository(a.postgresqlDB)
 
 	// 模型配置缓存（10 分钟 TTL）
 	modelCache := cache.New(a.redis, "model:", 10*time.Minute)
@@ -263,12 +264,33 @@ func (a *App) initDependencies() {
 	userModelConfigRepo := repository.NewCachedUserModelConfigRepository(repository.NewUserModelConfigRepository(a.postgresqlDB), modelCache)
 	chatSessionRepo := repository.NewChatSessionRepository(a.postgresqlDB)
 	chatMessageRepo := repository.NewChatMessageRepository(a.postgresqlDB)
+	// 工具配置——原始仓库
+	toolTypeRepo := repository.NewToolTypeRepository(a.postgresqlDB)
+	toolProviderRepo := repository.NewToolProviderRepository(a.postgresqlDB)
+	rawUserToolConfigRepo := repository.NewUserToolConfigRepository(a.postgresqlDB)
+
+	// Redis 缓存（写时失效，10 分钟 TTL 兜底）
+	toolTypeCache := cache.New(a.redis, "tool:type:", 10*time.Minute)
+	toolConfigCache := cache.New(a.redis, "tool:config:", 10*time.Minute)
+
+	// 缓存装饰器
+	cachedToolTypeRepo := repository.NewCachedToolTypeRepository(toolTypeRepo, toolTypeCache)
+	cachedUserToolConfigRepo := repository.NewCachedUserToolConfigRepository(rawUserToolConfigRepo, toolConfigCache)
 
 	// 预热所有已启用系统模型的 LLM 客户端（消除首次请求冷启动）
 	a.prewarmModelClients(modelRepo)
 
-	// 初始化 Agent 组件
-	ai := a.initAgentComponents()
+	// 初始化工具 Provider 注册表——开发阶段注册已实现的 Provider
+	toolRegistry := tool.NewProviderRegistry()
+	toolRegistry.Register("http_get", providers.NewHTTPGetProvider())   // GET 请求——参数拼 URL
+	toolRegistry.Register("http_post", providers.NewHTTPPostProvider()) // POST 请求——参数 JSON body
+	toolRegistry.Register("bocha", providers.NewBochaProvider())        // 博查 AI 搜索——POST JSON + Bearer 鉴权
+
+	// ToolFactory——Agent 引擎从 DB/Redis 加载用户配置的工具
+	toolFactory := tool.NewFactory(toolRegistry, cachedUserToolConfigRepo, cachedToolTypeRepo)
+
+	// 初始化 Agent 组件（传入 ToolFactory 替换硬编码的 WebSearchTool）
+	ai := a.initAgentComponents(toolFactory)
 
 	// 初始化 Service
 	userSvc := service.NewUserService(userRepo)
@@ -281,8 +303,13 @@ func (a *App) initDependencies() {
 	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentVersionRepo, documentJobRepo, storageQuotaRepo, documentChunkSvc, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, ai.AgentEngine)
+	// 工具 Service（用缓存仓库，写入自动失效）
+	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo)
+	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry)
+	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo)
 
 	// 路由
+	chunkRepo := repository.NewChunkRepository(a.postgresqlDB)
 	a.router = api.NewRouter(
 		userSvc,
 		authSvc,
@@ -291,7 +318,11 @@ func (a *App) initDependencies() {
 		knowledgeBaseSvc,
 		documentSvc,
 		storageSvc,
-		chatSvc)
+		chatSvc,
+		chunkRepo,
+		toolTypeService,
+		toolProviderService,
+		userToolConfigService)
 }
 
 // prewarmModelClients 启动时预创建所有已启用系统模型的 LLM 客户端

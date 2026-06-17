@@ -64,6 +64,12 @@ const (
 	CodeKnowledgeBaseReadonly   = 9006
 	CodeDocumentStatusInvalid   = 9007
 	CodeDocumentJobNotFound     = 9008
+
+	// 工具管理错误 10xxx
+	CodeToolTypeExists       = 10001
+	CodeToolTypeNotFound     = 10002
+	CodeToolProviderExists   = 10003
+	CodeToolProviderNotFound = 10004
 )
 
 var codeMessages = map[int]string{
@@ -107,12 +113,17 @@ var codeMessages = map[int]string{
 	CodeKnowledgeBaseReadonly:   "当前知识库不允许上传文档",
 	CodeDocumentStatusInvalid:   "当前文档状态不允许处理",
 	CodeDocumentJobNotFound:     "文档处理任务不存在",
-	CodeModelConfigExists:       "模型配置已存在",
-	CodeModelConfigNotFound:     "模型配置不存在",
-	CodeModelExists:             "系统模型已存在",
 
-	CodeSessionNotFound: "会话不存在",
-	CodeSessionClosed:   "会话已关闭",
+	CodeSessionNotFound:     "会话不存在",
+	CodeSessionClosed:       "会话已关闭",
+	CodeModelConfigExists:   "模型配置已存在",
+	CodeModelConfigNotFound: "模型配置不存在",
+	CodeModelExists:         "系统模型已存在",
+
+	CodeToolTypeExists:       "工具类型已存在",
+	CodeToolTypeNotFound:     "工具类型不存在",
+	CodeToolProviderExists:   "工具供应商已存在",
+	CodeToolProviderNotFound: "工具供应商不存在",
 }
 
 // GetMessage 获取错误码对应的文本消息

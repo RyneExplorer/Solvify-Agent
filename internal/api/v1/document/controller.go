@@ -5,6 +5,7 @@ import (
 
 	apiv1 "solvify-agent/internal/api/v1"
 	requestdto "solvify-agent/internal/model/dto/request"
+	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
 )
@@ -12,11 +13,12 @@ import (
 // Controller 处理文档模块请求
 type Controller struct {
 	documentService service.DocumentServiceInterface
+	chunkRepo       repository.ChunkRepository
 }
 
 // NewController 创建文档控制器
-func NewController(documentService service.DocumentServiceInterface) *Controller {
-	return &Controller{documentService: documentService}
+func NewController(documentService service.DocumentServiceInterface, chunkRepo repository.ChunkRepository) *Controller {
+	return &Controller{documentService: documentService, chunkRepo: chunkRepo}
 }
 
 // Upload 上传文档到指定知识库
@@ -192,6 +194,32 @@ func (ctrl *Controller) Reindex(c *gin.Context) {
 		return
 	}
 	response.Success(c, output)
+}
+
+// ChunkDetail 查询 chunk 详情（用于引用预览）
+func (ctrl *Controller) ChunkDetail(c *gin.Context) {
+	chunkID := c.Param("id")
+	if chunkID == "" {
+		response.BadRequest(c, "chunk ID 不能为空")
+		return
+	}
+
+	chunk, found, err := ctrl.chunkRepo.FindByID(c.Request.Context(), chunkID)
+	if err != nil {
+		response.InternalError(c, "查询 chunk 失败")
+		return
+	}
+	if !found {
+		response.NotFound(c, "chunk 不存在")
+		return
+	}
+
+	response.Success(c, gin.H{
+		"id":            chunk.ID,
+		"content":       chunk.Content,
+		"section_title": chunk.SectionTitle,
+		"document_id":   chunk.DocumentID,
+	})
 }
 
 // userAndKnowledgeBaseID 读取当前用户和知识库 ID

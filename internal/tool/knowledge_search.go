@@ -6,15 +6,28 @@ import (
 	"fmt"
 	"strings"
 
+	einoTool "github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
+	"github.com/eino-contrib/jsonschema"
+
+	orderedmap "github.com/wk8/go-ordered-map/v2"
+
 	"solvify-agent/internal/rag"
 	"solvify-agent/pkg/config"
+	"solvify-agent/pkg/logger"
 )
 
 // KnowledgeSearchTool 知识库语义搜索工具
+// 直接实现 eino tool.InvokableTool 接口
 type KnowledgeSearchTool struct {
 	retriever rag.Retriever
 	userID    string
 	kbIDs     []string
+
+	// CollectedSources 记录本次请求中所有检索命中的来源（Agent 结束后读取）
+	CollectedSources []SourceDocument
+	// SearchCount 记录搜索次数
+	SearchCount int
 }
 
 // NewKnowledgeSearchTool 创建知识库搜索工具
@@ -31,48 +44,31 @@ func (t *KnowledgeSearchTool) WithContext(userID string, kbIDs []string) *Knowle
 	}
 }
 
-func (t *KnowledgeSearchTool) Name() string {
-	return "knowledge_search"
+// Info 返回工具元数据，供 ChatModel 决定何时调用
+func (t *KnowledgeSearchTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: "knowledge_search",
+		Desc: "语义向量搜索知识库，返回相关文档片段。当需要从知识库中查找信息时使用。",
+		ParamsOneOf: schema.NewParamsOneOfByJSONSchema(&jsonschema.Schema{
+			Type:       "object",
+			Properties: buildProperties("query", "string", "搜索查询文本"),
+			Required:   []string{"query"},
+		}),
+	}, nil
 }
 
-func (t *KnowledgeSearchTool) Description() string {
-	return "语义向量搜索知识库，返回相关文档片段。当需要从知识库中查找信息时使用。"
-}
-
-func (t *KnowledgeSearchTool) Parameters() map[string]any {
-	return map[string]any{
-		"query": map[string]any{
-			"type":        "string",
-			"description": "搜索查询文本",
-			"required":    true,
-		},
-	}
-}
-
-// SearchResult 知识库搜索结果（同时包含内容和来源元数据）
-type SearchResult struct {
-	Content string           `json:"content"`
-	Sources []SourceDocument `json:"sources"`
-}
-
-// SourceDocument 来源文档信息
-type SourceDocument struct {
-	DocumentID      string  `json:"document_id"`
-	KnowledgeBaseID string  `json:"knowledge_base_id"`
-	Title           string  `json:"title"`
-	Score           float64 `json:"score"`
-	Content         string  `json:"content"`
-}
-
-func (t *KnowledgeSearchTool) Execute(ctx context.Context, args string) (string, error) {
+// InvokableRun 执行知识库搜索
+// 注意：即使检索失败也返回字符串结果（而非 Go error），
+// 这样 LLM 可以看到失败信息并自行决定如何处理（如用已有知识回答）
+func (t *KnowledgeSearchTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...einoTool.Option) (string, error) {
 	var params struct {
 		Query string `json:"query"`
 	}
-	if err := json.Unmarshal([]byte(args), &params); err != nil {
-		return "", fmt.Errorf("参数解析失败: %w", err)
+	if err := json.Unmarshal([]byte(argumentsInJSON), &params); err != nil {
+		return fmt.Sprintf("参数解析失败: %v", err), nil
 	}
 	if params.Query == "" {
-		return "", fmt.Errorf("query 参数不能为空")
+		return "query 参数不能为空", nil
 	}
 
 	result, err := t.retriever.Retrieve(ctx, rag.Query{
@@ -82,7 +78,8 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args string) (string,
 		UserID:           t.userID,
 	})
 	if err != nil {
-		return "", fmt.Errorf("知识库检索失败: %w", err)
+		logger.Errorf("知识库检索异常: query=%q, err=%v", params.Query, err)
+		return fmt.Sprintf("知识库检索暂时不可用（%v），请基于你已有的知识回答用户问题。", err), nil
 	}
 
 	if !result.Hit || len(result.Documents) == 0 {
@@ -91,9 +88,13 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args string) (string,
 
 	var contentBuilder strings.Builder
 	var sources []SourceDocument
-	for i, doc := range result.Documents {
-		contentBuilder.WriteString(fmt.Sprintf("[%d] %s\n%s\n\n", i+1, doc.Title, doc.Content))
+	contentBuilder.WriteString("根据以下参考资料回答。\n")
+	contentBuilder.WriteString("回答时必须在句末插入引用标签，格式为 <kb doc=\"文档名\" chunk_id=\"真实ID\" />。\n")
+	contentBuilder.WriteString("【禁止】把以下原文复制到回答中。\n\n")
+	for _, doc := range result.Documents {
+		contentBuilder.WriteString(fmt.Sprintf("[chunk_id=%s] %s: %s\n\n", doc.ID, doc.Title, truncateRunes(doc.Content, 150)))
 		sources = append(sources, SourceDocument{
+			ID:              doc.ID,
 			DocumentID:      doc.DocumentID,
 			KnowledgeBaseID: doc.KnowledgeBaseID,
 			Title:           doc.Title,
@@ -102,10 +103,49 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args string) (string,
 		})
 	}
 
+	// 记录来源（Agent 结束后从 CollectedSources 读取）
+	t.CollectedSources = append(t.CollectedSources, sources...)
+	t.SearchCount++
+
 	searchResult := SearchResult{
 		Content: contentBuilder.String(),
 		Sources: sources,
 	}
 	data, _ := json.Marshal(searchResult)
 	return string(data), nil
+}
+
+// SearchResult 知识库搜索结果
+type SearchResult struct {
+	Content string           `json:"content"`
+	Sources []SourceDocument `json:"sources"`
+}
+
+// SourceDocument 来源文档信息
+type SourceDocument struct {
+	ID              string  `json:"id"` // chunk_id，如 chunk_17
+	DocumentID      string  `json:"document_id"`
+	KnowledgeBaseID string  `json:"knowledge_base_id"`
+	Title           string  `json:"title"`
+	Score           float64 `json:"score"`
+	Content         string  `json:"content"`
+}
+
+// truncateRunes 截断字符串到指定 rune 长度
+func truncateRunes(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen]) + "..."
+}
+
+// buildProperties 构建单个属性的 JSON Schema ordered map
+func buildProperties(name, propType, desc string) *orderedmap.OrderedMap[string, *jsonschema.Schema] {
+	props := jsonschema.NewProperties()
+	props.Set(name, &jsonschema.Schema{
+		Type:        propType,
+		Description: desc,
+	})
+	return props
 }

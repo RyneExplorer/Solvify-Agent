@@ -16,6 +16,7 @@ type ModelConfig struct {
 	ModelID  string
 	BaseURL  string
 	APIKey   string
+	Config   []byte // entity.Model.Config 或 entity.UserModelConfig.Config 的原始 JSON
 }
 
 // clientCacheKey 用于缓存 key
@@ -23,20 +24,19 @@ type clientCacheKey struct {
 	BaseURL string
 	APIKey  string
 	ModelID string
+	Config  string // 序列化后的配置，确保不同配置不复用
 }
 
 var llmClientCache sync.Map
 
 // NewClientFromModelConfig 根据模型配置动态创建 LLM 客户端（带缓存）
-func NewClientFromModelConfig(ctx context.Context, cfg ModelConfig) (Client, error) {
+func NewClientFromModelConfig(ctx context.Context, cfg ModelConfig) (*OpenAIClient, error) {
 	switch cfg.Provider {
-	case "mock":
-		return NewMockClient(cfg.ModelID), nil
 	case "openai", "deepseek", "zhipu", "tongyi":
-		key := clientCacheKey{BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, ModelID: cfg.ModelID}
+		key := clientCacheKey{BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, ModelID: cfg.ModelID, Config: string(cfg.Config)}
 		if cached, ok := llmClientCache.Load(key); ok {
 			logger.Infof("[LLM] 客户端缓存命中: modelID=%s", cfg.ModelID)
-			return cached.(Client), nil
+			return cached.(*OpenAIClient), nil
 		}
 		logger.Infof("[LLM] 客户端缓存未命中: modelID=%s, 创建新客户端...", cfg.ModelID)
 		t0 := time.Now()
@@ -44,6 +44,7 @@ func NewClientFromModelConfig(ctx context.Context, cfg ModelConfig) (Client, err
 			APIKey:  cfg.APIKey,
 			BaseURL: cfg.BaseURL,
 			Model:   cfg.ModelID,
+			Config:  cfg.Config,
 		})
 		logger.Infof("[LLM] 创建客户端耗时: modelID=%s, cost=%dms", cfg.ModelID, time.Since(t0).Milliseconds())
 		if err != nil {

@@ -3,14 +3,16 @@ package api
 import (
 	"github.com/gin-gonic/gin"
 
-	"solvify-agent/internal/api/v1/chat"
 	"solvify-agent/internal/api/v1/auth"
+	"solvify-agent/internal/api/v1/chat"
 	"solvify-agent/internal/api/v1/document"
 	"solvify-agent/internal/api/v1/knowledgebase"
 	"solvify-agent/internal/api/v1/model"
 	"solvify-agent/internal/api/v1/storage"
+	"solvify-agent/internal/api/v1/tool"
 	"solvify-agent/internal/api/v1/user"
 	"solvify-agent/internal/middleware"
+	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
 )
@@ -25,6 +27,7 @@ type Router struct {
 	modelCtrl         *model.Controller
 	userModelCtrl     *model.UserModelController
 	chatCtrl          *chat.Controller
+	toolCtrl          *tool.Controller
 }
 
 // NewRouter 创建 API 路由聚合器
@@ -37,6 +40,10 @@ func NewRouter(
 	documentSvc service.DocumentServiceInterface,
 	storageSvc service.StorageServiceInterface,
 	chatSvc service.ChatServiceInterface,
+	chunkRepo repository.ChunkRepository,
+	toolTypeService service.ToolTypeService,
+	toolProviderService service.ToolProviderService,
+	userToolConfigService service.UserToolConfigService,
 ) *Router {
 	return &Router{
 		userCtrl:          user.NewController(userService),
@@ -44,9 +51,10 @@ func NewRouter(
 		modelCtrl:         model.NewController(modelService),
 		userModelCtrl:     model.NewUserModelController(userModelConfigService),
 		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseSvc),
-		documentCtrl:      document.NewController(documentSvc),
+		documentCtrl:      document.NewController(documentSvc, chunkRepo),
 		storageCtrl:       storage.NewController(storageSvc),
 		chatCtrl:          chat.NewController(chatSvc),
+		toolCtrl:          tool.NewController(toolTypeService, toolProviderService, userToolConfigService),
 	}
 }
 
@@ -74,7 +82,9 @@ func (r *Router) Setup(engine *gin.Engine) {
 	r.documentCtrl.RegisterKnowledgeBaseRoutes(v1)
 	r.documentCtrl.RegisterDocumentRoutes(v1)
 	r.documentCtrl.RegisterDocumentJobRoutes(v1)
+	r.documentCtrl.RegisterChunkRoutes(v1)
 	r.storageCtrl.RegisterRoutes(v1)
+	r.toolCtrl.RegisterRoutes(user)
 }
 
 // health 返回服务健康状态
