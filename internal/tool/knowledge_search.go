@@ -9,10 +9,12 @@ import (
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 	"github.com/eino-contrib/jsonschema"
+
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 
 	"solvify-agent/internal/rag"
 	"solvify-agent/pkg/config"
+	"solvify-agent/pkg/logger"
 )
 
 // KnowledgeSearchTool 知识库语义搜索工具
@@ -56,15 +58,17 @@ func (t *KnowledgeSearchTool) Info(ctx context.Context) (*schema.ToolInfo, error
 }
 
 // InvokableRun 执行知识库搜索
+// 注意：即使检索失败也返回字符串结果（而非 Go error），
+// 这样 LLM 可以看到失败信息并自行决定如何处理（如用已有知识回答）
 func (t *KnowledgeSearchTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...einoTool.Option) (string, error) {
 	var params struct {
 		Query string `json:"query"`
 	}
 	if err := json.Unmarshal([]byte(argumentsInJSON), &params); err != nil {
-		return "", fmt.Errorf("参数解析失败: %w", err)
+		return fmt.Sprintf("参数解析失败: %v", err), nil
 	}
 	if params.Query == "" {
-		return "", fmt.Errorf("query 参数不能为空")
+		return "query 参数不能为空", nil
 	}
 
 	result, err := t.retriever.Retrieve(ctx, rag.Query{
@@ -74,7 +78,8 @@ func (t *KnowledgeSearchTool) InvokableRun(ctx context.Context, argumentsInJSON 
 		UserID:           t.userID,
 	})
 	if err != nil {
-		return "", fmt.Errorf("知识库检索失败: %w", err)
+		logger.Errorf("知识库检索异常: query=%q, err=%v", params.Query, err)
+		return fmt.Sprintf("知识库检索暂时不可用（%v），请基于你已有的知识回答用户问题。", err), nil
 	}
 
 	if !result.Hit || len(result.Documents) == 0 {
@@ -126,13 +131,6 @@ type SourceDocument struct {
 	Content         string  `json:"content"`
 }
 
-// buildProperties 构建单参数的 JSON Schema Properties
-func buildProperties(name, typ, desc string) *orderedmap.OrderedMap[string, *jsonschema.Schema] {
-	p := orderedmap.New[string, *jsonschema.Schema]()
-	p.Set(name, &jsonschema.Schema{Type: typ, Description: desc})
-	return p
-}
-
 // truncateRunes 截断字符串到指定 rune 长度
 func truncateRunes(s string, maxLen int) string {
 	runes := []rune(s)
@@ -140,4 +138,14 @@ func truncateRunes(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen]) + "..."
+}
+
+// buildProperties 构建单个属性的 JSON Schema ordered map
+func buildProperties(name, propType, desc string) *orderedmap.OrderedMap[string, *jsonschema.Schema] {
+	props := jsonschema.NewProperties()
+	props.Set(name, &jsonschema.Schema{
+		Type:        propType,
+		Description: desc,
+	})
+	return props
 }
