@@ -70,6 +70,11 @@ const (
 	CodeToolTypeNotFound     = 10002
 	CodeToolProviderExists   = 10003
 	CodeToolProviderNotFound = 10004
+
+	// 钉钉集成错误 11xxx
+	CodeDingTalkConfigMissing     = 11001
+	CodeDingTalkAccessTokenFailed = 11002
+	CodeDingTalkAPICallFailed     = 11003
 )
 
 var codeMessages = map[int]string{
@@ -124,6 +129,10 @@ var codeMessages = map[int]string{
 	CodeToolTypeNotFound:     "工具类型不存在",
 	CodeToolProviderExists:   "工具供应商已存在",
 	CodeToolProviderNotFound: "工具供应商不存在",
+
+	CodeDingTalkConfigMissing:     "钉钉应用配置缺失",
+	CodeDingTalkAccessTokenFailed: "获取钉钉 access_token 失败",
+	CodeDingTalkAPICallFailed:     "调用钉钉接口失败",
 }
 
 // GetMessage 获取错误码对应的文本消息
