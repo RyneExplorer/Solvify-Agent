@@ -20,11 +20,11 @@ import (
 	"solvify-agent/internal/api"
 	"solvify-agent/internal/llm"
 	"solvify-agent/internal/middleware"
-	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
 	"solvify-agent/internal/tool"
+	"solvify-agent/internal/tool/providers"
 	"solvify-agent/pkg/cache"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/database"
@@ -119,21 +119,24 @@ func (a *App) initDatabase() error {
 	}
 	a.postgresqlDB = postgresqlDB
 
-	// 自动迁移数据库表结构
-	if err := postgresqlDB.AutoMigrate(
-		&entity.Model{},
-		&entity.UserModelConfig{},
-		&entity.KnowledgeBase{},
-		&entity.StorageQuota{},
-		&entity.Document{},
-		&entity.DocumentProcessingJob{},
-		&entity.DocumentVersion{},
-		&entity.DocumentChunk{},
-		&entity.ChatSession{},
-		&entity.ChatMessage{},
-	); err != nil {
-		return fmt.Errorf("数据库自动迁移失败: %w", err)
-	}
+	//// 自动迁移数据库表结构
+	//if err := postgresqlDB.AutoMigrate(
+	//	&entity.Model{},
+	//	&entity.UserModelConfig{},
+	//	&entity.KnowledgeBase{},
+	//	&entity.StorageQuota{},
+	//	&entity.Document{},
+	//	&entity.DocumentProcessingJob{},
+	//	&entity.DocumentVersion{},
+	//	&entity.DocumentChunk{},
+	//	&entity.ChatSession{},
+	//	&entity.ChatMessage{},
+	//	&entity.ToolType{},
+	//	&entity.ToolProvider{},
+	//	&entity.UserToolConfig{},
+	//); err != nil {
+	//	return fmt.Errorf("数据库自动迁移失败: %w", err)
+	//}
 
 	// redis
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
@@ -222,7 +225,7 @@ type AgentComponents struct {
 }
 
 // initAgentComponents 初始化 Agent 相关组件（Embedding、RAG、工具、Agent 引擎）
-func (a *App) initAgentComponents() *AgentComponents {
+func (a *App) initAgentComponents(toolFactory tool.ToolFactory) *AgentComponents {
 	embeddingFunc := a.initEmbedding()
 	vectorRetriever := a.initRetriever(embeddingFunc)
 
@@ -231,13 +234,11 @@ func (a *App) initAgentComponents() *AgentComponents {
 		return tool.NewKnowledgeSearchTool(vectorRetriever).WithContext(userID, kbIDs)
 	})
 
-	// web_search 工具
-	webSearchTool := tool.NewWebSearchTool(a.cfg.Tools.WebSearch.APIKey, a.cfg.Tools.WebSearch.BaseURL)
-
 	// 初始化 Agent Engine（eino ReAct Agent）
+	// 用户配置的工具（web_search 等）通过 ToolFactory 从 DB/Redis 动态加载
 	agentEngine := agent.NewEngine(
 		ksFactory,
-		webSearchTool,
+		toolFactory,
 		a.cfg.Agent,
 	)
 
@@ -263,12 +264,33 @@ func (a *App) initDependencies() {
 	userModelConfigRepo := repository.NewCachedUserModelConfigRepository(repository.NewUserModelConfigRepository(a.postgresqlDB), modelCache)
 	chatSessionRepo := repository.NewChatSessionRepository(a.postgresqlDB)
 	chatMessageRepo := repository.NewChatMessageRepository(a.postgresqlDB)
+	// 工具配置——原始仓库
+	toolTypeRepo := repository.NewToolTypeRepository(a.postgresqlDB)
+	toolProviderRepo := repository.NewToolProviderRepository(a.postgresqlDB)
+	rawUserToolConfigRepo := repository.NewUserToolConfigRepository(a.postgresqlDB)
+
+	// Redis 缓存（写时失效，10 分钟 TTL 兜底）
+	toolTypeCache := cache.New(a.redis, "tool:type:", 10*time.Minute)
+	toolConfigCache := cache.New(a.redis, "tool:config:", 10*time.Minute)
+
+	// 缓存装饰器
+	cachedToolTypeRepo := repository.NewCachedToolTypeRepository(toolTypeRepo, toolTypeCache)
+	cachedUserToolConfigRepo := repository.NewCachedUserToolConfigRepository(rawUserToolConfigRepo, toolConfigCache)
 
 	// 预热所有已启用系统模型的 LLM 客户端（消除首次请求冷启动）
 	a.prewarmModelClients(modelRepo)
 
-	// 初始化 Agent 组件
-	ai := a.initAgentComponents()
+	// 初始化工具 Provider 注册表——开发阶段注册已实现的 Provider
+	toolRegistry := tool.NewProviderRegistry()
+	toolRegistry.Register("http_get", providers.NewHTTPGetProvider())   // GET 请求——参数拼 URL
+	toolRegistry.Register("http_post", providers.NewHTTPPostProvider()) // POST 请求——参数 JSON body
+	toolRegistry.Register("bocha", providers.NewBochaProvider())        // 博查 AI 搜索——POST JSON + Bearer 鉴权
+
+	// ToolFactory——Agent 引擎从 DB/Redis 加载用户配置的工具
+	toolFactory := tool.NewFactory(toolRegistry, cachedUserToolConfigRepo, cachedToolTypeRepo)
+
+	// 初始化 Agent 组件（传入 ToolFactory 替换硬编码的 WebSearchTool）
+	ai := a.initAgentComponents(toolFactory)
 
 	// 初始化 Service
 	userSvc := service.NewUserService(userRepo)
@@ -281,6 +303,10 @@ func (a *App) initDependencies() {
 	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentVersionRepo, documentJobRepo, storageQuotaRepo, documentChunkSvc, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, ai.AgentEngine)
+	// 工具 Service（用缓存仓库，写入自动失效）
+	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo)
+	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry)
+	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo)
 
 	// 路由
 	chunkRepo := repository.NewChunkRepository(a.postgresqlDB)
@@ -293,7 +319,10 @@ func (a *App) initDependencies() {
 		documentSvc,
 		storageSvc,
 		chatSvc,
-		chunkRepo)
+		chunkRepo,
+		toolTypeService,
+		toolProviderService,
+		userToolConfigService)
 }
 
 // prewarmModelClients 启动时预创建所有已启用系统模型的 LLM 客户端

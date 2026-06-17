@@ -35,26 +35,48 @@ func (e *Engine) Execute(ctx context.Context, req Request, chatModel model.ToolC
 
 // runAgent 创建 eino ReAct Agent 并处理流式输出
 func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.ToolCallingChatModel, eventCh chan<- Event) {
-	// 1. 构建 system prompt
-	systemPrompt := buildReActSystemPrompt()
-
-	// 2. 构建输入消息（历史 + 当前问题）
-	inputMessages := buildInputMessages(req.Query, req.History)
-
-	// 3. 创建带用户上下文的工具（直接实现 eino InvokableTool，无需适配）
+	// 1. 创建带用户上下文的 knowledge_search 工具
 	ksTool := e.knowledgeSearchFactory(req.UserID, req.KnowledgeBaseIDs)
 
-	// 4. 确定最大步数（每轮 Think+Act 算一步，默认给足空间）
+	// 2. 从 DB/Redis 加载用户配置的工具（联网搜索等）
+	userTools := e.toolFactory.CreateAgentTools(ctx, req.UserID)
+
+	// 3. 合并工具列表（先加载工具，再构建 prompt——因为 prompt 需要动态列出可用工具）
+	allTools := make([]einoTool.BaseTool, 0, 1+len(userTools))
+	allTools = append(allTools, ksTool)
+	allTools = append(allTools, userTools...)
+
+	// 打印最终工具清单 + 构建 toolDescMap（供 callback 识别工具类别）
+	toolDescMap := make(map[string]string, len(allTools))
+	logger.Infof("[Agent] userID=%s, 工具总数=%d (knowledge_search + %d 用户工具)", req.UserID, len(allTools), len(userTools))
+	for _, t := range allTools {
+		info, err := t.Info(ctx)
+		if err != nil {
+			logger.Warnf("[Agent] 获取工具信息失败: %v", err)
+			continue
+		}
+		toolDescMap[info.Name] = info.Desc
+		logger.Infof("[Agent]   工具: name=%s, desc=%s", info.Name, truncateStr(info.Desc, 80))
+	}
+
+	// 4. 动态构建 system prompt（根据实际加载的工具列表生成）
+	systemPrompt := buildReActSystemPrompt(ctx, userTools)
+	logger.Infof("[Agent] SystemPrompt (前200字符): %s", truncateStr(systemPrompt, 200))
+
+	// 5. 构建输入消息（历史 + 当前问题）
+	inputMessages := buildInputMessages(req.Query, req.History)
+
+	// 6. 确定最大步数（每轮 Think+Act 算一步，默认给足空间）
 	maxStep := e.cfg.MaxIterations
 	if maxStep <= 0 {
 		maxStep = 8
 	}
 
-	// 5. 创建 eino ReAct Agent
+	// 7. 创建 eino ReAct Agent
 	agent, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel: chatModel,
 		ToolsConfig: compose.ToolsNodeConfig{
-			Tools: []einoTool.BaseTool{ksTool, e.webSearchTool},
+			Tools: allTools,
 		},
 		MaxStep: maxStep,
 		MessageModifier: func(_ context.Context, msgs []*schema.Message) []*schema.Message {
@@ -67,7 +89,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	}
 
 	// 6. 注册回调处理器，捕获中间事件（思考、工具调用等）
-	callbackHandler := newAgentCallbackHandler(eventCh)
+	callbackHandler := newAgentCallbackHandler(eventCh, req.KnowledgeBaseIDs, toolDescMap)
 
 	// 7. 流式调用 Agent（通过回调捕获中间事件）
 	stream, err := agent.Stream(ctx, inputMessages, einoAgent.WithComposeOptions(compose.WithCallbacks(callbackHandler)))
@@ -82,10 +104,12 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 
 // processStream 读取 eino Agent 的流式输出，转换为 SSE 事件
 // LLM 直接在文本中输出 <kb doc="..." chunk_id="..." /> 引用标签，前端解析渲染
+//
+// 注意："正在生成答案" (running) 已由 callback.go 在 ChatModel onEnd（无工具调用时）发出，
+// 这里只负责流式推送答案内容和最终的"正在生成答案" (success) 标记。
 func (e *Engine) processStream(stream *schema.StreamReader[*schema.Message], ksTool *tool.KnowledgeSearchTool, eventCh chan<- Event) {
 	defer stream.Close()
 
-	emittedThinking := false
 	var fullAnswer string
 
 	for {
@@ -104,10 +128,6 @@ func (e *Engine) processStream(stream *schema.StreamReader[*schema.Message], ksT
 
 		// eino ReAct Agent 的 Stream() 只输出最终答案（分块）
 		if msg.Role == schema.Assistant && msg.Content != "" {
-			if !emittedThinking {
-				emittedThinking = true
-				eventCh <- Event{Type: EventThinking, Title: "正在生成答案", Status: "running"}
-			}
 			fullAnswer += msg.Content
 			// 直接发送文本（包含 <kb> 标签），前端负责解析
 			eventCh <- Event{Type: EventAnswer, Content: msg.Content}
@@ -144,15 +164,20 @@ func (e *Engine) processStream(stream *schema.StreamReader[*schema.Message], ksT
 		})
 	}
 
-	// 发送来源和完成事件
+	// 标记答案生成完成
+	eventCh <- Event{Type: EventThinking, Title: "正在生成答案", Status: "success"}
+
+	// 发送来源信息（由 Service 层统一封装到最终 done 事件中）
 	if len(sources) > 0 {
 		eventCh <- Event{Type: EventSources, Sources: sources}
 	}
+
+	// 发送完成信号（Done=false，不终止 SSE——由 Service 层的 emitDoneAndSave 统一终止）
+	// Content 为完整答案，供 Service 层收集后持久化
 	eventCh <- Event{
 		Type:    EventDone,
 		Content: fullAnswer,
 		Sources: sources,
-		Done:    true,
 	}
 }
 
@@ -182,4 +207,12 @@ func extractQueryFromArgs(args string) string {
 		return params.Query
 	}
 	return args
+}
+
+// truncateStr 截断字符串到指定长度
+func truncateStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
