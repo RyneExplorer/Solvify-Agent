@@ -198,6 +198,72 @@ COMMENT ON COLUMN document_processing_jobs.finished_at IS '完成时间';
 COMMENT ON COLUMN document_processing_jobs.created_at IS '创建时间';
 COMMENT ON COLUMN document_processing_jobs.updated_at IS '更新时间';
 
+-- 同步源表记录钉钉等外部平台同步配置
+CREATE TABLE IF NOT EXISTS sync_sources
+(
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),        -- 同步源 ID
+    user_id UUID NOT NULL,                                -- 所属用户 ID
+    knowledge_base_id UUID NOT NULL,                      -- 绑定知识库 ID
+    name          VARCHAR(128) NOT NULL,                  -- 同步源名称
+    platform      VARCHAR(32)  NOT NULL,                  -- 同步平台，当前支持 dingtalk
+    source_config JSONB        NOT NULL DEFAULT '{}'::jsonb, -- 非敏感同步配置
+    status        INT          NOT NULL DEFAULT 1,        -- 同步源状态，1 正常，2 禁用，3 已删除
+    last_sync_at TIMESTAMPTZ,                             -- 最近同步时间
+    last_error_message TEXT NOT NULL DEFAULT '',          -- 最近同步失败原因
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),        -- 创建时间
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),        -- 更新时间
+    deleted_at TIMESTAMPTZ                                -- 删除时间
+);
+
+COMMENT ON TABLE sync_sources IS '同步源配置表，记录钉钉等外部平台同步入口';
+COMMENT ON COLUMN sync_sources.id IS '同步源 ID';
+COMMENT ON COLUMN sync_sources.user_id IS '所属用户 ID';
+COMMENT ON COLUMN sync_sources.knowledge_base_id IS '绑定知识库 ID';
+COMMENT ON COLUMN sync_sources.name IS '同步源名称';
+COMMENT ON COLUMN sync_sources.platform IS '同步平台，当前支持 dingtalk';
+COMMENT ON COLUMN sync_sources.source_config IS '非敏感同步配置';
+COMMENT ON COLUMN sync_sources.status IS '同步源状态，1 正常，2 禁用，3 已删除';
+COMMENT ON COLUMN sync_sources.last_sync_at IS '最近同步时间';
+COMMENT ON COLUMN sync_sources.last_error_message IS '最近同步失败原因';
+COMMENT ON COLUMN sync_sources.created_at IS '创建时间';
+COMMENT ON COLUMN sync_sources.updated_at IS '更新时间';
+COMMENT ON COLUMN sync_sources.deleted_at IS '删除时间';
+
+-- 同步任务表记录每次手动触发同步的执行状态
+CREATE TABLE IF NOT EXISTS sync_jobs
+(
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), -- 同步任务 ID
+    user_id UUID NOT NULL,                         -- 所属用户 ID
+    sync_source_id UUID NOT NULL,                  -- 同步源 ID
+    knowledge_base_id UUID NOT NULL,               -- 绑定知识库 ID
+    job_type      VARCHAR(32) NOT NULL,            -- 任务类型，manual 手动同步
+    status        INT         NOT NULL DEFAULT 1,  -- 任务状态，1 待同步，2 同步中，3 成功，4 失败
+    total_count   INT         NOT NULL DEFAULT 0,  -- 同步总数
+    success_count INT         NOT NULL DEFAULT 0,  -- 同步成功数
+    failed_count  INT         NOT NULL DEFAULT 0,  -- 同步失败数
+    error_message TEXT        NOT NULL DEFAULT '', -- 任务失败原因
+    started_at TIMESTAMPTZ,                        -- 开始时间
+    finished_at TIMESTAMPTZ,                       -- 完成时间
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(), -- 创建时间
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()  -- 更新时间
+);
+
+COMMENT ON TABLE sync_jobs IS '同步任务表，记录外部平台同步执行状态';
+COMMENT ON COLUMN sync_jobs.id IS '同步任务 ID';
+COMMENT ON COLUMN sync_jobs.user_id IS '所属用户 ID';
+COMMENT ON COLUMN sync_jobs.sync_source_id IS '同步源 ID';
+COMMENT ON COLUMN sync_jobs.knowledge_base_id IS '绑定知识库 ID';
+COMMENT ON COLUMN sync_jobs.job_type IS '任务类型，manual 手动同步';
+COMMENT ON COLUMN sync_jobs.status IS '任务状态，1 待同步，2 同步中，3 成功，4 失败';
+COMMENT ON COLUMN sync_jobs.total_count IS '同步总数';
+COMMENT ON COLUMN sync_jobs.success_count IS '同步成功数';
+COMMENT ON COLUMN sync_jobs.failed_count IS '同步失败数';
+COMMENT ON COLUMN sync_jobs.error_message IS '任务失败原因';
+COMMENT ON COLUMN sync_jobs.started_at IS '开始时间';
+COMMENT ON COLUMN sync_jobs.finished_at IS '完成时间';
+COMMENT ON COLUMN sync_jobs.created_at IS '创建时间';
+COMMENT ON COLUMN sync_jobs.updated_at IS '更新时间';
+
 -- 存储配额表记录用户存储上限和已用容量
 CREATE TABLE IF NOT EXISTS storage_quotas
 (
@@ -237,6 +303,15 @@ CREATE INDEX IF NOT EXISTS idx_document_chunks_document_id
 
 CREATE INDEX IF NOT EXISTS idx_document_processing_jobs_document_id
     ON document_processing_jobs(document_id);
+
+CREATE INDEX IF NOT EXISTS idx_sync_sources_user_kb
+    ON sync_sources(user_id, knowledge_base_id);
+
+CREATE INDEX IF NOT EXISTS idx_sync_jobs_source_id
+    ON sync_jobs(sync_source_id);
+
+CREATE INDEX IF NOT EXISTS idx_sync_jobs_user_kb
+    ON sync_jobs(user_id, knowledge_base_id);
 
 CREATE INDEX IF NOT EXISTS idx_document_chunks_embedding
     ON document_chunks
