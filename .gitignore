@@ -35,8 +35,9 @@ Thumbs.db
 tmp/
 tasks/
 
-docs/superpowers/
-design/
+docs/
+design/solvify-prototype
 .claude/
 leetcode/
 
+design/vue/node_modules
