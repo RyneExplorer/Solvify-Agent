@@ -64,6 +64,9 @@ const (
 	CodeKnowledgeBaseReadonly   = 9006
 	CodeDocumentStatusInvalid   = 9007
 	CodeDocumentJobNotFound     = 9008
+	CodeSyncSourceNotFound      = 9009
+	CodeSyncSourceStatusInvalid = 9010
+	CodeSyncJobNotFound         = 9011
 
 	// 工具管理错误 10xxx
 	CodeToolTypeExists       = 10001
@@ -118,6 +121,9 @@ var codeMessages = map[int]string{
 	CodeKnowledgeBaseReadonly:   "当前知识库不允许上传文档",
 	CodeDocumentStatusInvalid:   "当前文档状态不允许处理",
 	CodeDocumentJobNotFound:     "文档处理任务不存在",
+	CodeSyncSourceNotFound:      "同步源不存在",
+	CodeSyncSourceStatusInvalid: "当前同步源状态不允许同步",
+	CodeSyncJobNotFound:         "同步任务不存在",
 
 	CodeSessionNotFound:     "会话不存在",
 	CodeSessionClosed:       "会话已关闭",

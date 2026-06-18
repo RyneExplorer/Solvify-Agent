@@ -13,6 +13,9 @@ type DocumentResponse struct {
 	StoragePath     string     `json:"storage_path"`
 	FileHash        string     `json:"file_hash"`
 	SourceType      string     `json:"source_type"`
+	ExternalID      string     `json:"external_id"`
+	ExternalURL     string     `json:"external_url"`
+	SourceUpdatedAt *time.Time `json:"source_updated_at"`
 	Status          int        `json:"status"`
 	ErrorMessage    string     `json:"error_message"`
 	ReadyAt         *time.Time `json:"ready_at"`

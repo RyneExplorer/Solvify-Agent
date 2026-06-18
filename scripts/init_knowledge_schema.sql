@@ -77,6 +77,9 @@ CREATE TABLE IF NOT EXISTS documents
     storage_path  TEXT         NOT NULL DEFAULT '',       -- 文件存储路径
     file_hash     VARCHAR(128) NOT NULL DEFAULT '',       -- 原始文件内容指纹
     source_type   VARCHAR(32)  NOT NULL DEFAULT 'upload', -- 文档来源类型，upload 上传，edit 编辑，sync 同步，web_search 联网搜索
+    external_id   VARCHAR(255) NOT NULL DEFAULT '',       -- 外部平台文档 ID
+    external_url  TEXT         NOT NULL DEFAULT '',       -- 外部平台文档链接
+    source_updated_at TIMESTAMPTZ,                        -- 外部平台更新时间
     status        INT          NOT NULL DEFAULT 1,        -- 文档状态，1 已上传，2 处理中，3 已就绪，4 处理失败，5 已删除
     error_message TEXT         NOT NULL DEFAULT '',       -- 处理失败原因
     ready_at TIMESTAMPTZ,                                 -- 文档就绪时间
@@ -98,6 +101,9 @@ COMMENT ON COLUMN documents.file_size IS '文件大小字节数';
 COMMENT ON COLUMN documents.storage_path IS '文件存储路径';
 COMMENT ON COLUMN documents.file_hash IS '原始文件内容指纹';
 COMMENT ON COLUMN documents.source_type IS '文档来源类型，upload 上传，edit 编辑，sync 同步，web_search 联网搜索';
+COMMENT ON COLUMN documents.external_id IS '外部平台文档 ID';
+COMMENT ON COLUMN documents.external_url IS '外部平台文档链接';
+COMMENT ON COLUMN documents.source_updated_at IS '外部平台更新时间';
 COMMENT ON COLUMN documents.status IS '文档状态，1 已上传，2 处理中，3 已就绪，4 处理失败，5 已删除';
 COMMENT ON COLUMN documents.error_message IS '处理失败原因';
 COMMENT ON COLUMN documents.ready_at IS '文档就绪时间';
@@ -105,6 +111,11 @@ COMMENT ON COLUMN documents.deleted_at IS '删除时间';
 COMMENT ON COLUMN documents.delete_expired_at IS '删除保留到期时间';
 COMMENT ON COLUMN documents.created_at IS '创建时间';
 COMMENT ON COLUMN documents.updated_at IS '更新时间';
+
+ALTER TABLE documents
+    ADD COLUMN IF NOT EXISTS external_id VARCHAR(255) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS external_url TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS source_updated_at TIMESTAMPTZ;
 
 -- 文档版本表支持在线编辑和重新向量化
 CREATE TABLE IF NOT EXISTS document_versions
@@ -291,6 +302,10 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_bases_user_id
 
 CREATE INDEX IF NOT EXISTS idx_documents_user_kb
     ON documents(user_id, knowledge_base_id);
+
+CREATE INDEX IF NOT EXISTS idx_documents_user_external
+    ON documents(user_id, source_type, external_id)
+    WHERE external_id <> '';
 
 CREATE INDEX IF NOT EXISTS idx_document_versions_document_id
     ON document_versions(document_id);
