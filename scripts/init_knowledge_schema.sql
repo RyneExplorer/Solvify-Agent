@@ -275,6 +275,34 @@ COMMENT ON COLUMN sync_jobs.finished_at IS '完成时间';
 COMMENT ON COLUMN sync_jobs.created_at IS '创建时间';
 COMMENT ON COLUMN sync_jobs.updated_at IS '更新时间';
 
+-- 钉钉用户绑定表保存系统用户与钉钉身份的对应关系
+CREATE TABLE IF NOT EXISTS dingtalk_user_bindings
+(
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),         -- 绑定 ID
+    user_id UUID NOT NULL,                                 -- 系统用户 ID
+    ding_open_id VARCHAR(128) NOT NULL DEFAULT '',         -- 钉钉 openid
+    ding_union_id VARCHAR(128) NOT NULL,                   -- 钉钉 unionId
+    corp_id VARCHAR(128) NOT NULL DEFAULT '',              -- 钉钉企业 ID
+    nickname VARCHAR(128) NOT NULL DEFAULT '',             -- 钉钉用户昵称
+    avatar TEXT NOT NULL DEFAULT '',                       -- 钉钉用户头像
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),         -- 创建时间
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),         -- 更新时间
+
+    CONSTRAINT dingtalk_user_bindings_user_unique UNIQUE (user_id),
+    CONSTRAINT dingtalk_user_bindings_union_unique UNIQUE (ding_union_id)
+);
+
+COMMENT ON TABLE dingtalk_user_bindings IS '钉钉用户绑定表，用于保存系统用户与钉钉身份的对应关系';
+COMMENT ON COLUMN dingtalk_user_bindings.id IS '绑定 ID';
+COMMENT ON COLUMN dingtalk_user_bindings.user_id IS '系统用户 ID';
+COMMENT ON COLUMN dingtalk_user_bindings.ding_open_id IS '钉钉 openid';
+COMMENT ON COLUMN dingtalk_user_bindings.ding_union_id IS '钉钉 unionId';
+COMMENT ON COLUMN dingtalk_user_bindings.corp_id IS '钉钉企业 ID';
+COMMENT ON COLUMN dingtalk_user_bindings.nickname IS '钉钉用户昵称';
+COMMENT ON COLUMN dingtalk_user_bindings.avatar IS '钉钉用户头像';
+COMMENT ON COLUMN dingtalk_user_bindings.created_at IS '创建时间';
+COMMENT ON COLUMN dingtalk_user_bindings.updated_at IS '更新时间';
+
 -- 存储配额表记录用户存储上限和已用容量
 CREATE TABLE IF NOT EXISTS storage_quotas
 (
@@ -327,6 +355,12 @@ CREATE INDEX IF NOT EXISTS idx_sync_jobs_source_id
 
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_user_kb
     ON sync_jobs(user_id, knowledge_base_id);
+
+CREATE INDEX IF NOT EXISTS idx_dingtalk_user_bindings_user_id
+    ON dingtalk_user_bindings(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_dingtalk_user_bindings_corp_id
+    ON dingtalk_user_bindings(corp_id);
 
 CREATE INDEX IF NOT EXISTS idx_document_chunks_embedding
     ON document_chunks

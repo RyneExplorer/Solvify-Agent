@@ -138,6 +138,7 @@ func (a *App) initDatabase() error {
 		//&entity.UserToolConfig{},
 		&entity.SyncJob{},
 		&entity.SyncSource{},
+		&entity.DingTalkUserBinding{},
 	); err != nil {
 		return fmt.Errorf("数据库自动迁移失败: %w", err)
 	}
@@ -262,6 +263,7 @@ func (a *App) initDependencies() {
 	syncSourceRepo := repository.NewSyncSourceRepository(a.postgresqlDB)
 	syncJobRepo := repository.NewSyncJobRepository(a.postgresqlDB)
 	syncedDocumentRepo := repository.NewSyncedDocumentRepository(a.postgresqlDB)
+	dingtalkBindingRepo := repository.NewDingTalkBindingRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
 	userRepo := repository.NewUserRepository(a.postgresqlDB)
 
@@ -308,7 +310,10 @@ func (a *App) initDependencies() {
 	embeddingSvc := service.NewEmbeddingService(a.cfg.Embedding)
 	documentChunkSvc := service.NewDocumentChunkService(embeddingSvc)
 	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentVersionRepo, documentJobRepo, storageQuotaRepo, documentChunkSvc, "data/uploads")
-	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncedDocumentRepo, documentChunkSvc, dingtalk.NewClient(a.cfg.DingTalk), "data/uploads")
+	dingtalkClient := dingtalk.NewClient(a.cfg.DingTalk)
+	dingtalkStateCache := cache.New(a.redis, "dingtalk:oauth:state:", 10*time.Minute)
+	dingtalkSvc := service.NewDingTalkService(a.cfg.DingTalk, dingtalkBindingRepo, dingtalkStateCache, dingtalkClient)
+	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, dingtalkClient, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, ai.AgentEngine)
 	// 工具 Service（用缓存仓库，写入自动失效）
@@ -328,6 +333,7 @@ func (a *App) initDependencies() {
 		storageSvc,
 		chatSvc,
 		syncSvc,
+		dingtalkSvc,
 		chunkRepo,
 		toolTypeService,
 		toolProviderService,

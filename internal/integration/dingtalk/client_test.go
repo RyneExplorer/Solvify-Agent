@@ -14,8 +14,14 @@ import (
 func TestClientListNodesUsesHeaderToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/gettoken":
-			_, _ = w.Write([]byte(`{"errcode":0,"access_token":"token-1","expires_in":7200}`))
+		case "/v1.0/oauth2/accessToken":
+			if r.Method != http.MethodPost {
+				t.Fatalf("accessToken 请求方法错误: %s", r.Method)
+			}
+			if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+				t.Fatalf("accessToken 请求体类型错误")
+			}
+			_, _ = w.Write([]byte(`{"accessToken":"token-1","expireIn":7200}`))
 		case "/v2.0/wiki/nodes":
 			if r.Header.Get("x-acs-dingtalk-access-token") != "token-1" {
 				t.Fatalf("未使用钉钉 Header 鉴权")
@@ -32,7 +38,7 @@ func TestClientListNodesUsesHeaderToken(t *testing.T) {
 
 	client := NewClient(config.DingTalkConfig{AppKey: "app-key", AppSecret: "app-secret"})
 	client.httpClient = server.Client()
-	client.accessTokenURL = server.URL + "/gettoken"
+	client.accessTokenURL = server.URL + "/v1.0/oauth2/accessToken"
 	client.apiBaseURL = server.URL
 
 	nodes, nextToken, err := client.ListNodes(context.Background(), "union-1", "root-1", "next-1", 50)
@@ -48,8 +54,8 @@ func TestClientListNodesUsesHeaderToken(t *testing.T) {
 func TestClientQueryDentryIDEscapesPath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/gettoken":
-			_, _ = w.Write([]byte(`{"errcode":0,"access_token":"token-1","expires_in":7200}`))
+		case "/v1.0/oauth2/accessToken":
+			_, _ = w.Write([]byte(`{"accessToken":"token-1","expireIn":7200}`))
 		case "/v2.0/doc/dentries/abc/def/queryDentryId":
 			if !strings.Contains(r.URL.RawPath, "abc%2Fdef") && !strings.Contains(r.RequestURI, "abc%2Fdef") {
 				t.Fatalf("dentryUuid 未正确转义: %s", r.RequestURI)
@@ -63,7 +69,7 @@ func TestClientQueryDentryIDEscapesPath(t *testing.T) {
 
 	client := NewClient(config.DingTalkConfig{AppKey: "app-key", AppSecret: "app-secret"})
 	client.httpClient = server.Client()
-	client.accessTokenURL = server.URL + "/gettoken"
+	client.accessTokenURL = server.URL + "/v1.0/oauth2/accessToken"
 	client.apiBaseURL = server.URL
 
 	output, err := client.QueryDentryID(context.Background(), "union-1", "abc/def")
@@ -79,8 +85,8 @@ func TestClientQueryDentryIDEscapesPath(t *testing.T) {
 func TestClientDownloadFileUsesReturnedHeaders(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/gettoken":
-			_, _ = w.Write([]byte(`{"errcode":0,"access_token":"token-1","expires_in":7200}`))
+		case "/v1.0/oauth2/accessToken":
+			_, _ = w.Write([]byte(`{"accessToken":"token-1","expireIn":7200}`))
 		case "/v1.0/storage/spaces/s-1/dentries/d-1/downloadInfos/query":
 			if r.Header.Get("x-acs-dingtalk-access-token") != "token-1" {
 				t.Fatalf("下载信息未使用钉钉 Header 鉴权")
@@ -99,7 +105,7 @@ func TestClientDownloadFileUsesReturnedHeaders(t *testing.T) {
 
 	client := NewClient(config.DingTalkConfig{AppKey: "app-key", AppSecret: "app-secret"})
 	client.httpClient = server.Client()
-	client.accessTokenURL = server.URL + "/gettoken"
+	client.accessTokenURL = server.URL + "/v1.0/oauth2/accessToken"
 	client.apiBaseURL = server.URL
 
 	data, hash, err := client.DownloadFile(context.Background(), "union-1", "s-1", "d-1")
@@ -114,4 +120,59 @@ func TestClientDownloadFileUsesReturnedHeaders(t *testing.T) {
 // serverURL 从测试请求还原服务地址
 func serverURL(r *http.Request) string {
 	return "http://" + r.Host
+}
+
+// TestClientExchangeUserAccessToken 验证扫码授权码使用新版 OAuth JSON 请求兑换用户 token
+func TestClientExchangeUserAccessToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1.0/oauth2/userAccessToken" {
+			t.Fatalf("未预期的请求路径: %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("用户 token 请求方法错误: %s", r.Method)
+		}
+		if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+			t.Fatalf("用户 token 请求体类型错误")
+		}
+		_, _ = w.Write([]byte(`{"accessToken":"user-token","refreshToken":"refresh-token","expireIn":7200,"corpId":"corp-1"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(config.DingTalkConfig{AppKey: "app-key", AppSecret: "app-secret"})
+	client.httpClient = server.Client()
+	client.apiBaseURL = server.URL
+
+	output, err := client.ExchangeUserAccessToken(context.Background(), "auth-code")
+	if err != nil {
+		t.Fatalf("兑换用户 token 失败: %v", err)
+	}
+	if output.AccessToken != "user-token" || output.CorpID != "corp-1" {
+		t.Fatalf("用户 token 响应解析错误: %+v", output)
+	}
+}
+
+// TestClientGetCurrentUserInfoUsesUserToken 验证用户信息接口使用个人 token Header
+func TestClientGetCurrentUserInfoUsesUserToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1.0/contact/users/me" {
+			t.Fatalf("未预期的请求路径: %s", r.URL.Path)
+		}
+		if r.Header.Get("x-acs-dingtalk-access-token") != "user-token" {
+			t.Fatalf("用户信息接口未使用个人 token Header")
+		}
+		_, _ = w.Write([]byte(`{"nick":"张三","avatarUrl":"https://example.com/a.png","openId":"open-1","unionId":"union-1","email":"a@example.com"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(config.DingTalkConfig{AppKey: "app-key", AppSecret: "app-secret"})
+	client.httpClient = server.Client()
+	client.apiBaseURL = server.URL
+
+	output, err := client.GetCurrentUserInfo(context.Background(), "user-token")
+	if err != nil {
+		t.Fatalf("获取用户信息失败: %v", err)
+	}
+	if output.UnionID != "union-1" || output.OpenID != "open-1" {
+		t.Fatalf("用户信息响应解析错误: %+v", output)
+	}
 }

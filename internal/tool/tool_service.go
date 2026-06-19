@@ -139,7 +139,7 @@ func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string) []ein
 		instance := NewToolInstance(toolType, provider, config)
 		agentTool := NewAgentTool(instance)
 		tools = append(tools, agentTool)
-		logger.Infof("[ToolFactory] ✅ 工具加载成功: toolKey=%s, provider=%s, toolName=%s",
+		logger.Infof("[ToolFactory] 工具加载成功: toolKey=%s, provider=%s, toolName=%s",
 			toolType.ToolKey, provider.Name(), toolType.Name)
 	}
 

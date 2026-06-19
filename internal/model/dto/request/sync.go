@@ -2,7 +2,7 @@ package request
 
 // SyncSourceConfigRequest 描述钉钉同步源非敏感配置
 type SyncSourceConfigRequest struct {
-	OperatorUnionID string `json:"operator_union_id" binding:"required"`
+	OperatorUnionID string `json:"operator_union_id"`
 	WorkspaceID     string `json:"workspace_id" binding:"required"`
 	RootNodeID      string `json:"root_node_id" binding:"required"`
 	SyncMode        string `json:"sync_mode"`

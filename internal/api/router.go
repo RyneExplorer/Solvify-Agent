@@ -5,6 +5,7 @@ import (
 
 	"solvify-agent/internal/api/v1/auth"
 	"solvify-agent/internal/api/v1/chat"
+	dingtalkapi "solvify-agent/internal/api/v1/dingtalk"
 	"solvify-agent/internal/api/v1/document"
 	"solvify-agent/internal/api/v1/knowledgebase"
 	"solvify-agent/internal/api/v1/model"
@@ -29,6 +30,7 @@ type Router struct {
 	userModelCtrl     *model.UserModelController
 	chatCtrl          *chat.Controller
 	syncCtrl          *syncapi.Controller
+	dingtalkCtrl      *dingtalkapi.Controller
 	toolCtrl          *tool.Controller
 }
 
@@ -43,6 +45,7 @@ func NewRouter(
 	storageSvc service.StorageServiceInterface,
 	chatSvc service.ChatServiceInterface,
 	syncSvc service.SyncServiceInterface,
+	dingtalkSvc service.DingTalkServiceInterface,
 	chunkRepo repository.ChunkRepository,
 	toolTypeService service.ToolTypeService,
 	toolProviderService service.ToolProviderService,
@@ -58,6 +61,7 @@ func NewRouter(
 		storageCtrl:       storage.NewController(storageSvc),
 		chatCtrl:          chat.NewController(chatSvc),
 		syncCtrl:          syncapi.NewController(syncSvc),
+		dingtalkCtrl:      dingtalkapi.NewController(dingtalkSvc),
 		toolCtrl:          tool.NewController(toolTypeService, toolProviderService, userToolConfigService),
 	}
 }
@@ -88,6 +92,7 @@ func (r *Router) Setup(engine *gin.Engine) {
 	r.documentCtrl.RegisterDocumentJobRoutes(v1)
 	r.documentCtrl.RegisterChunkRoutes(v1)
 	r.syncCtrl.RegisterRoutes(v1)
+	r.dingtalkCtrl.RegisterRoutes(v1)
 	r.storageCtrl.RegisterRoutes(v1)
 	r.toolCtrl.RegisterRoutes(user)
 }

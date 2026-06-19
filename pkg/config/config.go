@@ -131,8 +131,9 @@ type WebSearchConfig struct {
 
 // DingTalkConfig 描述钉钉开放平台配置
 type DingTalkConfig struct {
-	AppKey    string `mapstructure:"app_key"`
-	AppSecret string `mapstructure:"app_secret"`
+	AppKey           string `mapstructure:"app_key"`
+	AppSecret        string `mapstructure:"app_secret"`
+	OAuthRedirectURI string `mapstructure:"oauth_redirect_uri"`
 }
 
 // ServerConfig 描述进程关闭配置
@@ -288,7 +289,9 @@ func Default() *Config {
 		Tools: ToolsConfig{
 			Enabled: true,
 		},
-		DingTalk: DingTalkConfig{},
+		DingTalk: DingTalkConfig{
+			OAuthRedirectURI: "http://localhost:5173/dingtalk/bind",
+		},
 		Server: ServerConfig{
 			Host:                   "",
 			Port:                   8080,
@@ -456,6 +459,7 @@ func applyEnv(cfg *Config) {
 	}
 	cfg.DingTalk.AppKey = getEnv("DINGTALK_APP_KEY", cfg.DingTalk.AppKey)
 	cfg.DingTalk.AppSecret = getEnv("DINGTALK_APP_SECRET", cfg.DingTalk.AppSecret)
+	cfg.DingTalk.OAuthRedirectURI = getEnv("DINGTALK_OAUTH_REDIRECT_URI", cfg.DingTalk.OAuthRedirectURI)
 	if value := os.Getenv("SHUTDOWN_TIMEOUT_SECONDS"); value != "" {
 		cfg.Server.ShutdownTimeoutSeconds = parseInt(value, cfg.Server.ShutdownTimeoutSeconds)
 	}

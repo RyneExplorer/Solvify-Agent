@@ -50,13 +50,14 @@ type DingTalkWikiClient interface {
 
 // syncService 封装同步业务用例实现
 type syncService struct {
-	knowledgeBaseRepo  repository.KnowledgeBaseRepository
-	syncSourceRepo     repository.SyncSourceRepository
-	syncJobRepo        repository.SyncJobRepository
-	syncedDocumentRepo repository.SyncedDocumentRepository
-	chunkService       DocumentChunkServiceInterface
-	dingtalkClient     DingTalkWikiClient
-	uploadRoot         string
+	knowledgeBaseRepo   repository.KnowledgeBaseRepository
+	syncSourceRepo      repository.SyncSourceRepository
+	syncJobRepo         repository.SyncJobRepository
+	syncedDocumentRepo  repository.SyncedDocumentRepository
+	dingtalkBindingRepo repository.DingTalkBindingRepository
+	chunkService        DocumentChunkServiceInterface
+	dingtalkClient      DingTalkWikiClient
+	uploadRoot          string
 }
 
 type syncSourceConfig struct {
@@ -79,18 +80,20 @@ func NewSyncService(
 	syncSourceRepo repository.SyncSourceRepository,
 	syncJobRepo repository.SyncJobRepository,
 	syncedDocumentRepo repository.SyncedDocumentRepository,
+	dingtalkBindingRepo repository.DingTalkBindingRepository,
 	chunkService DocumentChunkServiceInterface,
 	dingtalkClient DingTalkWikiClient,
 	uploadRoot string,
 ) SyncServiceInterface {
 	return &syncService{
-		knowledgeBaseRepo:  knowledgeBaseRepo,
-		syncSourceRepo:     syncSourceRepo,
-		syncJobRepo:        syncJobRepo,
-		syncedDocumentRepo: syncedDocumentRepo,
-		chunkService:       chunkService,
-		dingtalkClient:     dingtalkClient,
-		uploadRoot:         uploadRoot,
+		knowledgeBaseRepo:   knowledgeBaseRepo,
+		syncSourceRepo:      syncSourceRepo,
+		syncJobRepo:         syncJobRepo,
+		syncedDocumentRepo:  syncedDocumentRepo,
+		dingtalkBindingRepo: dingtalkBindingRepo,
+		chunkService:        chunkService,
+		dingtalkClient:      dingtalkClient,
+		uploadRoot:          uploadRoot,
 	}
 }
 
@@ -102,7 +105,7 @@ func (s *syncService) CreateSource(ctx context.Context, userID string, req reque
 	if _, err := s.findNormalKnowledgeBase(ctx, userID, req.KnowledgeBaseID); err != nil {
 		return dto.SyncSourceResponse{}, err
 	}
-	cfg, err := s.sourceConfigFromRequest(req.SourceConfig)
+	cfg, err := s.sourceConfigFromRequest(ctx, userID, req.SourceConfig)
 	if err != nil {
 		return dto.SyncSourceResponse{}, err
 	}
@@ -153,7 +156,7 @@ func (s *syncService) UpdateSource(ctx context.Context, userID, sourceID string,
 	if err != nil {
 		return dto.SyncSourceResponse{}, err
 	}
-	cfg, err := s.sourceConfigFromRequest(req.SourceConfig)
+	cfg, err := s.sourceConfigFromRequest(ctx, userID, req.SourceConfig)
 	if err != nil {
 		return dto.SyncSourceResponse{}, err
 	}
@@ -405,9 +408,9 @@ func (s *syncService) findNormalKnowledgeBase(ctx context.Context, userID, kbID 
 }
 
 // sourceConfigFromRequest 规整同步配置
-func (s *syncService) sourceConfigFromRequest(input requestdto.SyncSourceConfigRequest) (syncSourceConfig, error) {
+func (s *syncService) sourceConfigFromRequest(ctx context.Context, userID string, input requestdto.SyncSourceConfigRequest) (syncSourceConfig, error) {
 	cfg := syncSourceConfig{
-		OperatorUnionID: strings.TrimSpace(input.OperatorUnionID),
+		OperatorUnionID: "",
 		WorkspaceID:     strings.TrimSpace(input.WorkspaceID),
 		RootNodeID:      strings.TrimSpace(input.RootNodeID),
 		SyncMode:        strings.TrimSpace(input.SyncMode),
@@ -415,13 +418,30 @@ func (s *syncService) sourceConfigFromRequest(input requestdto.SyncSourceConfigR
 	if cfg.SyncMode == "" {
 		cfg.SyncMode = syncModeFull
 	}
-	if cfg.OperatorUnionID == "" || cfg.WorkspaceID == "" || cfg.RootNodeID == "" {
+	operatorUnionID, err := s.dingtalkOperatorUnionID(ctx, userID)
+	if err != nil {
+		return syncSourceConfig{}, err
+	}
+	cfg.OperatorUnionID = operatorUnionID
+	if cfg.WorkspaceID == "" || cfg.RootNodeID == "" {
 		return syncSourceConfig{}, apperrors.New(apperrors.CodeBadRequest, "钉钉同步配置不完整")
 	}
 	if cfg.SyncMode != syncModeFull {
 		return syncSourceConfig{}, apperrors.New(apperrors.CodeBadRequest, "当前仅支持全量同步")
 	}
 	return cfg, nil
+}
+
+// dingtalkOperatorUnionID 读取当前用户绑定的钉钉 unionId
+func (s *syncService) dingtalkOperatorUnionID(ctx context.Context, userID string) (string, error) {
+	binding, ok, err := s.dingtalkBindingRepo.FindByUserID(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if !ok || strings.TrimSpace(binding.DingUnionID) == "" {
+		return "", apperrors.New(apperrors.CodeBadRequest, "请先绑定钉钉账号")
+	}
+	return strings.TrimSpace(binding.DingUnionID), nil
 }
 
 // sourceConfigFromJSON 解析同步配置
