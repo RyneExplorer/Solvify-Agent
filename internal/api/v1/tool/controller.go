@@ -1,6 +1,8 @@
 package tool
 
 import (
+	"encoding/json"
+
 	"github.com/gin-gonic/gin"
 
 	"solvify-agent/internal/model/dto/request"
@@ -85,10 +87,10 @@ func (c *Controller) DeleteToolType(ctx *gin.Context) {
 
 // ========== 管理员接口：工具供应商 ==========
 
-// ListProviderKeys 返回所有已注册的 provider_key
-func (c *Controller) ListProviderKeys(ctx *gin.Context) {
-	keys := c.providerService.ListProviderKeys()
-	response.Success(ctx, keys)
+// ListProviderTypes 返回所有已注册的供应商类型
+func (c *Controller) ListProviderTypes(ctx *gin.Context) {
+	types := c.providerService.ListProviderTypes()
+	response.Success(ctx, types)
 }
 
 // ListToolProviders 获取工具供应商列表
@@ -156,9 +158,13 @@ func (c *Controller) ListToolTemplates(ctx *gin.Context) {
 	}
 
 	type providerBrief struct {
-		ID          string `json:"id"`
-		Name        string `json:"name"`
-		Description string `json:"description"`
+		ID           string          `json:"id"`
+		ProviderKey  string          `json:"provider_key"`
+		Name         string          `json:"name"`
+		Description  string          `json:"description"`
+		ProviderType string          `json:"provider_type"`
+		ConfigSchema json.RawMessage `json:"config_schema"`
+		InputSchema  json.RawMessage `json:"input_schema"`
 	}
 	type templateInfo struct {
 		ID            string          `json:"id"`
@@ -166,6 +172,7 @@ func (c *Controller) ListToolTemplates(ctx *gin.Context) {
 		ToolKey       string          `json:"tool_key"`
 		Description   string          `json:"description"`
 		ExecutionMode string          `json:"execution_mode"`
+		ProviderCount int             `json:"provider_count"`
 		Providers     []providerBrief `json:"providers"`
 	}
 
@@ -178,13 +185,18 @@ func (c *Controller) ListToolTemplates(ctx *gin.Context) {
 			ToolKey:       tt.ToolKey,
 			Description:   tt.Description,
 			ExecutionMode: tt.ExecutionMode,
+			ProviderCount: tt.ProviderCount,
 		}
 		if providers != nil {
 			for _, p := range providers.Providers {
 				t.Providers = append(t.Providers, providerBrief{
-					ID:          p.ID,
-					Name:        p.Name,
-					Description: p.Description,
+					ID:           p.ID,
+					ProviderKey:  p.ProviderKey,
+					Name:         p.Name,
+					Description:  p.Description,
+					ProviderType: p.ProviderType,
+					ConfigSchema: p.ConfigSchema,
+					InputSchema:  p.InputSchema,
 				})
 			}
 		}

@@ -15,6 +15,6 @@ type ToolProviderService interface {
 	GetByID(ctx context.Context, id string) (*response.ToolProviderInfo, error)
 	ListByToolTypeID(ctx context.Context, toolTypeID string) (*response.ListToolProvidersResponse, error)
 	ListEnabledByToolTypeID(ctx context.Context, toolTypeID string) (*response.ListToolProvidersResponse, error)
-	// ListProviderKeys 返回所有已注册的 provider_key
-	ListProviderKeys() []string
+	// ListProviderTypes 返回所有已注册的供应商类型（http, mcp, custom）
+	ListProviderTypes() []string
 }

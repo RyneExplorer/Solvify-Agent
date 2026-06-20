@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/components/model"
@@ -29,10 +30,10 @@ import (
 // 改写完成后若查询有变化，补充检索并合并结果，兼顾速度与召回质量。
 func (s *chatService) processMessage(ctx context.Context, userID, sessionID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
 	// Step 1: 并行加载模型 + 历史对话
-	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在加载上下文..."}
+	sendProgressEvent(eventCh, "正在加载上下文...")
 	client, history, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, 600)
 	if err != nil {
-		eventCh <- dto.StreamEvent{Type: "error", Error: err.Error(), Done: true}
+		sendErrorEvent(eventCh, err, err.Error())
 		return
 	}
 
@@ -40,7 +41,7 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 	searchQuery := req.Content
 
 	// Step 2+3: 查询改写与 RAG 检索并行（快速路径优化）
-	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在检索知识库..."}
+	sendProgressEvent(eventCh, "正在检索知识库...")
 
 	var sources []dto.SourceInfo
 	var retrieveResult rag.Result
@@ -70,7 +71,7 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 
 		if err := g.Wait(); err != nil {
 			logger.Errorf("知识库检索失败, sessionID=%s: %v", sessionID, err)
-			eventCh <- dto.StreamEvent{Type: "error", Error: "知识库检索失败", Done: true}
+			sendErrorEvent(eventCh, err, "知识库检索失败")
 			return
 		}
 
@@ -84,17 +85,17 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 			}
 		}
 	} else {
-		eventCh <- dto.StreamEvent{Type: "progress", Content: "正在检索知识库..."}
+		sendProgressEvent(eventCh, "正在检索知识库...")
 		sources, retrieveResult, err = s.retrieveContext(ctx, userID, searchQuery, req.KnowledgeBaseIDs)
 		if err != nil {
 			logger.Errorf("知识库检索失败, sessionID=%s: %v", sessionID, err)
-			eventCh <- dto.StreamEvent{Type: "error", Error: "知识库检索失败", Done: true}
+			sendErrorEvent(eventCh, err, "知识库检索失败")
 			return
 		}
 	}
 
 	// Step 4: 组装 Prompt（用原始问题，改写后的查询仅用于检索）
-	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在整理资料..."}
+	sendProgressEvent(eventCh, "正在整理资料...")
 	messages := buildMessages(history, req.Content, retrieveResult)
 
 	// Step 5: LLM 流式生成
@@ -102,7 +103,8 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 	fullContent, err := s.streamAndCollect(ctx, chatModel, messages, assistantMsgID, eventCh)
 
 	// Step 6: 保存助手消息
-	if err != nil && fullContent == "" {
+	// LLM 流式生成失败时已发送 error 事件，此处直接返回，避免再发 done 导致前端重复显示
+	if err != nil {
 		return
 	}
 	if fullContent != "" {
@@ -119,10 +121,10 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 	assistantMsgID := uuid.New().String()
 
 	// Step 1: 并行加载模型 + 历史对话
-	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在加载上下文..."}
+	sendProgressEvent(eventCh, "正在加载上下文...")
 	client, history, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, 2000)
 	if err != nil {
-		eventCh <- dto.StreamEvent{Type: "error", Error: err.Error(), Done: true}
+		sendErrorEvent(eventCh, err, err.Error())
 		return
 	}
 
@@ -130,7 +132,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 	eventCh <- dto.StreamEvent{Type: "start", MessageID: assistantMsgID}
 
 	// Step 3: 委托 eino ReAct Agent 执行
-	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在深度推理..."}
+	sendProgressEvent(eventCh, "正在深度推理...")
 	agentEventCh, err := s.agentEngine.Execute(ctx, agent.Request{
 		UserID:           userID,
 		Query:            req.Content,
@@ -141,7 +143,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 	}, client.ChatModel())
 	if err != nil {
 		logger.Errorf("Agent 执行失败, sessionID=%s: %v", sessionID, err)
-		eventCh <- dto.StreamEvent{Type: "error", Error: "深度思考模式执行失败", Done: true}
+		sendErrorEvent(eventCh, err, "Agent 执行失败")
 		return
 	}
 
@@ -149,6 +151,8 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 	var fullContent string
 	var agentSources []dto.SourceInfo
 	var reasoningSteps []dto.ReasoningStep
+	toolEventSeen := false
+	agentErrorSeen := false
 
 	for agentEvent := range agentEventCh {
 		// Agent 的 done 事件仅用于收集完整答案，不透传到 SSE
@@ -163,6 +167,17 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 			continue
 		}
 
+		// 实时累积答案内容，确保用户中断时也能保存已生成的部分
+		if agentEvent.Type == agent.EventAnswer {
+			fullContent += agentEvent.Content
+		}
+		if agentEvent.Type == agent.EventToolCall || agentEvent.Type == agent.EventToolResult {
+			toolEventSeen = true
+		}
+		if agentEvent.Type == agent.EventError {
+			agentErrorSeen = true
+		}
+
 		eventCh <- toStreamEvent(agentEvent)
 
 		if len(agentEvent.Sources) > 0 {
@@ -172,7 +187,22 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 	}
 
 	// Step 5: 保存助手消息（含推理步骤）
-	if fullContent == "" {
+	if agentErrorSeen {
+		return
+	}
+	if !toolEventSeen && looksLikeExecutionPlan(fullContent) {
+		logger.Warnf("深度模式未产生工具调用，仅返回执行计划，sessionID=%s, content=%q", sessionID, fullContent)
+		eventCh <- dto.StreamEvent{
+			Type:      "error",
+			Title:     "深度推理未完成",
+			Detail:    "当前模型没有正确发起工具调用，请重试或切换支持工具调用的模型",
+			Retryable: true,
+			Done:      true,
+		}
+		return
+	}
+	// 用户中断时可能没有最终答案，但有推理步骤也应保存
+	if fullContent == "" && len(reasoningSteps) == 0 {
 		return
 	}
 
@@ -195,6 +225,7 @@ func (s *chatService) emitDoneAndSave(eventCh chan<- dto.StreamEvent, sessionID,
 		defer cancel()
 		if err := s.saveAssistantMessage(saveCtx, sessionID, msgID, content, req, sources, metadata); err != nil {
 			logger.Errorf("保存助手消息失败, messageID=%s: %v", msgID, err)
+			sendWarningEvent(eventCh, "消息保存失败", "回答已显示但可能未保存，请刷新页面确认")
 		}
 	}()
 }
@@ -241,11 +272,11 @@ func (s *chatService) retrieveContext(ctx context.Context, userID, question stri
 func (s *chatService) streamAndCollect(ctx context.Context, chatModel interface {
 	Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error)
 }, messages []*schema.Message, assistantMsgID string, eventCh chan<- dto.StreamEvent) (string, error) {
-	eventCh <- dto.StreamEvent{Type: "progress", Content: "正在生成回答..."}
+	sendProgressEvent(eventCh, "正在生成回答...")
 	streamReader, err := chatModel.Stream(ctx, messages)
 	if err != nil {
 		logger.Errorf("LLM 调用失败: %v", err)
-		eventCh <- dto.StreamEvent{Type: "error", Error: "LLM 调用失败", Done: true}
+		sendErrorEvent(eventCh, err, "LLM 调用失败")
 		return "", err
 	}
 	defer streamReader.Close()
@@ -267,7 +298,7 @@ func (s *chatService) streamAndCollect(ctx context.Context, chatModel interface 
 				return fullContent, recvErr
 			}
 			logger.Errorf("LLM 流式生成错误: %v", recvErr)
-			eventCh <- dto.StreamEvent{Type: "error", Error: recvErr.Error(), Done: true}
+			sendErrorEvent(eventCh, recvErr, "LLM 流式生成错误")
 			return fullContent, recvErr
 		}
 		if msg == nil || msg.Content == "" {
@@ -333,13 +364,14 @@ func mergeRetrieveResults(originalSources []dto.SourceInfo, originalResult rag.R
 // toStreamEvent 将 Agent 事件转换为 SSE 流式事件
 func toStreamEvent(e agent.Event) dto.StreamEvent {
 	se := dto.StreamEvent{
-		Type:    e.Type,
-		Title:   e.Title,
-		Detail:  e.Detail,
-		Status:  e.Status,
-		Content: e.Content,
-		Error:   e.Error,
-		Done:    e.Done,
+		Type:      e.Type,
+		Title:     e.Title,
+		Detail:    e.Detail,
+		Status:    e.Status,
+		Content:   e.Content,
+		Error:     e.Error,
+		Done:      e.Done,
+		Retryable: e.Retryable,
 	}
 	if len(e.Sources) > 0 {
 		se.Sources = e.Sources
@@ -352,6 +384,23 @@ func toStreamEvent(e agent.Event) dto.StreamEvent {
 		se.CitationContent = e.CitationContent
 	}
 	return se
+}
+
+func looksLikeExecutionPlan(content string) bool {
+	text := strings.TrimSpace(content)
+	if text == "" {
+		return false
+	}
+	if len([]rune(text)) > 120 {
+		return false
+	}
+	planPrefixes := []string{"我会先", "我将先", "我先", "先查一下", "我会查", "我将查"}
+	for _, prefix := range planPrefixes {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // applyReasoningStep 从 Agent 事件更新推理步骤列表（用于持久化）

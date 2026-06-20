@@ -16,16 +16,13 @@ export default {
           500: '#10b981',
           600: '#059669',
         },
-        // Solvify Design System — white-and-blue
         accent: {
-          50: '#eff6ff',
-          100: '#dbeafe',
-          200: '#bfdbfe',
-          300: '#93c5fd',
-          400: '#60a5fa',
-          500: '#3b82f6',
-          600: '#2563eb',
-          700: '#1d4ed8',
+          50: '#eef2ff',
+          100: '#e0e7ff',
+          200: '#c7d2fe',
+          500: '#6366f1',
+          600: '#4F46E5',
+          700: '#4338CA',
         },
         slate: {
           50: '#f8fafc',
@@ -39,7 +36,10 @@ export default {
           800: '#1e293b',
           900: '#0f172a',
         }
-      }
+      },
+      fontFamily: {
+        display: ['"Space Grotesk"', 'sans-serif'],
+      },
     },
   },
   plugins: [],

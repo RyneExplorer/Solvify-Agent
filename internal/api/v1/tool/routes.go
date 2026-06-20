@@ -11,8 +11,8 @@ func (c *Controller) RegisterRoutes(router *gin.RouterGroup) {
 	adminTypeGroup.PUT("/:id", c.UpdateToolType)
 	adminTypeGroup.DELETE("/:id", c.DeleteToolType)
 
-	// 管理员：查看可用的 provider_key
-	router.GET("/admin/provider-keys", c.ListProviderKeys)
+	// 管理员：查看可用的供应商类型
+	router.GET("/admin/provider-types", c.ListProviderTypes)
 
 	// 管理员：工具供应商管理
 	adminProviderGroup := router.Group("/admin/tool-types/:id/providers")

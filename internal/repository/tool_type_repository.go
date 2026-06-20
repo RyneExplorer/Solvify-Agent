@@ -64,3 +64,27 @@ func (r *toolTypeRepository) ExistsByKey(ctx context.Context, toolKey string) (b
 	err := r.db.WithContext(ctx).Model(&entity.ToolType{}).Where("tool_key = ?", toolKey).Count(&count).Error
 	return count > 0, err
 }
+
+// GetProviderCounts 获取所有工具类型的供应商数量
+func (r *toolTypeRepository) GetProviderCounts(ctx context.Context) (map[string]int, error) {
+	type result struct {
+		ToolTypeID string
+		Count      int
+	}
+	var results []result
+
+	err := r.db.WithContext(ctx).
+		Model(&entity.ToolProvider{}).
+		Select("tool_type_id, count(*) as count").
+		Group("tool_type_id").
+		Find(&results).Error
+	if err != nil {
+		return nil, err
+	}
+
+	counts := make(map[string]int, len(results))
+	for _, r := range results {
+		counts[r.ToolTypeID] = r.Count
+	}
+	return counts, nil
+}
