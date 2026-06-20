@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -56,4 +57,45 @@ func (r *chatSessionRepository) UpdateTitle(ctx context.Context, id string, titl
 // Delete 删除会话
 func (r *chatSessionRepository) Delete(ctx context.Context, id string) error {
 	return r.db.WithContext(ctx).Where("id = ?", id).Delete(&entity.ChatSession{}).Error
+}
+
+// AdminList 管理员分页查询会话列表
+func (r *chatSessionRepository) AdminList(ctx context.Context, offset, limit int, keyword, status string) ([]AdminSessionRow, int64, error) {
+	base := r.db.WithContext(ctx).Table("chat_sessions as s").
+		Select("s.*, u.username, COUNT(m.id) as message_count").
+		Joins("JOIN users u ON s.user_id = u.id").
+		Joins("LEFT JOIN chat_messages m ON s.id = m.session_id")
+
+	if keyword != "" {
+		base = base.Where("s.title ILIKE ? OR u.username ILIKE ?", "%"+keyword+"%", "%"+keyword+"%")
+	}
+	if status != "" {
+		base = base.Where("s.status = ?", status)
+	}
+
+	var total int64
+	if err := base.Group("s.id, u.username").Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var rows []AdminSessionRow
+	if err := base.Group("s.id, u.username").
+		Order("s.updated_at DESC").
+		Offset(offset).
+		Limit(limit).
+		Find(&rows).Error; err != nil {
+		return nil, 0, err
+	}
+
+	return rows, total, nil
+}
+
+// ListExpired 返回指定时间之前未更新的会话 ID 列表
+func (r *chatSessionRepository) ListExpired(ctx context.Context, before time.Time) ([]string, error) {
+	var ids []string
+	err := r.db.WithContext(ctx).
+		Model(&entity.ChatSession{}).
+		Where("updated_at < ?", before).
+		Pluck("id", &ids).Error
+	return ids, err
 }

@@ -93,3 +93,17 @@ export interface ListSessionsResponse {
 export interface ListMessagesResponse {
   messages: ChatMessage[]
 }
+
+// ── Admin Session ──
+
+export interface AdminSession {
+  id: string
+  user_id: string
+  username: string
+  title: string
+  model_id: string
+  status: string
+  message_count: number
+  created_at: string
+  updated_at: string
+}

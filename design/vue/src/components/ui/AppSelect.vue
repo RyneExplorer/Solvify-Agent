@@ -12,12 +12,12 @@
 
 <script setup lang="ts">
 defineProps<{
-  modelValue: string
+  modelValue: string | number
   placeholder?: string
 }>()
 
 defineEmits<{
-  (e: 'update:modelValue', value: string): void
+  (e: 'update:modelValue', value: string | number): void
 }>()
 </script>
 

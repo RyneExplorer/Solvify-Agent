@@ -7,6 +7,7 @@ import (
 	"solvify-agent/pkg/response"
 
 	"fmt"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -70,6 +71,7 @@ func Auth() gin.HandlerFunc {
 		// 将用户信息存入上下文
 		c.Set(ContextUserID, claims.GetUserID())
 		c.Set(ContextUsername, claims.GetUsername())
+		c.Set(ContextUserRole, claims.GetRole())
 
 		c.Next()
 	}
@@ -101,6 +103,7 @@ func OptionalAuth() gin.HandlerFunc {
 
 		c.Set(ContextUserID, claims.GetUserID())
 		c.Set(ContextUsername, claims.GetUsername())
+		c.Set(ContextUserRole, claims.GetRole())
 		c.Next()
 	}
 }
@@ -146,4 +149,9 @@ func GetUserRole(c *gin.Context) int {
 		return role.(int)
 	}
 	return -1
+}
+
+// RequireAdmin 要求当前登录用户是管理员
+func RequireAdmin() gin.HandlerFunc {
+	return RequireRole(2)
 }

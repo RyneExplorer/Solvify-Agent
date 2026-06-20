@@ -8,16 +8,23 @@ import (
 
 // RegisterRoutes 注册用户模块路由
 func (ctrl *Controller) RegisterRoutes(r *gin.RouterGroup) {
-	group := r.Group("/user")
-	group.Use(middleware.Auth())
+	// 普通用户：个人资料管理
+	userGroup := r.Group("/user")
 	{
-		// 获取个人资料
-		group.GET("/profile", ctrl.GetProfile)
-		// 更新个人资料
-		group.PUT("/profile", ctrl.UpdateProfile)
-		// 上传头像
-		group.POST("/avatar", ctrl.UploadAvatar)
-		// 修改密码
-		group.POST("/password", ctrl.ChangePassword)
+		userGroup.GET("/profile", ctrl.GetProfile)
+		userGroup.PUT("/profile", ctrl.UpdateProfile)
+		userGroup.POST("/avatar", ctrl.UploadAvatar)
+		userGroup.POST("/password", ctrl.ChangePassword)
+	}
+
+	// 管理员：用户管理
+	adminGroup := r.Group("/admin/users")
+	adminGroup.Use(middleware.RequireAdmin())
+	{
+		adminGroup.GET("", ctrl.AdminListUsers)
+		adminGroup.POST("", ctrl.AdminCreateUser)
+		adminGroup.PUT("/:id", ctrl.AdminUpdateUser)
+		adminGroup.DELETE("/:id", ctrl.AdminDeleteUser)
+		adminGroup.POST("/:id/reset-password", ctrl.AdminResetPassword)
 	}
 }

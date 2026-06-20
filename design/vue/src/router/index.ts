@@ -1,5 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { hasToken } from '@/api/client'
+import { hasToken, removeToken } from '@/api/client'
+import { getProfile } from '@/api/auth'
+import { isAdmin, currentUser } from '@/composables/useAuth'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -57,22 +59,43 @@ const router = createRouter({
       path: '/admin',
       name: 'admin',
       component: () => import('@/pages/AdminPage.vue'),
-      meta: { auth: true },
+      meta: { auth: true, admin: true },
     },
   ],
 })
 
 // Auth guard
-router.beforeEach((to, _from, next) => {
+router.beforeEach(async (to, _from, next) => {
   const authenticated = hasToken()
 
   if (to.meta.auth && !authenticated) {
     next({ name: 'login', query: { redirect: to.fullPath } })
-  } else if (to.meta.guest && authenticated) {
-    next({ name: 'chat' })
-  } else {
-    next()
+    return
   }
+  if (to.meta.guest && authenticated) {
+    next({ name: 'chat' })
+    return
+  }
+  if (to.meta.admin) {
+    // 如果用户信息未加载但持有 token，先拉取 profile 再判断权限
+    if (authenticated && currentUser.value === null) {
+      try {
+        const res = await getProfile()
+        if (res.code === 0 && res.data) {
+          currentUser.value = res.data
+        }
+      } catch {
+        removeToken()
+        next({ name: 'login', query: { redirect: to.fullPath } })
+        return
+      }
+    }
+    if (!isAdmin.value) {
+      next({ name: 'chat' })
+      return
+    }
+  }
+  next()
 })
 
 export default router

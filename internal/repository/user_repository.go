@@ -91,8 +91,14 @@ func (r *userRepository) AdminList(offset, limit int, filter *UserListFilter) ([
 		if username := strings.TrimSpace(filter.Username); username != "" {
 			q = q.Where("username LIKE ?", "%"+username+"%")
 		}
+		if email := strings.TrimSpace(filter.Email); email != "" {
+			q = q.Where("email LIKE ?", "%"+email+"%")
+		}
 		if filter.Status != nil {
 			q = q.Where("status = ?", *filter.Status)
+		}
+		if filter.Role != nil {
+			q = q.Where("role = ?", *filter.Role)
 		}
 	}
 

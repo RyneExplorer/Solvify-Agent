@@ -1,15 +1,31 @@
 package chat
 
-import "github.com/gin-gonic/gin"
+import (
+	"solvify-agent/internal/middleware"
+
+	"github.com/gin-gonic/gin"
+)
 
 // RegisterRoutes 注册聊天模块路由
 func (ctrl *Controller) RegisterRoutes(router *gin.RouterGroup) {
-	group := router.Group("/chat")
-	group.POST("/sessions", ctrl.CreateSession)
-	group.GET("/sessions", ctrl.ListSessions)
-	group.GET("/sessions/:id", ctrl.GetSession)
-	group.PUT("/sessions/:id", ctrl.UpdateSession)
-	group.DELETE("/sessions/:id", ctrl.DeleteSession)
-	group.POST("/sessions/:id/messages", ctrl.SendMessage)
-	group.GET("/sessions/:id/messages", ctrl.GetMessages)
+	// 普通用户：聊天会话管理
+	chatGroup := router.Group("/chat")
+	{
+		chatGroup.POST("/sessions", ctrl.CreateSession)
+		chatGroup.GET("/sessions", ctrl.ListSessions)
+		chatGroup.GET("/sessions/:id", ctrl.GetSession)
+		chatGroup.PUT("/sessions/:id", ctrl.UpdateSession)
+		chatGroup.DELETE("/sessions/:id", ctrl.DeleteSession)
+		chatGroup.POST("/sessions/:id/messages", ctrl.SendMessage)
+		chatGroup.GET("/sessions/:id/messages", ctrl.GetMessages)
+	}
+
+	// 管理员：会话管理
+	adminGroup := router.Group("/admin/sessions")
+	adminGroup.Use(middleware.RequireAdmin())
+	{
+		adminGroup.GET("", ctrl.AdminListSessions)
+		adminGroup.DELETE("/:id", ctrl.AdminDeleteSession)
+		adminGroup.POST("/cleanup", ctrl.AdminCleanupSessions)
+	}
 }
