@@ -18,7 +18,21 @@ export interface UserInfo {
   email: string
   avatar: string
   status: number
+  role: number
   lastModel?: string
+  created_at: string
+  updated_at: string
+}
+
+// ── Admin Users ──
+
+export interface AdminUser {
+  id: string
+  username: string
+  email: string
+  avatar: string
+  role: number
+  status: number
   created_at: string
   updated_at: string
 }

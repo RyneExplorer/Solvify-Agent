@@ -137,6 +137,7 @@ func (s *userService) GetUserResponse(user *entity.User) *dto.UserResponse {
 		Email:     user.Email,
 		Avatar:    user.Avatar,
 		Status:    user.Status,
+		Role:      user.Role,
 		LastModel: user.LastModel,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
@@ -168,8 +169,9 @@ func (s *userService) AdminListUsers(adminID string, req *request.AdminUserListR
 	offset := (page - 1) * pageSize
 	users, total, err := s.userRepo.AdminList(offset, pageSize, &repository.UserListFilter{
 		Username: req.Username,
-		Nickname: req.Nickname,
+		Email:    req.Email,
 		Status:   req.Status,
+		Role:     req.Role,
 	})
 	if err != nil {
 		return nil, err
@@ -183,6 +185,7 @@ func (s *userService) AdminListUsers(adminID string, req *request.AdminUserListR
 			Username:  user.Username,
 			Email:     user.Email,
 			Avatar:    user.Avatar,
+			Role:      user.Role,
 			Status:    user.Status,
 			CreatedAt: user.CreatedAt,
 			UpdatedAt: user.UpdatedAt,

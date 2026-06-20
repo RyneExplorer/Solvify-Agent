@@ -1,21 +1,29 @@
 package tool
 
-import "github.com/gin-gonic/gin"
+import (
+	"solvify-agent/internal/middleware"
+
+	"github.com/gin-gonic/gin"
+)
 
 // RegisterRoutes 注册工具管理路由
 func (c *Controller) RegisterRoutes(router *gin.RouterGroup) {
 	// 管理员：工具类型管理
 	adminTypeGroup := router.Group("/admin/tool-types")
+	adminTypeGroup.Use(middleware.RequireAdmin())
 	adminTypeGroup.GET("", c.ListToolTypes)
 	adminTypeGroup.POST("", c.CreateToolType)
 	adminTypeGroup.PUT("/:id", c.UpdateToolType)
 	adminTypeGroup.DELETE("/:id", c.DeleteToolType)
 
 	// 管理员：查看可用的供应商类型
-	router.GET("/admin/provider-types", c.ListProviderTypes)
+	adminProviderTypes := router.Group("/admin/provider-types")
+	adminProviderTypes.Use(middleware.RequireAdmin())
+	adminProviderTypes.GET("", c.ListProviderTypes)
 
 	// 管理员：工具供应商管理
 	adminProviderGroup := router.Group("/admin/tool-types/:id/providers")
+	adminProviderGroup.Use(middleware.RequireAdmin())
 	adminProviderGroup.GET("", c.ListToolProviders)
 	adminProviderGroup.POST("", c.CreateToolProvider)
 	adminProviderGroup.PUT("/:providerId", c.UpdateToolProvider)

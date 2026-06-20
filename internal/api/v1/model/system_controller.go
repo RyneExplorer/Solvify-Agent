@@ -48,7 +48,7 @@ func (ctrl *Controller) Get(ctx *gin.Context) {
 func (ctrl *Controller) Create(ctx *gin.Context) {
 	var req requestdto.CreateModelRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(ctx, "请求参数错误: "+err.Error())
+		response.BadRequest(ctx, "请求参数错误")
 		return
 	}
 
@@ -70,7 +70,7 @@ func (ctrl *Controller) Update(ctx *gin.Context) {
 
 	var req requestdto.UpdateModelRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(ctx, "请求参数错误: "+err.Error())
+		response.BadRequest(ctx, "请求参数错误")
 		return
 	}
 

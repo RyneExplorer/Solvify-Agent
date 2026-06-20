@@ -1,6 +1,55 @@
 import { request } from './client'
 import type { ModelInfo } from '@/types/model'
 import type { ToolTypeInfo, ToolProviderInfo } from '@/types/tool'
+import type { AdminUser } from '@/types/auth'
+import type { AdminSession } from '@/types/chat'
+
+// ── Admin Users ──
+
+export function adminListUsers(params: {
+  page: number
+  pageSize: number
+  username?: string
+  email?: string
+  status?: number
+  role?: number
+}) {
+  const query = new URLSearchParams()
+  query.set('page', String(params.page))
+  query.set('pageSize', String(params.pageSize))
+  if (params.username) query.set('username', params.username)
+  if (params.email) query.set('email', params.email)
+  if (params.status !== undefined) query.set('status', String(params.status))
+  if (params.role !== undefined) query.set('role', String(params.role))
+  return request<{ list: AdminUser[]; total: number; page: number; pageSize: number; pages: number }>(`/admin/users?${query.toString()}`)
+}
+
+export function adminCreateUser(data: {
+  username: string
+  email: string
+  password: string
+  status: number
+  role: number
+}) {
+  return request<AdminUser>('/admin/users', { method: 'POST', body: data })
+}
+
+export function adminUpdateUser(id: string, data: Partial<{
+  username: string
+  email: string
+  status: number
+  role: number
+}>) {
+  return request<null>(`/admin/users/${id}`, { method: 'PUT', body: data })
+}
+
+export function adminDeleteUser(id: string) {
+  return request<null>(`/admin/users/${id}`, { method: 'DELETE' })
+}
+
+export function adminResetUserPassword(id: string, data: { password: string }) {
+  return request<null>(`/admin/users/${id}/reset-password`, { method: 'POST', body: data })
+}
 
 // ── Admin Models ──
 
@@ -114,4 +163,28 @@ export function adminDeleteToolProvider(toolTypeId: string, providerId: string) 
   return request<null>(`/admin/tool-types/${toolTypeId}/providers/${providerId}`, {
     method: 'DELETE',
   })
+}
+
+// ── Admin Sessions ──
+
+export function adminListSessions(params: {
+  page: number
+  pageSize: number
+  keyword?: string
+  status?: string
+}) {
+  const query = new URLSearchParams()
+  query.set('page', String(params.page))
+  query.set('pageSize', String(params.pageSize))
+  if (params.keyword) query.set('keyword', params.keyword)
+  if (params.status) query.set('status', params.status)
+  return request<{ list: AdminSession[]; total: number; page: number; pageSize: number; pages: number }>(`/admin/sessions?${query.toString()}`)
+}
+
+export function adminDeleteSession(id: string) {
+  return request<null>(`/admin/sessions/${id}`, { method: 'DELETE' })
+}
+
+export function adminCleanupSessions() {
+  return request<{ deleted: number }>('/admin/sessions/cleanup', { method: 'POST' })
 }

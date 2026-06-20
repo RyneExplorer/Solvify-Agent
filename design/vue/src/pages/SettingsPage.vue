@@ -280,7 +280,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useModelConfig } from '@/composables/useModelConfig'
 import { useToolConfig } from '@/composables/useToolConfig'
 import AppButton from '@/components/ui/AppButton.vue'
@@ -367,7 +367,17 @@ function openModelEdit(m: UserModelConfigInfo) {
   modalMode.value = 'model'; editId.value = m.id; mForm.api_format = m.api_format; mForm.base_url = m.base_url; mForm.model_id = m.model_id; mForm.api_key = m.api_key || ''
   cfgText.value = m.config ? JSON.stringify(m.config, null, 2) : ''; showModal.value = true
 }
-async function handleModelDelete(id: string) { if (confirm('确定要删除这个模型配置吗？')) { await deleteModel(id); loadModels() } }
+async function handleModelDelete(id: string) {
+  try {
+    await ElMessageBox.confirm('确定要删除这个模型配置吗？', '提示', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
+    await deleteModel(id)
+    await loadModels()
+    ElMessage.success('删除成功')
+  } catch (e: any) {
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '删除失败')
+  }
+}
 
 function openToolCreate() {
   modalMode.value = 'tool'; editId.value = null
@@ -394,7 +404,17 @@ async function handleToolEnable(c: UserToolConfigInfo) {
     ElMessage.error(e instanceof Error ? e.message : '启用失败')
   }
 }
-async function handleToolDelete(id: string) { if (confirm('确定要删除这个工具配置吗？')) { await deleteTool(id); loadTools() } }
+async function handleToolDelete(id: string) {
+  try {
+    await ElMessageBox.confirm('确定要删除这个工具配置吗？', '提示', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
+    await deleteTool(id)
+    await loadTools()
+    ElMessage.success('删除成功')
+  } catch (e: any) {
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '删除失败')
+  }
+}
 
 async function doSave() {
   try {

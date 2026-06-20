@@ -7,8 +7,9 @@ import (
 // UserListFilter 用户列表筛选条件
 type UserListFilter struct {
 	Username string
-	Nickname string
+	Email    string
 	Status   *int
+	Role     *int
 }
 
 // UserRepository 用户仓储接口

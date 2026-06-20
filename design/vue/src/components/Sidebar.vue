@@ -14,7 +14,7 @@
     <!-- Main nav -->
     <nav class="px-3 py-3 space-y-0.5 shrink-0">
       <router-link
-        v-for="item in navItems"
+        v-for="item in visibleNavItems"
         :key="item.key"
         :to="item.to"
         class="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] text-sm transition-colors no-underline"
@@ -159,14 +159,17 @@ import { computed, ref, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { updateSession, deleteSession } from '@/api/chat'
 import AppLogo from '@/components/AppLogo.vue'
+import { useAuth } from '@/composables/useAuth'
 
 const historyExpanded = ref(true)
+const { isAdmin } = useAuth()
 
 interface NavItem {
   key: string
   label: string
   to: string
   icon: string
+  adminOnly?: boolean
 }
 
 const navItems: NavItem[] = [
@@ -210,9 +213,12 @@ const navItems: NavItem[] = [
     key: 'admin',
     label: '管理',
     to: '/admin',
+    adminOnly: true,
     icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
   },
 ]
+
+const visibleNavItems = computed(() => navItems.filter(item => !item.adminOnly || isAdmin.value))
 
 interface HistoryItem { id: string; title: string }
 

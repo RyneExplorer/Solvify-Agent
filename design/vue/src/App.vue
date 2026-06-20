@@ -19,21 +19,30 @@ import { useRoute, useRouter } from 'vue-router'
 import Sidebar from './components/Sidebar.vue'
 import { listSessions } from './api/chat'
 import { removeToken, hasToken } from './api/client'
+import { useAuth } from './composables/useAuth'
+import { ElMessageBox } from 'element-plus'
 
 interface HistoryItem { id: string; title: string }
 
 const route = useRoute()
 const router = useRouter()
+const { currentUser, initAuth } = useAuth()
 
-const userName = ref('Admin')
-const userEmail = ref('admin@solvify.ai')
 const historyList = ref<HistoryItem[]>([])
 
 const isLoginPage = computed(() => route.name === 'login')
+const userName = computed(() => currentUser.value?.username || 'User')
+const userEmail = computed(() => currentUser.value?.email || '')
 
-function handleLogout() {
-  removeToken()
-  router.push('/login')
+async function handleLogout() {
+  try {
+    await ElMessageBox.confirm('确定要退出登录吗？', '提示', { confirmButtonText: '退出', cancelButtonText: '取消', type: 'warning' })
+    removeToken()
+    currentUser.value = null
+    router.push('/login')
+  } catch (e: any) {
+    if (e === 'cancel' || e === 'close') return
+  }
 }
 
 async function loadHistory() {
@@ -49,5 +58,8 @@ async function loadHistory() {
   } catch { /* silent */ }
 }
 
-onMounted(() => { loadHistory() })
+onMounted(async () => {
+  await initAuth()
+  await loadHistory()
+})
 </script>
