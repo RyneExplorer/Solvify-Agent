@@ -27,27 +27,33 @@
             </svg>
           </button>
 
-          <!-- 快速 -->
-          <button class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-gray-500 hover:bg-gray-50 transition-colors border border-gray-200">
+          <!-- 检索模式 -->
+          <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-gray-500 hover:bg-gray-50 transition-colors border border-gray-200 cursor-pointer">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
             </svg>
-            <span>快速</span>
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <select v-model="searchMode" class="bg-transparent outline-none text-xs text-gray-500 cursor-pointer pr-4 appearance-none">
+              <option value="fast">快速检索</option>
+              <option value="deep">深度模式</option>
+            </select>
+            <svg class="w-3 h-3 -ml-5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
             </svg>
-          </button>
+          </div>
 
           <!-- 模型选择 -->
           <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-gray-500 hover:bg-gray-50 transition-colors border border-gray-200 cursor-pointer">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
             </svg>
-            <select v-model="selectedModel" class="bg-transparent outline-none text-xs text-gray-500 cursor-pointer">
+            <select v-model="selectedModel" class="bg-transparent outline-none text-xs text-gray-500 cursor-pointer pr-4 appearance-none">
               <option value="gpt-4">GPT-4</option>
               <option value="claude-3">Claude-3</option>
               <option value="gpt-3.5">GPT-3.5</option>
             </select>
+            <svg class="w-3 h-3 -ml-5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+            </svg>
           </div>
         </div>
 
@@ -76,6 +82,7 @@ import { ref } from 'vue'
 
 const inputText = ref('')
 const selectedModel = ref('gpt-4')
+const searchMode = ref('fast')
 
 const handleSend = () => {
   if (!inputText.value.trim()) return

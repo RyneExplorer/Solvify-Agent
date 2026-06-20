@@ -17,6 +17,7 @@ import (
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
+	"solvify-agent/pkg/cache"
 	apperrors "solvify-agent/pkg/errors"
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/tokenutil"
@@ -33,6 +34,8 @@ type chatService struct {
 	retriever           rag.Retriever
 	modelRepo           repository.ModelRepo
 	userModelConfigRepo repository.UserModelConfigRepo
+	userRepo            repository.UserRepository
+	userCache           *cache.RedisCache
 	agentEngine         *agent.Engine
 }
 
@@ -43,6 +46,8 @@ func NewChatService(
 	retriever rag.Retriever,
 	modelRepo repository.ModelRepo,
 	userModelConfigRepo repository.UserModelConfigRepo,
+	userRepo repository.UserRepository,
+	userCache *cache.RedisCache,
 	agentEngine *agent.Engine,
 ) ChatServiceInterface {
 	return &chatService{
@@ -51,6 +56,8 @@ func NewChatService(
 		retriever:           retriever,
 		modelRepo:           modelRepo,
 		userModelConfigRepo: userModelConfigRepo,
+		userRepo:            userRepo,
+		userCache:           userCache,
 		agentEngine:         agentEngine,
 	}
 }
@@ -64,6 +71,11 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 		return nil, err
 	}
 
+	// 缓存比对：如果模型 ID 不一致，更新缓存和数据库
+	if req.ModelID != "" {
+		s.updateUserLastModel(ctx, userID, req.ModelID)
+	}
+
 	eventCh := make(chan dto.StreamEvent, 100)
 	go func() {
 		defer close(eventCh)
@@ -75,6 +87,35 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 	}()
 
 	return eventCh, nil
+}
+
+// updateUserLastModel 更新用户上次使用的模型（缓存比对策略）
+func (s *chatService) updateUserLastModel(ctx context.Context, userID, modelID string) {
+	cacheKey := "user:model:" + userID
+
+	// 1. 从缓存获取上次使用的模型
+	var cachedModelID string
+	found, err := s.userCache.Get(ctx, cacheKey, &cachedModelID)
+	if err != nil {
+		logger.Errorf("读取用户模型缓存失败: userID=%s, err=%v", userID, err)
+	}
+
+	// 2. 如果缓存命中且模型 ID 一致，不需要更新
+	if found && cachedModelID == modelID {
+		return
+	}
+
+	// 3. 更新缓存
+	if err := s.userCache.Set(ctx, cacheKey, modelID, 24*time.Hour); err != nil {
+		logger.Errorf("更新用户模型缓存失败: userID=%s, err=%v", userID, err)
+	}
+
+	// 4. 更新数据库
+	go func() {
+		if err := s.userRepo.Update(userID, map[string]interface{}{"last_model": modelID}); err != nil {
+			logger.Errorf("更新用户模型失败: userID=%s, modelID=%s, err=%v", userID, modelID, err)
+		}
+	}()
 }
 
 // ─── 会话 CRUD ───────────────────────────────────────────

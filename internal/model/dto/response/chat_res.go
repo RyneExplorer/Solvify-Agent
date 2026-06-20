@@ -59,6 +59,7 @@ type StreamEvent struct {
 	MessageID        string `json:"message_id,omitempty"`
 	Done             bool   `json:"done"`
 	Error            string `json:"error,omitempty"`
+	Retryable        bool   `json:"retryable,omitempty"` // 是否可重试
 }
 
 // CitationInfo 描述引用信息（前端 hover 用）

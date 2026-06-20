@@ -42,20 +42,21 @@ func buildRewritePrompt(history []entity.ChatMessage, question string) []*schema
 	}
 }
 
-// buildMessages 组装 LLM 消息列表
+// buildMessages 组装快速检索模式的 LLM 消息列表
 func buildMessages(history []entity.ChatMessage, question string, retrieveResult rag.Result) []*schema.Message {
-	systemPrompt := `你是一个专业的知识问答助手。请严格遵守以下规则：
-
-## 回答规则
-1. **优先使用参考资料**：如果参考资料中包含足够的信息来回答问题，请直接基于参考资料作答，不要额外编造内容。
-2. **资料不足时适度扩展**：如果参考资料只覆盖了问题的部分方面，可以结合你的通用知识适度补充，但必须明确标注哪些内容来自参考资料、哪些是补充说明，且补充内容不得与参考资料矛盾。
-3. **无相关资料时如实告知**：如果参考资料中完全没有相关信息，请明确告知用户"当前知识库中未找到相关信息"，不要编造答案。
-4. **绝不编造或篡改**：绝对不要捏造参考资料中不存在的数据、事实或结论。宁可说"不确定"也不要胡编。
-
-## 格式要求
-- 使用 Markdown 格式输出回答
-- 适当使用标题（##、###）、列表（- 或 1.）、加粗（**重点**）等格式提升可读性
-- 引用参考资料时使用行内标注，如：（来源：文档标题）`
+	// 快速检索模式专用提示词
+	systemPrompt := "你是一个专业的知识问答助手。\n\n" +
+		"## 回答规则\n" +
+		"1. 先分析知识库检索结果是否与问题直接相关\n" +
+		"2. 如果知识库有直接相关内容，用知识库内容回答\n" +
+		"3. 如果知识库没有直接相关内容，说明情况，然后用通用知识回答\n" +
+		"4. 可以提及知识库中找到的相关文档\n" +
+		"5. 禁止捏造虚假信息\n\n" +
+		"## 格式要求\n" +
+		"- 使用 Markdown 格式\n" +
+		"- 用自己的语言组织回答，不要直接复制原文\n" +
+		"- 不要在回答中使用 [1] [2] 等编号引用\n" +
+		"- 引用信息自动显示在消息底部，无需手动标注"
 
 	messages := []*schema.Message{
 		schema.SystemMessage(systemPrompt),
@@ -71,17 +72,17 @@ func buildMessages(history []entity.ChatMessage, question string, retrieveResult
 	}
 
 	if retrieveResult.Hit {
-		contextText := "## 参考资料\n\n"
-		for i, doc := range retrieveResult.Documents {
-			contextText += fmt.Sprintf("### [%d] %s\n\n%s\n\n", i+1, doc.Title, doc.Content)
+		contextText := "## 知识库检索结果\n\n"
+		for _, doc := range retrieveResult.Documents {
+			contextText += fmt.Sprintf("### %s\n\n%s\n\n", doc.Title, doc.Content)
 		}
 		if len(contextText) > maxContextChars {
 			contextText = contextText[:maxContextChars] + "\n\n（参考资料过长，已截断）\n\n"
 		}
-		questionText := fmt.Sprintf("%s\n---\n\n**问题**：%s\n\n请根据以上参考资料回答。如果资料充分，直接作答；如果资料不足，请在回答中说明哪些部分来自参考资料、哪些是补充说明。", contextText, question)
+		questionText := fmt.Sprintf("%s---\n\n**问题**：%s", contextText, question)
 		messages = append(messages, schema.UserMessage(questionText))
 	} else {
-		questionText := fmt.Sprintf("**问题**：%s\n\n（当前无匹配的参考资料，请如实告知用户知识库中未找到相关信息。）", question)
+		questionText := fmt.Sprintf("**问题**：%s\n\n知识库中未找到相关内容，请用通用知识回答。", question)
 		messages = append(messages, schema.UserMessage(questionText))
 	}
 

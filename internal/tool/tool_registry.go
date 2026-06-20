@@ -12,22 +12,22 @@ func NewProviderRegistry() ProviderRegistry {
 	}
 }
 
-// Register 注册供应商
-func (r *providerRegistry) Register(key string, provider Provider) {
-	r.providers[key] = provider
+// Register 注册供应商类型
+func (r *providerRegistry) Register(providerType string, provider Provider) {
+	r.providers[providerType] = provider
 }
 
-// Get 获取供应商
-func (r *providerRegistry) Get(key string) Provider {
-	return r.providers[key]
+// Get 获取供应商类型
+func (r *providerRegistry) Get(providerType string) Provider {
+	return r.providers[providerType]
 }
 
-// List 列出所有供应商
+// List 列出所有供应商类型
 func (r *providerRegistry) List() map[string]Provider {
 	return r.providers
 }
 
-// Keys 返回所有已注册的 provider_key
+// Keys 返回所有已注册的 provider_type
 func (r *providerRegistry) Keys() []string {
 	keys := make([]string, 0, len(r.providers))
 	for k := range r.providers {

@@ -16,4 +16,5 @@ type ToolTypeRepository interface {
 	List(ctx context.Context) ([]entity.ToolType, error)
 	ListEnabled(ctx context.Context) ([]entity.ToolType, error)
 	ExistsByKey(ctx context.Context, toolKey string) (bool, error)
+	GetProviderCounts(ctx context.Context) (map[string]int, error)
 }

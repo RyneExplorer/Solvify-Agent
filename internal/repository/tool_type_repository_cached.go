@@ -97,3 +97,7 @@ func (r *cachedToolTypeRepository) ListEnabled(ctx context.Context) ([]entity.To
 func (r *cachedToolTypeRepository) ExistsByKey(ctx context.Context, toolKey string) (bool, error) {
 	return r.inner.ExistsByKey(ctx, toolKey)
 }
+
+func (r *cachedToolTypeRepository) GetProviderCounts(ctx context.Context) (map[string]int, error) {
+	return r.inner.GetProviderCounts(ctx)
+}

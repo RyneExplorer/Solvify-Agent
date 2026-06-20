@@ -8,34 +8,10 @@ import (
 	"solvify-agent/internal/model/entity"
 )
 
-// Provider 工具供应商接口
-//
-// 每个 Provider 对应一个具体的第三方服务（SerpAPI、Tavily 等），由开发者一次性实现。
-// 所有技术参数（URL、认证方式、参数映射、响应解析）硬编码在 Execute 中，
-// 管理员通过 adminConfig 配置业务参数，用户通过 userConfig 提供 API Key。
-type Provider interface {
-	Name() string
-
-	// GetInputSchema Agent 调用时的参数定义（固定，代码写死）
-	GetInputSchema() map[string]interface{}
-
-	// GetConfigSchema 用户需要填写的配置参数定义（固定，代码写死）
-	GetConfigSchema() map[string]interface{}
-
-	// Validate 校验用户配置
-	Validate(userConfig map[string]interface{}) error
-
-	// Execute 执行工具调用
-	// toolInput:    LLM 传来的参数
-	// userConfig:   用户配置（API Key 等）
-	// adminConfig:  管理员配置的业务参数
-	Execute(ctx context.Context, toolInput, userConfig, adminConfig map[string]interface{}) (string, error)
-}
-
 // ProviderRegistry 供应商注册表接口
 type ProviderRegistry interface {
-	Register(key string, provider Provider)
-	Get(key string) Provider
+	Register(providerType string, provider Provider)
+	Get(providerType string) Provider
 	List() map[string]Provider
 	Keys() []string
 }

@@ -31,6 +31,7 @@ type Event struct {
 	MessageID        string `json:"message_id,omitempty"`
 	Error            string `json:"error,omitempty"`
 	Done             bool   `json:"done"`
+	Retryable        bool   `json:"retryable,omitempty"` // 是否可重试
 }
 
 // 事件类型常量

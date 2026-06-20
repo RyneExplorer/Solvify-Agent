@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"gorm.io/datatypes"
 
@@ -41,9 +40,9 @@ func (s *toolProviderService) Create(ctx context.Context, req request.CreateTool
 		return nil, apperrors.NewDefault(apperrors.CodeToolTypeNotFound)
 	}
 
-	// 防线一：检查 provider_key 是否在 Registry 中已注册
-	if s.registry != nil && s.registry.Get(req.ProviderKey) == nil {
-		return nil, apperrors.New(apperrors.CodeBadRequest, fmt.Sprintf("供应商标识 '%s' 未在后端注册，可用值: %v", req.ProviderKey, s.registry.Keys()))
+	// 检查 provider_type 是否已注册
+	if s.registry.Get(req.ProviderType) == nil {
+		return nil, apperrors.New(apperrors.CodeBadRequest, "供应商类型未注册")
 	}
 
 	// 检查 provider_key 在当前 tool_type 下是否已存在
@@ -52,17 +51,21 @@ func (s *toolProviderService) Create(ctx context.Context, req request.CreateTool
 		return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 	if exists {
-		return nil, apperrors.New(apperrors.CodeToolProviderExists, fmt.Sprintf("供应商标识 '%s' 已存在", req.ProviderKey))
+		return nil, apperrors.New(apperrors.CodeToolProviderExists, "供应商标识已存在")
 	}
 
 	provider := &entity.ToolProvider{
-		ToolTypeID:  req.ToolTypeID,
-		Name:        req.Name,
-		ProviderKey: req.ProviderKey,
-		Description: req.Description,
-		AdminConfig: datatypes.JSON(req.AdminConfig),
-		RateLimit:   datatypes.JSON(req.RateLimit),
-		IsEnabled:   true,
+		ToolTypeID:     req.ToolTypeID,
+		ProviderKey:    req.ProviderKey,
+		Name:           req.Name,
+		Description:    req.Description,
+		ProviderType:   req.ProviderType,
+		ConfigSchema:   datatypes.JSON(req.ConfigSchema),
+		InputSchema:    datatypes.JSON(req.InputSchema),
+		ProviderConfig: datatypes.JSON(req.ProviderConfig),
+		AdminConfig:    datatypes.JSON(req.AdminConfig),
+		RateLimit:      datatypes.JSON(req.RateLimit),
+		IsEnabled:      true,
 	}
 
 	if err := s.repo.Create(ctx, provider); err != nil {
@@ -83,6 +86,22 @@ func (s *toolProviderService) Update(ctx context.Context, id string, req request
 	}
 	if req.Description != nil {
 		provider.Description = *req.Description
+	}
+	if req.ProviderType != nil {
+		// 检查 provider_type 是否已注册
+		if s.registry.Get(*req.ProviderType) == nil {
+			return nil, apperrors.New(apperrors.CodeBadRequest, "供应商类型未注册")
+		}
+		provider.ProviderType = *req.ProviderType
+	}
+	if req.ConfigSchema != nil {
+		provider.ConfigSchema = datatypes.JSON(*req.ConfigSchema)
+	}
+	if req.InputSchema != nil {
+		provider.InputSchema = datatypes.JSON(*req.InputSchema)
+	}
+	if req.ProviderConfig != nil {
+		provider.ProviderConfig = datatypes.JSON(*req.ProviderConfig)
 	}
 	if req.AdminConfig != nil {
 		provider.AdminConfig = datatypes.JSON(*req.AdminConfig)
@@ -141,8 +160,8 @@ func (s *toolProviderService) ListEnabledByToolTypeID(ctx context.Context, toolT
 	return &response.ListToolProvidersResponse{Providers: infos}, nil
 }
 
-// ListProviderKeys 返回所有已注册的 provider_key
-func (s *toolProviderService) ListProviderKeys() []string {
+// ListProviderTypes 返回所有已注册的供应商类型
+func (s *toolProviderService) ListProviderTypes() []string {
 	if s.registry == nil {
 		return nil
 	}
@@ -150,24 +169,19 @@ func (s *toolProviderService) ListProviderKeys() []string {
 }
 
 func (s *toolProviderService) toProviderInfo(p *entity.ToolProvider) *response.ToolProviderInfo {
-	var configSchema json.RawMessage
-	if s.registry != nil {
-		if provider := s.registry.Get(p.ProviderKey); provider != nil {
-			if schema := provider.GetConfigSchema(); schema != nil {
-				configSchema, _ = json.Marshal(schema)
-			}
-		}
-	}
 	return &response.ToolProviderInfo{
-		ID:           p.ID,
-		ToolTypeID:   p.ToolTypeID,
-		Name:         p.Name,
-		ProviderKey:  p.ProviderKey,
-		Description:  p.Description,
-		ConfigSchema: configSchema,
-		AdminConfig:  json.RawMessage(p.AdminConfig),
-		RateLimit:    json.RawMessage(p.RateLimit),
-		IsEnabled:    p.IsEnabled,
-		DisplayOrder: p.DisplayOrder,
+		ID:             p.ID,
+		ToolTypeID:     p.ToolTypeID,
+		ProviderKey:    p.ProviderKey,
+		Name:           p.Name,
+		Description:    p.Description,
+		ProviderType:   p.ProviderType,
+		ConfigSchema:   json.RawMessage(p.ConfigSchema),
+		InputSchema:    json.RawMessage(p.InputSchema),
+		ProviderConfig: json.RawMessage(p.ProviderConfig),
+		AdminConfig:    json.RawMessage(p.AdminConfig),
+		RateLimit:      json.RawMessage(p.RateLimit),
+		IsEnabled:      p.IsEnabled,
+		DisplayOrder:   p.DisplayOrder,
 	}
 }
