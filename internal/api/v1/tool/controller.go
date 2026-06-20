@@ -46,7 +46,7 @@ func (c *Controller) ListToolTypes(ctx *gin.Context) {
 func (c *Controller) CreateToolType(ctx *gin.Context) {
 	var req request.CreateToolTypeRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(ctx, "参数错误: "+err.Error())
+		response.BadRequest(ctx, "请求参数错误")
 		return
 	}
 
@@ -63,7 +63,7 @@ func (c *Controller) UpdateToolType(ctx *gin.Context) {
 	id := ctx.Param("id")
 	var req request.UpdateToolTypeRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(ctx, "参数错误: "+err.Error())
+		response.BadRequest(ctx, "请求参数错误")
 		return
 	}
 
@@ -108,7 +108,7 @@ func (c *Controller) ListToolProviders(ctx *gin.Context) {
 func (c *Controller) CreateToolProvider(ctx *gin.Context) {
 	var req request.CreateToolProviderRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(ctx, "参数错误: "+err.Error())
+		response.BadRequest(ctx, "请求参数错误")
 		return
 	}
 
@@ -125,7 +125,7 @@ func (c *Controller) UpdateToolProvider(ctx *gin.Context) {
 	id := ctx.Param("providerId")
 	var req request.UpdateToolProviderRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(ctx, "参数错误: "+err.Error())
+		response.BadRequest(ctx, "请求参数错误")
 		return
 	}
 
@@ -222,7 +222,7 @@ func (c *Controller) CreateUserToolConfig(ctx *gin.Context) {
 	userID := ctx.GetString("user_id")
 	var req request.CreateUserToolConfigRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(ctx, "参数错误: "+err.Error())
+		response.BadRequest(ctx, "请求参数错误")
 		return
 	}
 
@@ -240,7 +240,7 @@ func (c *Controller) UpdateUserToolConfig(ctx *gin.Context) {
 	id := ctx.Param("id")
 	var req request.UpdateUserToolConfigRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(ctx, "参数错误: "+err.Error())
+		response.BadRequest(ctx, "请求参数错误")
 		return
 	}
 

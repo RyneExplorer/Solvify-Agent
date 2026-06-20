@@ -1,8 +1,6 @@
 package auth
 
 import (
-	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
 	"regexp"
 	"solvify-agent/internal/middleware"
 	"solvify-agent/internal/model/dto/request"
@@ -10,6 +8,9 @@ import (
 	"solvify-agent/pkg/captcha"
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/response"
+
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 // Controller 认证控制器
@@ -52,7 +53,6 @@ func (ctrl *Controller) Register(c *gin.Context) {
 	}
 
 	if err := ctrl.authService.Register(&req); err != nil {
-		logger.Errorf("用户注册失败:", zap.String("username", req.Username), zap.Error(err))
 		response.BizError(c, err)
 		return
 	}
@@ -64,7 +64,7 @@ func (ctrl *Controller) Register(c *gin.Context) {
 func (ctrl *Controller) Login(c *gin.Context) {
 	var req request.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, err.Error())
+		response.BadRequest(c, "请求参数错误")
 		return
 	}
 
@@ -87,7 +87,7 @@ func (ctrl *Controller) Login(c *gin.Context) {
 func (ctrl *Controller) RefreshToken(c *gin.Context) {
 	var req request.RefreshTokenRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, err.Error())
+		response.BadRequest(c, "请求参数错误")
 		return
 	}
 
@@ -137,7 +137,7 @@ func (ctrl *Controller) Logout(c *gin.Context) {
 func (ctrl *Controller) ResetPassword(c *gin.Context) {
 	var req request.ResetPasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, err.Error())
+		response.BadRequest(c, "请求参数错误")
 		return
 	}
 	if req.NewPassword != req.ConfirmPassword {

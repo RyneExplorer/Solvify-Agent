@@ -16,12 +16,16 @@ import (
 
 // Controller 处理聊天模块请求
 type Controller struct {
-	chatSvc service.ChatServiceInterface
+	chatSvc             service.ChatServiceInterface
+	adminSessionService service.AdminSessionServiceInterface
 }
 
 // NewController 创建聊天控制器
-func NewController(chatSvc service.ChatServiceInterface) *Controller {
-	return &Controller{chatSvc: chatSvc}
+func NewController(chatSvc service.ChatServiceInterface, adminSessionService service.AdminSessionServiceInterface) *Controller {
+	return &Controller{
+		chatSvc:             chatSvc,
+		adminSessionService: adminSessionService,
+	}
 }
 
 // CreateSession 创建聊天会话
@@ -170,6 +174,57 @@ func (ctrl *Controller) GetMessages(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{"messages": output})
+}
+
+// AdminListSessions 管理员查询会话列表
+func (ctrl *Controller) AdminListSessions(c *gin.Context) {
+	var req requestdto.AdminSessionListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.BadRequest(c, "请求参数错误")
+		return
+	}
+
+	result, err := ctrl.adminSessionService.List(c.Request.Context(), &req)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}
+
+// AdminDeleteSession 管理员删除会话
+func (ctrl *Controller) AdminDeleteSession(c *gin.Context) {
+	sessionID := c.Param("id")
+	if !apiv1.IsUUID(sessionID) {
+		response.BadRequest(c, "会话 ID 格式错误")
+		return
+	}
+
+	if err := ctrl.adminSessionService.Delete(c.Request.Context(), sessionID); err != nil {
+		response.BizError(c, err)
+		return
+	}
+
+	response.Success(c, nil)
+}
+
+// AdminCleanupSessions 管理员清理过期会话
+func (ctrl *Controller) AdminCleanupSessions(c *gin.Context) {
+	var req struct {
+		RetentionDays int `json:"retention_days"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		req.RetentionDays = 90
+	}
+
+	deleted, err := ctrl.adminSessionService.CleanupExpired(c.Request.Context(), req.RetentionDays)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+
+	response.Success(c, gin.H{"deleted": deleted})
 }
 
 // userAndSessionID 读取当前用户和会话 ID

@@ -37,6 +37,8 @@ type Router struct {
 // NewRouter 创建 API 路由聚合器
 func NewRouter(
 	userService service.UserServiceInterface,
+	adminUserService service.AdminUserServiceInterface,
+	adminSessionService service.AdminSessionServiceInterface,
 	authService service.AuthServiceInterface,
 	modelService service.ModelServiceInterface,
 	userModelConfigService service.UserModelConfigServiceInterface,
@@ -52,16 +54,16 @@ func NewRouter(
 	userToolConfigService service.UserToolConfigService,
 ) *Router {
 	return &Router{
-		userCtrl:          user.NewController(userService),
+		userCtrl:          user.NewController(userService, adminUserService),
 		authCtrl:          auth.NewController(authService, userService),
 		modelCtrl:         model.NewController(modelService),
 		userModelCtrl:     model.NewUserModelController(userModelConfigService),
 		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseSvc),
 		documentCtrl:      document.NewController(documentSvc, chunkRepo),
 		storageCtrl:       storage.NewController(storageSvc),
-		chatCtrl:          chat.NewController(chatSvc),
 		syncCtrl:          syncapi.NewController(syncSvc),
 		dingtalkCtrl:      dingtalkapi.NewController(dingtalkSvc),
+		chatCtrl:          chat.NewController(chatSvc, adminSessionService),
 		toolCtrl:          tool.NewController(toolTypeService, toolProviderService, userToolConfigService),
 	}
 }
@@ -79,25 +81,24 @@ func (r *Router) Setup(engine *gin.Engine) {
 	r.authCtrl.RegisterRoutes(v1)
 
 	// 业务路由 — 需要 JWT 认证
-	protected := v1.Group("")
-	protected.Use(middleware.Auth())
+	v1.Use(middleware.Auth())
 
-	// 用户
-	r.userCtrl.RegisterRoutes(protected)
+	// 用户管理
+	r.userCtrl.RegisterRoutes(v1)
 
 	// 模型管理
-	r.modelCtrl.RegisterRoutes(protected)
-	r.userModelCtrl.RegisterRoutes(protected)
+	r.modelCtrl.RegisterRoutes(v1)
+	r.userModelCtrl.RegisterRoutes(v1)
 
-	// 聊天
-	r.chatCtrl.RegisterRoutes(protected)
+	// 聊天管理
+	r.chatCtrl.RegisterRoutes(v1)
 
 	// 知识库 & 文档
-	r.knowledgeBaseCtrl.RegisterRoutes(protected)
-	r.documentCtrl.RegisterKnowledgeBaseRoutes(protected)
-	r.documentCtrl.RegisterDocumentRoutes(protected)
-	r.documentCtrl.RegisterDocumentJobRoutes(protected)
-	r.documentCtrl.RegisterChunkRoutes(protected)
+	r.knowledgeBaseCtrl.RegisterRoutes(v1)
+	r.documentCtrl.RegisterKnowledgeBaseRoutes(v1)
+	r.documentCtrl.RegisterDocumentRoutes(v1)
+	r.documentCtrl.RegisterDocumentJobRoutes(v1)
+	r.documentCtrl.RegisterChunkRoutes(v1)
 
 	r.knowledgeBaseCtrl.RegisterRoutes(v1)
 	r.documentCtrl.RegisterKnowledgeBaseRoutes(v1)
@@ -109,10 +110,10 @@ func (r *Router) Setup(engine *gin.Engine) {
 	r.storageCtrl.RegisterRoutes(v1)
 	r.toolCtrl.RegisterRoutes(user)
 	// 存储
-	r.storageCtrl.RegisterRoutes(protected)
+	r.storageCtrl.RegisterRoutes(v1)
 
 	// 工具
-	r.toolCtrl.RegisterRoutes(protected)
+	r.toolCtrl.RegisterRoutes(v1)
 }
 
 // health 返回服务健康状态

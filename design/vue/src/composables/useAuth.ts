@@ -5,8 +5,9 @@ import { setToken, removeToken, hasToken } from '@/api/client'
 import type { UserInfo, CaptchaData } from '@/types/auth'
 
 // ── Global auth state (singleton) ──
-const currentUser = ref<UserInfo | null>(null)
+export const currentUser = ref<UserInfo | null>(null)
 const isAuthenticated = computed(() => hasToken() && currentUser.value !== null)
+export const isAdmin = computed(() => currentUser.value?.role === 2)
 
 export function useAuth() {
   const router = useRouter()
@@ -139,9 +140,15 @@ export function useAuth() {
   // ── Init — check if already logged in ──
   async function initAuth() {
     if (!hasToken()) return
-    // We have a token but need to validate it.
-    // For now, we trust the token. A full validation would call GET /user/profile.
-    // The router guard will catch 401 on API calls and redirect to login.
+    try {
+      const res = await authApi.getProfile()
+      if (res.code === 0 && res.data) {
+        currentUser.value = res.data
+      }
+    } catch {
+      removeToken()
+      currentUser.value = null
+    }
   }
 
   function switchMode(mode: 'login' | 'register') {
@@ -156,6 +163,7 @@ export function useAuth() {
     // state
     currentUser,
     isAuthenticated,
+    isAdmin,
     loading,
     error,
     captcha,

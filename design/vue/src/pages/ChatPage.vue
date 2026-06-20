@@ -147,7 +147,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useChat } from '@/composables/useChat'
 import ChatInputCard from '@/components/ChatInputCard.vue'
@@ -183,4 +183,5 @@ watch(
 )
 
 onMounted(() => { init(); loadSessions() })
+onBeforeUnmount(() => { stopGeneration() })
 </script>

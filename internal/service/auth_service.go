@@ -108,7 +108,7 @@ func (s *authService) Login(req *request.LoginRequest) (*dto.LoginResponse, erro
 		return nil, apperrors.NewWithErr(apperrors.CodeInvalidCredentials, "登录失败：密码错误", err)
 	}
 
-	token, err := jwt.GenerateToken(user.ID, user.Username)
+	token, err := jwt.GenerateToken(user.ID, user.Username, user.Role)
 	if err != nil {
 		logger.Error("JWT 令牌生成失败", zap.Error(err))
 		return nil, apperrors.NewWithErr(apperrors.CodeInvalidToken, "无效的令牌", err)

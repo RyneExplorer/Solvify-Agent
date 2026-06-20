@@ -73,6 +73,10 @@ export async function request<T>(
     routerInstance?.push('/login')
     throw new Error(data.message || '登录已过期，请重新登录')
   }
+  // Business error
+  if (data.code !== 0) {
+    throw new Error(data.message || '请求失败')
+  }
   return data
 }
 

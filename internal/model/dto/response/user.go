@@ -9,6 +9,7 @@ type UserResponse struct {
 	Email     string    `json:"email"`
 	Avatar    string    `json:"avatar"`
 	Status    int       `json:"status"`
+	Role      int       `json:"role"`
 	LastModel string    `json:"lastModel,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -21,7 +22,6 @@ type AdminUserListItem struct {
 	Email     string    `json:"email"`
 	Avatar    string    `json:"avatar"`
 	Role      int       `json:"role"`
-	Nickname  string    `json:"nickname"`
 	Status    int       `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

@@ -21,8 +21,8 @@
     <!-- Users tab -->
     <div v-if="activeTab === 'users'">
       <div class="flex justify-between mb-4">
-        <SearchInput v-model="userSearch" placeholder="搜索用户..." wrapper-class="w-80" />
-        <AppButton>+ 添加用户</AppButton>
+        <SearchInput v-model="userSearch" placeholder="搜索用户名/邮箱..." wrapper-class="w-80" />
+        <AppButton @click="openUserModal()">+ 添加用户</AppButton>
       </div>
       <AppCard class="!p-0 overflow-hidden">
         <table class="w-full text-sm border-collapse">
@@ -32,23 +32,27 @@
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">邮箱</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">角色</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">状态</th>
-              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">最后登录</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">操作</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(u, i) in users" :key="i" class="border-b border-slate-100 last:border-b-0">
+            <tr v-for="u in users" :key="u.id" class="border-b border-slate-100 last:border-b-0">
               <td class="px-4 py-3">
                 <div class="flex items-center gap-2">
-                  <AppAvatar :name="u.name" />
-                  <span class="font-medium text-slate-900">{{ u.name }}</span>
+                  <AppAvatar :name="u.username" />
+                  <span class="font-medium text-slate-900">{{ u.username }}</span>
                 </div>
               </td>
               <td class="px-4 py-3 text-slate-900">{{ u.email }}</td>
-              <td class="px-4 py-3"><AppBadge variant="blue">{{ u.role }}</AppBadge></td>
-              <td class="px-4 py-3"><AppBadge :variant="u.status === 'active' ? 'success' : 'neutral'">{{ u.status === 'active' ? '活跃' : '停用' }}</AppBadge></td>
-              <td class="px-4 py-3 text-slate-900">{{ u.lastLogin }}</td>
-              <td class="px-4 py-3"><AppButton variant="ghost" size="sm">编辑</AppButton></td>
+              <td class="px-4 py-3"><AppBadge variant="blue">{{ roleText(u.role) }}</AppBadge></td>
+              <td class="px-4 py-3"><AppBadge :variant="u.status === 1 ? 'success' : 'neutral'">{{ u.status === 1 ? '活跃' : '停用' }}</AppBadge></td>
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-1">
+                  <AppButton variant="ghost" size="sm" @click="openUserModal(u)">编辑</AppButton>
+                  <AppButton variant="ghost" size="sm" @click="openResetPasswordModal(u)">重置密码</AppButton>
+                  <AppButton variant="ghost" size="sm" class="text-red-600 hover:text-red-700 hover:bg-red-50" @click="deleteUser(u.id)">删除</AppButton>
+                </div>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -57,14 +61,45 @@
 
     <!-- Sessions tab -->
     <div v-if="activeTab === 'sessions'">
-      <AppCard>
-        <h3 class="text-base font-semibold text-slate-900 mb-3" style="font-family: 'Space Grotesk', sans-serif;">会话管理</h3>
-        <p class="text-sm text-slate-400 mb-4">查看、搜索、删除历史会话。会话记录保留 90 天，超过自动归档。</p>
+      <div class="flex justify-between mb-4">
         <div class="flex gap-2">
-          <SearchInput v-model="sessionSearch" placeholder="搜索会话..." wrapper-class="flex-1" />
-          <AppButton variant="danger" size="sm">清理过期会话</AppButton>
+          <SearchInput v-model="sessionSearch" placeholder="搜索标题/用户名..." wrapper-class="w-64" />
+          <AppSelect v-model="sessionStatus" :options="sessionStatusOptions" />
         </div>
+        <AppButton variant="danger" size="sm" @click="cleanupSessions">清理过期会话</AppButton>
+      </div>
+      <AppCard class="!p-0 overflow-hidden">
+        <table class="w-full text-sm border-collapse">
+          <thead>
+            <tr class="bg-slate-50 border-b border-slate-200">
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">标题</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">用户</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">模型</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">状态</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">消息数</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">更新时间</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="s in sessions" :key="s.id" class="border-b border-slate-100 last:border-b-0">
+              <td class="px-4 py-3 font-medium text-slate-900 max-w-xs truncate" :title="s.title">{{ s.title || '未命名会话' }}</td>
+              <td class="px-4 py-3 text-slate-900">{{ s.username }}</td>
+              <td class="px-4 py-3 text-slate-500">{{ s.model_id }}</td>
+              <td class="px-4 py-3"><AppBadge :variant="s.status === 'active' ? 'success' : 'neutral'">{{ s.status }}</AppBadge></td>
+              <td class="px-4 py-3 text-slate-500">{{ s.message_count }}</td>
+              <td class="px-4 py-3 text-slate-500">{{ formatDate(s.updated_at) }}</td>
+              <td class="px-4 py-3">
+                <AppButton variant="ghost" size="sm" class="text-red-600 hover:text-red-700 hover:bg-red-50" @click="deleteSession(s.id)">删除</AppButton>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="!sessions.length" class="px-4 py-8 text-center text-sm text-slate-400">暂无会话</div>
       </AppCard>
+      <div v-if="sessionTotal > sessionPageSize" class="flex justify-end mt-4">
+        <el-pagination v-model:current-page="sessionPage" :page-size="sessionPageSize" :total="sessionTotal" layout="prev, pager, next" background />
+      </div>
     </div>
 
     <!-- KB tab -->
@@ -474,11 +509,71 @@
         </div>
       </div>
     </div>
+
+    <!-- User Modal -->
+    <div v-if="userModalVisible" class="fixed inset-0 z-50 flex items-center justify-center">
+      <div class="absolute inset-0 bg-black/30" @click="userModalVisible = false" />
+      <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-[480px]">
+        <h3 class="text-lg font-semibold text-slate-900 mb-4">{{ editingUser ? '编辑用户' : '添加用户' }}</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-[13px] font-medium text-slate-600 mb-1.5">用户名 <span class="text-red-500">*</span></label>
+            <input v-model="userForm.username" placeholder="请输入用户名" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
+          </div>
+          <div>
+            <label class="block text-[13px] font-medium text-slate-600 mb-1.5">邮箱 <span class="text-red-500">*</span></label>
+            <input v-model="userForm.email" placeholder="请输入邮箱" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
+          </div>
+          <div v-if="!editingUser">
+            <label class="block text-[13px] font-medium text-slate-600 mb-1.5">密码 <span class="text-red-500">*</span></label>
+            <input v-model="userForm.password" type="password" placeholder="至少 6 位" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
+          </div>
+          <div>
+            <label class="block text-[13px] font-medium text-slate-600 mb-1.5">角色</label>
+            <AppSelect v-model="userForm.role" class="w-full">
+              <el-option :value="1" label="普通用户" />
+              <el-option :value="2" label="管理员" />
+            </AppSelect>
+          </div>
+          <div>
+            <label class="block text-[13px] font-medium text-slate-600 mb-1.5">状态</label>
+            <AppSelect v-model="userForm.status" class="w-full">
+              <el-option :value="1" label="正常" />
+              <el-option :value="2" label="禁用" />
+              <el-option :value="3" label="注销" />
+              <el-option :value="4" label="待验证" />
+            </AppSelect>
+          </div>
+        </div>
+        <div class="flex justify-end gap-2 mt-6">
+          <AppButton variant="secondary" @click="userModalVisible = false">取消</AppButton>
+          <AppButton :disabled="!userFormValid" @click="saveUser">保存</AppButton>
+        </div>
+      </div>
+    </div>
+
+    <!-- Reset Password Modal -->
+    <div v-if="resetPasswordModalVisible" class="fixed inset-0 z-50 flex items-center justify-center">
+      <div class="absolute inset-0 bg-black/30" @click="resetPasswordModalVisible = false" />
+      <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-[400px]">
+        <h3 class="text-lg font-semibold text-slate-900 mb-4">重置密码</h3>
+        <p class="text-sm text-slate-500 mb-4">正在为 <span class="font-medium text-slate-900">{{ resetPasswordUser?.username }}</span> 设置新密码</p>
+        <div>
+          <label class="block text-[13px] font-medium text-slate-600 mb-1.5">新密码 <span class="text-red-500">*</span></label>
+          <input v-model="resetPasswordForm.password" type="password" placeholder="至少 6 位" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
+        </div>
+        <div class="flex justify-end gap-2 mt-6">
+          <AppButton variant="secondary" @click="resetPasswordModalVisible = false">取消</AppButton>
+          <AppButton :disabled="!resetPasswordFormValid" @click="saveResetPassword">保存</AppButton>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import AppCard from '../components/ui/AppCard.vue'
 import AppButton from '../components/ui/AppButton.vue'
 import AppBadge from '../components/ui/AppBadge.vue'
@@ -487,7 +582,13 @@ import AppSelect from '../components/ui/AppSelect.vue'
 import SearchInput from '../components/ui/SearchInput.vue'
 import type { ModelInfo } from '@/types/model'
 import type { ToolTypeInfo, ToolProviderInfo } from '@/types/tool'
+import type { AdminSession } from '@/types/chat'
 import {
+  adminListUsers,
+  adminCreateUser,
+  adminUpdateUser,
+  adminDeleteUser,
+  adminResetUserPassword,
   adminListModels,
   adminCreateModel,
   adminUpdateModel,
@@ -500,11 +601,19 @@ import {
   adminCreateToolProvider,
   adminUpdateToolProvider,
   adminDeleteToolProvider,
+  adminListSessions,
+  adminDeleteSession,
+  adminCleanupSessions,
 } from '@/api/admin'
+import type { AdminUser } from '@/types/auth'
 
 const activeTab = ref('users')
 const userSearch = ref('')
 const sessionSearch = ref('')
+const sessionStatus = ref('')
+const sessionPage = ref(1)
+const sessionPageSize = ref(10)
+const sessionTotal = ref(0)
 const modelSearch = ref('')
 const toolSearch = ref('')
 const logLevel = ref('全部级别')
@@ -524,12 +633,14 @@ const adminTabs = [
   { key: 'config', label: '配置管理' },
 ]
 
-const users = [
-  { name: '张三', email: 'zhangsan@company.com', role: '超级管理员', status: 'active', lastLogin: '在线' },
-  { name: '李四', email: 'lisi@company.com', role: '管理员', status: 'active', lastLogin: '2 小时前' },
-  { name: '王五', email: 'wangwu@company.com', role: '编辑者', status: 'active', lastLogin: '1 天前' },
-  { name: '赵六', email: 'zhaoliu@company.com', role: '观察者', status: 'inactive', lastLogin: '1 周前' },
-  { name: '孙七', email: 'sunqi@company.com', role: '编辑者', status: 'active', lastLogin: '3 天前' },
+const users = ref<AdminUser[]>([])
+const sessions = ref<AdminSession[]>([])
+
+const sessionStatusOptions = [
+  { value: '', label: '全部状态' },
+  { value: 'active', label: '活跃' },
+  { value: 'archived', label: '已归档' },
+  { value: 'closed', label: '已关闭' },
 ]
 
 const logs = [
@@ -581,8 +692,9 @@ async function saveModel() {
     }
     modelModalVisible.value = false
     await loadModels()
+    ElMessage.success(editingModel.value ? '保存成功' : '添加成功')
   } catch (e: any) {
-    alert(e.message || '保存失败')
+    ElMessage.error(e.message || '保存失败')
   }
 }
 
@@ -590,18 +702,21 @@ async function toggleModelEnabled(model: ModelInfo) {
   try {
     await adminUpdateModel(model.id, { is_enabled: !model.is_enabled })
     await loadModels()
+    ElMessage.success(model.is_enabled ? '停用成功' : '启用成功')
   } catch (e: any) {
-    alert(e.message || '操作失败')
+    ElMessage.error(e.message || '操作失败')
   }
 }
 
 async function deleteModel(id: string) {
-  if (!confirm('确定删除这个模型吗？')) return
   try {
+    await ElMessageBox.confirm('确定删除这个模型吗？', '提示', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
     await adminDeleteModel(id)
     await loadModels()
+    ElMessage.success('删除成功')
   } catch (e: any) {
-    alert(e.message || '删除失败')
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '删除失败')
   }
 }
 
@@ -610,7 +725,143 @@ async function loadModels() {
     const res = await adminListModels()
     if (res.code === 0) models.value = res.data.models || []
   } catch (e: any) {
-    alert(e.message || '加载模型失败')
+    ElMessage.error(e.message || '加载模型失败')
+  }
+}
+
+// ── Users ──
+const userModalVisible = ref(false)
+const editingUser = ref<AdminUser | null>(null)
+const userForm = ref({ username: '', email: '', password: '', status: 1, role: 1 })
+const userFormValid = computed(() => {
+  if (editingUser.value) {
+    return userForm.value.username.trim() && userForm.value.email.trim()
+  }
+  return userForm.value.username.trim() && userForm.value.email.trim() && userForm.value.password.length >= 6
+})
+
+function roleText(role: number) {
+  const map: Record<number, string> = { 1: '普通用户', 2: '管理员' }
+  return map[role] || '未知'
+}
+
+function openUserModal(user?: AdminUser) {
+  editingUser.value = user ?? null
+  if (user) {
+    userForm.value = { username: user.username, email: user.email, password: '', status: user.status, role: user.role }
+  } else {
+    userForm.value = { username: '', email: '', password: '', status: 1, role: 1 }
+  }
+  userModalVisible.value = true
+}
+
+async function saveUser() {
+  try {
+    if (editingUser.value) {
+      const payload: Partial<typeof userForm.value> = { ...userForm.value }
+      if (!payload.password) delete payload.password
+      await adminUpdateUser(editingUser.value.id, payload)
+    } else {
+      await adminCreateUser(userForm.value)
+    }
+    userModalVisible.value = false
+    await loadUsers()
+    ElMessage.success(editingUser.value ? '保存成功' : '添加成功')
+  } catch (e: any) {
+    ElMessage.error(e.message || '保存失败')
+  }
+}
+
+async function deleteUser(id: string) {
+  try {
+    await ElMessageBox.confirm('确定删除这个用户吗？', '提示', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
+    await adminDeleteUser(id)
+    await loadUsers()
+    ElMessage.success('删除成功')
+  } catch (e: any) {
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '删除失败')
+  }
+}
+
+async function loadUsers() {
+  try {
+    const res = await adminListUsers({ page: 1, pageSize: 100, username: userSearch.value, email: userSearch.value })
+    if (res.code === 0) users.value = res.data.list || []
+  } catch (e: any) {
+    ElMessage.error(e.message || '加载用户失败')
+  }
+}
+
+// ── Sessions ──
+function formatDate(date: string) {
+  if (!date) return '-'
+  return new Date(date).toLocaleString('zh-CN', { hour12: false })
+}
+
+async function loadSessions() {
+  try {
+    const res = await adminListSessions({
+      page: sessionPage.value,
+      pageSize: sessionPageSize.value,
+      keyword: sessionSearch.value,
+      status: sessionStatus.value,
+    })
+    if (res.code === 0) {
+      sessions.value = res.data.list || []
+      sessionTotal.value = res.data.total || 0
+    }
+  } catch (e: any) {
+    ElMessage.error(e.message || '加载会话失败')
+  }
+}
+
+async function deleteSession(id: string) {
+  try {
+    await ElMessageBox.confirm('确定删除这个会话吗？', '提示', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
+    await adminDeleteSession(id)
+    await loadSessions()
+    ElMessage.success('删除成功')
+  } catch (e: any) {
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '删除失败')
+  }
+}
+
+async function cleanupSessions() {
+  try {
+    await ElMessageBox.confirm('确定清理所有过期会话吗？此操作不可恢复。', '提示', { confirmButtonText: '清理', cancelButtonText: '取消', type: 'warning' })
+    const res = await adminCleanupSessions()
+    if (res.code === 0) {
+      await loadSessions()
+      ElMessage.success(`已清理 ${res.data.deleted} 个过期会话`)
+    }
+  } catch (e: any) {
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '清理失败')
+  }
+}
+
+// Reset Password
+const resetPasswordModalVisible = ref(false)
+const resetPasswordUser = ref<AdminUser | null>(null)
+const resetPasswordForm = ref({ password: '' })
+const resetPasswordFormValid = computed(() => resetPasswordForm.value.password.length >= 6)
+
+function openResetPasswordModal(user: AdminUser) {
+  resetPasswordUser.value = user
+  resetPasswordForm.value = { password: '' }
+  resetPasswordModalVisible.value = true
+}
+
+async function saveResetPassword() {
+  if (!resetPasswordUser.value) return
+  try {
+    await adminResetUserPassword(resetPasswordUser.value.id, resetPasswordForm.value)
+    resetPasswordModalVisible.value = false
+    ElMessage.success('重置密码成功')
+  } catch (e: any) {
+    ElMessage.error(e.message || '重置密码失败')
   }
 }
 
@@ -645,8 +896,9 @@ async function saveToolType() {
     }
     toolTypeModalVisible.value = false
     await loadToolTypes()
+    ElMessage.success(editingToolType.value ? '保存成功' : '添加成功')
   } catch (e: any) {
-    alert(e.message || '保存失败')
+    ElMessage.error(e.message || '保存失败')
   }
 }
 
@@ -654,18 +906,21 @@ async function toggleToolTypeEnabled(toolType: ToolTypeInfo) {
   try {
     await adminUpdateToolType(toolType.id, { is_enabled: !toolType.is_enabled })
     await loadToolTypes()
+    ElMessage.success(toolType.is_enabled ? '停用成功' : '启用成功')
   } catch (e: any) {
-    alert(e.message || '操作失败')
+    ElMessage.error(e.message || '操作失败')
   }
 }
 
 async function deleteToolType(id: string) {
-  if (!confirm('确定删除这个工具类型吗？')) return
   try {
+    await ElMessageBox.confirm('确定删除这个工具类型吗？', '提示', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
     await adminDeleteToolType(id)
     await loadToolTypes()
+    ElMessage.success('删除成功')
   } catch (e: any) {
-    alert(e.message || '删除失败')
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '删除失败')
   }
 }
 
@@ -674,7 +929,7 @@ async function loadToolTypes() {
     const res = await adminListToolTypes()
     if (res.code === 0) toolTypes.value = res.data.tool_types || []
   } catch (e: any) {
-    alert(e.message || '加载工具类型失败')
+    ElMessage.error(e.message || '加载工具类型失败')
   }
 }
 
@@ -862,7 +1117,7 @@ async function loadToolProviders(toolTypeId: string) {
     const res = await adminListToolProviders(toolTypeId)
     if (res.code === 0) toolProviders.value = res.data.providers || []
   } catch (e: any) {
-    alert(e.message || '加载供应商失败')
+    ElMessage.error(e.message || '加载供应商失败')
   }
 }
 
@@ -922,8 +1177,9 @@ async function saveToolProvider() {
     toolProviderModalVisible.value = false
     await loadToolProviders(currentToolType.value.id)
     await loadToolTypes()
+    ElMessage.success(editingToolProvider.value ? '保存成功' : '添加成功')
   } catch (e: any) {
-    alert(e.message || '保存失败')
+    ElMessage.error(e.message || '保存失败')
   }
 }
 
@@ -932,29 +1188,39 @@ async function toggleToolProviderEnabled(provider: ToolProviderInfo) {
   try {
     await adminUpdateToolProvider(currentToolType.value.id, provider.id, { is_enabled: !provider.is_enabled })
     await loadToolProviders(currentToolType.value.id)
+    ElMessage.success(provider.is_enabled ? '停用成功' : '启用成功')
   } catch (e: any) {
-    alert(e.message || '操作失败')
+    ElMessage.error(e.message || '操作失败')
   }
 }
 
 async function deleteToolProvider(id: string) {
   if (!currentToolType.value) return
-  if (!confirm('确定删除这个供应商吗？')) return
   try {
+    await ElMessageBox.confirm('确定删除这个供应商吗？', '提示', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
     await adminDeleteToolProvider(currentToolType.value.id, id)
     await loadToolProviders(currentToolType.value.id)
     await loadToolTypes()
+    ElMessage.success('删除成功')
   } catch (e: any) {
-    alert(e.message || '删除失败')
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '删除失败')
   }
 }
 
 watch(activeTab, (tab) => {
+  if (tab === 'users') loadUsers()
+  if (tab === 'sessions') loadSessions()
   if (tab === 'models') loadModels()
   if (tab === 'tools') loadToolTypes()
 })
 
+watch(userSearch, () => loadUsers())
+watch([sessionSearch, sessionStatus, sessionPage], () => loadSessions())
+
 onMounted(() => {
+  if (activeTab.value === 'users') loadUsers()
+  if (activeTab.value === 'sessions') loadSessions()
   if (activeTab.value === 'models') loadModels()
   if (activeTab.value === 'tools') loadToolTypes()
 })

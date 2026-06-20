@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"solvify-agent/internal/model/entity"
 	"syscall"
 	"time"
 
@@ -120,25 +121,25 @@ func (a *App) initDatabase() error {
 		return fmt.Errorf("初始化 PostgreSQL 失败: %w", err)
 	}
 	a.postgresqlDB = postgresqlDB
-
-	// 自动迁移数据库表结构
-	//if err := postgresqlDB.AutoMigrate(
-	//	&entity.Model{},
-	//	&entity.UserModelConfig{},
-	//	&entity.KnowledgeBase{},
-	//	&entity.StorageQuota{},
-	//	&entity.Document{},
-	//	&entity.DocumentProcessingJob{},
-	//	&entity.DocumentVersion{},
-	//	&entity.DocumentChunk{},
-	//	&entity.ChatSession{},
-	//	&entity.ChatMessage{},
-	//	&entity.ToolType{},
-	//	&entity.ToolProvider{},
-	//	&entity.UserToolConfig{},
-	//); err != nil {
-	//	return fmt.Errorf("数据库自动迁移失败: %w", err)
-	//}
+	//自动迁移数据库表结构
+	if err := postgresqlDB.AutoMigrate(
+		&entity.User{},
+		&entity.Model{},
+		&entity.UserModelConfig{},
+		&entity.KnowledgeBase{},
+		&entity.StorageQuota{},
+		&entity.Document{},
+		&entity.DocumentProcessingJob{},
+		&entity.DocumentVersion{},
+		&entity.DocumentChunk{},
+		&entity.ChatSession{},
+		&entity.ChatMessage{},
+		&entity.ToolType{},
+		&entity.ToolProvider{},
+		&entity.UserToolConfig{},
+	); err != nil {
+		return fmt.Errorf("数据库自动迁移失败: %w", err)
+	}
 
 	// redis
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
@@ -299,6 +300,8 @@ func (a *App) initDependencies() {
 
 	// 初始化 Service
 	userSvc := service.NewUserService(userRepo)
+	adminUserSvc := service.NewAdminUserService(userRepo)
+	adminSessionSvc := service.NewAdminSessionService(chatSessionRepo, chatMessageRepo)
 	authSvc := service.NewAuthService(userRepo, userSvc, a.redis)
 	modelService := service.NewModelService(modelRepo)
 	userModelConfigService := service.NewUserModelConfigService(userModelConfigRepo)
@@ -323,6 +326,8 @@ func (a *App) initDependencies() {
 	chunkRepo := repository.NewChunkRepository(a.postgresqlDB)
 	a.router = api.NewRouter(
 		userSvc,
+		adminUserSvc,
+		adminSessionSvc,
 		authSvc,
 		modelService,
 		userModelConfigService,
