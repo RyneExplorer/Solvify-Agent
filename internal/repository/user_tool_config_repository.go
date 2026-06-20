@@ -54,6 +54,30 @@ func (r *userToolConfigRepository) GetByUserAndToolType(ctx context.Context, use
 	return &config, nil
 }
 
+func (r *userToolConfigRepository) GetByUserAndProvider(ctx context.Context, userID, providerID string) (*entity.UserToolConfig, error) {
+	var config entity.UserToolConfig
+	err := r.db.WithContext(ctx).
+		Preload("ToolType").
+		Preload("ToolProvider").
+		Where("user_id = ? AND provider_id = ?", userID, providerID).
+		First(&config).Error
+	if err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
+func (r *userToolConfigRepository) DisableOthersByToolType(ctx context.Context, userID, toolTypeID, exceptID string) error {
+	query := r.db.WithContext(ctx).
+		Model(&entity.UserToolConfig{}).
+		Where("user_id = ? AND tool_type_id = ?", userID, toolTypeID).
+		Where("is_enabled = ?", true)
+	if exceptID != "" {
+		query = query.Where("id <> ?", exceptID)
+	}
+	return query.Update("is_enabled", false).Error
+}
+
 func (r *userToolConfigRepository) ListByUserID(ctx context.Context, userID string) ([]entity.UserToolConfig, error) {
 	var configs []entity.UserToolConfig
 	err := r.db.WithContext(ctx).

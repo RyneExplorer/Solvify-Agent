@@ -122,26 +122,23 @@ func (a *App) initDatabase() error {
 	a.postgresqlDB = postgresqlDB
 
 	// 自动迁移数据库表结构
-	if err := postgresqlDB.AutoMigrate(
-		//&entity.Model{},
-		//&entity.UserModelConfig{},
-		//&entity.KnowledgeBase{},
-		//&entity.StorageQuota{},
-		&entity.Document{},
-		//&entity.DocumentProcessingJob{},
-		//&entity.DocumentVersion{},
-		//&entity.DocumentChunk{},
-		//&entity.ChatSession{},
-		//&entity.ChatMessage{},
-		//&entity.ToolType{},
-		//&entity.ToolProvider{},
-		//&entity.UserToolConfig{},
-		&entity.SyncJob{},
-		&entity.SyncSource{},
-		&entity.DingTalkUserBinding{},
-	); err != nil {
-		return fmt.Errorf("数据库自动迁移失败: %w", err)
-	}
+	//if err := postgresqlDB.AutoMigrate(
+	//	&entity.Model{},
+	//	&entity.UserModelConfig{},
+	//	&entity.KnowledgeBase{},
+	//	&entity.StorageQuota{},
+	//	&entity.Document{},
+	//	&entity.DocumentProcessingJob{},
+	//	&entity.DocumentVersion{},
+	//	&entity.DocumentChunk{},
+	//	&entity.ChatSession{},
+	//	&entity.ChatMessage{},
+	//	&entity.ToolType{},
+	//	&entity.ToolProvider{},
+	//	&entity.UserToolConfig{},
+	//); err != nil {
+	//	return fmt.Errorf("数据库自动迁移失败: %w", err)
+	//}
 
 	// redis
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
@@ -289,11 +286,10 @@ func (a *App) initDependencies() {
 	// 预热所有已启用系统模型的 LLM 客户端（消除首次请求冷启动）
 	a.prewarmModelClients(modelRepo)
 
-	// 初始化工具 Provider 注册表——开发阶段注册已实现的 Provider
+	// 初始化工具 Provider 注册表——注册通用 Provider 类型
 	toolRegistry := tool.NewProviderRegistry()
-	toolRegistry.Register("http_get", providers.NewHTTPGetProvider())   // GET 请求——参数拼 URL
-	toolRegistry.Register("http_post", providers.NewHTTPPostProvider()) // POST 请求——参数 JSON body
-	toolRegistry.Register("bocha", providers.NewBochaProvider())        // 博查 AI 搜索——POST JSON + Bearer 鉴权
+	toolRegistry.Register("http", providers.NewHTTPProvider()) // 通用 HTTP Provider
+	// toolRegistry.Register("mcp", providers.NewMCPProvider())   // MCP Provider（待实现）
 
 	// ToolFactory——Agent 引擎从 DB/Redis 加载用户配置的工具
 	toolFactory := tool.NewFactory(toolRegistry, cachedUserToolConfigRepo, cachedToolTypeRepo)
@@ -315,11 +311,13 @@ func (a *App) initDependencies() {
 	dingtalkSvc := service.NewDingTalkService(a.cfg.DingTalk, dingtalkBindingRepo, dingtalkStateCache, dingtalkClient)
 	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, dingtalkClient, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
-	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, ai.AgentEngine)
+	// 用户模型缓存（24 小时 TTL）
+	userModelCache := cache.New(a.redis, "user:model:", 24*time.Hour)
+	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine)
 	// 工具 Service（用缓存仓库，写入自动失效）
 	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo)
 	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry)
-	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo)
+	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo, toolRegistry)
 
 	// 路由
 	chunkRepo := repository.NewChunkRepository(a.postgresqlDB)

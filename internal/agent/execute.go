@@ -84,22 +84,40 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 		},
 	})
 	if err != nil {
-		eventCh <- Event{Type: EventError, Title: "Agent 初始化失败", Detail: err.Error(), Status: "error", Done: true}
+		logger.Errorf("Agent 初始化失败: %v", err)
+		eventCh <- Event{
+			Type:      EventError,
+			Title:     "深度模式启动失败",
+			Detail:    "请尝试切换到快速模式，或稍后重试",
+			Error:     err.Error(),
+			Status:    "error",
+			Retryable: true,
+			Done:      true,
+		}
 		return
 	}
 
-	// 6. 注册回调处理器，捕获中间事件（思考、工具调用等）
+	// 8. 注册回调处理器，捕获中间事件（思考、工具调用等）
 	callbackHandler := newAgentCallbackHandler(eventCh, req.KnowledgeBaseIDs, toolDescMap)
 
-	// 7. 流式调用 Agent（通过回调捕获中间事件）
+	// 9. 流式调用 Agent（通过回调捕获中间事件）
 	stream, err := agent.Stream(ctx, inputMessages, einoAgent.WithComposeOptions(compose.WithCallbacks(callbackHandler)))
 	if err != nil {
-		eventCh <- Event{Type: EventError, Title: "Agent 调用失败", Detail: err.Error(), Status: "error", Done: true}
+		logger.Errorf("Agent 调用失败: %v", err)
+		eventCh <- Event{
+			Type:      EventError,
+			Title:     "深度推理失败",
+			Detail:    "深度思考模式执行异常，请重试或使用快速模式",
+			Error:     err.Error(),
+			Status:    "error",
+			Retryable: true,
+			Done:      true,
+		}
 		return
 	}
 
-	// 8. 读取流式消息，转换为 SSE 事件
-	e.processStream(stream, ksTool, eventCh)
+	// 10. 读取流式消息，转换为 SSE 事件
+	e.processStream(ctx, stream, ksTool, eventCh)
 }
 
 // processStream 读取 eino Agent 的流式输出，转换为 SSE 事件
@@ -107,7 +125,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 //
 // 注意："正在生成答案" (running) 已由 callback.go 在 ChatModel onEnd（无工具调用时）发出，
 // 这里只负责流式推送答案内容和最终的"正在生成答案" (success) 标记。
-func (e *Engine) processStream(stream *schema.StreamReader[*schema.Message], ksTool *tool.KnowledgeSearchTool, eventCh chan<- Event) {
+func (e *Engine) processStream(ctx context.Context, stream *schema.StreamReader[*schema.Message], ksTool *tool.KnowledgeSearchTool, eventCh chan<- Event) {
 	defer stream.Close()
 
 	var fullAnswer string
@@ -118,8 +136,21 @@ func (e *Engine) processStream(stream *schema.StreamReader[*schema.Message], ksT
 			break
 		}
 		if err != nil {
+			// 用户主动中断时，ctx 会被取消，不发送错误事件，直接结束
+			if ctx.Err() != nil {
+				logger.Infof("Agent 流被用户中断，已收集 %d 字符", len(fullAnswer))
+				break
+			}
 			logger.Errorf("Agent 流读取失败: %v", err)
-			eventCh <- Event{Type: EventError, Title: "Agent 流读取失败", Detail: err.Error(), Status: "error", Done: true}
+			eventCh <- Event{
+				Type:      EventError,
+				Title:     "推理过程中断",
+				Detail:    "深度推理过程中断，请重试",
+				Error:     err.Error(),
+				Status:    "error",
+				Retryable: true,
+				Done:      true,
+			}
 			return
 		}
 		if msg == nil {

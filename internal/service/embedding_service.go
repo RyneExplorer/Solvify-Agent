@@ -77,7 +77,7 @@ func (s *embeddingService) EmbedTexts(ctx context.Context, texts []string) ([][]
 		return nil, apperrors.NewWithErr(apperrors.CodeInternalError, "读取向量响应失败", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, apperrors.New(apperrors.CodeInternalError, fmt.Sprintf("文本向量模型返回异常状态: %d", resp.StatusCode))
+		return nil, normalizeEmbeddingHTTPError(resp.StatusCode, body, s.cfg.Model)
 	}
 
 	var parsed embeddingResponse
@@ -96,6 +96,23 @@ func (s *embeddingService) EmbedTexts(ctx context.Context, texts []string) ([][]
 		vectors[item.Index] = item.Embedding
 	}
 	return vectors, nil
+}
+
+func normalizeEmbeddingHTTPError(statusCode int, body []byte, model string) error {
+	message := strings.ToLower(string(body))
+	if strings.Contains(message, "model") && strings.Contains(message, "not found") {
+		if strings.TrimSpace(model) == "" {
+			model = "当前向量模型"
+		}
+		return apperrors.New(apperrors.CodeInternalError, fmt.Sprintf("向量模型 %q 未安装，请先拉取或切换可用的向量模型", model))
+	}
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return apperrors.New(apperrors.CodeInternalError, "向量服务认证失败，请检查 API Key 配置")
+	}
+	if statusCode == http.StatusTooManyRequests {
+		return apperrors.New(apperrors.CodeInternalError, "向量服务请求过多，请稍后重试")
+	}
+	return apperrors.New(apperrors.CodeInternalError, "向量服务调用失败，请检查 Embedding 配置")
 }
 
 // embeddingURL 返回 OpenAI 兼容向量接口地址

@@ -137,6 +137,7 @@ func (s *userService) GetUserResponse(user *entity.User) *dto.UserResponse {
 		Email:     user.Email,
 		Avatar:    user.Avatar,
 		Status:    user.Status,
+		LastModel: user.LastModel,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 	}

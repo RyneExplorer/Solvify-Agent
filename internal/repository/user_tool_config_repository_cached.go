@@ -98,6 +98,18 @@ func (r *cachedUserToolConfigRepository) GetByUserAndToolType(ctx context.Contex
 	return r.inner.GetByUserAndToolType(ctx, userID, toolTypeID)
 }
 
+func (r *cachedUserToolConfigRepository) GetByUserAndProvider(ctx context.Context, userID, providerID string) (*entity.UserToolConfig, error) {
+	return r.inner.GetByUserAndProvider(ctx, userID, providerID)
+}
+
+func (r *cachedUserToolConfigRepository) DisableOthersByToolType(ctx context.Context, userID, toolTypeID, exceptID string) error {
+	if err := r.inner.DisableOthersByToolType(ctx, userID, toolTypeID, exceptID); err != nil {
+		return err
+	}
+	r.invalidateUser(ctx, userID)
+	return nil
+}
+
 // ========== 缓存失效 ==========
 
 func (r *cachedUserToolConfigRepository) invalidateUser(ctx context.Context, userID string) {

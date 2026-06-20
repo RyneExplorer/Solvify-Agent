@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+
+	"gorm.io/datatypes"
 
 	"solvify-agent/internal/model/dto/request"
 	"solvify-agent/internal/model/dto/response"
@@ -40,6 +43,7 @@ func (s *toolTypeService) Create(ctx context.Context, req request.CreateToolType
 		ToolKey:       req.ToolKey,
 		Description:   req.Description,
 		ExecutionMode: executionMode,
+		InputSchema:   datatypes.JSON(req.InputSchema),
 		IsEnabled:     true,
 	}
 
@@ -64,6 +68,9 @@ func (s *toolTypeService) Update(ctx context.Context, id string, req request.Upd
 	}
 	if req.ExecutionMode != nil {
 		toolType.ExecutionMode = *req.ExecutionMode
+	}
+	if req.InputSchema != nil {
+		toolType.InputSchema = datatypes.JSON(*req.InputSchema)
 	}
 	if req.IsEnabled != nil {
 		toolType.IsEnabled = *req.IsEnabled
@@ -94,9 +101,15 @@ func (s *toolTypeService) List(ctx context.Context) (*response.ListToolTypesResp
 		return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 
+	// 获取所有工具类型的供应商数量
+	providerCounts, err := s.repo.GetProviderCounts(ctx)
+	if err != nil {
+		providerCounts = make(map[string]int)
+	}
+
 	infos := make([]response.ToolTypeInfo, len(toolTypes))
 	for i, tt := range toolTypes {
-		infos[i] = *s.toToolTypeInfo(&tt, 0)
+		infos[i] = *s.toToolTypeInfo(&tt, providerCounts[tt.ID])
 	}
 
 	return &response.ListToolTypesResponse{ToolTypes: infos}, nil
@@ -108,9 +121,15 @@ func (s *toolTypeService) ListEnabled(ctx context.Context) (*response.ListToolTy
 		return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 
+	// 获取所有工具类型的供应商数量
+	providerCounts, err := s.repo.GetProviderCounts(ctx)
+	if err != nil {
+		providerCounts = make(map[string]int)
+	}
+
 	infos := make([]response.ToolTypeInfo, len(toolTypes))
 	for i, tt := range toolTypes {
-		infos[i] = *s.toToolTypeInfo(&tt, 0)
+		infos[i] = *s.toToolTypeInfo(&tt, providerCounts[tt.ID])
 	}
 
 	return &response.ListToolTypesResponse{ToolTypes: infos}, nil
@@ -123,6 +142,7 @@ func (s *toolTypeService) toToolTypeInfo(tt *entity.ToolType, providerCount int)
 		ToolKey:       tt.ToolKey,
 		Description:   tt.Description,
 		ExecutionMode: tt.ExecutionMode,
+		InputSchema:   json.RawMessage(tt.InputSchema),
 		IsEnabled:     tt.IsEnabled,
 		ProviderCount: providerCount,
 	}

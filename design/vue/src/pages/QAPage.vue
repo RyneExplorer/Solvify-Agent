@@ -28,10 +28,23 @@
             >
               <!-- Timeline (deep mode - streaming/history) -->
               <div v-if="msg.role === 'assistant' && msg.timeline?.length" class="mb-3">
-                <div v-for="(step, si) in msg.timeline" :key="si" class="flex items-start gap-2 py-1 text-xs">
-                  <span v-if="step.status === 'running'" class="w-3 h-3 mt-0.5 border-2 border-gray-200 border-t-emerald-500 rounded-full animate-spin flex-shrink-0"></span>
-                  <span v-else class="w-3 h-3 mt-0.5 text-emerald-500 flex-shrink-0">✓</span>
-                  <span class="text-gray-500">{{ step.title || step.content }}</span>
+                <button
+                  @click="collapsedTimelines.has(i) ? collapsedTimelines.delete(i) : collapsedTimelines.add(i)"
+                  class="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-600 mb-1 cursor-pointer"
+                >
+                  <svg
+                    class="w-3 h-3 transition-transform"
+                    :class="{ '-rotate-90': collapsedTimelines.has(i) }"
+                    fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                  ><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                  <span>推理步骤 ({{ msg.timeline.length }})</span>
+                </button>
+                <div v-show="!collapsedTimelines.has(i)">
+                  <div v-for="(step, si) in msg.timeline" :key="si" class="flex items-start gap-2 py-1 text-xs">
+                    <span v-if="step.status === 'running'" class="w-3 h-3 mt-0.5 border-2 border-gray-200 border-t-emerald-500 rounded-full animate-spin flex-shrink-0"></span>
+                    <span v-else class="w-3 h-3 mt-0.5 text-emerald-500 flex-shrink-0">✓</span>
+                    <span class="text-gray-500">{{ step.title || step.content }}</span>
+                  </div>
                 </div>
               </div>
 
@@ -42,12 +55,12 @@
 
             <!-- Action buttons for AI message -->
             <div v-if="msg.role === 'assistant'" class="flex items-center gap-1 mt-2">
-              <button class="p-1.5 rounded-md hover:bg-gray-100 text-gray-400 transition-colors" title="复制" @click="copyText(msg.content)">
+              <button class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="复制" @click="copyText(msg.content)">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
                 </svg>
               </button>
-              <button class="p-1.5 rounded-md hover:bg-gray-100 text-gray-400 transition-colors" title="重新生成" @click="regenerate">
+              <button class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="重新生成" @click="regenerate">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
                 </svg>
@@ -56,18 +69,39 @@
 
             <!-- Sources -->
             <div v-if="msg.role === 'assistant' && (msg.sources?.length || extractWebCount(msg.content))" class="mt-2 flex flex-wrap items-center gap-1.5">
-              <template v-if="msg.sources?.length">
-                <span class="text-[11px] text-gray-400">来源:</span>
+              <template v-if="msg.sources?.filter((s: any) => s?.title).length">
+                <span class="text-[11px] text-gray-400">知识库:</span>
                 <span v-for="(s, si) in msg.sources.filter((s: any) => s?.title)" :key="si"
-                  class="text-[11px] px-2 py-0.5 bg-gray-100 border border-gray-200 rounded-full text-gray-500">{{ s.title }}</span>
+                  :title="getSourceTooltip(s)"
+                  class="text-[11px] px-2 py-0.5 bg-gray-100 border border-gray-200 rounded-full text-gray-500 cursor-help hover:bg-gray-200 transition-colors">{{ s.title }}</span>
               </template>
-              <a v-for="(ws, wi) in extractWebSources(msg.content)" :key="'w'+wi"
-                :href="ws.url" target="_blank" :title="ws.title"
-                class="text-[10px] px-1.5 py-0.5 bg-blue-50 border border-blue-200 rounded-full text-blue-500 no-underline hover:bg-blue-100 ml-1">🔗{{ wi + 1 }}</a>
+              <template v-if="extractWebSources(msg.content).length">
+                <span class="text-[11px] text-gray-400">联网搜索:</span>
+                <a v-for="(ws, wi) in extractWebSources(msg.content)" :key="'w'+wi"
+                  :href="ws.url" target="_blank" :title="ws.title"
+                  class="text-[10px] px-1.5 py-0.5 bg-blue-50 border border-blue-200 rounded-full text-blue-500 no-underline hover:bg-blue-100">🔗{{ wi + 1 }}</a>
+              </template>
             </div>
 
             <!-- Error -->
-            <div v-if="msg.role === 'error'" class="mt-1 text-xs text-red-500">{{ msg.content }}</div>
+            <div v-if="msg.role === 'error'" class="mt-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+              <div class="flex items-start gap-2">
+                <svg class="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                </svg>
+                <div class="flex-1">
+                  <div class="text-sm font-medium text-red-800">{{ msg.content }}</div>
+                  <div v-if="msg.detail" class="text-xs text-red-600 mt-1">{{ msg.detail }}</div>
+                  <button
+                    v-if="msg.retryable"
+                    @click="retryMessage(msg)"
+                    class="mt-2 px-3 py-1 text-xs bg-red-100 hover:bg-red-200 text-red-700 rounded-md transition-colors"
+                  >
+                    重试
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -95,7 +129,7 @@
                 <span class="w-1 h-1 rounded-full bg-gray-300 animate-bounce" style="animation-delay:0.3s"></span>
               </div>
               <!-- Streaming content -->
-              <div v-if="streamContent" class="leading-relaxed whitespace-pre-wrap" v-html="formatContent(streamContent, [])"></div>
+              <div v-if="streamContent" class="leading-relaxed whitespace-pre-wrap" v-html="formatContent(streamContent, streamSources)"></div>
             </div>
           </div>
         </div>
@@ -149,41 +183,57 @@
               </div>
 
               <!-- Search mode -->
-              <button @click="searchMode = searchMode === 'quick' ? 'smart-reasoning' : 'quick'"
-                class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-colors border"
-                :class="searchMode === 'smart-reasoning'
-                  ? 'text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100'
-                  : 'text-gray-500 border-gray-200 hover:bg-gray-50'">
+              <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-gray-500 hover:bg-gray-50 transition-colors border border-gray-200 cursor-pointer">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
                 </svg>
-                <span>{{ searchMode === 'smart-reasoning' ? '智能推理' : '快速' }}</span>
-              </button>
+                <select v-model="searchMode" class="bg-transparent outline-none text-xs text-gray-500 cursor-pointer pr-4 appearance-none">
+                  <option value="quick">快速检索</option>
+                  <option value="smart-reasoning">深度模式</option>
+                </select>
+                <svg class="w-3 h-3 -ml-5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                </svg>
+              </div>
 
               <!-- Model selector -->
               <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-gray-500 hover:bg-gray-50 transition-colors border border-gray-200 cursor-pointer">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
                 </svg>
-                <select v-model="selectedModel" class="bg-transparent outline-none text-xs text-gray-500 cursor-pointer">
+                <select v-model="selectedModel" class="bg-transparent outline-none text-xs text-gray-500 cursor-pointer pr-4 appearance-none">
                   <optgroup v-if="systemModels.length" label="系统模型">
-                    <option v-for="m in systemModels" :key="m.id" :value="m.id">{{ m.name }}</option>
+                    <option v-for="m in systemModels" :key="m.id" :value="m.id">{{ m.provider }} / {{ m.model_id }}</option>
                   </optgroup>
                   <optgroup v-if="userModels.length" label="我的模型">
                     <option v-for="m in userModels" :key="m.id" :value="m.id">{{ m.display_name || m.model_id }}</option>
                   </optgroup>
                   <option v-if="!systemModels.length && !userModels.length" value="">加载中...</option>
                 </select>
+                <svg class="w-3 h-3 -ml-5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                </svg>
               </div>
             </div>
 
-            <!-- Right send button -->
+            <!-- Right send/stop button -->
             <button
+              v-if="isLoading"
+              @click="stopGeneration"
+              class="w-9 h-9 rounded-full flex items-center justify-center transition-all bg-red-500 hover:bg-red-600 text-white shadow-md"
+              title="停止生成"
+            >
+              <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                <rect x="6" y="6" width="12" height="12" rx="2"/>
+              </svg>
+            </button>
+            <button
+              v-else
               @click="sendMessage"
-              :disabled="!input.trim() || isLoading"
+              :disabled="!input.trim()"
               :class="[
                 'w-9 h-9 rounded-full flex items-center justify-center transition-all',
-                input.trim() && !isLoading
+                input.trim()
                   ? 'bg-gray-800 hover:bg-gray-700 text-white shadow-md'
                   : 'bg-gray-100 text-gray-300 cursor-not-allowed'
               ]"
@@ -206,6 +256,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
 
 // ── Props ──
@@ -225,7 +276,7 @@ const kbWrapperRef = ref<HTMLDivElement>()
 const chatContainer = ref<HTMLDivElement>()
 
 // ── Data state ──
-const systemModels = ref<{ id: string; name: string; provider: string }[]>([])
+const systemModels = ref<{ id: string; provider: string; model_id: string }[]>([])
 const userModels = ref<{ id: string; display_name?: string; model_id?: string }[]>([])
 const knowledgeBases = ref<{ id: string; name: string }[]>([])
 const connected = ref(false)
@@ -235,6 +286,8 @@ interface Message {
   id?: string
   role: 'user' | 'assistant' | 'error'
   content: string
+  detail?: string
+  retryable?: boolean
   sources?: any[]
   timeline?: any[]
 }
@@ -245,6 +298,8 @@ const progressText = ref('')
 const streamContent = ref('')
 const streamTimeline = ref<any[]>([])
 const streamSources = ref<any[]>([])
+const collapsedTimelines = ref<Set<number>>(new Set())
+let abortController: AbortController | null = null
 
 // ── Computed ──
 const displayTitle = computed(() => props.title || '智能问答')
@@ -311,8 +366,13 @@ async function sendMessage() {
   const content = input.value.trim()
   if (!content || isLoading.value) return
 
+  if (!selectedModel.value) {
+    ElMessage.warning('请先选择一个模型')
+    return
+  }
+
   if (!selectedKBs.value.length) {
-    messages.value.push({ id: 'e-' + Date.now(), role: 'error', content: '请至少选择一个知识库' })
+    ElMessage.warning('请至少选择一个知识库')
     return
   }
 
@@ -346,8 +406,9 @@ async function sendMessage() {
   }
 
   const modelType = userModels.value.find(m => m.id === selectedModel.value) ? 'user' : 'system'
+  abortController = new AbortController()
   const safetyTimer = setTimeout(() => {
-    if (isLoading.value) { isLoading.value = false; messages.value.push({ role: 'error', content: '响应超时' }) }
+    if (isLoading.value) { isLoading.value = false; abortController?.abort(); messages.value.push({ role: 'error', content: '响应超时' }) }
   }, 120000)
 
   try {
@@ -355,6 +416,7 @@ async function sendMessage() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-User-ID': USER_ID },
       body: JSON.stringify({ content, model_id: selectedModel.value, model_type: modelType, search_mode: searchMode.value, knowledge_base_ids: selectedKBs.value }),
+      signal: abortController.signal,
     })
     if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`))
 
@@ -394,10 +456,20 @@ async function sendMessage() {
             streamContent.value = finalContent
             scrollToBottom()
           } else if (data.type === 'error') {
-            isLoading.value = false; messages.value.push({ role: 'error', content: data.title || data.error || '未知错误' })
+            isLoading.value = false
+            messages.value.push({
+              role: 'error',
+              content: data.title || data.error || '未知错误',
+              detail: data.detail,
+              retryable: data.retryable,
+            })
+            return
           } else if (data.type === 'done') {
             for (const item of streamTimeline.value) { if (item.status === 'running') item.status = 'success' }
-            if (data.sources?.length) finalSources = data.sources
+            if (data.sources?.length) {
+              finalSources = data.sources
+              streamSources.value = data.sources
+            }
             finalTimeline = [...streamTimeline.value]
 
             messages.value.push({
@@ -407,17 +479,34 @@ async function sendMessage() {
               sources: finalSources,
               timeline: finalTimeline.length ? finalTimeline : undefined,
             })
+            if (finalTimeline.length) {
+              collapsedTimelines.value.add(messages.value.length - 1)
+            }
 
             isLoading.value = false; streamContent.value = ''; streamTimeline.value = []; streamSources.value = []
             progressText.value = ''
+            return
           }
         } catch { /* skip bad JSON */ }
       }
     }
   } catch (e: any) {
-    messages.value.push({ role: 'error', content: e.message })
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      if (finalContent || streamContent.value || streamTimeline.value.length || streamSources.value?.length) {
+        messages.value.push({
+          id: assistantId || 'a-' + Date.now(),
+          role: 'assistant',
+          content: streamContent.value || finalContent,
+          sources: finalSources.length ? finalSources : (streamSources.value?.length ? [...streamSources.value] : undefined),
+          timeline: streamTimeline.value.length ? [...streamTimeline.value] : undefined,
+        })
+      }
+    } else {
+      messages.value.push({ role: 'error', content: e.message })
+    }
   } finally {
     clearTimeout(safetyTimer)
+    abortController = null
     isLoading.value = false; streamContent.value = ''; streamTimeline.value = []; progressText.value = ''
   }
 
@@ -459,42 +548,97 @@ function regenerate() {
   }
 }
 
+function retryMessage(errorMsg: Message) {
+  // 找到错误消息的索引
+  const errorIdx = messages.value.indexOf(errorMsg)
+  if (errorIdx < 0) return
+
+  // 删除错误消息
+  messages.value.splice(errorIdx, 1)
+
+  // 找到最后一条用户消息并重试
+  const lastUser = [...messages.value].reverse().find(m => m.role === 'user')
+  if (lastUser) {
+    input.value = lastUser.content
+    sendMessage()
+  }
+}
+
+function stopGeneration() {
+  if (abortController) {
+    abortController.abort()
+  }
+}
+
 // ── Content formatting ──
 function extractWebSources(content: string): { url: string; title: string }[] {
   const result: { url: string; title: string }[] = []
   const seen = new Set<string>()
-  const re = /<web\s+url="([^"]*)"\s+title="([^"]*)"\s*\/>/g
+  const re = /<web\s+(?:(?:url|title)="[^"]*"\s*)+\/>/g
   let m
   while ((m = re.exec(String(content))) !== null) {
-    if (!seen.has(m[1])) { seen.add(m[1]); result.push({ url: m[1], title: m[2] }) }
+    const urlMatch = m[0].match(/url="([^"]*)"/)
+    const titleMatch = m[0].match(/title="([^"]*)"/)
+    const url = urlMatch?.[1] ?? ''
+    if (url && !seen.has(url)) { seen.add(url); result.push({ url, title: titleMatch?.[1] ?? url }) }
   }
   return result
 }
 
 function extractWebCount(content: string): number {
-  if (!content) return 0
-  const seen = new Set<string>()
-  const re = /<web\s+url="([^"]*)"\s+title="([^"]*)"\s*\/>/g
-  let m
-  while ((m = re.exec(String(content))) !== null) seen.add(m[1])
-  return seen.size
+  return extractWebSources(content).length
 }
 
-function formatContent(content: string, sources?: any[]): string {
+function getSourceTooltip(source: any): string {
+  if (!source) return ''
+  const chunks = source.chunks
+  if (!Array.isArray(chunks) || chunks.length === 0) return source.title || ''
+
+  // 拼接所有 chunk 的内容，最多显示 500 字符
+  const parts: string[] = []
+  let totalLen = 0
+  for (const chunk of chunks) {
+    const text = chunk.content || chunk.quote || ''
+    if (!text) continue
+    if (totalLen + text.length > 500) {
+      parts.push(text.slice(0, 500 - totalLen) + '...')
+      break
+    }
+    parts.push(text)
+    totalLen += text.length
+  }
+  return parts.join('\n---\n') || source.title || ''
+}
+
+function formatContent(content: string, sources?: unknown[]): string {
   if (!content) return ''
 
+  // Build a lookup from chunk_id -> chunk content for hover tooltips
+  const chunkMap = new Map<string, string>()
+  if (Array.isArray(sources)) {
+    for (const doc of sources) {
+      const chunks = (doc as any)?.chunks
+      if (!Array.isArray(chunks)) continue
+      for (const chunk of chunks) {
+        if (chunk?.id) chunkMap.set(chunk.id, chunk.content || chunk.quote || '')
+      }
+    }
+  }
+
   // Extract and replace <kb>/<web> tags with citations
-  const cites: { type: string; doc?: string; url?: string; title?: string }[] = []
+  const cites: { type: string; doc?: string; chunkId?: string; url?: string; title?: string }[] = []
   let processed = String(content)
 
-  processed = processed.replace(/<kb\s+doc="([^"]*)"\s+chunk_id="([^"]*)"\s*\/>/g, (_, doc) => {
+  processed = processed.replace(/<kb\s+doc="([^"]*)"\s+chunk_id="([^"]*)"\s*\/>/g, (_, doc, chunkId) => {
     const idx = cites.length
-    cites.push({ type: 'kb', doc })
+    cites.push({ type: 'kb', doc, chunkId })
     return `%%CITE${idx}%%`
   })
-  processed = processed.replace(/<web\s+url="([^"]*)"\s+title="([^"]*)"\s*\/>/g, (_, url, title) => {
+  processed = processed.replace(/<web\s+(?:(?:url|title)="[^"]*"\s*)+\/>/g, (match) => {
+    const urlMatch = match.match(/url="([^"]*)"/)
+    const titleMatch = match.match(/title="([^"]*)"/)
     const idx = cites.length
-    cites.push({ type: 'web', url, title })
+    cites.push({ type: 'web', url: urlMatch?.[1] ?? '', title: titleMatch?.[1] ?? '' })
     return `%%CITE${idx}%%`
   })
 
@@ -505,10 +649,13 @@ function formatContent(content: string, sources?: any[]): string {
     const c = cites[i]
     let citeHtml
     if (c.type === 'kb') {
-      citeHtml = `<span class="inline-cite-kb">📄${escapeHtml(c.doc || '')}</span>`
+      const chunkText = c.chunkId ? chunkMap.get(c.chunkId) || '' : ''
+      const safeDoc = escapeHtml(c.doc || '')
+      const safeTip = escapeAttr(chunkText.slice(0, 300) + (chunkText.length > 300 ? '...' : ''))
+      citeHtml = `<span class="inline-cite-kb" title="${safeTip || safeDoc}">📄${safeDoc}</span>`
     } else if (c.type === 'web') {
       webNum++
-      citeHtml = `<a class="inline-cite-web" href="${escapeAttr(c.url || '')}" target="_blank" rel="noopener">${toCircleNum(webNum)}</a>`
+      citeHtml = `<a class="inline-cite-web" href="${escapeAttr(c.url || '')}" target="_blank" rel="noopener" title="${escapeAttr(c.title || '')}">${toCircleNum(webNum)}</a>`
     }
     html = html.replace(`%%CITE${i}%%`, citeHtml!)
   }

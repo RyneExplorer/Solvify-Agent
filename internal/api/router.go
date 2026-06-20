@@ -75,16 +75,29 @@ func (r *Router) Setup(engine *gin.Engine) {
 
 	v1 := engine.Group("/api/v1")
 
-	// 所有业务路由需要用户身份（开发阶段使用假用户中间件）
-	user := v1.Group("")
-	user.Use(middleware.FakeUser())
+	// 认证路由 — 公开，无需登录
+	r.authCtrl.RegisterRoutes(v1)
+
+	// 业务路由 — 需要 JWT 认证
+	protected := v1.Group("")
+	protected.Use(middleware.Auth())
+
+	// 用户
+	r.userCtrl.RegisterRoutes(protected)
 
 	// 模型管理
-	r.modelCtrl.RegisterRoutes(user)
-	r.userModelCtrl.RegisterRoutes(user)
+	r.modelCtrl.RegisterRoutes(protected)
+	r.userModelCtrl.RegisterRoutes(protected)
 
 	// 聊天
-	r.chatCtrl.RegisterRoutes(user)
+	r.chatCtrl.RegisterRoutes(protected)
+
+	// 知识库 & 文档
+	r.knowledgeBaseCtrl.RegisterRoutes(protected)
+	r.documentCtrl.RegisterKnowledgeBaseRoutes(protected)
+	r.documentCtrl.RegisterDocumentRoutes(protected)
+	r.documentCtrl.RegisterDocumentJobRoutes(protected)
+	r.documentCtrl.RegisterChunkRoutes(protected)
 
 	r.knowledgeBaseCtrl.RegisterRoutes(v1)
 	r.documentCtrl.RegisterKnowledgeBaseRoutes(v1)
@@ -95,6 +108,11 @@ func (r *Router) Setup(engine *gin.Engine) {
 	r.dingtalkCtrl.RegisterRoutes(v1)
 	r.storageCtrl.RegisterRoutes(v1)
 	r.toolCtrl.RegisterRoutes(user)
+	// 存储
+	r.storageCtrl.RegisterRoutes(protected)
+
+	// 工具
+	r.toolCtrl.RegisterRoutes(protected)
 }
 
 // health 返回服务健康状态

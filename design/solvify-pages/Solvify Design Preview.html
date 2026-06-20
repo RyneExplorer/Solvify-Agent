@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Solvify — 设计预览</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        accent: { 50: '#eef2ff', 100: '#e0e7ff', 200: '#c7d2fe', 500: '#6366f1', 600: '#4F46E5', 700: '#4338CA' },
+        slate: { 50: '#F8FAFC', 100: '#F1F5F9', 200: '#E2E8F0', 300: '#CBD5E1', 400: '#94A3B8', 500: '#64748B', 600: '#475569', 800: '#1E293B', 900: '#0F172A' },
+      },
+      fontFamily: { display: ['"Space Grotesk"', 'sans-serif'] },
+    }
+  }
+}
+</script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; margin: 0; }
+  .font-display { font-family: 'Space Grotesk', sans-serif; }
+  .view-panel { display: none; }
+  .view-panel.active { display: flex; }
+  .tab-btn.active { color: #1E293B; font-weight: 600; border-bottom: 2px solid #4F46E5; }
+  .modal-overlay { display: none; }
+  .modal-overlay.show { display: flex; }
+  .kb-dropdown { display: none; }
+  .kb-dropdown.show { display: block; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 2px; }
+  textarea:focus, input:focus, select:focus { outline: none; }
+  .fade-in { animation: fadeIn 0.2s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes bounce-dot1 { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
+  @keyframes bounce-dot2 { 0%,100% { opacity: 0.3; } 25%,75% { opacity: 1; } }
+  @keyframes bounce-dot3 { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
+  .dot1 { animation: bounce-dot1 1.2s infinite; }
+  .dot2 { animation: bounce-dot2 1.2s infinite; }
+  .dot3 { animation: bounce-dot3 1.2s infinite; animation-delay: 0.3s; }
+  .md-content h1,.md-content h2,.md-content h3 { color:#1e293b; font-weight:600; margin:16px 0 8px; }
+  .md-content p { margin:0 0 8px; line-height:1.7; }
+  .md-content ul,.md-content ol { margin:0 0 8px; padding-left:20px; }
+  .md-content code { background:#f8fafc; border:1px solid #e2e8f0; border-radius:4px; padding:1px 6px; font-size:13px; color:#059669; }
+  .md-content pre { background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:14px; margin:0 0 8px; overflow-x:auto; }
+  .md-content blockquote { border-left:3px solid #10b981; padding:6px 14px; margin:0 0 8px; background:#ecfdf5; border-radius:0 8px 8px 0; color:#475569; }
+  .cite-kb { display:inline-flex; align-items:center; gap:3px; padding:0 6px; background:#ecfdf5; border:1px solid rgba(16,185,129,0.2); border-radius:4px; font-size:11px; color:#059669; }
+  .cite-web { display:inline-flex; align-items:center; justify-content:center; min-width:16px; height:16px; padding:0 3px; background:rgba(79,70,229,0.1); border:1px solid rgba(79,70,229,0.2); border-radius:8px; font-size:10px; font-weight:600; color:#4F46E5; text-decoration:none; }
+</style>
+</head>
+<body class="bg-white h-screen flex flex-col overflow-hidden">
+
+<!-- ====== VIEW SWITCHER BAR ====== -->
+<div class="h-10 bg-slate-900 flex items-center px-4 gap-1 shrink-0 z-50">
+  <span class="text-xs text-slate-400 mr-2 font-medium">预览切换:</span>
+  <button onclick="switchView('chat-new')" id="btn-chat-new" class="px-3 py-1 rounded text-xs text-white bg-accent-600 hover:bg-accent-700 transition-colors">对话 · 新对话</button>
+  <button onclick="switchView('chat-active')" id="btn-chat-active" class="px-3 py-1 rounded text-xs text-slate-300 hover:bg-slate-700 transition-colors">对话 · 活跃</button>
+  <button onclick="switchView('settings-model')" id="btn-settings-model" class="px-3 py-1 rounded text-xs text-slate-300 hover:bg-slate-700 transition-colors">配置 · AI模型</button>
+  <button onclick="switchView('settings-search')" id="btn-settings-search" class="px-3 py-1 rounded text-xs text-slate-300 hover:bg-slate-700 transition-colors">配置 · 搜索工具</button>
+  <button onclick="switchView('settings-status')" id="btn-settings-status" class="px-3 py-1 rounded text-xs text-slate-300 hover:bg-slate-700 transition-colors">配置 · 系统状态</button>
+</div>
+
+<!-- ====== APP SHELL ====== -->
+<div class="flex flex-1 min-h-0 overflow-hidden">
+
+<!-- ========== SIDEBAR (shared) ========== -->
+<aside class="w-[260px] h-full bg-slate-50 border-r border-slate-200 flex flex-col shrink-0">
+  <!-- Logo -->
+  <div class="h-14 flex items-center px-5 border-b border-slate-200 shrink-0 gap-2.5">
+    <div class="w-7 h-7 rounded-lg bg-accent-600 text-white flex items-center justify-center text-sm font-bold shrink-0 font-display">S</div>
+    <span class="text-base font-semibold text-slate-900 font-display tracking-tight">Solvify</span>
+    <button class="ml-auto p-1.5 hover:bg-slate-200/60 rounded-lg transition-colors">
+      <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+    </button>
+  </div>
+
+  <!-- Nav -->
+  <nav class="px-3 py-3 space-y-0.5 shrink-0">
+    <a href="#" class="flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] text-sm text-slate-600 hover:bg-slate-200/60 transition-colors no-underline">
+      <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      <span>概览</span>
+    </a>
+    <a href="#" class="flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] text-sm bg-accent-600 text-white font-medium transition-colors no-underline">
+      <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 4v16m8-8H4"/></svg>
+      <span>新对话</span>
+    </a>
+    <a href="#" class="flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] text-sm text-slate-600 hover:bg-slate-200/60 transition-colors no-underline">
+      <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+      <span>知识库</span>
+    </a>
+    <a href="#" class="flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] text-sm text-slate-600 hover:bg-slate-200/60 transition-colors no-underline">
+      <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      <span>文档</span>
+    </a>
+    <a href="#" class="flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] text-sm text-slate-600 hover:bg-slate-200/60 transition-colors no-underline">
+      <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg>
+      <span>Wiki</span>
+    </a>
+    <a href="#" class="flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] text-sm text-slate-600 hover:bg-slate-200/60 transition-colors no-underline">
+      <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span>配置</span>
+    </a>
+    <a href="#" class="flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] text-sm text-slate-600 hover:bg-slate-200/60 transition-colors no-underline">
+      <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      <span>管理</span>
+    </a>
+  </nav>
+
+  <!-- Divider -->
+  <div class="px-3 shrink-0"><div class="border-t border-slate-200"></div></div>
+
+  <!-- History -->
+  <div class="flex-1 overflow-hidden flex flex-col min-h-0">
+    <div class="px-4 py-2 flex items-center justify-between shrink-0">
+      <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">历史对话</span>
+    </div>
+    <div class="flex-1 overflow-y-auto px-3 pb-2 space-y-0.5">
+      <a href="#" class="block w-full text-left px-3 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-200/60 transition-colors truncate no-underline">Go语言基础概念解析</a>
+      <a href="#" class="block w-full text-left px-3 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-200/60 transition-colors truncate no-underline">今日天气查询</a>
+      <a href="#" class="block w-full text-left px-3 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-200/60 transition-colors truncate no-underline">智答云集项目需求概述</a>
+      <a href="#" class="block w-full text-left px-3 py-2 rounded-lg text-sm text-accent-600 bg-accent-50 font-medium transition-colors truncate no-underline">用户问题意图分析</a>
+      <a href="#" class="block w-full text-left px-3 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-200/60 transition-colors truncate no-underline">常用英语词汇列表</a>
+      <a href="#" class="block w-full text-left px-3 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-200/60 transition-colors truncate no-underline">孙家旺个人介绍</a>
+    </div>
+  </div>
+
+  <!-- User -->
+  <div class="h-14 border-t border-slate-200 flex items-center px-4 shrink-0 gap-2.5">
+    <div class="w-7 h-7 rounded-full bg-accent-600 text-white flex items-center justify-center text-xs font-medium shrink-0">A</div>
+    <div class="min-w-0 flex-1">
+      <div class="text-[13px] font-medium text-slate-900 truncate leading-tight">Admin</div>
+      <div class="text-[11px] text-slate-400 truncate leading-tight">admin@solvify.ai</div>
+    </div>
+  </div>
+</aside>
+
+<!-- ========== CONTENT AREA ========== -->
+<div class="flex-1 flex flex-col min-w-0 bg-white relative">
+
+<!-- ===== VIEW: Chat - New ===== -->
+<div id="view-chat-new" class="view-panel active flex-col h-full">
+  <!-- Header -->
+  <div class="h-14 flex items-center justify-between px-6 border-b border-slate-200 shrink-0">
+    <h2 class="text-sm font-semibold text-slate-800">新对话</h2>
+    <div class="flex items-center gap-1.5">
+      <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+      <span class="text-xs text-slate-400">就绪</span>
+    </div>
+  </div>
+
+  <!-- Centered input area -->
+  <div class="flex-1 flex flex-col items-center justify-center px-6 gap-8">
+    <div class="text-center">
+      <h1 class="text-4xl font-bold text-slate-800 italic mb-2">开始新的对话</h1>
+      <p class="text-sm text-slate-400">向你的知识库提问，获取回答与分析</p>
+    </div>
+    <div class="w-full max-w-2xl">
+      <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <textarea rows="3" placeholder="请输入您想要咨询的问题..." class="w-full px-5 py-4 text-sm text-slate-700 placeholder-slate-300 resize-none border-none"></textarea>
+        <div class="flex items-center justify-between px-4 py-3 border-t border-slate-100">
+          <div class="flex items-center gap-2">
+            <div class="relative">
+              <button onclick="document.querySelector('#kb-drop').classList.toggle('show')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-500 hover:bg-slate-50 border border-slate-200">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+                <span class="max-w-[100px] truncate">全部知识库</span>
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+              </button>
+              <div id="kb-drop" class="kb-dropdown absolute bottom-full left-0 mb-1 w-64 bg-white border border-slate-200 rounded-xl shadow-lg max-h-[200px] overflow-y-auto z-50">
+                <div class="px-3.5 py-2.5 text-[13px] cursor-pointer hover:bg-slate-50 flex items-center gap-2.5 text-emerald-600"><span class="w-4 h-4 border border-slate-200 rounded flex items-center justify-center shrink-0 bg-emerald-500 border-emerald-500"><svg class="w-2.5 h-2.5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></span>全部知识库</div>
+                <div class="px-3.5 py-2.5 text-[13px] cursor-pointer hover:bg-slate-50 flex items-center gap-2.5"><span class="w-4 h-4 border border-slate-200 rounded flex items-center justify-center shrink-0"></span>技术文档库</div>
+                <div class="px-3.5 py-2.5 text-[13px] cursor-pointer hover:bg-slate-50 flex items-center gap-2.5"><span class="w-4 h-4 border border-slate-200 rounded flex items-center justify-center shrink-0"></span>产品需求库</div>
+              </div>
+            </div>
+            <button class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100 transition-colors">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+              <span>智能推理</span>
+            </button>
+            <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-500 border border-slate-200">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+              <select class="bg-transparent text-xs text-slate-500 cursor-pointer"><option>GPT-4</option><option>Claude Opus</option><option>通义千问</option></select>
+            </div>
+          </div>
+          <button class="w-9 h-9 rounded-full flex items-center justify-center bg-slate-800 hover:bg-slate-700 text-white shadow-md transition-all">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="text-center pb-3 shrink-0"><span class="text-xs text-slate-300">内容由 AI 生成，仅供参考</span></div>
+</div>
+
+<!-- ===== VIEW: Chat - Active ===== -->
+<div id="view-chat-active" class="view-panel flex-col h-full">
+  <!-- Header -->
+  <div class="h-14 flex items-center justify-between px-6 border-b border-slate-200 shrink-0">
+    <h2 class="text-sm font-semibold text-slate-800">用户问题意图分析</h2>
+    <div class="flex items-center gap-1.5">
+      <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+      <span class="text-xs text-slate-400">就绪</span>
+    </div>
+  </div>
+
+  <!-- Messages -->
+  <div class="flex-1 overflow-y-auto px-6 py-6">
+    <div class="max-w-[800px] mx-auto space-y-6">
+
+      <!-- User message -->
+      <div class="flex justify-end">
+        <div class="max-w-[75%] px-4 py-3 rounded-2xl text-sm leading-relaxed bg-slate-100 text-slate-800">Go语言相比Python有哪些优势？</div>
+      </div>
+
+      <!-- AI message with timeline -->
+      <div class="flex justify-start">
+        <div class="max-w-[80%]">
+          <!-- Timeline -->
+          <div class="mb-3 space-y-1">
+            <div class="flex items-start gap-2 py-0.5 text-xs"><span class="w-3 h-3 mt-0.5 text-emerald-500 shrink-0">✓</span><span class="text-emerald-600">分析用户意图</span></div>
+            <div class="flex items-start gap-2 py-0.5 text-xs"><span class="w-3 h-3 mt-0.5 text-emerald-500 shrink-0">✓</span><span class="text-emerald-600">检索知识库</span></div>
+            <div class="flex items-start gap-2 py-0.5 text-xs"><span class="w-3 h-3 mt-0.5 text-emerald-500 shrink-0">✓</span><span class="text-emerald-600">生成回答</span></div>
+          </div>
+          <!-- Bubble -->
+          <div class="px-4 py-3 rounded-2xl text-sm leading-relaxed bg-white text-slate-800 md-content">
+            <p>Go语言相比Python主要优势体现在以下几个方面：</p>
+            <ol><li><strong>并发性能</strong> — Go的goroutine轻量级协程模型，比Python的线程/异步更高效</li><li><strong>编译型语言</strong> — 直接编译为机器码，启动快、内存占用低</li><li><strong>静态类型</strong> — 编译期类型检查，减少运行时错误<span class="cite-kb">📄Go语言入门指南</span></li><li><strong>部署简单</strong> — 单二进制文件，无需依赖环境</li></ol>
+            <p>但在数据科学、ML领域，Python的生态优势仍然明显。<span class="cite-web">①</span></p>
+          </div>
+          <!-- Actions -->
+          <div class="flex items-center gap-1 mt-2">
+            <button class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg></button>
+            <button class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg></button>
+          </div>
+          <!-- Sources -->
+          <div class="mt-2 flex flex-wrap items-center gap-1.5">
+            <span class="text-[11px] text-slate-400">来源:</span>
+            <span class="text-[11px] px-2 py-0.5 bg-slate-100 border border-slate-200 rounded-full text-slate-500">Go语言入门指南</span>
+            <span class="text-[11px] px-2 py-0.5 bg-slate-100 border border-slate-200 rounded-full text-slate-500">性能对比分析</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- User message 2 -->
+      <div class="flex justify-end">
+        <div class="max-w-[75%] px-4 py-3 rounded-2xl text-sm leading-relaxed bg-slate-100 text-slate-800">能给我一个goroutine的代码示例吗？</div>
+      </div>
+
+      <!-- AI message 2 (simpler) -->
+      <div class="flex justify-start">
+        <div class="max-w-[80%]">
+          <div class="px-4 py-3 rounded-2xl text-sm leading-relaxed bg-white text-slate-800 md-content">
+            <p>当然，这是一个简单的goroutine示例：</p>
+<pre><code>func main() {
+    go func() {
+        fmt.Println("Hello from goroutine!")
+    }()
+    time.Sleep(time.Second)
+}</code></pre>
+            <p>使用 <code>go</code> 关键字即可启动一个新的goroutine，它是轻量级线程，由Go运行时调度管理。<span class="cite-kb">📄Go并发编程</span></p>
+          </div>
+          <div class="flex items-center gap-1 mt-2">
+            <button class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg></button>
+            <button class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Input -->
+  <div class="px-6 py-4 shrink-0">
+    <div class="max-w-[800px] mx-auto">
+      <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <textarea rows="3" placeholder="请输入您想要咨询的问题..." class="w-full px-5 py-4 text-sm text-slate-700 placeholder-slate-300 resize-none border-none"></textarea>
+        <div class="flex items-center justify-between px-4 py-3 border-t border-slate-100">
+          <div class="flex items-center gap-2">
+            <div class="relative">
+              <button onclick="document.querySelector('#kb-drop2').classList.toggle('show')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-500 hover:bg-slate-50 border border-slate-200">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+                <span class="max-w-[100px] truncate">全部知识库</span>
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+              </button>
+              <div id="kb-drop2" class="kb-dropdown absolute bottom-full left-0 mb-1 w-64 bg-white border border-slate-200 rounded-xl shadow-lg max-h-[200px] overflow-y-auto z-50">
+                <div class="px-3.5 py-2.5 text-[13px] cursor-pointer hover:bg-slate-50 flex items-center gap-2.5 text-emerald-600"><span class="w-4 h-4 border border-slate-200 rounded flex items-center justify-center shrink-0 bg-emerald-500 border-emerald-500"><svg class="w-2.5 h-2.5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg></span>全部知识库</div>
+                <div class="px-3.5 py-2.5 text-[13px] cursor-pointer hover:bg-slate-50 flex items-center gap-2.5"><span class="w-4 h-4 border border-slate-200 rounded flex items-center justify-center shrink-0"></span>技术文档库</div>
+                <div class="px-3.5 py-2.5 text-[13px] cursor-pointer hover:bg-slate-50 flex items-center gap-2.5"><span class="w-4 h-4 border border-slate-200 rounded flex items-center justify-center shrink-0"></span>产品需求库</div>
+              </div>
+            </div>
+            <button class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100 transition-colors">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+              <span>智能推理</span>
+            </button>
+            <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-500 border border-slate-200">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+              <select class="bg-transparent text-xs text-slate-500 cursor-pointer"><option>GPT-4</option><option>Claude Opus</option></select>
+            </div>
+          </div>
+          <button class="w-9 h-9 rounded-full flex items-center justify-center bg-slate-800 hover:bg-slate-700 text-white shadow-md transition-all">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="text-center pb-3 shrink-0"><span class="text-xs text-slate-300">内容由 AI 生成，仅供参考</span></div>
+</div>
+
+<!-- ===== VIEW: Settings - AI Models ===== -->
+<div id="view-settings-model" class="view-panel flex-col h-full overflow-y-auto">
+  <div class="py-8 px-10 max-w-3xl mx-auto w-full">
+    <h1 class="text-[28px] font-bold text-slate-900 mb-6 font-display tracking-tight">系统配置</h1>
+
+    <!-- Tabs -->
+    <div class="flex border-b border-slate-200 mb-6">
+      <button class="tab-btn active px-4 py-2.5 text-sm border-b-2 border-transparent hover:text-slate-600 transition-colors" onclick="switchSettingsTab('model', this)">AI 模型</button>
+      <button class="tab-btn px-4 py-2.5 text-sm text-slate-400 border-b-2 border-transparent hover:text-slate-600 transition-colors" onclick="switchSettingsTab('search', this)">搜索工具</button>
+      <button class="tab-btn px-4 py-2.5 text-sm text-slate-400 border-b-2 border-transparent hover:text-slate-600 transition-colors" onclick="switchSettingsTab('status', this)">系统状态</button>
+    </div>
+
+    <!-- System Models -->
+    <div id="stab-model" class="fade-in">
+      <div class="bg-white border border-slate-200 rounded-2xl p-5 mb-3">
+        <h3 class="text-base font-semibold text-slate-900 mb-4 font-display">系统模型</h3>
+        <div class="grid grid-cols-2 gap-3">
+          <div class="flex justify-between items-center p-3.5 border border-slate-200 rounded-xl">
+            <div><div class="text-sm font-medium text-slate-900">GPT-4</div><div class="text-xs text-slate-400 mt-0.5">OpenAI · gpt-4-turbo</div></div>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-600 border border-emerald-200">可用</span>
+          </div>
+          <div class="flex justify-between items-center p-3.5 border border-slate-200 rounded-xl">
+            <div><div class="text-sm font-medium text-slate-900">Claude Opus</div><div class="text-xs text-slate-400 mt-0.5">Anthropic · claude-opus-4-8</div></div>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-600 border border-emerald-200">可用</span>
+          </div>
+          <div class="flex justify-between items-center p-3.5 border border-slate-200 rounded-xl">
+            <div><div class="text-sm font-medium text-slate-900">通义千问</div><div class="text-xs text-slate-400 mt-0.5">阿里云 · qwen-max</div></div>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-600 border border-emerald-200">可用</span>
+          </div>
+          <div class="flex justify-between items-center p-3.5 border border-slate-200 rounded-xl">
+            <div><div class="text-sm font-medium text-slate-900">GLM-4</div><div class="text-xs text-slate-400 mt-0.5">智谱 · glm-4</div></div>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-500 border border-slate-200">停用</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- My Models -->
+      <div class="bg-white border border-slate-200 rounded-2xl p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-base font-semibold text-slate-900 font-display">我的模型</h3>
+          <button onclick="document.querySelector('#model-modal').classList.add('show')" class="inline-flex items-center gap-1.5 rounded-xl text-xs px-3 py-1.5 bg-slate-900 text-white hover:bg-slate-800 transition-colors font-medium cursor-pointer border-none">添加模型</button>
+        </div>
+        <div class="flex justify-between items-center p-3.5 border border-slate-200 rounded-xl mb-2">
+          <div class="min-w-0 flex-1"><div class="text-sm font-medium text-slate-900 truncate">我的GPT</div><div class="text-xs text-slate-400 mt-0.5">openai · https://api.openai.com/v1</div></div>
+          <div class="flex items-center gap-2 ml-3 shrink-0">
+            <button onclick="document.querySelector('#model-modal').classList.add('show')" class="inline-flex items-center gap-1 rounded-xl text-xs px-3 py-1.5 bg-white text-slate-900 border border-slate-200 hover:bg-slate-50 transition-colors font-medium cursor-pointer">编辑</button>
+            <button class="inline-flex items-center gap-1 rounded-xl text-xs px-3 py-1.5 bg-red-600 text-white hover:bg-red-700 transition-colors font-medium cursor-pointer border-none">删除</button>
+          </div>
+        </div>
+        <div class="flex justify-between items-center p-3.5 border border-slate-200 rounded-xl">
+          <div class="min-w-0 flex-1"><div class="text-sm font-medium text-slate-900 truncate">本地Claude</div><div class="text-xs text-slate-400 mt-0.5">anthropic · http://localhost:8080</div></div>
+          <div class="flex items-center gap-2 ml-3 shrink-0">
+            <button class="inline-flex items-center gap-1 rounded-xl text-xs px-3 py-1.5 bg-white text-slate-900 border border-slate-200 hover:bg-slate-50 transition-colors font-medium cursor-pointer">编辑</button>
+            <button class="inline-flex items-center gap-1 rounded-xl text-xs px-3 py-1.5 bg-red-600 text-white hover:bg-red-700 transition-colors font-medium cursor-pointer border-none">删除</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Search Tools tab -->
+    <div id="stab-search" class="fade-in hidden">
+      <div class="bg-white border border-slate-200 rounded-2xl p-5 mb-3">
+        <h3 class="text-base font-semibold text-slate-900 mb-2 font-display">可用工具</h3>
+        <p class="text-[13px] text-slate-400 mb-4">配置工具后可在智能推理模式中使用。</p>
+        <div class="p-3.5 border border-slate-200 rounded-xl mb-2">
+          <div class="flex items-center justify-between">
+            <div><div class="text-sm font-medium text-slate-900">Bocha搜索</div><div class="text-xs text-slate-400 mt-0.5">联网搜索 · Bocha API</div></div>
+            <span class="text-[11px] text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">同步</span>
+          </div>
+          <div class="mt-2 flex flex-wrap gap-1.5"><span class="text-[11px] text-slate-500 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full">Bocha</span></div>
+        </div>
+        <div class="p-3.5 border border-slate-200 rounded-xl">
+          <div class="flex items-center justify-between">
+            <div><div class="text-sm font-medium text-slate-900">HTTP请求</div><div class="text-xs text-slate-400 mt-0.5">自定义HTTP API调用</div></div>
+            <span class="text-[11px] text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">同步</span>
+          </div>
+          <div class="mt-2 flex flex-wrap gap-1.5"><span class="text-[11px] text-slate-500 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full">http-get</span><span class="text-[11px] text-slate-500 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full">http-post</span></div>
+        </div>
+      </div>
+
+      <div class="bg-white border border-slate-200 rounded-2xl p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-base font-semibold text-slate-900 font-display">我的工具</h3>
+          <button onclick="document.querySelector('#tool-modal').classList.add('show')" class="inline-flex items-center gap-1.5 rounded-xl text-xs px-3 py-1.5 bg-slate-900 text-white hover:bg-slate-800 transition-colors font-medium cursor-pointer border-none">添加工具</button>
+        </div>
+        <div class="flex justify-between items-center p-3.5 border border-slate-200 rounded-xl">
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-medium text-slate-900">我的搜索</div>
+            <div class="text-xs text-slate-400 mt-0.5">Bocha搜索 · Bocha <span class="text-emerald-500">· 启用</span></div>
+          </div>
+          <div class="flex items-center gap-2 ml-3 shrink-0">
+            <button onclick="document.querySelector('#tool-modal').classList.add('show')" class="inline-flex items-center gap-1 rounded-xl text-xs px-3 py-1.5 bg-white text-slate-900 border border-slate-200 hover:bg-slate-50 transition-colors font-medium cursor-pointer">编辑</button>
+            <button class="inline-flex items-center gap-1 rounded-xl text-xs px-3 py-1.5 bg-red-600 text-white hover:bg-red-700 transition-colors font-medium cursor-pointer border-none">删除</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- System Status tab -->
+    <div id="stab-status" class="fade-in hidden">
+      <div class="bg-white border border-slate-200 rounded-2xl p-5 mb-3">
+        <h3 class="text-base font-semibold text-slate-900 mb-4 font-display">基础设施状态</h3>
+        <p class="text-[13px] text-slate-400 mb-4">以下配置由管理员设置，普通用户不可修改。</p>
+        <div class="flex flex-col gap-4">
+          <div class="flex justify-between items-center p-3.5 bg-slate-50 rounded-xl">
+            <div><div class="text-sm font-medium text-slate-900">向量数据库</div><div class="text-xs text-slate-400 mt-0.5">PostgreSQL (pgvector)</div></div>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-600 border border-emerald-200">运行中</span>
+          </div>
+          <div class="flex justify-between items-center p-3.5 bg-slate-50 rounded-xl">
+            <div><div class="text-sm font-medium text-slate-900">RAG 引擎</div><div class="text-xs text-slate-400 mt-0.5">Eino Framework</div></div>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-600 border border-emerald-200">运行中</span>
+          </div>
+          <div class="flex justify-between items-center p-3.5 bg-slate-50 rounded-xl">
+            <div><div class="text-sm font-medium text-slate-900">默认 AI 模型</div><div class="text-xs text-slate-400 mt-0.5">GPT-4 (系统级)</div></div>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-accent-50 text-accent-600 border border-accent-200">系统配置</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white border border-slate-200 rounded-2xl p-5">
+        <h3 class="text-base font-semibold text-slate-900 mb-4 font-display">第三方平台集成</h3>
+        <p class="text-[13px] text-slate-400 mb-4">集成配置由管理员管理，同步知识库可在知识库页面查看。</p>
+        <div class="flex justify-between items-center p-3.5 border border-slate-200 rounded-xl mb-2">
+          <div><div class="text-sm font-medium text-slate-900">钉钉</div><div class="text-xs text-slate-400 mt-0.5">通过 Webhook 同步知识库</div></div>
+          <div class="flex items-center gap-3"><span class="text-xs text-slate-400">已同步 234 篇</span><span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-600 border border-emerald-200">已连接</span></div>
+        </div>
+        <div class="flex justify-between items-center p-3.5 border border-slate-200 rounded-xl mb-2">
+          <div><div class="text-sm font-medium text-slate-900">飞书</div><div class="text-xs text-slate-400 mt-0.5">从飞书文档同步知识库</div></div>
+          <div class="flex items-center gap-3"><span class="text-xs text-slate-400">已同步 189 篇</span><span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-600 border border-emerald-200">已连接</span></div>
+        </div>
+        <div class="flex justify-between items-center p-3.5 border border-slate-200 rounded-xl">
+          <div><div class="text-sm font-medium text-slate-900">Notion</div><div class="text-xs text-slate-400 mt-0.5">从 Notion 页面同步知识库</div></div>
+          <div class="flex items-center gap-3"><span class="text-xs text-slate-400">已同步 -</span><span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-500 border border-slate-200">未配置</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /content-area -->
+</div><!-- /app-shell -->
+
+<!-- ===== MODEL MODAL ===== -->
+<div id="model-modal" class="modal-overlay fixed inset-0 z-50 items-center justify-center bg-black/30" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md mx-4 fade-in">
+    <h3 class="text-lg font-semibold text-slate-900 mb-4 font-display">添加模型</h3>
+    <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">API 格式</label>
+      <select class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900" style="appearance:none;background-image:url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 12 12%22%3E%3Cpath fill=%22%2394a3b8%22 d=%22M6 8.825L1.175 4 2.238 2.938 6 6.7 9.763 2.937 10.825 4z%22/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 12px center;">
+        <option>OpenAI 兼容</option><option>Anthropic</option><option>自定义</option>
+      </select></div>
+    <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">Base URL</label><input placeholder="https://api.openai.com/v1" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900"></div>
+    <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">Model ID</label><input placeholder="gpt-4" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900"></div>
+    <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">API Key</label><input type="password" placeholder="sk-..." class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900"></div>
+    <div class="mb-5"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">配置 (JSON 可选)</label><textarea rows="3" placeholder='{"temperature": 0.7}' class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 resize-none"></textarea></div>
+    <div class="flex gap-2 justify-end">
+      <button onclick="document.querySelector('#model-modal').classList.remove('show')" class="inline-flex items-center gap-1 rounded-xl text-sm px-5 py-2.5 bg-white text-slate-900 border border-slate-200 hover:bg-slate-50 transition-colors font-medium cursor-pointer">取消</button>
+      <button onclick="document.querySelector('#model-modal').classList.remove('show')" class="inline-flex items-center gap-1 rounded-xl text-sm px-5 py-2.5 bg-slate-900 text-white hover:bg-slate-800 transition-colors font-medium cursor-pointer border-none">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== TOOL MODAL ===== -->
+<div id="tool-modal" class="modal-overlay fixed inset-0 z-50 items-center justify-center bg-black/30" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md mx-4 fade-in">
+    <h3 class="text-lg font-semibold text-slate-900 mb-4 font-display">添加工具</h3>
+    <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">显示名称</label><input placeholder="我的搜索工具" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900"></div>
+    <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">工具类型</label>
+      <select class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900" style="appearance:none;background-image:url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 12 12%22%3E%3Cpath fill=%22%2394a3b8%22 d=%22M6 8.825L1.175 4 2.238 2.938 6 6.7 9.763 2.937 10.825 4z%22/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 12px center;">
+        <option value="" disabled selected>选择工具类型</option><option>Bocha搜索</option><option>HTTP请求</option>
+      </select></div>
+    <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">提供商</label>
+      <select class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900" style="appearance:none;background-image:url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 12 12%22%3E%3Cpath fill=%22%2394a3b8%22 d=%22M6 8.825L1.175 4 2.238 2.938 6 6.7 9.763 2.937 10.825 4z%22/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 12px center;">
+        <option value="" disabled selected>选择提供商</option><option>Bocha</option>
+      </select></div>
+    <div class="mb-5"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">配置 (JSON 可选)</label><textarea rows="4" placeholder='{"api_key": "..."}' class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 resize-none"></textarea></div>
+    <div class="flex gap-2 justify-end">
+      <button onclick="document.querySelector('#tool-modal').classList.remove('show')" class="inline-flex items-center gap-1 rounded-xl text-sm px-5 py-2.5 bg-white text-slate-900 border border-slate-200 hover:bg-slate-50 transition-colors font-medium cursor-pointer">取消</button>
+      <button onclick="document.querySelector('#tool-modal').classList.remove('show')" class="inline-flex items-center gap-1 rounded-xl text-sm px-5 py-2.5 bg-slate-900 text-white hover:bg-slate-700 transition-colors font-medium cursor-pointer border-none">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Top bar view switching ──
+function switchView(viewId) {
+  document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('view-' + viewId).classList.add('active');
+  // Update top buttons
+  document.querySelectorAll('[id^="btn-"]').forEach(b => {
+    b.classList.remove('bg-accent-600','text-white');
+    b.classList.add('text-slate-300','hover:bg-slate-700');
+  });
+  const btn = document.getElementById('btn-' + viewId);
+  if (btn) { btn.classList.remove('text-slate-300','hover:bg-slate-700'); btn.classList.add('bg-accent-600','text-white'); }
+}
+
+// ── Settings tab switching ──
+function switchSettingsTab(tab, btn) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('stab-model').classList.add('hidden');
+  document.getElementById('stab-search').classList.add('hidden');
+  document.getElementById('stab-status').classList.add('hidden');
+  const target = document.getElementById('stab-' + tab);
+  if (target) { target.classList.remove('hidden'); target.classList.add('fade-in'); }
+}
+</script>
+
+</body>
+</html>

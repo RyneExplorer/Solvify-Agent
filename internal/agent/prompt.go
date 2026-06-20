@@ -28,10 +28,13 @@ func buildReActSystemPrompt(ctx context.Context, userTools []einoTool.BaseTool) 
 	sb.WriteString("规则：\n")
 	sb.WriteString("- 【必须】引用标签紧跟在支持该事实的句子末尾，不能换行\n")
 	sb.WriteString("- 【必须】chunk_id 使用工具返回的真实 ID（UUID 格式），不要编造\n")
+	sb.WriteString("- 【必须】如果使用了联网搜索工具，回答中必须使用 <web> 标签标注对应的网页来源\n")
+	sb.WriteString("- 【必须】同一句话中如果同时有 KB 和 Web 来源，可以同时插入两种标签\n")
 	sb.WriteString("- 【禁止】把引用集中放在答案末尾\n")
 	sb.WriteString("- 【禁止】把工具返回的原文复制到回答中\n\n")
 	sb.WriteString("示例：\n")
 	sb.WriteString("  ✅ RAG 是一种技术 <kb doc=\"RAG技术介绍\" chunk_id=\"550e8400-e29b-41d4-a716-446655440000\" />。\n")
+	sb.WriteString("  ✅ Go 1.18 加入泛型 <web url=\"https://go.dev/doc/\" title=\"Go Documentation\" />。\n")
 	sb.WriteString("  ❌ RAG 是一种技术 <kb doc=\"RAG技术介绍\" chunk_id=\"C1\" />。（错误：用了虚拟ID）\n")
 	sb.WriteString("  ❌ RAG 是一种技术。（错误：缺少引用）\n\n")
 
@@ -50,17 +53,19 @@ func buildReActSystemPrompt(ctx context.Context, userTools []einoTool.BaseTool) 
 	sb.WriteString("\n")
 
 	sb.WriteString("## 工作流程\n")
-	sb.WriteString("1. 用 knowledge_search 搜索 1-2 次，不同关键词\n")
+	sb.WriteString("1. 用 knowledge_search 搜索知识库 1 次\n")
 	if len(toolDescs) > 0 {
 		names := make([]string, len(toolDescs))
 		for i, t := range toolDescs {
 			names[i] = t.Name
 		}
-		sb.WriteString(fmt.Sprintf("2. 知识库信息不足时，可调用 %s 补充（最多 1 次）\n", strings.Join(names, " 或 ")))
+		sb.WriteString(fmt.Sprintf("2. 同时或随后调用 %s 获取最新互联网信息（最多 1 次）\n", strings.Join(names, " 或 ")))
+		sb.WriteString("   即使知识库有相关内容，也建议调用联网搜索补充最新、更全面的信息\n")
+		sb.WriteString("   调用时请按工具参数要求传入搜索关键词等必要参数\n")
 	} else {
 		sb.WriteString("2. 如果知识库信息不足，基于自身知识尽力回答\n")
 	}
-	sb.WriteString("3. 用自己的话组织回答，在句末插入引用标签\n")
+	sb.WriteString("3. 综合所有信息，用自己的话组织回答，在句末插入引用标签\n")
 	sb.WriteString("4. 工具调用总计不超过 3 次\n\n")
 
 	sb.WriteString("## 回答格式（必须严格遵守，否则用户无法阅读）\n")

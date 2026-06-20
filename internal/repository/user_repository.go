@@ -22,7 +22,7 @@ func NewUserRepository(db *gorm.DB) UserRepository {
 // FindByID 根据 ID 查找用户
 func (r *userRepository) FindByID(id string) (*entity.User, error) {
 	var user entity.User
-	err := r.db.First(&user, id).Error
+	err := r.db.Where("id = ?", id).First(&user).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -76,7 +76,7 @@ func (r *userRepository) Update(id string, updates map[string]interface{}) error
 
 // Delete 删除用户
 func (r *userRepository) Delete(id string) error {
-	return r.db.Delete(&entity.User{}, id).Error
+	return r.db.Where("id = ?", id).Delete(&entity.User{}).Error
 }
 
 // AdminList 管理员分页获取用户列表
