@@ -58,8 +58,8 @@ func (t *AgentTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 // 优先级：ToolType > ToolProvider > 自动从 BodyTemplate 推断
 func (t *AgentTool) getInputSchema() map[string]interface{} {
 	// 1. 从配置获取
-	if schema := t.getConfiguredInputSchema(); schema != nil {
-		return schema
+	if inputSchema := t.getConfiguredInputSchema(); inputSchema != nil {
+		return inputSchema
 	}
 
 	// 2. 自动从 BodyTemplate 推断 LLM 需要提供的参数
@@ -96,17 +96,17 @@ func (t *AgentTool) getInputSchema() map[string]interface{} {
 func (t *AgentTool) getConfiguredInputSchema() map[string]interface{} {
 	// 优先从 ToolType 获取
 	if len(t.config.ToolType.InputSchema) > 0 {
-		var schema map[string]interface{}
-		if err := json.Unmarshal(t.config.ToolType.InputSchema, &schema); err == nil {
-			return schema
+		var s map[string]interface{}
+		if err := json.Unmarshal(t.config.ToolType.InputSchema, &s); err == nil {
+			return s
 		}
 	}
 
 	// 从 ToolProvider.InputSchema 获取
 	if len(t.config.InputSchema) > 0 {
-		var schema map[string]interface{}
-		if err := json.Unmarshal(t.config.InputSchema, &schema); err == nil {
-			return schema
+		var s map[string]interface{}
+		if err := json.Unmarshal(t.config.InputSchema, &s); err == nil {
+			return s
 		}
 	}
 
