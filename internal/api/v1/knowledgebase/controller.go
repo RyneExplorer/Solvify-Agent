@@ -3,7 +3,7 @@ package knowledgebase
 import (
 	"github.com/gin-gonic/gin"
 
-	apiv1 "solvify-agent/internal/api/v1"
+	"solvify-agent/internal/middleware"
 	requestdto "solvify-agent/internal/model/dto/request"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
@@ -21,7 +21,7 @@ func NewController(knowledgeBaseSvc service.KnowledgeBaseServiceInterface) *Cont
 
 // Create 创建本地知识库
 func (ctrl *Controller) Create(c *gin.Context) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
 	}
@@ -42,7 +42,7 @@ func (ctrl *Controller) Create(c *gin.Context) {
 
 // List 查询当前用户知识库列表
 func (ctrl *Controller) List(c *gin.Context) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
 	}
@@ -122,13 +122,13 @@ func (ctrl *Controller) Stats(c *gin.Context) {
 
 // userAndKnowledgeBaseID 读取当前用户和知识库 ID
 func (ctrl *Controller) userAndKnowledgeBaseID(c *gin.Context) (string, string, bool) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return "", "", false
 	}
 
 	kbID := c.Param("id")
-	if !apiv1.IsUUID(kbID) {
+	if !middleware.IsUUID(kbID) {
 		response.BadRequest(c, "知识库 ID 格式错误")
 		return "", "", false
 	}

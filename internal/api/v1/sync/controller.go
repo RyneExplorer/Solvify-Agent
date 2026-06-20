@@ -3,7 +3,7 @@ package sync
 import (
 	"github.com/gin-gonic/gin"
 
-	apiv1 "solvify-agent/internal/api/v1"
+	"solvify-agent/internal/middleware"
 	requestdto "solvify-agent/internal/model/dto/request"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
@@ -21,7 +21,7 @@ func NewController(syncSvc service.SyncServiceInterface) *Controller {
 
 // CreateSource 创建同步源
 func (ctrl *Controller) CreateSource(c *gin.Context) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
 	}
@@ -40,7 +40,7 @@ func (ctrl *Controller) CreateSource(c *gin.Context) {
 
 // ListSources 查询同步源列表
 func (ctrl *Controller) ListSources(c *gin.Context) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
 	}
@@ -128,12 +128,12 @@ func (ctrl *Controller) ListJobs(c *gin.Context) {
 
 // JobDetail 查询同步任务详情
 func (ctrl *Controller) JobDetail(c *gin.Context) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
 	}
 	jobID := c.Param("id")
-	if !apiv1.IsUUID(jobID) {
+	if !middleware.IsUUID(jobID) {
 		response.BadRequest(c, "同步任务 ID 格式错误")
 		return
 	}
@@ -147,12 +147,12 @@ func (ctrl *Controller) JobDetail(c *gin.Context) {
 
 // userAndSourceID 读取当前用户和同步源 ID
 func (ctrl *Controller) userAndSourceID(c *gin.Context) (string, string, bool) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return "", "", false
 	}
 	sourceID := c.Param("id")
-	if !apiv1.IsUUID(sourceID) {
+	if !middleware.IsUUID(sourceID) {
 		response.BadRequest(c, "同步源 ID 格式错误")
 		return "", "", false
 	}

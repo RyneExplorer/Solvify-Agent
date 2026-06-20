@@ -22,7 +22,6 @@ import (
 	"solvify-agent/internal/integration/dingtalk"
 	"solvify-agent/internal/llm"
 	"solvify-agent/internal/middleware"
-	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"

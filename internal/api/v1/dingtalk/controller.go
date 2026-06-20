@@ -6,7 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	apiv1 "solvify-agent/internal/api/v1"
+	"solvify-agent/internal/middleware"
 	requestdto "solvify-agent/internal/model/dto/request"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
@@ -24,7 +24,7 @@ func NewController(dingtalkSvc service.DingTalkServiceInterface) *Controller {
 
 // OAuthConfig 获取前端内嵌二维码登录参数
 func (ctrl *Controller) OAuthConfig(c *gin.Context) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
 	}
@@ -38,7 +38,7 @@ func (ctrl *Controller) OAuthConfig(c *gin.Context) {
 
 // ExchangeAuthCode 兑换钉钉扫码授权码并保存绑定
 func (ctrl *Controller) ExchangeAuthCode(c *gin.Context) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
 	}
@@ -57,7 +57,7 @@ func (ctrl *Controller) ExchangeAuthCode(c *gin.Context) {
 
 // Binding 查询当前用户钉钉绑定状态
 func (ctrl *Controller) Binding(c *gin.Context) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
 	}
@@ -71,7 +71,7 @@ func (ctrl *Controller) Binding(c *gin.Context) {
 
 // DeleteBinding 删除当前用户钉钉绑定
 func (ctrl *Controller) DeleteBinding(c *gin.Context) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
 	}
@@ -84,7 +84,7 @@ func (ctrl *Controller) DeleteBinding(c *gin.Context) {
 
 // ListWorkspaces 查询钉钉知识库列表
 func (ctrl *Controller) ListWorkspaces(c *gin.Context) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
 	}
@@ -98,7 +98,7 @@ func (ctrl *Controller) ListWorkspaces(c *gin.Context) {
 
 // ListNodes 查询钉钉知识库节点列表
 func (ctrl *Controller) ListNodes(c *gin.Context) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
 	}

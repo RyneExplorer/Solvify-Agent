@@ -32,6 +32,7 @@ type Router struct {
 	syncCtrl          *syncapi.Controller
 	dingtalkCtrl      *dingtalkapi.Controller
 	toolCtrl          *tool.Controller
+	authService       service.AuthServiceInterface
 }
 
 // NewRouter 创建 API 路由聚合器
@@ -65,6 +66,7 @@ func NewRouter(
 		dingtalkCtrl:      dingtalkapi.NewController(dingtalkSvc),
 		chatCtrl:          chat.NewController(chatSvc, adminSessionService),
 		toolCtrl:          tool.NewController(toolTypeService, toolProviderService, userToolConfigService),
+		authService:       authService,
 	}
 }
 
@@ -77,11 +79,14 @@ func (r *Router) Setup(engine *gin.Engine) {
 
 	v1 := engine.Group("/api/v1")
 
-	// 认证路由 — 公开，无需登录
-	r.authCtrl.RegisterRoutes(v1)
+	// 公开认证路由
+	r.authCtrl.RegisterPublicRoutes(v1)
 
-	// 业务路由 — 需要 JWT 认证
-	v1.Use(middleware.Auth())
+	// 中间件认证
+	v1.Use(middleware.Auth(r.authService))
+
+	// 需要登录的认证路由
+	r.authCtrl.RegisterPrivateRoutes(v1)
 
 	// 用户管理
 	r.userCtrl.RegisterRoutes(v1)
@@ -99,16 +104,9 @@ func (r *Router) Setup(engine *gin.Engine) {
 	r.documentCtrl.RegisterDocumentRoutes(v1)
 	r.documentCtrl.RegisterDocumentJobRoutes(v1)
 	r.documentCtrl.RegisterChunkRoutes(v1)
-
-	r.knowledgeBaseCtrl.RegisterRoutes(v1)
-	r.documentCtrl.RegisterKnowledgeBaseRoutes(v1)
-	r.documentCtrl.RegisterDocumentRoutes(v1)
-	r.documentCtrl.RegisterDocumentJobRoutes(v1)
-	r.documentCtrl.RegisterChunkRoutes(v1)
 	r.syncCtrl.RegisterRoutes(v1)
 	r.dingtalkCtrl.RegisterRoutes(v1)
-	r.storageCtrl.RegisterRoutes(v1)
-	r.toolCtrl.RegisterRoutes(user)
+
 	// 存储
 	r.storageCtrl.RegisterRoutes(v1)
 

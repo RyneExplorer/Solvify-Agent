@@ -15,7 +15,7 @@ interface RequestOptions {
   isPublic?: boolean
 }
 
-function getToken(): string | null {
+export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
 }
 

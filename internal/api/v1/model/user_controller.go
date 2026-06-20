@@ -3,6 +3,7 @@ package model
 import (
 	"github.com/gin-gonic/gin"
 
+	"solvify-agent/internal/middleware"
 	requestdto "solvify-agent/internal/model/dto/request"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
@@ -20,7 +21,10 @@ func NewUserModelController(svc service.UserModelConfigServiceInterface) *UserMo
 
 // List 获取用户模型配置列表
 func (ctrl *UserModelController) List(ctx *gin.Context) {
-	userID := ctx.GetString("user_id")
+	userID, ok := middleware.CurrentUserID(ctx)
+	if !ok {
+		return
+	}
 
 	output, err := ctrl.userModelConfigService.List(ctx.Request.Context(), userID)
 	if err != nil {
@@ -33,7 +37,10 @@ func (ctrl *UserModelController) List(ctx *gin.Context) {
 
 // Create 创建用户模型配置
 func (ctrl *UserModelController) Create(ctx *gin.Context) {
-	userID := ctx.GetString("user_id")
+	userID, ok := middleware.CurrentUserID(ctx)
+	if !ok {
+		return
+	}
 
 	var input requestdto.CreateUserModelConfigRequest
 	if err := ctx.ShouldBindJSON(&input); err != nil {
@@ -52,7 +59,10 @@ func (ctrl *UserModelController) Create(ctx *gin.Context) {
 
 // Get 获取单个用户模型配置
 func (ctrl *UserModelController) Get(ctx *gin.Context) {
-	userID := ctx.GetString("user_id")
+	userID, ok := middleware.CurrentUserID(ctx)
+	if !ok {
+		return
+	}
 	configID := ctx.Param("id")
 
 	output, err := ctrl.userModelConfigService.Get(ctx.Request.Context(), userID, configID)
@@ -66,7 +76,10 @@ func (ctrl *UserModelController) Get(ctx *gin.Context) {
 
 // Update 更新用户模型配置
 func (ctrl *UserModelController) Update(ctx *gin.Context) {
-	userID := ctx.GetString("user_id")
+	userID, ok := middleware.CurrentUserID(ctx)
+	if !ok {
+		return
+	}
 	configID := ctx.Param("id")
 
 	var input requestdto.UpdateUserModelConfigRequest
@@ -85,7 +98,10 @@ func (ctrl *UserModelController) Update(ctx *gin.Context) {
 
 // Delete 删除用户模型配置
 func (ctrl *UserModelController) Delete(ctx *gin.Context) {
-	userID := ctx.GetString("user_id")
+	userID, ok := middleware.CurrentUserID(ctx)
+	if !ok {
+		return
+	}
 	configID := ctx.Param("id")
 
 	if err := ctrl.userModelConfigService.Delete(ctx.Request.Context(), userID, configID); err != nil {

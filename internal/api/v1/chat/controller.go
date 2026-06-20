@@ -7,7 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	apiv1 "solvify-agent/internal/api/v1"
+	"solvify-agent/internal/middleware"
 	requestdto "solvify-agent/internal/model/dto/request"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/logger"
@@ -30,9 +30,8 @@ func NewController(chatSvc service.ChatServiceInterface, adminSessionService ser
 
 // CreateSession 创建聊天会话
 func (ctrl *Controller) CreateSession(c *gin.Context) {
-	userID := c.GetString("user_id")
-	if userID == "" {
-		response.BadRequest(c, "用户身份无效")
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
 		return
 	}
 
@@ -66,9 +65,8 @@ func (ctrl *Controller) GetSession(c *gin.Context) {
 
 // ListSessions 获取会话列表
 func (ctrl *Controller) ListSessions(c *gin.Context) {
-	userID := c.GetString("user_id")
-	if userID == "" {
-		response.BadRequest(c, "用户身份无效")
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
 		return
 	}
 
@@ -196,7 +194,7 @@ func (ctrl *Controller) AdminListSessions(c *gin.Context) {
 // AdminDeleteSession 管理员删除会话
 func (ctrl *Controller) AdminDeleteSession(c *gin.Context) {
 	sessionID := c.Param("id")
-	if !apiv1.IsUUID(sessionID) {
+	if !middleware.IsUUID(sessionID) {
 		response.BadRequest(c, "会话 ID 格式错误")
 		return
 	}
@@ -229,13 +227,12 @@ func (ctrl *Controller) AdminCleanupSessions(c *gin.Context) {
 
 // userAndSessionID 读取当前用户和会话 ID
 func (ctrl *Controller) userAndSessionID(c *gin.Context) (string, string, bool) {
-	userID := c.GetString("user_id")
-	if userID == "" {
-		response.BadRequest(c, "用户身份无效")
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
 		return "", "", false
 	}
 	sessionID := c.Param("id")
-	if !apiv1.IsUUID(sessionID) {
+	if !middleware.IsUUID(sessionID) {
 		response.BadRequest(c, "会话 ID 格式错误")
 		return "", "", false
 	}
