@@ -46,7 +46,8 @@ const (
 	CodeAgentRunFailed  = 5002
 	CodeAgentRunTimeout = 5003
 
-	CodeKnowledgeBaseNotFound = 6001
+	CodeKnowledgeBaseNotFound   = 6001
+	CodeKnowledgeBaseDuplicated = 6002
 
 	CodeModelConfigExists   = 7001
 	CodeModelConfigNotFound = 7002
@@ -111,7 +112,8 @@ var codeMessages = map[int]string{
 	CodeAgentRunFailed:     "Agent 执行失败",
 	CodeAgentRunTimeout:    "Agent 执行超时",
 
-	CodeKnowledgeBaseNotFound: "知识库不存在",
+	CodeKnowledgeBaseNotFound:   "知识库不存在",
+	CodeKnowledgeBaseDuplicated: "同名知识库已存在",
 
 	CodeDocumentNotFound:        "文档不存在",
 	CodeDocumentFileTooLarge:    "文件大小超过限制",

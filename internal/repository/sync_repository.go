@@ -167,6 +167,100 @@ func (r *syncJobRepository) FindByID(ctx context.Context, userID, jobID string) 
 	return job, err == nil, err
 }
 
+// syncItemRepository 封装外部同步文件目录项 GORM 数据访问
+type syncItemRepository struct {
+	db *gorm.DB
+}
+
+// NewSyncItemRepository 创建外部同步文件目录项仓储
+func NewSyncItemRepository(db *gorm.DB) SyncItemRepository {
+	return &syncItemRepository{db: db}
+}
+
+// Upsert 创建或更新外部同步文件目录项
+func (r *syncItemRepository) Upsert(ctx context.Context, item entity.SyncItem) error {
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "user_id"},
+			{Name: "sync_source_id"},
+			{Name: "external_id"},
+		},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"knowledge_base_id",
+			"parent_external_id",
+			"name",
+			"item_type",
+			"category",
+			"extension",
+			"external_url",
+			"file_size",
+			"has_children",
+			"source_updated_at",
+			"updated_at",
+		}),
+	}).Create(&item).Error
+}
+
+// ListBySource 查询同步源下外部文件目录项
+func (r *syncItemRepository) ListBySource(ctx context.Context, userID, sourceID string) ([]entity.SyncItem, error) {
+	var items []entity.SyncItem
+	err := r.db.WithContext(ctx).
+		Where("user_id = ? AND sync_source_id = ?", userID, sourceID).
+		Order("item_type ASC, name ASC").
+		Find(&items).Error
+	return items, err
+}
+
+// FindByID 查询外部文件目录项
+func (r *syncItemRepository) FindByID(ctx context.Context, userID, itemID string) (entity.SyncItem, bool, error) {
+	var item entity.SyncItem
+	err := r.db.WithContext(ctx).
+		Where("id = ? AND user_id = ?", itemID, userID).
+		First(&item).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return entity.SyncItem{}, false, nil
+	}
+	return item, err == nil, err
+}
+
+// MarkImporting 标记外部文件目录项导入中
+func (r *syncItemRepository) MarkImporting(ctx context.Context, userID, itemID string, importingStatus int) (bool, error) {
+	result := r.db.WithContext(ctx).
+		Model(&entity.SyncItem{}).
+		Where("id = ? AND user_id = ?", itemID, userID).
+		Updates(map[string]any{
+			"import_status": importingStatus,
+			"error_message": "",
+		})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
+}
+
+// MarkImported 标记外部文件目录项已导入
+func (r *syncItemRepository) MarkImported(ctx context.Context, userID, itemID, documentID string, importedStatus int) error {
+	return r.db.WithContext(ctx).
+		Model(&entity.SyncItem{}).
+		Where("id = ? AND user_id = ?", itemID, userID).
+		Updates(map[string]any{
+			"local_document_id": documentID,
+			"import_status":     importedStatus,
+			"error_message":     "",
+		}).Error
+}
+
+// MarkImportFailed 标记外部文件目录项导入失败
+func (r *syncItemRepository) MarkImportFailed(ctx context.Context, userID, itemID string, failedStatus int, errorMessage string) error {
+	return r.db.WithContext(ctx).
+		Model(&entity.SyncItem{}).
+		Where("id = ? AND user_id = ?", itemID, userID).
+		Updates(map[string]any{
+			"import_status": failedStatus,
+			"error_message": errorMessage,
+		}).Error
+}
+
 // syncedDocumentRepository 封装同步文档入库事务
 type syncedDocumentRepository struct {
 	db *gorm.DB
@@ -269,6 +363,55 @@ func (r *syncedDocumentRepository) SaveSyncedDocument(ctx context.Context, doc e
 				"error_message": "",
 				"ready_at":      finishedAt,
 			}).Error
+	})
+}
+
+// SaveSyncedPlaceholder 保存暂不支持解析的同步文档记录
+func (r *syncedDocumentRepository) SaveSyncedPlaceholder(ctx context.Context, doc entity.Document, deletedStatus int) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current entity.Document
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("user_id = ? AND source_type = ? AND external_id = ? AND status <> ?", doc.UserID, doc.SourceType, doc.ExternalID, deletedStatus).
+			First(&current).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if err := tx.Create(&doc).Error; err != nil {
+				return err
+			}
+			return tx.Model(&entity.KnowledgeBase{}).
+				Where("id = ? AND user_id = ?", doc.KnowledgeBaseID, doc.UserID).
+				Updates(map[string]any{
+					"document_count": gorm.Expr("document_count + ?", 1),
+					"storage_bytes":  gorm.Expr("storage_bytes + ?", doc.FileSize),
+				}).Error
+		}
+		if err != nil {
+			return err
+		}
+
+		diff := doc.FileSize - current.FileSize
+		if err := tx.Model(&entity.Document{}).
+			Where("id = ? AND user_id = ?", current.ID, doc.UserID).
+			Updates(map[string]any{
+				"title":             doc.Title,
+				"file_name":         doc.FileName,
+				"file_type":         doc.FileType,
+				"file_size":         doc.FileSize,
+				"storage_path":      "",
+				"file_hash":         doc.FileHash,
+				"external_url":      doc.ExternalURL,
+				"source_updated_at": doc.SourceUpdatedAt,
+				"status":            doc.Status,
+				"error_message":     doc.ErrorMessage,
+				"ready_at":          nil,
+			}).Error; err != nil {
+			return err
+		}
+		if diff == 0 {
+			return nil
+		}
+		return tx.Model(&entity.KnowledgeBase{}).
+			Where("id = ? AND user_id = ?", doc.KnowledgeBaseID, doc.UserID).
+			Update("storage_bytes", gorm.Expr("CASE WHEN storage_bytes + ? > 0 THEN storage_bytes + ? ELSE 0 END", diff, diff)).Error
 	})
 }
 

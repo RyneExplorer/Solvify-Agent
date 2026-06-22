@@ -71,7 +71,7 @@
       <div v-if="documentsLoading" class="px-4 py-10 text-center text-sm text-slate-500">正在加载文档列表</div>
       <div v-else-if="documentsError" class="px-4 py-10 text-center text-sm text-red-500">{{ documentsError }}</div>
       <div v-else-if="!knowledgeBaseID" class="px-4 py-10 text-center text-sm text-slate-500">请先从知识库页面进入文档管理</div>
-      <div v-else-if="documents.length === 0" class="px-4 py-10 text-center text-sm text-slate-500">当前知识库还没有文档</div>
+      <div v-else-if="documents.length === 0" class="px-4 py-10 text-center text-sm text-slate-500">当前知识库还没有已导入文档</div>
       <table v-else class="w-full text-sm border-collapse">
         <thead>
           <tr class="bg-slate-50 border-b border-slate-200">
@@ -105,6 +105,16 @@
                   class="absolute right-0 top-9 z-50 w-44 rounded-xl border border-slate-100 bg-white p-1.5 shadow-xl"
                 >
                   <button class="menu-item" @click="editDocument(doc)">编辑文档</button>
+                  <a
+                    v-if="doc.external_url"
+                    class="menu-item"
+                    :href="doc.external_url"
+                    target="_blank"
+                    rel="noopener"
+                    @click="activeMenuID = ''"
+                  >
+                    查看原文
+                  </a>
                   <button class="menu-item" @click="openJobsFromMenu(doc)">任务历史</button>
                   <button
                     v-if="doc.status === documentStatusFailed"
@@ -117,6 +127,78 @@
                   <div class="my-1 border-t border-slate-100" />
                   <button class="menu-item menu-item-danger" @click="openDeleteDialog(doc)">删除</button>
                 </div>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </AppCard>
+
+    <AppCard v-if="syncSourceID || syncItems.length || syncItemsLoading" class="!p-0 overflow-visible mt-6">
+      <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
+        <div>
+          <div class="text-sm font-semibold text-slate-900">钉钉文件</div>
+          <div class="text-xs text-slate-400 mt-1">未导入的文件只支持查看原文，不参与本地检索</div>
+        </div>
+        <AppButton variant="secondary" size="sm" :disabled="syncItemsLoading" @click="loadSyncItems">
+          {{ syncItemsLoading ? '刷新中' : '刷新列表' }}
+        </AppButton>
+      </div>
+      <div v-if="syncItemsLoading" class="px-4 py-10 text-center text-sm text-slate-500">正在加载钉钉文件</div>
+      <div v-else-if="syncItemsError" class="px-4 py-10 text-center text-sm text-red-500">{{ syncItemsError }}</div>
+      <div v-else-if="syncItems.length === 0" class="px-4 py-10 text-center text-sm text-slate-500">暂无钉钉文件，请先刷新目录</div>
+      <table v-else class="w-full text-sm border-collapse">
+        <thead>
+          <tr class="bg-slate-50 border-b border-slate-200">
+            <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">名称</th>
+            <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">类型</th>
+            <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">大小</th>
+            <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">导入状态</th>
+            <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">更新时间</th>
+            <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in syncItems" :key="item.id" class="border-b border-slate-100 last:border-b-0">
+            <td class="px-4 py-3">
+              <div class="font-medium text-slate-900">{{ item.name }}</div>
+              <div v-if="syncItemHint(item)" class="text-xs text-slate-400 mt-1">{{ syncItemHint(item) }}</div>
+              <div v-if="item.error_message" class="text-xs text-red-500 mt-1">{{ item.error_message }}</div>
+            </td>
+            <td class="px-4 py-3 text-slate-900">{{ syncItemTypeText(item) }}</td>
+            <td class="px-4 py-3 text-slate-900">{{ formatBytes(item.file_size) }}</td>
+            <td class="px-4 py-3">
+              <AppBadge :variant="syncImportStatusVariant(item.import_status)">
+                {{ syncImportStatusText(item.import_status) }}
+              </AppBadge>
+            </td>
+            <td class="px-4 py-3 text-slate-900">{{ formatDate(item.source_updated_at) }}</td>
+            <td class="px-4 py-3">
+              <div class="flex flex-wrap gap-2">
+                <a
+                  v-if="item.external_url"
+                  class="text-sm text-accent-600 hover:text-accent-700"
+                  :href="item.external_url"
+                  target="_blank"
+                  rel="noopener"
+                >
+                  查看原文
+                </a>
+                <button
+                  v-if="canImportSyncItem(item)"
+                  class="text-sm text-accent-600 hover:text-accent-700 disabled:text-slate-300"
+                  :disabled="importingItemID === item.id"
+                  @click="importDingTalkItem(item)"
+                >
+                  {{ importingItemID === item.id ? '导入中' : '导入本地' }}
+                </button>
+                <button
+                  v-if="item.local_document_id"
+                  class="text-sm text-slate-600 hover:text-slate-900"
+                  @click="openImportedDocument(item.local_document_id)"
+                >
+                  查看本地文档
+                </button>
               </div>
             </td>
           </tr>
@@ -178,9 +260,11 @@ import { useRoute, useRouter } from 'vue-router'
 import { deleteDocument, listDocumentJobs, listDocuments, processDocument, uploadDocument } from '@/api/document'
 import { getKnowledgeBase } from '@/api/knowledge'
 import { getStorageQuota } from '@/api/storage'
+import { importSyncItem, listSyncItems, listSyncSources } from '@/api/sync'
 import type { Document, DocumentProcessingJob } from '@/types/document'
 import type { KnowledgeBase } from '@/types/knowledge'
 import type { StorageQuota } from '@/types/storage'
+import type { SyncItem } from '@/types/sync'
 import AppCard from '../components/ui/AppCard.vue'
 import AppButton from '../components/ui/AppButton.vue'
 import AppBadge from '../components/ui/AppBadge.vue'
@@ -213,6 +297,11 @@ const deleteError = ref('')
 const knowledgeBase = ref<KnowledgeBase | null>(null)
 const knowledgeBaseLoading = ref(false)
 const knowledgeBaseError = ref('')
+const syncItems = ref<SyncItem[]>([])
+const syncItemsLoading = ref(false)
+const syncItemsError = ref('')
+const syncSourceID = ref('')
+const importingItemID = ref('')
 
 const knowledgeBaseID = computed(() => {
   const value = route.query.knowledge_base_id
@@ -320,6 +409,29 @@ async function loadDocuments() {
   }
 }
 
+// loadSyncItems 读取当前知识库绑定的钉钉文件目录
+async function loadSyncItems() {
+  syncItems.value = []
+  syncSourceID.value = ''
+  syncItemsError.value = ''
+  if (!knowledgeBaseID.value) return
+  syncItemsLoading.value = true
+  try {
+    const sourceRes = await listSyncSources()
+    const source = (sourceRes.data || []).find(item => {
+      return item.knowledge_base_id === knowledgeBaseID.value && item.platform === 'dingtalk'
+    })
+    if (!source) return
+    syncSourceID.value = source.id
+    const itemRes = await listSyncItems(source.id)
+    syncItems.value = itemRes.data || []
+  } catch (error) {
+    syncItemsError.value = error instanceof Error ? error.message : '读取钉钉文件失败'
+  } finally {
+    syncItemsLoading.value = false
+  }
+}
+
 // openFilePicker 打开文件选择器
 function openFilePicker() {
   if (!knowledgeBaseID.value || uploading.value) return
@@ -374,6 +486,26 @@ async function retryProcess(doc: Document) {
   } finally {
     retryingID.value = ''
   }
+}
+
+// importDingTalkItem 导入钉钉文件到本地文档
+async function importDingTalkItem(item: SyncItem) {
+  importingItemID.value = item.id
+  syncItemsError.value = ''
+  try {
+    await importSyncItem(item.id)
+    await Promise.all([loadDocuments(), loadStorageQuota(), loadSyncItems()])
+  } catch (error) {
+    syncItemsError.value = error instanceof Error ? error.message : '导入钉钉文件失败'
+    await loadSyncItems()
+  } finally {
+    importingItemID.value = ''
+  }
+}
+
+// openImportedDocument 打开已导入文档
+function openImportedDocument(documentID: string) {
+  router.push({ path: `/docs/${documentID}/edit`, query: { knowledge_base_id: knowledgeBaseID.value } })
 }
 
 // editDocument 跳转到文档编辑页面
@@ -504,6 +636,50 @@ function fileTypeText(fileType: string) {
   return fileType ? fileType.toUpperCase() : '-'
 }
 
+// syncItemTypeText 规整钉钉文件类型展示
+function syncItemTypeText(item: SyncItem) {
+  if (item.item_type === 'FOLDER') return '目录'
+  return (item.extension || item.category || item.item_type || '-').toUpperCase()
+}
+
+// syncItemHint 返回钉钉文件辅助说明
+function syncItemHint(item: SyncItem) {
+  if (isUnsupportedAliDocItem(item)) return '钉钉在线文档暂不支持自动导入'
+  if (item.item_type === 'FOLDER') return item.has_children ? '目录' : '目录或快捷方式'
+  return item.category || ''
+}
+
+// canImportSyncItem 判断钉钉文件是否可导入
+function canImportSyncItem(item: SyncItem) {
+  if (item.item_type !== 'FILE') return false
+  if (item.import_status === 2 || item.import_status === 3) return false
+  return !isUnsupportedAliDocItem(item)
+}
+
+// isUnsupportedAliDocItem 判断是否为暂不支持自动导入的钉钉在线文档
+function isUnsupportedAliDocItem(item: SyncItem) {
+  return item.category === 'ALIDOC' && ['adoc', 'axls'].includes(item.extension)
+}
+
+// syncImportStatusText 转换钉钉文件导入状态
+function syncImportStatusText(status: number) {
+  const statusMap: Record<number, string> = {
+    1: '未导入',
+    2: '导入中',
+    3: '已导入',
+    4: '导入失败',
+  }
+  return statusMap[status] || '未知状态'
+}
+
+// syncImportStatusVariant 转换钉钉文件导入状态标签样式
+function syncImportStatusVariant(status: number): 'success' | 'warning' | 'error' | 'neutral' | 'blue' {
+  if (status === 3) return 'success'
+  if (status === 4) return 'error'
+  if (status === 2) return 'warning'
+  return 'neutral'
+}
+
 // shortID 缩短 ID 展示
 function shortID(id: string) {
   return id ? id.slice(0, 8) : '-'
@@ -535,6 +711,7 @@ onMounted(() => {
   loadStorageQuota()
   loadKnowledgeBaseDetail()
   loadDocuments()
+  loadSyncItems()
 })
 
 watch(knowledgeBaseID, () => {
@@ -543,6 +720,7 @@ watch(knowledgeBaseID, () => {
   activeMenuID.value = ''
   loadKnowledgeBaseDetail()
   loadDocuments()
+  loadSyncItems()
 })
 </script>
 

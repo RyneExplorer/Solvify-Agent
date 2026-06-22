@@ -41,3 +41,25 @@ type SyncJobResponse struct {
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
+
+// SyncItemResponse 描述外部同步文件目录项响应
+type SyncItemResponse struct {
+	ID               string     `json:"id"`
+	SyncSourceID     string     `json:"sync_source_id"`
+	KnowledgeBaseID  string     `json:"knowledge_base_id"`
+	ExternalID       string     `json:"external_id"`
+	ParentExternalID string     `json:"parent_external_id"`
+	Name             string     `json:"name"`
+	ItemType         string     `json:"item_type"`
+	Category         string     `json:"category"`
+	Extension        string     `json:"extension"`
+	ExternalURL      string     `json:"external_url"`
+	FileSize         int64      `json:"file_size"`
+	HasChildren      bool       `json:"has_children"`
+	SourceUpdatedAt  *time.Time `json:"source_updated_at"`
+	LocalDocumentID  string     `json:"local_document_id"`
+	ImportStatus     int        `json:"import_status"`
+	ErrorMessage     string     `json:"error_message"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}

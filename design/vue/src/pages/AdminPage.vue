@@ -285,7 +285,7 @@
     <div v-if="activeTab === 'integration'">
       <AppCard>
         <h3 class="text-base font-semibold text-slate-900 mb-2" style="font-family: 'Space Grotesk', sans-serif;">第三方平台集成</h3>
-        <p class="text-[13px] text-slate-400 mb-4">配置钉钉、飞书、Notion 等平台的集成参数，实现知识库自动同步。</p>
+        <p class="text-[13px] text-slate-400 mb-4">配置钉钉同源同步参数，实现知识库自动同步。</p>
         <div v-for="(item, i) in adminIntegrations" :key="item.name"
           class="flex justify-between items-center p-3.5 border border-slate-200 rounded-xl"
           :class="{ 'mb-2': i < adminIntegrations.length - 1 }"
@@ -652,9 +652,7 @@ const logs = [
 ]
 
 const adminIntegrations = [
-  { name: '钉钉', desc: '通过 Webhook 同步知识库（需企业认证）', status: '已连接' },
-  { name: '飞书', desc: '从飞书文档同步知识库（OAuth 授权）', status: '已连接' },
-  { name: 'Notion', desc: '从 Notion 页面同步知识库（API Key）', status: '未配置' },
+  { name: '钉钉', desc: '通过钉钉 Web 扫码绑定后同步知识库', status: '已连接' },
 ]
 
 // ── Models ──
