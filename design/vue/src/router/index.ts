@@ -50,6 +50,13 @@ const router = createRouter({
       meta: { auth: true },
     },
     {
+      path: '/docs/:id/edit',
+      name: 'document-edit',
+      // @ts-ignore
+      component: () => import('@/pages/DocumentEditPage.vue'),
+      meta: { auth: true },
+    },
+    {
       path: '/wiki',
       name: 'wiki',
       // @ts-ignore

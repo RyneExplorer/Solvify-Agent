@@ -15,6 +15,13 @@ interface RequestOptions {
   isPublic?: boolean
 }
 
+interface FormRequestOptions {
+  method?: string
+  body: FormData
+  /** Skip auth header for public endpoints */
+  isPublic?: boolean
+}
+
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
 }
@@ -74,6 +81,51 @@ export async function request<T>(
     throw new Error(data.message || '登录已过期，请重新登录')
   }
   // Business error
+  if (data.code !== 0) {
+    throw new Error(data.message || '请求失败')
+  }
+  return data
+}
+
+/** 通用 multipart/form-data 请求 */
+export async function formRequest<T>(
+  path: string,
+  options: FormRequestOptions,
+): Promise<ApiResponse<T>> {
+  const { method = 'POST', body, isPublic } = options
+
+  const headers: Record<string, string> = {}
+
+  // multipart 请求不能手动设置 Content-Type，浏览器会自动生成 boundary
+  if (!isPublic) {
+    const token = getToken()
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`
+    }
+  }
+
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method,
+    headers,
+    body,
+  })
+
+  if (!res.ok) {
+    if (res.status === 401) {
+      removeToken()
+      routerInstance?.push('/login')
+      throw new Error('登录已过期，请重新登录')
+    }
+    const text = await res.text().catch(() => '')
+    throw new Error(text || `HTTP ${res.status}`)
+  }
+
+  const data = await res.json()
+  if (data.code === 401 || data.code === 403) {
+    removeToken()
+    routerInstance?.push('/login')
+    throw new Error(data.message || '登录已过期，请重新登录')
+  }
   if (data.code !== 0) {
     throw new Error(data.message || '请求失败')
   }

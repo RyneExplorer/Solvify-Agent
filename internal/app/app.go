@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"solvify-agent/internal/model/entity"
 	"syscall"
 	"time"
 
@@ -121,24 +120,24 @@ func (a *App) initDatabase() error {
 	}
 	a.postgresqlDB = postgresqlDB
 	//自动迁移数据库表结构
-	if err := postgresqlDB.AutoMigrate(
-		&entity.User{},
-		&entity.Model{},
-		&entity.UserModelConfig{},
-		&entity.KnowledgeBase{},
-		&entity.StorageQuota{},
-		&entity.Document{},
-		&entity.DocumentProcessingJob{},
-		&entity.DocumentVersion{},
-		&entity.DocumentChunk{},
-		&entity.ChatSession{},
-		&entity.ChatMessage{},
-		&entity.ToolType{},
-		&entity.ToolProvider{},
-		&entity.UserToolConfig{},
-	); err != nil {
-		return fmt.Errorf("数据库自动迁移失败: %w", err)
-	}
+	//if err := postgresqlDB.AutoMigrate(
+	//	&entity.User{},
+	//	&entity.Model{},
+	//	&entity.UserModelConfig{},
+	//	&entity.KnowledgeBase{},
+	//	&entity.StorageQuota{},
+	//	&entity.Document{},
+	//	&entity.DocumentProcessingJob{},
+	//	&entity.DocumentVersion{},
+	//	&entity.DocumentChunk{},
+	//	&entity.ChatSession{},
+	//	&entity.ChatMessage{},
+	//	&entity.ToolType{},
+	//	&entity.ToolProvider{},
+	//	&entity.UserToolConfig{},
+	//); err != nil {
+	//	return fmt.Errorf("数据库自动迁移失败: %w", err)
+	//}
 
 	// redis
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
