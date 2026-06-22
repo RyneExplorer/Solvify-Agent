@@ -3,7 +3,7 @@ package document
 import (
 	"github.com/gin-gonic/gin"
 
-	apiv1 "solvify-agent/internal/api/v1"
+	"solvify-agent/internal/middleware"
 	requestdto "solvify-agent/internal/model/dto/request"
 	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
@@ -224,12 +224,12 @@ func (ctrl *Controller) ChunkDetail(c *gin.Context) {
 
 // userAndKnowledgeBaseID 读取当前用户和知识库 ID
 func (ctrl *Controller) userAndKnowledgeBaseID(c *gin.Context) (string, string, bool) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return "", "", false
 	}
 	kbID := c.Param("id")
-	if !apiv1.IsUUID(kbID) {
+	if !middleware.IsUUID(kbID) {
 		response.BadRequest(c, "知识库 ID 格式错误")
 		return "", "", false
 	}
@@ -238,12 +238,12 @@ func (ctrl *Controller) userAndKnowledgeBaseID(c *gin.Context) (string, string, 
 
 // userAndDocumentID 读取当前用户和文档 ID
 func (ctrl *Controller) userAndDocumentID(c *gin.Context) (string, string, bool) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return "", "", false
 	}
 	documentID := c.Param("id")
-	if !apiv1.IsUUID(documentID) {
+	if !middleware.IsUUID(documentID) {
 		response.BadRequest(c, "文档 ID 格式错误")
 		return "", "", false
 	}
@@ -252,12 +252,12 @@ func (ctrl *Controller) userAndDocumentID(c *gin.Context) (string, string, bool)
 
 // userAndDocumentJobID 读取当前用户和文档处理任务 ID
 func (ctrl *Controller) userAndDocumentJobID(c *gin.Context) (string, string, bool) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return "", "", false
 	}
 	jobID := c.Param("id")
-	if !apiv1.IsUUID(jobID) {
+	if !middleware.IsUUID(jobID) {
 		response.BadRequest(c, "文档处理任务 ID 格式错误")
 		return "", "", false
 	}
@@ -271,7 +271,7 @@ func (ctrl *Controller) userAndDocumentVersionID(c *gin.Context) (string, string
 		return "", "", "", false
 	}
 	versionID := c.Param("version_id")
-	if !apiv1.IsUUID(versionID) {
+	if !middleware.IsUUID(versionID) {
 		response.BadRequest(c, "文档版本 ID 格式错误")
 		return "", "", "", false
 	}

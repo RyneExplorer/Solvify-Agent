@@ -13,7 +13,10 @@ type Document struct {
 	FileSize        int64      `gorm:"column:file_size;not null;default:0"`
 	StoragePath     string     `gorm:"column:storage_path;not null;default:''"`
 	FileHash        string     `gorm:"column:file_hash;type:varchar(128);not null;default:''"`
-	SourceType      string     `gorm:"column:source_type;type:varchar(32);not null;default:upload"`
+	SourceType      string     `gorm:"column:source_type;type:varchar(32);default:upload"`
+	ExternalID      string     `gorm:"column:external_id;type:varchar(255);default:''"`
+	ExternalURL     string     `gorm:"column:external_url;not null;default:''"`
+	SourceUpdatedAt *time.Time `gorm:"column:source_updated_at"`
 	Status          int        `gorm:"column:status;not null;default:1"`
 	ErrorMessage    string     `gorm:"column:error_message;not null;default:''"`
 	ReadyAt         *time.Time `gorm:"column:ready_at"`

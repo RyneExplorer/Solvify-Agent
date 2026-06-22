@@ -37,7 +37,6 @@ func (r *documentRepository) SaveProcessResult(ctx context.Context, doc entity.D
 			Updates(map[string]any{
 				"status":        successJobStatus,
 				"error_message": "",
-				"started_at":    finishedAt,
 				"finished_at":   finishedAt,
 			}).Error
 	})
@@ -59,7 +58,6 @@ func (r *documentRepository) MarkProcessFailed(ctx context.Context, userID, docu
 			Updates(map[string]any{
 				"status":        failedJobStatus,
 				"error_message": errorMessage,
-				"started_at":    finishedAt,
 				"finished_at":   finishedAt,
 			}).Error
 	})

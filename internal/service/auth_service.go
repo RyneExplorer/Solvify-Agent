@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -28,6 +30,8 @@ type authService struct {
 	redis       *redis.Client
 }
 
+const tokenBlacklistPrefix = "auth:token:blacklist:"
+
 // NewAuthService 创建认证服务
 func NewAuthService(
 	userRepo repository.UserRepository,
@@ -40,9 +44,35 @@ func NewAuthService(
 		redis:       redisClient,
 	}
 }
-func (s *authService) Logout(id string) error {
-	_ = id
+func (s *authService) Logout(token string) error {
+	claims, err := jwt.ParseToken(token)
+	if err != nil {
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			return apperrors.NewWithErr(apperrors.CodeTokenExpired, "token 已过期", err)
+		}
+		return apperrors.NewWithErr(apperrors.CodeInvalidToken, "无效的 token", err)
+	}
+	if claims.ExpiresAt == nil {
+		return apperrors.New(apperrors.CodeInvalidToken, "无效的 token")
+	}
+
+	ttl := time.Until(claims.ExpiresAt.Time)
+	if ttl <= 0 {
+		return apperrors.New(apperrors.CodeTokenExpired, "token 已过期")
+	}
+
+	if err := s.redis.Set(context.Background(), tokenBlacklistKey(token), "1", ttl).Err(); err != nil {
+		return apperrors.NewWithErr(apperrors.CodeInternalError, "写入 token 黑名单失败", err)
+	}
 	return nil
+}
+
+func (s *authService) IsTokenRevoked(ctx context.Context, token string) (bool, error) {
+	count, err := s.redis.Exists(ctx, tokenBlacklistKey(token)).Result()
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (s *authService) ResetPassword(req *request.ResetPasswordRequest) error {
@@ -200,4 +230,9 @@ func (s *authService) SendEmailCode(emailStr string) error {
 	}
 
 	return nil
+}
+
+func tokenBlacklistKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return tokenBlacklistPrefix + hex.EncodeToString(sum[:])
 }

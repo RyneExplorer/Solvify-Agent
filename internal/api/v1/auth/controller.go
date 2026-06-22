@@ -119,13 +119,13 @@ func (ctrl *Controller) SendEmailCode(c *gin.Context) {
 
 // Logout 用户登出
 func (ctrl *Controller) Logout(c *gin.Context) {
-	userID := middleware.GetUserID(c)
-	if userID == "" {
-		response.Unauthorized(c, "未登录或Token无效")
+	token := middleware.GetToken(c)
+	if token == "" {
+		response.Unauthorized(c, "未登录或 token 无效")
 		return
 	}
 
-	if err := ctrl.authService.Logout(userID); err != nil {
+	if err := ctrl.authService.Logout(token); err != nil {
 		response.BizError(c, err)
 		return
 	}

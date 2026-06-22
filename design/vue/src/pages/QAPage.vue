@@ -258,13 +258,13 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
+import { getToken } from '@/api/client'
 
 // ── Props ──
 const props = defineProps<{ title: string }>()
 
 // ── Config (defaults, could be made configurable) ──
 const API_URL = 'http://localhost:8080'
-const USER_ID = '550e8400-e29b-41d4-a716-446655440000'
 
 // ── UI state ──
 const input = ref('')
@@ -310,9 +310,15 @@ const kbTriggerText = computed(() => {
 
 // ── API ──
 async function api(path: string, method = 'GET', body: any = null): Promise<any> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const token = getToken()
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+  }
+
   const res = await fetch(API_URL + path, {
     method,
-    headers: { 'Content-Type': 'application/json', 'X-User-ID': USER_ID },
+    headers,
     ...(body ? { body: JSON.stringify(body) } : {}),
   })
   if (!res.ok) {
@@ -412,9 +418,15 @@ async function sendMessage() {
   }, 120000)
 
   try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    const token = getToken()
+    if (token) {
+      headers.Authorization = `Bearer ${token}`
+    }
+
     const res = await fetch(API_URL + `/api/v1/chat/sessions/${activeSessionId.value}/messages`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-User-ID': USER_ID },
+      headers,
       body: JSON.stringify({ content, model_id: selectedModel.value, model_type: modelType, search_mode: searchMode.value, knowledge_base_ids: selectedKBs.value }),
       signal: abortController.signal,
     })

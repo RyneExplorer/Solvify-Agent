@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"context"
+	"regexp"
 	"strings"
 
 	"solvify-agent/pkg/jwt"
@@ -11,6 +13,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
 const (
 	// ContextUserID 用户 ID 上下文键
 	ContextUserID = "user_id"
@@ -18,37 +22,19 @@ const (
 	ContextUsername = "username"
 	// ContextUserRole 用户角色上下文键
 	ContextUserRole = "role"
+	// ContextToken 当前请求认证令牌上下文键
+	ContextToken = "token"
 )
 
+// TokenRevoker 校验令牌是否已经失效
+type TokenRevoker interface {
+	IsTokenRevoked(ctx context.Context, token string) (bool, error)
+}
+
 // Auth JWT 认证中间件
-func Auth() gin.HandlerFunc {
+func Auth(revoker TokenRevoker) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var token string
-
-		// 1. 尝试从 Header 获取 Authorization
-		authHeader := c.GetHeader("Authorization")
-		if authHeader != "" {
-			// 简单处理：如果是 Bearer 开头，取后面部分；否则直接当作 Token
-			parts := strings.SplitN(authHeader, " ", 2)
-			if len(parts) == 2 && parts[0] == "Bearer" {
-				token = parts[1]
-			} else if len(parts) == 1 {
-				// 有些客户端可能只发 Token 不发 Bearer 前缀
-				token = authHeader
-			}
-		}
-
-		// 2. 尝试从 Query 参数获取 (适配 WebSocket)
-		if token == "" {
-			token = c.Query("token")
-		}
-
-		// 3. 尝试从 Cookie 获取
-		if token == "" {
-			if cookieToken, err := c.Cookie("ACCESS_TOKEN"); err == nil {
-				token = cookieToken
-			}
-		}
+		token := ExtractToken(c)
 
 		if token == "" {
 			// 如果是 WebSocket 连接，尝试打印一些调试信息
@@ -58,6 +44,20 @@ func Auth() gin.HandlerFunc {
 			response.Unauthorized(c, "请提供认证令牌")
 			c.Abort()
 			return
+		}
+
+		if revoker != nil {
+			revoked, err := revoker.IsTokenRevoked(c.Request.Context(), token)
+			if err != nil {
+				response.InternalError(c, "认证状态校验失败")
+				c.Abort()
+				return
+			}
+			if revoked {
+				response.Unauthorized(c, "token 已失效")
+				c.Abort()
+				return
+			}
 		}
 
 		// 解析 Token
@@ -72,30 +72,32 @@ func Auth() gin.HandlerFunc {
 		c.Set(ContextUserID, claims.GetUserID())
 		c.Set(ContextUsername, claims.GetUsername())
 		c.Set(ContextUserRole, claims.GetRole())
+		c.Set(ContextToken, token)
 
 		c.Next()
 	}
 }
 
 // OptionalAuth 可选 JWT 认证中间件
-func OptionalAuth() gin.HandlerFunc {
+func OptionalAuth(revoker TokenRevoker) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 1. 请求没有携带 Token 时继续放行，保证公开接口可匿名访问
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.Next()
-			return
-		}
-
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || parts[0] != "Bearer" {
+		token := ExtractToken(c)
+		if token == "" {
 			c.Next()
 			return
 		}
 
 		// 2. 请求携带有效 Token 时写入用户上下文，供列表/详情接口返回真实交互状态
 		// 3. 请求携带无效 Token 时也继续放行，由需要强登录的接口继续使用 Auth 严格拦截
-		claims, err := jwt.ParseToken(parts[1])
+		if revoker != nil {
+			revoked, err := revoker.IsTokenRevoked(c.Request.Context(), token)
+			if err != nil || revoked {
+				c.Next()
+				return
+			}
+		}
+
+		claims, err := jwt.ParseToken(token)
 		if err != nil {
 			c.Next()
 			return
@@ -104,8 +106,33 @@ func OptionalAuth() gin.HandlerFunc {
 		c.Set(ContextUserID, claims.GetUserID())
 		c.Set(ContextUsername, claims.GetUsername())
 		c.Set(ContextUserRole, claims.GetRole())
+		c.Set(ContextToken, token)
 		c.Next()
 	}
+}
+
+// ExtractToken 从请求中读取认证令牌
+func ExtractToken(c *gin.Context) string {
+	authHeader := c.GetHeader("Authorization")
+	if authHeader != "" {
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && parts[0] == "Bearer" {
+			return strings.TrimSpace(parts[1])
+		}
+		if len(parts) == 1 {
+			return strings.TrimSpace(authHeader)
+		}
+	}
+
+	if token := strings.TrimSpace(c.Query("token")); token != "" {
+		return token
+	}
+
+	if cookieToken, err := c.Cookie("ACCESS_TOKEN"); err == nil {
+		return strings.TrimSpace(cookieToken)
+	}
+
+	return ""
 }
 
 // RequireRole 要求当前登录用户具备指定角色之一
@@ -133,6 +160,33 @@ func GetUserID(c *gin.Context) string {
 		return userID.(string)
 	}
 	return ""
+}
+
+// GetToken 从上下文获取当前认证令牌
+func GetToken(c *gin.Context) string {
+	if token, exists := c.Get(ContextToken); exists {
+		return token.(string)
+	}
+	return ""
+}
+
+// CurrentUserID 从 JWT 认证上下文中读取当前用户 ID
+func CurrentUserID(c *gin.Context) (string, bool) {
+	userID := GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c, "未登录或 Token 已过期")
+		return "", false
+	}
+	if !IsUUID(userID) {
+		response.BadRequest(c, "用户 ID 格式错误")
+		return "", false
+	}
+	return userID, true
+}
+
+// IsUUID 判断字符串是否为 UUID 格式
+func IsUUID(value string) bool {
+	return uuidPattern.MatchString(strings.TrimSpace(value))
 }
 
 // GetUsername 从上下文获取用户名

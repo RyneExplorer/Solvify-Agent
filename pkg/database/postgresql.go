@@ -66,14 +66,14 @@ func ClosePostgreSQL(db *gorm.DB) error {
 
 // buildPostgreSQLDSN 生成 PostgreSQL 连接地址
 func buildPostgreSQLDSN(cfg *config.PostgresConfig) string {
-	values := url.Values{}
-
 	dsn := url.URL{
-		Scheme:   "postgres",
-		User:     url.UserPassword(cfg.Username, cfg.Password),
-		Host:     net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
-		Path:     cfg.Database,
-		RawQuery: values.Encode(),
+		Scheme: "postgres",
+		User:   url.UserPassword(cfg.Username, cfg.Password),
+		Host:   net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
+		Path:   cfg.Database,
+	}
+	if cfg.TimeZone != "" {
+		dsn.RawQuery = "TimeZone=" + cfg.TimeZone
 	}
 	return dsn.String()
 }

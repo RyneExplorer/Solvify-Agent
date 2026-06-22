@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"solvify-agent/internal/middleware"
 	"solvify-agent/internal/model/dto/request"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
@@ -208,7 +209,10 @@ func (c *Controller) ListToolTemplates(ctx *gin.Context) {
 
 // ListUserToolConfigs 获取用户工具配置列表
 func (c *Controller) ListUserToolConfigs(ctx *gin.Context) {
-	userID := ctx.GetString("user_id")
+	userID, ok := middleware.CurrentUserID(ctx)
+	if !ok {
+		return
+	}
 	result, err := c.configService.List(ctx.Request.Context(), userID)
 	if err != nil {
 		response.BizError(ctx, err)
@@ -219,7 +223,10 @@ func (c *Controller) ListUserToolConfigs(ctx *gin.Context) {
 
 // CreateUserToolConfig 创建用户工具配置
 func (c *Controller) CreateUserToolConfig(ctx *gin.Context) {
-	userID := ctx.GetString("user_id")
+	userID, ok := middleware.CurrentUserID(ctx)
+	if !ok {
+		return
+	}
 	var req request.CreateUserToolConfigRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(ctx, "请求参数错误")
@@ -236,7 +243,10 @@ func (c *Controller) CreateUserToolConfig(ctx *gin.Context) {
 
 // UpdateUserToolConfig 更新用户工具配置
 func (c *Controller) UpdateUserToolConfig(ctx *gin.Context) {
-	userID := ctx.GetString("user_id")
+	userID, ok := middleware.CurrentUserID(ctx)
+	if !ok {
+		return
+	}
 	id := ctx.Param("id")
 	var req request.UpdateUserToolConfigRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
@@ -254,7 +264,10 @@ func (c *Controller) UpdateUserToolConfig(ctx *gin.Context) {
 
 // DeleteUserToolConfig 删除用户工具配置
 func (c *Controller) DeleteUserToolConfig(ctx *gin.Context) {
-	userID := ctx.GetString("user_id")
+	userID, ok := middleware.CurrentUserID(ctx)
+	if !ok {
+		return
+	}
 	id := ctx.Param("id")
 	if err := c.configService.Delete(ctx.Request.Context(), userID, id); err != nil {
 		response.BizError(ctx, err)

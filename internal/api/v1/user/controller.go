@@ -26,9 +26,8 @@ func NewController(userService service.UserServiceInterface, adminUserService se
 
 // GetProfile 获取当前用户信息
 func (ctrl *Controller) GetProfile(c *gin.Context) {
-	userID := middleware.GetUserID(c)
-	if userID == "" {
-		response.Unauthorized(c, "用户未登录")
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
 		return
 	}
 
@@ -43,9 +42,8 @@ func (ctrl *Controller) GetProfile(c *gin.Context) {
 
 // UpdateProfile 更新当前用户信息
 func (ctrl *Controller) UpdateProfile(c *gin.Context) {
-	userID := middleware.GetUserID(c)
-	if userID == "" {
-		response.Unauthorized(c, "用户未登录")
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
 		return
 	}
 
@@ -65,9 +63,8 @@ func (ctrl *Controller) UpdateProfile(c *gin.Context) {
 
 // UploadAvatar 上传并更新当前用户头像
 func (ctrl *Controller) UploadAvatar(c *gin.Context) {
-	userID := middleware.GetUserID(c)
-	if userID == "" {
-		response.Unauthorized(c, "用户未登录")
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
 		return
 	}
 
@@ -92,9 +89,8 @@ func (ctrl *Controller) UploadAvatar(c *gin.Context) {
 
 // ChangePassword 修改密码
 func (ctrl *Controller) ChangePassword(c *gin.Context) {
-	userID := middleware.GetUserID(c)
-	if userID == "" {
-		response.Unauthorized(c, "用户未登录")
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
 		return
 	}
 

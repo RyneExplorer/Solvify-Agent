@@ -3,7 +3,7 @@ package storage
 import (
 	"github.com/gin-gonic/gin"
 
-	apiv1 "solvify-agent/internal/api/v1"
+	"solvify-agent/internal/middleware"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
 )
@@ -20,7 +20,7 @@ func NewController(storageSvc service.StorageServiceInterface) *Controller {
 
 // Quota 查询当前用户存储配额
 func (ctrl *Controller) Quota(c *gin.Context) {
-	userID, ok := apiv1.CurrentUserID(c)
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
 	}

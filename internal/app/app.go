@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"solvify-agent/internal/model/entity"
 	"syscall"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 
 	"solvify-agent/internal/agent"
 	"solvify-agent/internal/api"
+	"solvify-agent/internal/integration/dingtalk"
 	"solvify-agent/internal/llm"
 	"solvify-agent/internal/middleware"
 	"solvify-agent/internal/rag"
@@ -120,24 +120,24 @@ func (a *App) initDatabase() error {
 	}
 	a.postgresqlDB = postgresqlDB
 	//自动迁移数据库表结构
-	if err := postgresqlDB.AutoMigrate(
-		&entity.User{},
-		&entity.Model{},
-		&entity.UserModelConfig{},
-		&entity.KnowledgeBase{},
-		&entity.StorageQuota{},
-		&entity.Document{},
-		&entity.DocumentProcessingJob{},
-		&entity.DocumentVersion{},
-		&entity.DocumentChunk{},
-		&entity.ChatSession{},
-		&entity.ChatMessage{},
-		&entity.ToolType{},
-		&entity.ToolProvider{},
-		&entity.UserToolConfig{},
-	); err != nil {
-		return fmt.Errorf("数据库自动迁移失败: %w", err)
-	}
+	//if err := postgresqlDB.AutoMigrate(
+	//	&entity.User{},
+	//	&entity.Model{},
+	//	&entity.UserModelConfig{},
+	//	&entity.KnowledgeBase{},
+	//	&entity.StorageQuota{},
+	//	&entity.Document{},
+	//	&entity.DocumentProcessingJob{},
+	//	&entity.DocumentVersion{},
+	//	&entity.DocumentChunk{},
+	//	&entity.ChatSession{},
+	//	&entity.ChatMessage{},
+	//	&entity.ToolType{},
+	//	&entity.ToolProvider{},
+	//	&entity.UserToolConfig{},
+	//); err != nil {
+	//	return fmt.Errorf("数据库自动迁移失败: %w", err)
+	//}
 
 	// redis
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
@@ -256,6 +256,10 @@ func (a *App) initDependencies() {
 	documentRepo := repository.NewDocumentRepository(a.postgresqlDB)
 	documentVersionRepo := repository.NewDocumentVersionRepository(a.postgresqlDB)
 	documentJobRepo := repository.NewDocumentProcessingJobRepository(a.postgresqlDB)
+	syncSourceRepo := repository.NewSyncSourceRepository(a.postgresqlDB)
+	syncJobRepo := repository.NewSyncJobRepository(a.postgresqlDB)
+	syncedDocumentRepo := repository.NewSyncedDocumentRepository(a.postgresqlDB)
+	dingtalkBindingRepo := repository.NewDingTalkBindingRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
 	userRepo := repository.NewUserRepository(a.postgresqlDB)
 
@@ -303,6 +307,10 @@ func (a *App) initDependencies() {
 	embeddingSvc := service.NewEmbeddingService(a.cfg.Embedding)
 	documentChunkSvc := service.NewDocumentChunkService(embeddingSvc)
 	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentVersionRepo, documentJobRepo, storageQuotaRepo, documentChunkSvc, "data/uploads")
+	dingtalkClient := dingtalk.NewClient(a.cfg.DingTalk)
+	dingtalkStateCache := cache.New(a.redis, "dingtalk:oauth:state:", 10*time.Minute)
+	dingtalkSvc := service.NewDingTalkService(a.cfg.DingTalk, dingtalkBindingRepo, dingtalkStateCache, dingtalkClient)
+	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, dingtalkClient, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 	// 用户模型缓存（24 小时 TTL）
 	userModelCache := cache.New(a.redis, "user:model:", 24*time.Hour)
@@ -325,6 +333,8 @@ func (a *App) initDependencies() {
 		documentSvc,
 		storageSvc,
 		chatSvc,
+		syncSvc,
+		dingtalkSvc,
 		chunkRepo,
 		toolTypeService,
 		toolProviderService,
