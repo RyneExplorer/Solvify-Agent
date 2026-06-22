@@ -126,6 +126,20 @@ func (ctrl *Controller) ListJobs(c *gin.Context) {
 	response.Success(c, output)
 }
 
+// ListItems 查询同步源文件目录
+func (ctrl *Controller) ListItems(c *gin.Context) {
+	userID, sourceID, ok := ctrl.userAndSourceID(c)
+	if !ok {
+		return
+	}
+	output, err := ctrl.syncSvc.ListItems(c.Request.Context(), userID, sourceID)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, output)
+}
+
 // JobDetail 查询同步任务详情
 func (ctrl *Controller) JobDetail(c *gin.Context) {
 	userID, ok := middleware.CurrentUserID(c)
@@ -138,6 +152,25 @@ func (ctrl *Controller) JobDetail(c *gin.Context) {
 		return
 	}
 	output, err := ctrl.syncSvc.JobDetail(c.Request.Context(), userID, jobID)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, output)
+}
+
+// ImportItem 导入同步文件到本地文档
+func (ctrl *Controller) ImportItem(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		return
+	}
+	itemID := c.Param("id")
+	if !middleware.IsUUID(itemID) {
+		response.BadRequest(c, "同步文件 ID 格式错误")
+		return
+	}
+	output, err := ctrl.syncSvc.ImportItem(c.Request.Context(), userID, itemID)
 	if err != nil {
 		response.BizError(c, err)
 		return

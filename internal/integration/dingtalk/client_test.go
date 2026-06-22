@@ -29,7 +29,7 @@ func TestClientListNodesUsesHeaderToken(t *testing.T) {
 			if r.URL.Query().Get("parentNodeId") != "root-1" || r.URL.Query().Get("nextToken") != "next-1" {
 				t.Fatalf("节点列表分页参数错误: %s", r.URL.RawQuery)
 			}
-			_, _ = w.Write([]byte(`{"nodes":[{"nodeId":"node-1","workspaceId":"ws-1","name":"a.md","size":12,"type":"FILE"}],"nextToken":"next-2"}`))
+			_, _ = w.Write([]byte(`{"nodes":[{"nodeId":"node-1","workspaceId":"ws-1","name":"a.md","size":"12","type":"FILE","modifiedTime":"1719999999000"}],"nextToken":"next-2"}`))
 		default:
 			t.Fatalf("未预期的请求路径: %s", r.URL.Path)
 		}
@@ -45,7 +45,7 @@ func TestClientListNodesUsesHeaderToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("获取节点列表失败: %v", err)
 	}
-	if len(nodes) != 1 || nodes[0].NodeID != "node-1" || nextToken != "next-2" {
+	if len(nodes) != 1 || nodes[0].NodeID != "node-1" || nodes[0].Size != 12 || nodes[0].ModifiedAt != 1719999999000 || nextToken != "next-2" {
 		t.Fatalf("节点列表响应解析错误: nodes=%v next=%s", nodes, nextToken)
 	}
 }

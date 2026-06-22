@@ -249,6 +249,8 @@ func dingtalkWorkspaceResponses(items []dingtalk.Workspace) []dto.DingTalkWorksp
 			RootNodeID:  item.RootNodeID,
 			Name:        item.Name,
 			Type:        item.Type,
+			IconURL:     item.Icon.Value,
+			URL:         item.URL,
 		})
 	}
 	return output

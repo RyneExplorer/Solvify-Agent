@@ -19,8 +19,14 @@ func (ctrl *Controller) RegisterRoutes(router *gin.RouterGroup) {
 	sources.POST("/:id/jobs", ctrl.CreateJob)
 	// 查询同步源任务列表
 	sources.GET("/:id/jobs", ctrl.ListJobs)
+	// 查询同步源文件目录
+	sources.GET("/:id/items", ctrl.ListItems)
 
 	jobs := router.Group("/sync-jobs")
 	// 根据id查询同步任务详情
 	jobs.GET("/:id", ctrl.JobDetail)
+
+	items := router.Group("/sync-items")
+	// 导入同步文件到本地文档
+	items.POST("/:id/import", ctrl.ImportItem)
 }

@@ -10,6 +10,7 @@ import (
 // KnowledgeBaseRepository 定义知识库数据访问能力
 type KnowledgeBaseRepository interface {
 	Create(ctx context.Context, kb *entity.KnowledgeBase) error
+	ExistsName(ctx context.Context, userID, name string, normalStatus int) (bool, error)
 	ListNormal(ctx context.Context, userID string, status int) ([]entity.KnowledgeBase, error)
 	FindNormal(ctx context.Context, userID, kbID string, status int) (entity.KnowledgeBase, bool, error)
 	UpdateBasic(ctx context.Context, userID, kbID string, status int, name, category, description string) (bool, error)

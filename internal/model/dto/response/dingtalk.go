@@ -26,6 +26,8 @@ type DingTalkWorkspaceResponse struct {
 	RootNodeID  string `json:"root_node_id"`
 	Name        string `json:"name"`
 	Type        string `json:"type"`
+	IconURL     string `json:"icon_url"`
+	URL         string `json:"url"`
 }
 
 // DingTalkNodeResponse 描述钉钉知识库节点响应

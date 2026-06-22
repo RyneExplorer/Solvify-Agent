@@ -283,6 +283,8 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useModelConfig } from '@/composables/useModelConfig'
 import { useToolConfig } from '@/composables/useToolConfig'
+import { getDingTalkBinding } from '@/api/dingtalk'
+import { listSyncSources } from '@/api/sync'
 import AppButton from '@/components/ui/AppButton.vue'
 import AppBadge from '@/components/ui/AppBadge.vue'
 import AppSelect from '@/components/ui/AppSelect.vue'
@@ -306,6 +308,8 @@ const tabHint = computed(() => {
 // ── Composables ──
 const { systemModels, userModels, loadAll: loadModels, createConfig: createModel, updateConfig: updateModel, deleteConfig: deleteModel } = useModelConfig()
 const { toolTemplates, userToolConfigs, loadAll: loadTools, createConfig: createTool, updateConfig: updateTool, deleteConfig: deleteTool } = useToolConfig()
+const dingtalkBound = ref(false)
+const dingtalkSyncCount = ref(0)
 
 // ── Modal ──
 const showModal = ref(false)
@@ -355,11 +359,29 @@ const infra = [
   { name: 'RAG 引擎', detail: 'Eino Framework', status: '运行中', variant: 'success' as const },
   { name: '默认 AI 模型', detail: 'GPT-4 (系统级)', status: '系统配置', variant: 'neutral' as const },
 ]
-const intg = [
-  { name: '钉钉', desc: '通过 Webhook 同步知识库', synced: '234 篇', status: '已连接' },
-  { name: '飞书', desc: '从飞书文档同步知识库', synced: '189 篇', status: '已连接' },
-  { name: 'Notion', desc: '从 Notion 页面同步知识库', synced: '-', status: '未配置' },
-]
+const intg = computed(() => [
+  {
+    name: '钉钉',
+    desc: '通过钉钉 Web 扫码绑定后同步知识库',
+    synced: `${dingtalkSyncCount.value} 个知识库`,
+    status: dingtalkBound.value ? '已连接' : '未连接',
+  },
+])
+
+// loadDingTalkIntegrationStatus 读取钉钉绑定和同步源状态
+async function loadDingTalkIntegrationStatus() {
+  try {
+    const [bindingRes, sourcesRes] = await Promise.all([
+      getDingTalkBinding(),
+      listSyncSources(),
+    ])
+    dingtalkBound.value = Boolean(bindingRes.data?.bound)
+    dingtalkSyncCount.value = (sourcesRes.data || []).filter(item => item.platform === 'dingtalk').length
+  } catch {
+    dingtalkBound.value = false
+    dingtalkSyncCount.value = 0
+  }
+}
 
 // ── Actions ──
 function openModelCreate() { modalMode.value = 'model'; editId.value = null; mForm.api_format = 'openai'; mForm.base_url = ''; mForm.model_id = ''; mForm.api_key = ''; cfgText.value = ''; showModal.value = true }
@@ -448,5 +470,5 @@ async function doSave() {
   }
 }
 
-onMounted(() => { loadModels(); loadTools() })
+onMounted(() => { loadModels(); loadTools(); loadDingTalkIntegrationStatus() })
 </script>
