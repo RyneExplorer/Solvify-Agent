@@ -65,6 +65,7 @@
           </section>
         </template>
 
+
         <!-- Search Tool tab -->
         <template v-if="activeTab === 'search'">
           <section>
