@@ -26,6 +26,16 @@ export interface UserInfo {
 
 // ── Admin Users ──
 
+export interface UpdateProfileRequest {
+  avatar?: string
+  email?: string
+}
+
+export interface ChangePasswordRequest {
+  old_password: string
+  new_password: string
+}
+
 export interface AdminUser {
   id: string
   username: string

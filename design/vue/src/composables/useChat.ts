@@ -35,7 +35,7 @@ interface ModelOption {
 interface KnowledgeBaseOption {
   id: string
   name: string
-  doc_count?: number
+  document_count?: number
 }
 
 export function useChat() {

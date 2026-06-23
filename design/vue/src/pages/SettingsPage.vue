@@ -382,6 +382,9 @@ async function loadDingTalkIntegrationStatus() {
     dingtalkSyncCount.value = 0
   }
 }
+const intg = [
+  { name: '钉钉', desc: '通过钉钉 Web 扫码绑定后同步知识库', synced: '-', status: '未配置' },
+]
 
 // ── Actions ──
 function openModelCreate() { modalMode.value = 'model'; editId.value = null; mForm.api_format = 'openai'; mForm.base_url = ''; mForm.model_id = ''; mForm.api_key = ''; cfgText.value = ''; showModal.value = true }

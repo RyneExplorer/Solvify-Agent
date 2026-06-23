@@ -8,6 +8,8 @@ import type {
   RefreshTokenRequest,
   RefreshTokenResponse,
   UserInfo,
+  UpdateProfileRequest,
+  ChangePasswordRequest,
 } from '@/types/auth'
 
 /** 登录 */
@@ -43,4 +45,14 @@ export function logout() {
 /** 获取当前用户信息 */
 export function getProfile() {
   return request<UserInfo>('/user/profile')
+}
+
+/** 更新个人资料 */
+export function updateProfile(data: UpdateProfileRequest) {
+  return request<null>('/user/profile', { method: 'PUT', body: data })
+}
+
+/** 修改密码 */
+export function changePassword(data: ChangePasswordRequest) {
+  return request<null>('/user/password', { method: 'POST', body: data })
 }
