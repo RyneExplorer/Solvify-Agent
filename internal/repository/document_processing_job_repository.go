@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -40,6 +41,21 @@ func (r *documentProcessingJobRepository) CreateProcessJob(ctx context.Context, 
 		return false, nil
 	}
 	return err == nil, err
+}
+
+// MarkRunning 标记处理任务为运行中
+func (r *documentProcessingJobRepository) MarkRunning(ctx context.Context, userID, jobID string, pendingStatus, runningStatus int, startedAt time.Time) (bool, error) {
+	result := r.db.WithContext(ctx).
+		Model(&entity.DocumentProcessingJob{}).
+		Where("id = ? AND user_id = ? AND status = ?", jobID, userID, pendingStatus).
+		Updates(map[string]any{
+			"status":     runningStatus,
+			"started_at": startedAt,
+		})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
 }
 
 // ListByDocument 查询文档处理任务列表

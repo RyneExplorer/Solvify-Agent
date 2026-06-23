@@ -5,11 +5,13 @@ import (
 
 	"solvify-agent/internal/api/v1/auth"
 	"solvify-agent/internal/api/v1/chat"
+	dingtalkapi "solvify-agent/internal/api/v1/dingtalk"
 	"solvify-agent/internal/api/v1/document"
 	"solvify-agent/internal/api/v1/knowledgebase"
 	"solvify-agent/internal/api/v1/model"
 	"solvify-agent/internal/api/v1/search"
 	"solvify-agent/internal/api/v1/storage"
+	syncapi "solvify-agent/internal/api/v1/sync"
 	"solvify-agent/internal/api/v1/tool"
 	"solvify-agent/internal/api/v1/user"
 	"solvify-agent/internal/middleware"
@@ -29,7 +31,10 @@ type Router struct {
 	modelCtrl         *model.Controller
 	userModelCtrl     *model.UserModelController
 	chatCtrl          *chat.Controller
+	syncCtrl          *syncapi.Controller
+	dingtalkCtrl      *dingtalkapi.Controller
 	toolCtrl          *tool.Controller
+	authService       service.AuthServiceInterface
 }
 
 // NewRouter 创建 API 路由聚合器
@@ -45,6 +50,8 @@ func NewRouter(
 	documentSvc service.DocumentServiceInterface,
 	storageSvc service.StorageServiceInterface,
 	chatSvc service.ChatServiceInterface,
+	syncSvc service.SyncServiceInterface,
+	dingtalkSvc service.DingTalkServiceInterface,
 	chunkRepo repository.ChunkRepository,
 	toolTypeService service.ToolTypeService,
 	toolProviderService service.ToolProviderService,
@@ -59,8 +66,11 @@ func NewRouter(
 		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseSvc),
 		documentCtrl:      document.NewController(documentSvc, chunkRepo),
 		storageCtrl:       storage.NewController(storageSvc),
+		syncCtrl:          syncapi.NewController(syncSvc),
+		dingtalkCtrl:      dingtalkapi.NewController(dingtalkSvc),
 		chatCtrl:          chat.NewController(chatSvc, adminSessionService),
 		toolCtrl:          tool.NewController(toolTypeService, toolProviderService, userToolConfigService),
+		authService:       authService,
 	}
 }
 
@@ -73,11 +83,14 @@ func (r *Router) Setup(engine *gin.Engine) {
 
 	v1 := engine.Group("/api/v1")
 
-	// 认证路由 — 公开，无需登录
-	r.authCtrl.RegisterRoutes(v1)
+	// 公开认证路由
+	r.authCtrl.RegisterPublicRoutes(v1)
 
-	// 业务路由 — 需要 JWT 认证
-	v1.Use(middleware.Auth())
+	// 中间件认证
+	v1.Use(middleware.Auth(r.authService))
+
+	// 需要登录的认证路由
+	r.authCtrl.RegisterPrivateRoutes(v1)
 
 	// 用户管理
 	r.userCtrl.RegisterRoutes(v1)
@@ -98,6 +111,8 @@ func (r *Router) Setup(engine *gin.Engine) {
 	r.documentCtrl.RegisterDocumentRoutes(v1)
 	r.documentCtrl.RegisterDocumentJobRoutes(v1)
 	r.documentCtrl.RegisterChunkRoutes(v1)
+	r.syncCtrl.RegisterRoutes(v1)
+	r.dingtalkCtrl.RegisterRoutes(v1)
 
 	// 存储
 	r.storageCtrl.RegisterRoutes(v1)

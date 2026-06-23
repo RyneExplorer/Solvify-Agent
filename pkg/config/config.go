@@ -24,6 +24,7 @@ type Config struct {
 	Embedding EmbeddingConfig `mapstructure:"embedding"`
 	RAG       RAGConfig       `mapstructure:"rag"`
 	Tools     ToolsConfig     `mapstructure:"tools"`
+	DingTalk  DingTalkConfig  `mapstructure:"dingtalk"`
 	Server    ServerConfig    `mapstructure:"server"`
 	Database  DatabaseConfig  `mapstructure:"database"`
 	JWT       JWTConfig       `mapstructure:"jwt"`
@@ -126,6 +127,13 @@ type ToolsConfig struct {
 type WebSearchConfig struct {
 	APIKey  string `mapstructure:"api_key"`
 	BaseURL string `mapstructure:"base_url"`
+}
+
+// DingTalkConfig 描述钉钉开放平台配置
+type DingTalkConfig struct {
+	AppKey           string `mapstructure:"app_key"`
+	AppSecret        string `mapstructure:"app_secret"`
+	OAuthRedirectURI string `mapstructure:"oauth_redirect_uri"`
 }
 
 // ServerConfig 描述进程关闭配置
@@ -280,6 +288,9 @@ func Default() *Config {
 		},
 		Tools: ToolsConfig{
 			Enabled: true,
+		},
+		DingTalk: DingTalkConfig{
+			OAuthRedirectURI: "http://localhost:5173/dingtalk/bind",
 		},
 		Server: ServerConfig{
 			Host:                   "",
@@ -446,6 +457,9 @@ func applyEnv(cfg *Config) {
 	if value := os.Getenv("TOOLS_ENABLED"); value != "" {
 		cfg.Tools.Enabled = parseBool(value, cfg.Tools.Enabled)
 	}
+	cfg.DingTalk.AppKey = getEnv("DINGTALK_APP_KEY", cfg.DingTalk.AppKey)
+	cfg.DingTalk.AppSecret = getEnv("DINGTALK_APP_SECRET", cfg.DingTalk.AppSecret)
+	cfg.DingTalk.OAuthRedirectURI = getEnv("DINGTALK_OAUTH_REDIRECT_URI", cfg.DingTalk.OAuthRedirectURI)
 	if value := os.Getenv("SHUTDOWN_TIMEOUT_SECONDS"); value != "" {
 		cfg.Server.ShutdownTimeoutSeconds = parseInt(value, cfg.Server.ShutdownTimeoutSeconds)
 	}
