@@ -356,9 +356,7 @@ const infra = [
   { name: '默认 AI 模型', detail: 'GPT-4 (系统级)', status: '系统配置', variant: 'neutral' as const },
 ]
 const intg = [
-  { name: '钉钉', desc: '通过 Webhook 同步知识库', synced: '234 篇', status: '已连接' },
-  { name: '飞书', desc: '从飞书文档同步知识库', synced: '189 篇', status: '已连接' },
-  { name: 'Notion', desc: '从 Notion 页面同步知识库', synced: '-', status: '未配置' },
+  { name: '钉钉', desc: '通过钉钉 Web 扫码绑定后同步知识库', synced: '-', status: '未配置' },
 ]
 
 // ── Actions ──

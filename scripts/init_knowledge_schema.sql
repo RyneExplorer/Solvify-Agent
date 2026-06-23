@@ -275,6 +275,53 @@ COMMENT ON COLUMN sync_jobs.finished_at IS '完成时间';
 COMMENT ON COLUMN sync_jobs.created_at IS '创建时间';
 COMMENT ON COLUMN sync_jobs.updated_at IS '更新时间';
 
+-- 同步目录项表记录外部知识库中的目录和文件元数据
+CREATE TABLE IF NOT EXISTS sync_items
+(
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),          -- 同步目录项 ID
+    user_id UUID NOT NULL,                                  -- 所属用户 ID
+    sync_source_id UUID NOT NULL,                           -- 同步源 ID
+    knowledge_base_id UUID NOT NULL,                        -- 绑定知识库 ID
+    external_id VARCHAR(255) NOT NULL,                      -- 外部节点 ID
+    parent_external_id VARCHAR(255) NOT NULL DEFAULT '',    -- 外部父节点 ID
+    name VARCHAR(255) NOT NULL,                             -- 节点名称
+    item_type VARCHAR(32) NOT NULL,                         -- 节点类型，FILE 或 FOLDER
+    category VARCHAR(64) NOT NULL DEFAULT '',               -- 钉钉节点分类
+    extension VARCHAR(32) NOT NULL DEFAULT '',              -- 文件扩展名
+    external_url TEXT NOT NULL DEFAULT '',                  -- 外部原文链接
+    file_size BIGINT NOT NULL DEFAULT 0,                    -- 文件大小
+    has_children BOOLEAN NOT NULL DEFAULT FALSE,            -- 是否有子节点
+    source_updated_at TIMESTAMPTZ,                          -- 外部更新时间
+    local_document_id UUID,                                 -- 已导入本地文档 ID
+    import_status INT NOT NULL DEFAULT 1,                   -- 导入状态，1 未导入，2 导入中，3 已导入，4 导入失败
+    error_message TEXT NOT NULL DEFAULT '',                 -- 导入失败原因
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),          -- 创建时间
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),          -- 更新时间
+
+    CONSTRAINT sync_items_user_source_external_unique UNIQUE (user_id, sync_source_id, external_id)
+);
+
+COMMENT ON TABLE sync_items IS '同步目录项表，记录外部知识库中的目录和文件元数据';
+COMMENT ON COLUMN sync_items.id IS '同步目录项 ID';
+COMMENT ON COLUMN sync_items.user_id IS '所属用户 ID';
+COMMENT ON COLUMN sync_items.sync_source_id IS '同步源 ID';
+COMMENT ON COLUMN sync_items.knowledge_base_id IS '绑定知识库 ID';
+COMMENT ON COLUMN sync_items.external_id IS '外部节点 ID';
+COMMENT ON COLUMN sync_items.parent_external_id IS '外部父节点 ID';
+COMMENT ON COLUMN sync_items.name IS '节点名称';
+COMMENT ON COLUMN sync_items.item_type IS '节点类型，FILE 或 FOLDER';
+COMMENT ON COLUMN sync_items.category IS '钉钉节点分类';
+COMMENT ON COLUMN sync_items.extension IS '文件扩展名';
+COMMENT ON COLUMN sync_items.external_url IS '外部原文链接';
+COMMENT ON COLUMN sync_items.file_size IS '文件大小';
+COMMENT ON COLUMN sync_items.has_children IS '是否有子节点';
+COMMENT ON COLUMN sync_items.source_updated_at IS '外部更新时间';
+COMMENT ON COLUMN sync_items.local_document_id IS '已导入本地文档 ID';
+COMMENT ON COLUMN sync_items.import_status IS '导入状态，1 未导入，2 导入中，3 已导入，4 导入失败';
+COMMENT ON COLUMN sync_items.error_message IS '导入失败原因';
+COMMENT ON COLUMN sync_items.created_at IS '创建时间';
+COMMENT ON COLUMN sync_items.updated_at IS '更新时间';
+
 -- 钉钉用户绑定表保存系统用户与钉钉身份的对应关系
 CREATE TABLE IF NOT EXISTS dingtalk_user_bindings
 (
@@ -355,6 +402,12 @@ CREATE INDEX IF NOT EXISTS idx_sync_jobs_source_id
 
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_user_kb
     ON sync_jobs(user_id, knowledge_base_id);
+
+CREATE INDEX IF NOT EXISTS idx_sync_items_source_parent
+    ON sync_items(sync_source_id, parent_external_id);
+
+CREATE INDEX IF NOT EXISTS idx_sync_items_user_kb
+    ON sync_items(user_id, knowledge_base_id);
 
 CREATE INDEX IF NOT EXISTS idx_dingtalk_user_bindings_user_id
     ON dingtalk_user_bindings(user_id);

@@ -258,6 +258,7 @@ func (a *App) initDependencies() {
 	documentJobRepo := repository.NewDocumentProcessingJobRepository(a.postgresqlDB)
 	syncSourceRepo := repository.NewSyncSourceRepository(a.postgresqlDB)
 	syncJobRepo := repository.NewSyncJobRepository(a.postgresqlDB)
+	syncItemRepo := repository.NewSyncItemRepository(a.postgresqlDB)
 	syncedDocumentRepo := repository.NewSyncedDocumentRepository(a.postgresqlDB)
 	dingtalkBindingRepo := repository.NewDingTalkBindingRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
@@ -310,7 +311,7 @@ func (a *App) initDependencies() {
 	dingtalkClient := dingtalk.NewClient(a.cfg.DingTalk)
 	dingtalkStateCache := cache.New(a.redis, "dingtalk:oauth:state:", 10*time.Minute)
 	dingtalkSvc := service.NewDingTalkService(a.cfg.DingTalk, dingtalkBindingRepo, dingtalkStateCache, dingtalkClient)
-	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, dingtalkClient, "data/uploads")
+	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncItemRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, dingtalkClient, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 	// 用户模型缓存（24 小时 TTL）
 	userModelCache := cache.New(a.redis, "user:model:", 24*time.Hour)

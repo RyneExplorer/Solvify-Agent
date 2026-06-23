@@ -26,8 +26,19 @@ type SyncJobRepository interface {
 	FindByID(ctx context.Context, userID, jobID string) (entity.SyncJob, bool, error)
 }
 
+// SyncItemRepository 定义外部同步文件目录项数据访问能力
+type SyncItemRepository interface {
+	Upsert(ctx context.Context, item entity.SyncItem) error
+	ListBySource(ctx context.Context, userID, sourceID string) ([]entity.SyncItem, error)
+	FindByID(ctx context.Context, userID, itemID string) (entity.SyncItem, bool, error)
+	MarkImporting(ctx context.Context, userID, itemID string, importingStatus int) (bool, error)
+	MarkImported(ctx context.Context, userID, itemID, documentID string, importedStatus int) error
+	MarkImportFailed(ctx context.Context, userID, itemID string, failedStatus int, errorMessage string) error
+}
+
 // SyncedDocumentRepository 定义同步文档入库能力
 type SyncedDocumentRepository interface {
 	FindByExternalID(ctx context.Context, userID, sourceType, externalID string, deletedStatus int) (entity.Document, bool, error)
 	SaveSyncedDocument(ctx context.Context, doc entity.Document, version *entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus int, finishedAt time.Time) error
+	SaveSyncedPlaceholder(ctx context.Context, doc entity.Document, deletedStatus int) error
 }

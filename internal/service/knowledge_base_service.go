@@ -31,6 +31,14 @@ func NewKnowledgeBaseService(knowledgeBaseRepo repository.KnowledgeBaseRepositor
 
 // Create 创建本地知识库
 func (s *knowledgeBaseService) Create(ctx context.Context, userID string, req requestdto.CreateKnowledgeBaseRequest) (dto.KnowledgeBaseResponse, error) {
+	exists, err := s.knowledgeBaseRepo.ExistsName(ctx, userID, req.Name, knowledgeBaseStatusNormal)
+	if err != nil {
+		return dto.KnowledgeBaseResponse{}, err
+	}
+	if exists {
+		return dto.KnowledgeBaseResponse{}, apperrors.NewDefault(apperrors.CodeKnowledgeBaseDuplicated)
+	}
+
 	kb := entity.KnowledgeBase{
 		UserID:      userID,
 		Name:        req.Name,
