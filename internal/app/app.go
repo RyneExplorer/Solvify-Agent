@@ -278,6 +278,7 @@ func (a *App) initDependencies() {
 	// Redis 缓存（写时失效，10 分钟 TTL 兜底）
 	toolTypeCache := cache.New(a.redis, "tool:type:", 10*time.Minute)
 	toolConfigCache := cache.New(a.redis, "tool:config:", 10*time.Minute)
+	userModelCache := cache.New(a.redis, "user:model:", 24*time.Hour)
 
 	// 缓存装饰器
 	cachedToolTypeRepo := repository.NewCachedToolTypeRepository(toolTypeRepo, toolTypeCache)
@@ -285,15 +286,11 @@ func (a *App) initDependencies() {
 
 	// 预热所有已启用系统模型的 LLM 客户端（消除首次请求冷启动）
 	a.prewarmModelClients(modelRepo)
-
 	// 初始化工具 Provider 注册表——注册通用 Provider 类型
 	toolRegistry := tool.NewProviderRegistry()
 	toolRegistry.Register("http", providers.NewHTTPProvider()) // 通用 HTTP Provider
-	// toolRegistry.Register("mcp", providers.NewMCPProvider())   // MCP Provider（待实现）
-
 	// ToolFactory——Agent 引擎从 DB/Redis 加载用户配置的工具
 	toolFactory := tool.NewFactory(toolRegistry, cachedUserToolConfigRepo, cachedToolTypeRepo)
-
 	// 初始化 Agent 组件（传入 ToolFactory 替换硬编码的 WebSearchTool）
 	ai := a.initAgentComponents(toolFactory)
 
@@ -313,20 +310,19 @@ func (a *App) initDependencies() {
 	dingtalkSvc := service.NewDingTalkService(a.cfg.DingTalk, dingtalkBindingRepo, dingtalkStateCache, dingtalkClient)
 	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncItemRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, dingtalkClient, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
-	// 用户模型缓存（24 小时 TTL）
-	userModelCache := cache.New(a.redis, "user:model:", 24*time.Hour)
 	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine)
-	// 工具 Service（用缓存仓库，写入自动失效）
 	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo)
 	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry)
 	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo, toolRegistry)
+	chunkRepo := repository.NewChunkRepository(a.postgresqlDB)
+	searchSvc := service.NewSearchService(chatMessageRepo, chunkRepo)
 
 	// 路由
-	chunkRepo := repository.NewChunkRepository(a.postgresqlDB)
 	a.router = api.NewRouter(
 		userSvc,
 		adminUserSvc,
 		adminSessionSvc,
+		searchSvc,
 		authSvc,
 		modelService,
 		userModelConfigService,

@@ -57,17 +57,17 @@ const router = createRouter({
       meta: { auth: true },
     },
     {
-      path: '/wiki',
-      name: 'wiki',
-      // @ts-ignore
-      component: () => import('@/pages/WikiPage.vue'),
-      meta: { auth: true },
-    },
-    {
       path: '/settings',
       name: 'settings',
       // @ts-ignore
       component: () => import('@/pages/SettingsPage.vue'),
+      meta: { auth: true },
+    },
+    {
+      path: '/profile',
+      name: 'profile',
+      // @ts-ignore
+      component: () => import('@/pages/ProfilePage.vue'),
       meta: { auth: true },
     },
     {

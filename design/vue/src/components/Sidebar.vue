@@ -1,37 +1,77 @@
 <template>
-  <aside class="w-[260px] h-full bg-slate-50 border-r border-slate-200 flex flex-col shrink-0">
+  <aside
+    class="h-full bg-slate-50 border-r border-slate-200 flex flex-col shrink-0 transition-all duration-300"
+    :class="collapsed ? 'w-[64px]' : 'w-[260px]'"
+  >
     <!-- Logo -->
-    <div class="h-14 flex items-center px-5 border-b border-slate-200 shrink-0 gap-2.5">
-      <AppLogo size="sm" class="flex-shrink-0" />
-      <span class="text-base font-semibold text-slate-900" style="font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.02em;">Solvify</span>
-      <button class="ml-auto p-1.5 hover:bg-slate-200/60 rounded-lg transition-colors">
-        <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+    <div class="h-14 flex items-center border-b border-slate-200 shrink-0" :class="collapsed ? 'px-3 justify-center' : 'px-4 gap-2.5'">
+      <!-- Collapsed: show expand icon -->
+      <button
+        v-show="collapsed"
+        @click="collapsed = !collapsed"
+        class="p-1.5 hover:bg-slate-200/60 rounded-lg transition-colors"
+        title="展开侧边栏"
+      >
+        <svg class="w-5 h-5 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <path d="M9 3v18"/>
+          <path d="m14 15 3-3-3-3"/>
+        </svg>
+      </button>
+      <!-- Expanded: show logo + name + collapse button -->
+      <AppLogo v-show="!collapsed" size="sm" class="flex-shrink-0" />
+      <span v-show="!collapsed" class="text-base font-semibold text-slate-900" style="font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.02em;">Solvify</span>
+      <button
+        v-show="!collapsed"
+        @click="collapsed = !collapsed"
+        class="ml-auto p-1.5 hover:bg-slate-200/60 rounded-lg transition-colors"
+        title="收缩侧边栏"
+      >
+        <svg class="w-5 h-5 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <path d="M15 3v18"/>
+          <path d="m10 15-3-3 3-3"/>
         </svg>
       </button>
     </div>
 
     <!-- Main nav -->
     <nav class="px-3 py-3 space-y-0.5 shrink-0">
-      <router-link
-        v-for="item in visibleNavItems"
-        :key="item.key"
-        :to="item.to"
-        class="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] text-sm transition-colors no-underline"
-        :class="isActive(item.key)
-          ? 'bg-accent-600 text-white font-medium'
-          : 'text-slate-600 hover:bg-slate-200/60 font-normal'"
-      >
-        <span class="w-5 flex items-center justify-center shrink-0" v-html="item.icon" />
-        <span>{{ item.label }}</span>
-      </router-link>
+      <template v-for="item in visibleNavItems.filter(i => i.key !== 'search')" :key="item.key">
+        <router-link
+          :to="item.to"
+          class="w-full flex items-center gap-2.5 rounded-[10px] text-sm transition-colors no-underline"
+          :class="[
+            collapsed ? 'px-3 py-2.5 justify-center' : 'px-3 py-2.5',
+            isActive(item.key)
+              ? 'bg-accent-600 text-white font-medium'
+              : 'text-slate-600 hover:bg-slate-200/60 font-normal'
+          ]"
+        >
+          <span class="w-5 flex items-center justify-center shrink-0" v-html="item.icon" />
+          <span v-show="!collapsed">{{ item.label }}</span>
+        </router-link>
+
+        <!-- Search button right after chat -->
+        <button
+          v-if="item.key === 'chat'"
+          @click="searchDialogRef?.open()"
+          class="w-full flex items-center gap-2.5 rounded-[10px] text-sm transition-colors text-slate-600 hover:bg-slate-200/60 font-normal cursor-pointer"
+          :class="collapsed ? 'px-3 py-2.5 justify-center' : 'px-3 py-2.5'"
+        >
+          <span class="w-5 flex items-center justify-center shrink-0">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          </span>
+          <span v-show="!collapsed">搜索</span>
+        </button>
+      </template>
     </nav>
 
     <!-- Divider -->
-    <div class="px-3 shrink-0"><div class="border-t border-slate-200" /></div>
+    <div v-show="!collapsed" class="px-3 shrink-0"><div class="border-t border-slate-200" /></div>
 
     <!-- History -->
-    <div class="flex-1 overflow-hidden flex flex-col min-h-0">
+    <div v-show="!collapsed" class="flex-1 overflow-hidden flex flex-col min-h-0">
       <button
         @click="historyExpanded = !historyExpanded"
         class="px-4 py-2 flex items-center justify-between shrink-0 w-full hover:bg-slate-200/40 transition-colors cursor-pointer"
@@ -95,13 +135,21 @@
     </div>
 
     <!-- User area -->
-    <div class="h-14 border-t border-slate-200 flex items-center px-4 shrink-0 gap-2.5">
+    <div
+      class="h-14 border-t border-slate-200 flex items-center px-4 shrink-0 gap-2.5 cursor-pointer hover:bg-slate-200/40 transition-colors"
+      @click="$router.push('/profile')"
+    >
       <div class="w-7 h-7 rounded-full bg-accent-600 text-white flex items-center justify-center text-xs font-medium shrink-0">{{ userInitial }}</div>
-      <div class="min-w-0 flex-1">
+      <div v-show="!collapsed" class="min-w-0 flex-1">
         <div class="text-[13px] font-medium text-slate-900 truncate leading-tight">{{ userName }}</div>
         <div class="text-[11px] text-slate-400 truncate leading-tight">{{ userEmail }}</div>
       </div>
-      <button @click="$emit('logout')" class="p-1.5 hover:bg-slate-200/60 rounded-md transition-colors" title="退出登录">
+      <button
+        v-show="!collapsed"
+        @click.stop="$emit('logout')"
+        class="p-1.5 hover:bg-slate-200/60 rounded-md transition-colors"
+        title="退出登录"
+      >
         <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
       </button>
     </div>
@@ -152,16 +200,22 @@
       </div>
     </div>
   </Teleport>
+
+  <!-- Search Dialog -->
+  <SearchDialog ref="searchDialogRef" />
 </template>
 
 <script setup lang="ts">
 import { computed, ref, nextTick, onMounted, onUnmounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { updateSession, deleteSession } from '@/api/chat'
 import AppLogo from '@/components/AppLogo.vue'
+import SearchDialog from '@/components/SearchDialog.vue'
 import { useAuth } from '@/composables/useAuth'
 
 const historyExpanded = ref(true)
+const collapsed = ref(false)
+const searchDialogRef = ref<InstanceType<typeof SearchDialog>>()
 const { isAdmin } = useAuth()
 
 interface NavItem {
@@ -181,9 +235,15 @@ const navItems: NavItem[] = [
   },
   {
     key: 'chat',
-    label: '新对话',
+    label: '对话',
     to: '/chat',
-    icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16m8-8H4"/></svg>`,
+    icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,
+  },
+  {
+    key: 'search',
+    label: '搜索',
+    to: '/search',
+    icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>`,
   },
   {
     key: 'kb',
@@ -196,12 +256,6 @@ const navItems: NavItem[] = [
     label: '文档',
     to: '/docs',
     icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`,
-  },
-  {
-    key: 'wiki',
-    label: 'Wiki',
-    to: '/wiki',
-    icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg>`,
   },
   {
     key: 'settings',
@@ -241,6 +295,7 @@ const emit = defineEmits<{
 }>()
 
 const route = useRoute()
+const router = useRouter()
 const userInitial = computed(() => props.userName.charAt(0).toUpperCase())
 
 // ── Menu ──
@@ -305,17 +360,35 @@ async function handleDelete(id: string) {
   confirmDeleteId.value = null
   try {
     await deleteSession(id)
+    // 如果删除的是当前正在查看的会话，跳转到对话首页
+    if (route.params.sessionId === id) {
+      router.push('/chat')
+    }
     emit('refresh')
   } catch { /* silent */ }
 }
 
-// ── Click outside to close menu ──
+// ── Click outside to close menu ─
 function onDocClick() {
   openMenuId.value = null
 }
 
-onMounted(() => document.addEventListener('click', onDocClick))
-onUnmounted(() => document.removeEventListener('click', onDocClick))
+// ─ Global shortcut Ctrl+K ──
+function onGlobalKeydown(e: KeyboardEvent) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+    e.preventDefault()
+    searchDialogRef.value?.open()
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('click', onDocClick)
+  document.addEventListener('keydown', onGlobalKeydown)
+})
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClick)
+  document.removeEventListener('keydown', onGlobalKeydown)
+})
 
 // ── Nav ──
 function isActive(key: string): boolean {

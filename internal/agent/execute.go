@@ -121,7 +121,6 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 }
 
 // processStream 读取 eino Agent 的流式输出，转换为 SSE 事件
-// LLM 直接在文本中输出 <kb doc="..." chunk_id="..." /> 引用标签，前端解析渲染
 //
 // 注意："正在生成答案" (running) 已由 callback.go 在 ChatModel onEnd（无工具调用时）发出，
 // 这里只负责流式推送答案内容和最终的"正在生成答案" (success) 标记。

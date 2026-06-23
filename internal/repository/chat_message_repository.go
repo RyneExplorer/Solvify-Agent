@@ -33,11 +33,6 @@ func (r *chatMessageRepository) FindBySessionID(ctx context.Context, sessionID s
 	return messages, err
 }
 
-// DeleteBySessionID 删除会话的所有消息
-func (r *chatMessageRepository) DeleteBySessionID(ctx context.Context, sessionID string) error {
-	return r.db.WithContext(ctx).Where("session_id = ?", sessionID).Delete(&entity.ChatMessage{}).Error
-}
-
 // FindRecent 获取会话的最近 N 条消息
 func (r *chatMessageRepository) FindRecent(ctx context.Context, sessionID string, limit int) ([]entity.ChatMessage, error) {
 	var messages []entity.ChatMessage
@@ -53,4 +48,30 @@ func (r *chatMessageRepository) FindRecent(ctx context.Context, sessionID string
 	}
 
 	return messages, err
+}
+
+// DeleteBySessionID 删除会话的所有消息
+func (r *chatMessageRepository) DeleteBySessionID(ctx context.Context, sessionID string) error {
+	return r.db.WithContext(ctx).Where("session_id = ?", sessionID).Delete(&entity.ChatMessage{}).Error
+}
+
+// SearchByKeyword 按关键字搜索用户历史消息
+func (r *chatMessageRepository) SearchByKeyword(ctx context.Context, userID, query string, topK int) ([]ChatMessageSearchRow, error) {
+	if topK <= 0 {
+		topK = 10
+	}
+
+	keyword := "%" + query + "%"
+	var results []ChatMessageSearchRow
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT m.id, m.session_id, s.title as session_title, m.role, m.content, 1.0 AS score, m.created_at
+		FROM chat_messages m
+		JOIN chat_sessions s ON s.id = m.session_id
+		WHERE s.user_id = ?
+		  AND m.content ILIKE ?
+		ORDER BY m.created_at DESC
+		LIMIT ?
+	`, userID, keyword, topK).Scan(&results).Error
+
+	return results, err
 }

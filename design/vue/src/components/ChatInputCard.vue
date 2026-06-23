@@ -84,7 +84,7 @@
                         :class="selectedKBs.includes(kb.id) ? 'text-emerald-600 font-medium' : 'text-slate-700'"
                       >{{ kb.name }}</span>
                     </div>
-                    <span class="text-xs text-slate-400 shrink-0 ml-2">{{ kb.doc_count ?? 0 }}篇</span>
+                    <span class="text-xs text-slate-400 shrink-0 ml-2">{{ kb.document_count ?? 0 }}篇</span>
                   </div>
                 </div>
               </div>
@@ -187,7 +187,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 
-interface KbItem { id: string; name: string; doc_count?: number }
+interface KbItem { id: string; name: string; document_count?: number }
 interface ModelItem { id: string; name: string; modelType: 'system' | 'user' }
 
 const props = defineProps<{

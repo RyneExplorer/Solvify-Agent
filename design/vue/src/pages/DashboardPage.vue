@@ -91,6 +91,5 @@ const activities = [
   { detail: '产品需求文档 v3.2.pdf', action: '上传文档', kb: '产品文档库', time: '10 分钟前' },
   { detail: '如何配置向量数据库？', action: '问答会话', kb: '技术支持库', time: '1 小时前' },
   { detail: '新增 23 篇技术文档', action: '知识库更新', kb: '技术文档库', time: '3 小时前' },
-  { detail: 'API 接口文档 Wiki 已生成', action: 'Wiki 生成', kb: '开发文档库', time: '昨天' },
 ]
 </script>

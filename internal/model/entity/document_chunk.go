@@ -70,6 +70,18 @@ func (FloatVector) GormDataType() string {
 	return "vector"
 }
 
+// String 返回 pgvector 字符串格式
+func (v FloatVector) String() string {
+	if len(v) == 0 {
+		return "[]"
+	}
+	items := make([]string, 0, len(v))
+	for _, item := range v {
+		items = append(items, strconv.FormatFloat(float64(item), 'f', 6, 32))
+	}
+	return "[" + strings.Join(items, ",") + "]"
+}
+
 // Value 转换为 PostgreSQL 数组字面量
 func (v TextArray) Value() (driver.Value, error) {
 	if len(v) == 0 {
