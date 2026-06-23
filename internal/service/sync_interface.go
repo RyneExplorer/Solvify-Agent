@@ -17,4 +17,6 @@ type SyncServiceInterface interface {
 	CreateJob(ctx context.Context, userID, sourceID string) (dto.SyncJobResponse, error)
 	ListJobs(ctx context.Context, userID, sourceID string) ([]dto.SyncJobResponse, error)
 	JobDetail(ctx context.Context, userID, jobID string) (dto.SyncJobResponse, error)
+	ListItems(ctx context.Context, userID, sourceID string) ([]dto.SyncItemResponse, error)
+	ImportItem(ctx context.Context, userID, itemID string) (dto.DocumentResponse, error)
 }

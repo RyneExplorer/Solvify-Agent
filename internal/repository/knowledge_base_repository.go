@@ -25,6 +25,16 @@ func (r *knowledgeBaseRepository) Create(ctx context.Context, kb *entity.Knowled
 	return r.db.WithContext(ctx).Create(kb).Error
 }
 
+// ExistsName 判断当前用户是否存在同名正常知识库
+func (r *knowledgeBaseRepository) ExistsName(ctx context.Context, userID, name string, normalStatus int) (bool, error) {
+	var count int64
+	err := r.db.WithContext(ctx).
+		Model(&entity.KnowledgeBase{}).
+		Where("user_id = ? AND name = ? AND status = ?", userID, name, normalStatus).
+		Count(&count).Error
+	return count > 0, err
+}
+
 // ListNormal 查询当前用户正常状态的知识库
 func (r *knowledgeBaseRepository) ListNormal(ctx context.Context, userID string, status int) ([]entity.KnowledgeBase, error) {
 	var items []entity.KnowledgeBase

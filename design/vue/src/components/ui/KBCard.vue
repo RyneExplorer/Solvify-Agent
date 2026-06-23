@@ -36,7 +36,8 @@
         <AppButton v-if="isLocal" variant="ghost" size="sm" @click="$emit('documents', kb)">文档</AppButton>
         <AppButton v-if="isLocal" variant="ghost" size="sm" class="!text-red-600 hover:!bg-red-50" @click="$emit('delete', kb)">删除</AppButton>
         <AppButton v-if="!isLocal" variant="ghost" size="sm" @click="$emit('view', kb)">查看</AppButton>
-        <AppButton v-if="!isLocal" variant="ghost" size="sm" @click="$emit('sync', kb)">立即同步</AppButton>
+        <AppButton v-if="isDingTalk" variant="ghost" size="sm" @click="$emit('sync', kb)">刷新目录</AppButton>
+        <AppButton v-if="isDingTalk" variant="ghost" size="sm" class="!text-red-600 hover:!bg-red-50" @click="$emit('delete', kb)">删除</AppButton>
       </div>
     </div>
 
@@ -70,6 +71,8 @@ defineEmits<{
 }>()
 
 const isLocal = computed(() => props.kb.source_type === 'local')
+
+const isDingTalk = computed(() => props.kb.source_type === 'sync' && props.kb.source_platform === 'dingtalk')
 
 const statusText = computed(() => {
   if (props.kb.status === 1) return '已就绪'

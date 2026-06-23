@@ -53,6 +53,7 @@ type syncService struct {
 	knowledgeBaseRepo   repository.KnowledgeBaseRepository
 	syncSourceRepo      repository.SyncSourceRepository
 	syncJobRepo         repository.SyncJobRepository
+	syncItemRepo        repository.SyncItemRepository
 	syncedDocumentRepo  repository.SyncedDocumentRepository
 	dingtalkBindingRepo repository.DingTalkBindingRepository
 	chunkService        DocumentChunkServiceInterface
@@ -67,6 +68,13 @@ type syncSourceConfig struct {
 	SyncMode        string `json:"sync_mode"`
 }
 
+const (
+	syncItemImportStatusPending   = 1
+	syncItemImportStatusImporting = 2
+	syncItemImportStatusImported  = 3
+	syncItemImportStatusFailed    = 4
+)
+
 type syncRunResult struct {
 	totalCount   int
 	successCount int
@@ -79,6 +87,7 @@ func NewSyncService(
 	knowledgeBaseRepo repository.KnowledgeBaseRepository,
 	syncSourceRepo repository.SyncSourceRepository,
 	syncJobRepo repository.SyncJobRepository,
+	syncItemRepo repository.SyncItemRepository,
 	syncedDocumentRepo repository.SyncedDocumentRepository,
 	dingtalkBindingRepo repository.DingTalkBindingRepository,
 	chunkService DocumentChunkServiceInterface,
@@ -89,6 +98,7 @@ func NewSyncService(
 		knowledgeBaseRepo:   knowledgeBaseRepo,
 		syncSourceRepo:      syncSourceRepo,
 		syncJobRepo:         syncJobRepo,
+		syncItemRepo:        syncItemRepo,
 		syncedDocumentRepo:  syncedDocumentRepo,
 		dingtalkBindingRepo: dingtalkBindingRepo,
 		chunkService:        chunkService,
@@ -248,6 +258,63 @@ func (s *syncService) JobDetail(ctx context.Context, userID, jobID string) (dto.
 	return syncJobResponse(job), nil
 }
 
+// ListItems 查询同步源下外部文件目录项
+func (s *syncService) ListItems(ctx context.Context, userID, sourceID string) ([]dto.SyncItemResponse, error) {
+	if _, err := s.findSource(ctx, userID, sourceID); err != nil {
+		return nil, err
+	}
+	items, err := s.syncItemRepo.ListBySource(ctx, userID, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	output := make([]dto.SyncItemResponse, 0, len(items))
+	for _, item := range items {
+		output = append(output, syncItemResponse(item))
+	}
+	return output, nil
+}
+
+// ImportItem 导入外部同步文件到本地文档
+func (s *syncService) ImportItem(ctx context.Context, userID, itemID string) (dto.DocumentResponse, error) {
+	item, ok, err := s.syncItemRepo.FindByID(ctx, userID, itemID)
+	if err != nil {
+		return dto.DocumentResponse{}, err
+	}
+	if !ok {
+		return dto.DocumentResponse{}, apperrors.New(apperrors.CodeNotFound, "同步文件不存在")
+	}
+	if !strings.EqualFold(item.ItemType, "FILE") {
+		return dto.DocumentResponse{}, apperrors.New(apperrors.CodeBadRequest, "目录不能导入为本地文档")
+	}
+	if isUnsupportedAliDocItem(item) {
+		return dto.DocumentResponse{}, apperrors.New(apperrors.CodeDocumentFileTypeInvalid, "钉钉在线文档暂不支持自动导入，请查看原文")
+	}
+	source, err := s.findSource(ctx, userID, item.SyncSourceID)
+	if err != nil {
+		return dto.DocumentResponse{}, err
+	}
+	cfg, err := sourceConfigFromJSON(source.SourceConfig)
+	if err != nil {
+		return dto.DocumentResponse{}, err
+	}
+	ok, err = s.syncItemRepo.MarkImporting(ctx, userID, item.ID, syncItemImportStatusImporting)
+	if err != nil {
+		return dto.DocumentResponse{}, err
+	}
+	if !ok {
+		return dto.DocumentResponse{}, apperrors.New(apperrors.CodeNotFound, "同步文件不存在")
+	}
+	doc, err := s.importFileItem(ctx, source, cfg, item)
+	if err != nil {
+		_ = s.syncItemRepo.MarkImportFailed(ctx, userID, item.ID, syncItemImportStatusFailed, err.Error())
+		return dto.DocumentResponse{}, err
+	}
+	if err := s.syncItemRepo.MarkImported(ctx, userID, item.ID, doc.ID, syncItemImportStatusImported); err != nil {
+		return dto.DocumentResponse{}, err
+	}
+	return documentResponse(doc), nil
+}
+
 // runJob 异步执行钉钉同步任务
 func (s *syncService) runJob(source entity.SyncSource, jobID string) {
 	ctx := context.Background()
@@ -300,17 +367,16 @@ func (s *syncService) syncNodeChildren(ctx context.Context, source entity.SyncSo
 			return
 		}
 		for _, node := range nodes {
-			if isDingTalkFileNode(node) {
-				result.totalCount++
-				if err := s.syncFileNode(ctx, source, cfg, node); err != nil {
-					result.failedCount++
-					result.errors = append(result.errors, fmt.Sprintf("%s 同步失败: %v", node.Name, err))
-					continue
-				}
-				result.successCount++
+			result.totalCount++
+			if err := s.saveSyncItem(ctx, source, node, parentNodeID); err != nil {
+				result.failedCount++
+				result.errors = append(result.errors, fmt.Sprintf("%s 元数据刷新失败: %v", node.Name, err))
 				continue
 			}
-			s.syncNodeChildren(ctx, source, cfg, node.NodeID, result)
+			result.successCount++
+			if isDingTalkFolderNode(node) && node.HasChildren {
+				s.syncNodeChildren(ctx, source, cfg, node.NodeID, result)
+			}
 		}
 		if next == "" {
 			return
@@ -319,12 +385,38 @@ func (s *syncService) syncNodeChildren(ctx context.Context, source entity.SyncSo
 	}
 }
 
+// saveSyncItem 保存钉钉节点元数据
+func (s *syncService) saveSyncItem(ctx context.Context, source entity.SyncSource, node dingtalk.Node, parentNodeID string) error {
+	item := entity.SyncItem{
+		ID:               uuid.NewString(),
+		UserID:           source.UserID,
+		SyncSourceID:     source.ID,
+		KnowledgeBaseID:  source.KnowledgeBaseID,
+		ExternalID:       strings.TrimSpace(node.NodeID),
+		ParentExternalID: strings.TrimSpace(parentNodeID),
+		Name:             strings.TrimSpace(node.Name),
+		ItemType:         strings.TrimSpace(node.Type),
+		Category:         strings.TrimSpace(node.Category),
+		Extension:        strings.ToLower(strings.TrimSpace(node.Extension)),
+		ExternalURL:      strings.TrimSpace(node.URL),
+		FileSize:         node.Size,
+		HasChildren:      node.HasChildren,
+		SourceUpdatedAt:  sourceUpdatedAt(node.ModifiedAt),
+		ImportStatus:     syncItemImportStatusPending,
+		ErrorMessage:     "",
+	}
+	return s.syncItemRepo.Upsert(ctx, item)
+}
+
 // syncFileNode 下载并入库单个钉钉文件节点
 func (s *syncService) syncFileNode(ctx context.Context, source entity.SyncSource, cfg syncSourceConfig, node dingtalk.Node) error {
 	fileName := filepath.Base(strings.TrimSpace(node.Name))
 	fileType := documentFileType(fileName)
+	if fileType == "" {
+		fileType = strings.ToLower(strings.TrimSpace(node.Extension))
+	}
 	if !s.chunkService.SupportsFileType(fileType) {
-		return apperrors.New(apperrors.CodeDocumentFileTypeInvalid, "当前文件类型暂不支持同步解析")
+		return s.saveUnsupportedFileNode(ctx, source, node, fileName, fileType)
 	}
 	dentry, err := s.dingtalkClient.QueryDentryID(ctx, cfg.OperatorUnionID, node.NodeID)
 	if err != nil {
@@ -381,6 +473,99 @@ func (s *syncService) syncFileNode(ctx context.Context, source entity.SyncSource
 		return apperrors.New(apperrors.CodeDocumentStatusInvalid, "同步文档分块为空")
 	}
 	return s.syncedDocumentRepo.SaveSyncedDocument(ctx, doc, &version, chunks, documentStatusReady, time.Now())
+}
+
+// importFileItem 导入单个外部文件目录项
+func (s *syncService) importFileItem(ctx context.Context, source entity.SyncSource, cfg syncSourceConfig, item entity.SyncItem) (entity.Document, error) {
+	fileName := syncItemFileName(item)
+	fileType := syncItemFileType(item, fileName)
+	if !s.chunkService.SupportsFileType(fileType) {
+		doc := syncedDocumentFromItem(source, item, fileName, fileType, documentStatusFailed, fmt.Sprintf("%s 文件暂不支持自动解析，可通过钉钉原文链接查看", strings.ToUpper(fileType)))
+		if err := s.applyExistingDocumentID(ctx, &doc); err != nil {
+			return entity.Document{}, err
+		}
+		return doc, s.syncedDocumentRepo.SaveSyncedPlaceholder(ctx, doc, documentStatusDeleted)
+	}
+	dentry, err := s.dingtalkClient.QueryDentryID(ctx, cfg.OperatorUnionID, item.ExternalID)
+	if err != nil {
+		return entity.Document{}, err
+	}
+	contentBytes, fileHash, err := s.dingtalkClient.DownloadFile(ctx, cfg.OperatorUnionID, dentry.SpaceID, dentry.DentryID)
+	if err != nil {
+		return entity.Document{}, err
+	}
+	content := s.chunkService.NormalizeContent(string(contentBytes), fileType)
+	if content == "" {
+		return entity.Document{}, apperrors.New(apperrors.CodeDocumentStatusInvalid, "同步文档正文为空")
+	}
+	doc := syncedDocumentFromItem(source, item, fileName, fileType, documentStatusReady, "")
+	if err := s.applyExistingDocumentID(ctx, &doc); err != nil {
+		return entity.Document{}, err
+	}
+	doc.FileSize = int64(len(contentBytes))
+	doc.FileHash = fileHash
+	storagePath, err := s.saveSyncedFile(source.UserID, source.KnowledgeBaseID, fileName, contentBytes)
+	if err != nil {
+		return entity.Document{}, err
+	}
+	doc.StoragePath = storagePath
+
+	versionID := uuid.NewString()
+	version := entity.DocumentVersion{
+		ID:            versionID,
+		UserID:        source.UserID,
+		DocumentID:    doc.ID,
+		Content:       content,
+		ContentHash:   hashSyncedText(content),
+		ChangeSummary: "钉钉导入生成版本",
+	}
+	chunks, err := s.chunkService.BuildChunks(ctx, doc, versionID, s.chunkService.SplitContent(content))
+	if err != nil {
+		return entity.Document{}, err
+	}
+	if len(chunks) == 0 {
+		return entity.Document{}, apperrors.New(apperrors.CodeDocumentStatusInvalid, "同步文档分块为空")
+	}
+	return doc, s.syncedDocumentRepo.SaveSyncedDocument(ctx, doc, &version, chunks, documentStatusReady, time.Now())
+}
+
+// applyExistingDocumentID 复用已有外部文档 ID
+func (s *syncService) applyExistingDocumentID(ctx context.Context, doc *entity.Document) error {
+	current, found, err := s.syncedDocumentRepo.FindByExternalID(ctx, doc.UserID, doc.SourceType, doc.ExternalID, documentStatusDeleted)
+	if err != nil {
+		return err
+	}
+	if found {
+		doc.ID = current.ID
+	}
+	return nil
+}
+
+// saveUnsupportedFileNode 保存暂不支持解析的钉钉文件元数据
+func (s *syncService) saveUnsupportedFileNode(ctx context.Context, source entity.SyncSource, node dingtalk.Node, fileName, fileType string) error {
+	if fileName == "." || strings.TrimSpace(fileName) == "" {
+		fileName = strings.TrimSpace(node.Name)
+	}
+	if fileType == "" {
+		fileType = "unknown"
+	}
+	doc := entity.Document{
+		ID:              uuid.NewString(),
+		UserID:          source.UserID,
+		KnowledgeBaseID: source.KnowledgeBaseID,
+		Title:           strings.TrimSuffix(fileName, filepath.Ext(fileName)),
+		FileName:        fileName,
+		FileType:        fileType,
+		FileSize:        node.Size,
+		FileHash:        hashSyncedText(node.NodeID + ":" + fmt.Sprintf("%d", node.ModifiedAt)),
+		SourceType:      documentSourceSync,
+		ExternalID:      node.NodeID,
+		ExternalURL:     node.URL,
+		SourceUpdatedAt: sourceUpdatedAt(node.ModifiedAt),
+		Status:          documentStatusFailed,
+		ErrorMessage:    fmt.Sprintf("%s 文件暂不支持自动解析，可通过钉钉原文链接查看", strings.ToUpper(fileType)),
+	}
+	return s.syncedDocumentRepo.SaveSyncedPlaceholder(ctx, doc, documentStatusDeleted)
 }
 
 // findSource 查询当前用户同步源
@@ -476,6 +661,65 @@ func isDingTalkFileNode(node dingtalk.Node) bool {
 	return strings.EqualFold(strings.TrimSpace(node.Type), "FILE")
 }
 
+// isDingTalkFolderNode 判断钉钉节点是否为目录
+func isDingTalkFolderNode(node dingtalk.Node) bool {
+	return strings.EqualFold(strings.TrimSpace(node.Type), "FOLDER")
+}
+
+// isUnsupportedAliDocItem 判断是否为暂不支持自动导入的钉钉在线文档
+func isUnsupportedAliDocItem(item entity.SyncItem) bool {
+	if !strings.EqualFold(strings.TrimSpace(item.Category), "ALIDOC") {
+		return false
+	}
+	ext := strings.ToLower(strings.TrimSpace(item.Extension))
+	return ext == "adoc" || ext == "axls"
+}
+
+// syncItemFileName 规整外部文件名
+func syncItemFileName(item entity.SyncItem) string {
+	name := strings.TrimSpace(item.Name)
+	if name == "" {
+		name = strings.TrimSpace(item.ExternalID)
+	}
+	if filepath.Ext(name) == "" && strings.TrimSpace(item.Extension) != "" {
+		name = name + "." + strings.ToLower(strings.TrimSpace(item.Extension))
+	}
+	return filepath.Base(name)
+}
+
+// syncItemFileType 规整外部文件类型
+func syncItemFileType(item entity.SyncItem, fileName string) string {
+	fileType := documentFileType(fileName)
+	if fileType != "" {
+		return fileType
+	}
+	fileType = strings.ToLower(strings.TrimSpace(item.Extension))
+	if fileType == "" {
+		return "unknown"
+	}
+	return fileType
+}
+
+// syncedDocumentFromItem 从外部目录项构造本地文档
+func syncedDocumentFromItem(source entity.SyncSource, item entity.SyncItem, fileName, fileType string, status int, errorMessage string) entity.Document {
+	return entity.Document{
+		ID:              uuid.NewString(),
+		UserID:          source.UserID,
+		KnowledgeBaseID: source.KnowledgeBaseID,
+		Title:           strings.TrimSuffix(fileName, filepath.Ext(fileName)),
+		FileName:        fileName,
+		FileType:        fileType,
+		FileSize:        item.FileSize,
+		FileHash:        hashSyncedText(item.ExternalID + ":" + fmt.Sprintf("%d", item.FileSize)),
+		SourceType:      documentSourceSync,
+		ExternalID:      item.ExternalID,
+		ExternalURL:     item.ExternalURL,
+		SourceUpdatedAt: item.SourceUpdatedAt,
+		Status:          status,
+		ErrorMessage:    errorMessage,
+	}
+}
+
 // sourceUpdatedAt 转换钉钉更新时间
 func sourceUpdatedAt(value int64) *time.Time {
 	if value <= 0 {
@@ -535,5 +779,33 @@ func syncJobResponse(job entity.SyncJob) dto.SyncJobResponse {
 		FinishedAt:      job.FinishedAt,
 		CreatedAt:       job.CreatedAt,
 		UpdatedAt:       job.UpdatedAt,
+	}
+}
+
+// syncItemResponse 转换外部同步文件目录项响应
+func syncItemResponse(item entity.SyncItem) dto.SyncItemResponse {
+	localDocumentID := ""
+	if item.LocalDocumentID != nil {
+		localDocumentID = *item.LocalDocumentID
+	}
+	return dto.SyncItemResponse{
+		ID:               item.ID,
+		SyncSourceID:     item.SyncSourceID,
+		KnowledgeBaseID:  item.KnowledgeBaseID,
+		ExternalID:       item.ExternalID,
+		ParentExternalID: item.ParentExternalID,
+		Name:             item.Name,
+		ItemType:         item.ItemType,
+		Category:         item.Category,
+		Extension:        item.Extension,
+		ExternalURL:      item.ExternalURL,
+		FileSize:         item.FileSize,
+		HasChildren:      item.HasChildren,
+		SourceUpdatedAt:  item.SourceUpdatedAt,
+		LocalDocumentID:  localDocumentID,
+		ImportStatus:     item.ImportStatus,
+		ErrorMessage:     item.ErrorMessage,
+		CreatedAt:        item.CreatedAt,
+		UpdatedAt:        item.UpdatedAt,
 	}
 }
