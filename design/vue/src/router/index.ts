@@ -32,6 +32,12 @@ const router = createRouter({
       meta: { auth: true },
     },
     {
+      path: '/search',
+      name: 'search',
+      component: () => import('@/pages/SearchPage.vue'),
+      meta: { auth: true },
+    },
+    {
       path: '/kb',
       name: 'kb',
       component: () => import('@/pages/KnowledgeBasePage.vue'),
@@ -44,15 +50,15 @@ const router = createRouter({
       meta: { auth: true },
     },
     {
-      path: '/wiki',
-      name: 'wiki',
-      component: () => import('@/pages/WikiPage.vue'),
-      meta: { auth: true },
-    },
-    {
       path: '/settings',
       name: 'settings',
       component: () => import('@/pages/SettingsPage.vue'),
+      meta: { auth: true },
+    },
+    {
+      path: '/profile',
+      name: 'profile',
+      component: () => import('@/pages/ProfilePage.vue'),
       meta: { auth: true },
     },
     {

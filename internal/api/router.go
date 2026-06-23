@@ -8,6 +8,7 @@ import (
 	"solvify-agent/internal/api/v1/document"
 	"solvify-agent/internal/api/v1/knowledgebase"
 	"solvify-agent/internal/api/v1/model"
+	"solvify-agent/internal/api/v1/search"
 	"solvify-agent/internal/api/v1/storage"
 	"solvify-agent/internal/api/v1/tool"
 	"solvify-agent/internal/api/v1/user"
@@ -21,6 +22,7 @@ import (
 type Router struct {
 	userCtrl          *user.Controller
 	authCtrl          *auth.Controller
+	searchCtrl        *search.Controller
 	knowledgeBaseCtrl *knowledgebase.Controller
 	documentCtrl      *document.Controller
 	storageCtrl       *storage.Controller
@@ -35,6 +37,7 @@ func NewRouter(
 	userService service.UserServiceInterface,
 	adminUserService service.AdminUserServiceInterface,
 	adminSessionService service.AdminSessionServiceInterface,
+	searchService service.SearchServiceInterface,
 	authService service.AuthServiceInterface,
 	modelService service.ModelServiceInterface,
 	userModelConfigService service.UserModelConfigServiceInterface,
@@ -50,6 +53,7 @@ func NewRouter(
 	return &Router{
 		userCtrl:          user.NewController(userService, adminUserService),
 		authCtrl:          auth.NewController(authService, userService),
+		searchCtrl:        search.NewController(searchService),
 		modelCtrl:         model.NewController(modelService),
 		userModelCtrl:     model.NewUserModelController(userModelConfigService),
 		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseSvc),
@@ -77,6 +81,9 @@ func (r *Router) Setup(engine *gin.Engine) {
 
 	// 用户管理
 	r.userCtrl.RegisterRoutes(v1)
+
+	// 搜索
+	r.searchCtrl.RegisterRoutes(v1)
 
 	// 模型管理
 	r.modelCtrl.RegisterRoutes(v1)
