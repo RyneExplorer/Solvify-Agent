@@ -88,12 +88,13 @@ func (ctrl *UserModelController) Update(ctx *gin.Context) {
 		return
 	}
 
-	if err := ctrl.userModelConfigService.Update(ctx.Request.Context(), userID, configID, input); err != nil {
+	output, err := ctrl.userModelConfigService.Update(ctx.Request.Context(), userID, configID, input)
+	if err != nil {
 		response.BizError(ctx, err)
 		return
 	}
 
-	response.Success(ctx, nil)
+	response.Success(ctx, output)
 }
 
 // Delete 删除用户模型配置

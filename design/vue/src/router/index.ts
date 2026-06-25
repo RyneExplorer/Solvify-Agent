@@ -29,10 +29,10 @@ const router = createRouter({
       meta: { auth: true },
     },
     {
-      path: '/dashboard',
-      name: 'dashboard',
+      path: '/search',
+      name: 'search',
       // @ts-ignore
-      component: () => import('@/pages/DashboardPage.vue'),
+      component: () => import('@/pages/SearchPage.vue'),
       meta: { auth: true },
     },
     {

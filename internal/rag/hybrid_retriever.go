@@ -35,22 +35,24 @@ func getSegmenter() *gse.Segmenter {
 
 // HybridRetriever 实现混合检索（向量 + 关键词 + RRF 融合）
 type HybridRetriever struct {
-	db             *gorm.DB
-	embeddingFunc  EmbeddingFunc
-	scoreThreshold float64
-	vectorWeight   float64
-	keywordWeight  float64
-	rrfK           float64
+	db                    *gorm.DB
+	embeddingFunc         EmbeddingFunc
+	scoreThreshold        float64
+	vectorWeight          float64
+	keywordWeight         float64
+	keywordScoreThreshold float64 // 向量全灭时，关键词结果的最低匹配比例
+	rrfK                  float64
 }
 
 // HybridRetrieverConfig 描述混合检索器配置
 type HybridRetrieverConfig struct {
-	DB             *gorm.DB
-	EmbeddingFunc  EmbeddingFunc
-	ScoreThreshold float64
-	VectorWeight   float64
-	KeywordWeight  float64
-	RRFK           float64
+	DB                    *gorm.DB
+	EmbeddingFunc         EmbeddingFunc
+	ScoreThreshold        float64
+	VectorWeight          float64
+	KeywordWeight         float64
+	KeywordScoreThreshold float64
+	RRFK                  float64
 }
 
 // NewHybridRetriever 创建混合检索器
@@ -67,17 +69,22 @@ func NewHybridRetriever(cfg HybridRetrieverConfig) *HybridRetriever {
 	if keywordWeight <= 0 {
 		keywordWeight = 0.3
 	}
+	keywordScoreThreshold := cfg.KeywordScoreThreshold
+	if keywordScoreThreshold <= 0 {
+		keywordScoreThreshold = 0.25
+	}
 	rrfK := cfg.RRFK
 	if rrfK <= 0 {
 		rrfK = 60
 	}
 	return &HybridRetriever{
-		db:             cfg.DB,
-		embeddingFunc:  cfg.EmbeddingFunc,
-		scoreThreshold: threshold,
-		vectorWeight:   vectorWeight,
-		keywordWeight:  keywordWeight,
-		rrfK:           rrfK,
+		db:                    cfg.DB,
+		embeddingFunc:         cfg.EmbeddingFunc,
+		scoreThreshold:        threshold,
+		vectorWeight:          vectorWeight,
+		keywordWeight:         keywordWeight,
+		keywordScoreThreshold: keywordScoreThreshold,
+		rrfK:                  rrfK,
 	}
 }
 
@@ -166,7 +173,9 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 
 	logger.Infof("向量检索命中: %d 条, 关键词检索命中: %d 条", len(vr.docs), len(kr.docs))
 
-	// 先按向量分数阈值过滤（阈值适用于余弦相似度，不是 RRF 分数）
+	// ===== Step 1: 同源质量检查（各自独立过滤） =====
+
+	// 1a. 向量侧：绝对阈值过滤（余弦相似度 >= scoreThreshold）
 	filteredVector := make([]scoredChunk, 0, len(vr.docs))
 	for _, doc := range vr.docs {
 		if doc.Score >= r.scoreThreshold {
@@ -177,10 +186,25 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 		}
 	}
 
-	// RRF 融合（用过滤后的向量结果 + 全部关键词结果）
-	fused := r.reciprocalRankFusion(filteredVector, kr.docs)
+	// 1b. 关键词侧：陡峭度检测 + 最低匹配过滤
+	filteredKeyword := r.keywordSourceFilter(kr.docs)
 
-	// 截取 TopK（RRF 已按分数排序，不再做阈值过滤）
+	// 1c. 向量全灭时，对关键词结果加最低匹配比例过滤
+	if len(filteredVector) == 0 && len(filteredKeyword) > 0 {
+		filteredKeyword = filterByMinScore(filteredKeyword, r.keywordScoreThreshold, "关键词")
+	}
+
+	// ===== Step 2: 同源内 Min-Max 归一化 =====
+	vectorNorm := minMaxNormalize(filteredVector)
+	keywordNorm := minMaxNormalize(filteredKeyword)
+
+	// ===== Step 3: RRF 融合 =====
+	fused := r.reciprocalRankFusion(filteredVector, filteredKeyword)
+
+	// ===== Step 4: 跨源交叉验证 =====
+	fused = r.crossSourceFilter(fused, filteredVector, filteredKeyword, vectorNorm, keywordNorm)
+
+	// ===== Step 5: TopK 截取 =====
 	docs := make([]Document, 0, len(fused))
 	for _, item := range fused {
 		if len(docs) >= topK {
@@ -434,4 +458,150 @@ func (r *HybridRetriever) reciprocalRankFusion(vectorResults, keywordResults []s
 	})
 
 	return results
+}
+
+// ===== 六步管线辅助函数 =====
+
+// keywordSourceFilter Step 1b: 关键词侧同源质量检查
+// 关键词分数量纲是"匹配率"[0,1]，天然可比。
+// 检测陡峭度：
+//   - 太陡（top1-top5 > 80% 差距）→ 只有 Top1 可信（长尾噪声大），截断
+//   - 平坦 → 全部保留（无法区分说明都差不差）
+//   - 正常 → 全部保留
+func (r *HybridRetriever) keywordSourceFilter(kwDocs []scoredChunk) []scoredChunk {
+	if len(kwDocs) < 2 {
+		return kwDocs
+	}
+	top1 := kwDocs[0].Score
+	top5Idx := min(5, len(kwDocs)) - 1
+	top5 := kwDocs[top5Idx].Score
+
+	if top1 <= 0 {
+		return kwDocs
+	}
+
+	steepness := (top1 - top5) / top1
+	if steepness > 0.80 {
+		logger.Infof("[关键词过滤] 分布太陡(steepness=%.2f)，仅保留 Top1", steepness)
+		return kwDocs[:1]
+	}
+	return kwDocs
+}
+
+// minMaxNormalize Step 2: 同源内 Min-Max 归一化
+// 将原始分数映射到 [0,1]，消除向量/关键词量纲差异。
+// 单条时退化为 1.0；全相同分数时退化为 0（避免除零）。
+// 返回 map[id]normalizedScore
+func minMaxNormalize(docs []scoredChunk) map[string]float64 {
+	result := make(map[string]float64, len(docs))
+	if len(docs) == 0 {
+		return result
+	}
+	if len(docs) == 1 {
+		result[docs[0].ID] = 1.0
+		return result
+	}
+
+	minScore, maxScore := docs[len(docs)-1].Score, docs[0].Score
+	span := maxScore - minScore
+	if span == 0 {
+		// 所有分数相同，无法区分，全部给 0（后续交叉验证会丢弃）
+		for _, doc := range docs {
+			result[doc.ID] = 0
+		}
+		return result
+	}
+
+	for _, doc := range docs {
+		result[doc.ID] = (doc.Score - minScore) / span
+	}
+	return result
+}
+
+// filterByMinScore 通用最低分过滤（带日志）
+func filterByMinScore(docs []scoredChunk, threshold float64, label string) []scoredChunk {
+	filtered := make([]scoredChunk, 0, len(docs))
+	for _, doc := range docs {
+		if doc.Score >= threshold {
+			filtered = append(filtered, doc)
+			logger.Infof("  ✓ %s [%s] score=%.4f title=%q", label, doc.DocumentID, doc.Score, doc.Title)
+		} else {
+			logger.Infof("  ✗ %s [%s] score=%.4f (低于阈值 %.2f)", label, doc.DocumentID, doc.Score, threshold)
+		}
+	}
+	return filtered
+}
+
+// crossSourceFilter Step 4: 跨源交叉验证
+//
+// RRF 融合后，每条结果按来源分类：
+//   - 双路命中（向量+关键词都命中此文档）→ 高置信，直接采纳
+//   - 仅向量侧命中 → 检查归一化分：< 0.05 → 丢弃（在该源内部排名太低）
+//   - 仅关键词侧命中 → 检查归一化分：< 0.05 → 丢弃
+//
+// 参数：
+//   - fused: RRF 融合后的全量结果
+//   - fv, fk: 过滤后的向量/关键词结果（用于判断来源）
+//   - normV, normK: 归一化分数 map
+func (r *HybridRetriever) crossSourceFilter(
+	fused []scoredChunk,
+	fv, fk []scoredChunk,
+	normV, normK map[string]float64,
+) []scoredChunk {
+	if len(fused) == 0 {
+		return fused
+	}
+
+	// 构建来源查找集
+	inVector := make(map[string]bool, len(fv))
+	for _, doc := range fv {
+		inVector[doc.ID] = true
+	}
+	inKeyword := make(map[string]bool, len(fk))
+	for _, doc := range fk {
+		inKeyword[doc.ID] = true
+	}
+
+	const crossSourceNormFloor = 0.05 // 归一化后太低→在该源内部排名垫底
+
+	result := make([]scoredChunk, 0, len(fused))
+	for _, doc := range fused {
+		fromVector := inVector[doc.ID]
+		fromKeyword := inKeyword[doc.ID]
+
+		if fromVector && fromKeyword {
+			// 双路命中 → 高置信
+			result = append(result, doc)
+			logger.Infof("[交叉验证] ✓ 双路命中 [%s] title=%q", doc.DocumentID, doc.Title)
+			continue
+		}
+
+		if fromVector {
+			// 仅向量侧命中
+			normScore := normV[doc.ID]
+			if normScore < crossSourceNormFloor {
+				logger.Infof("[交叉验证] ✗ 仅向量 [%s] normScore=%.4f < %.2f 丢弃 title=%q",
+					doc.DocumentID, normScore, crossSourceNormFloor, doc.Title)
+				continue
+			}
+			result = append(result, doc)
+			logger.Infof("[交叉验证] ✓ 仅向量 [%s] normScore=%.4f title=%q", doc.DocumentID, normScore, doc.Title)
+			continue
+		}
+
+		if fromKeyword {
+			// 仅关键词侧命中
+			normScore := normK[doc.ID]
+			if normScore < crossSourceNormFloor {
+				logger.Infof("[交叉验证] ✗ 仅关键词 [%s] normScore=%.4f < %.2f 丢弃 title=%q",
+					doc.DocumentID, normScore, crossSourceNormFloor, doc.Title)
+				continue
+			}
+			result = append(result, doc)
+			logger.Infof("[交叉验证] ✓ 仅关键词 [%s] normScore=%.4f title=%q", doc.DocumentID, normScore, doc.Title)
+			continue
+		}
+	}
+
+	return result
 }

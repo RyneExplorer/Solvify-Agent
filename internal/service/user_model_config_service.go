@@ -13,7 +13,6 @@ import (
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/repository"
 	apperrors "solvify-agent/pkg/errors"
-	"solvify-agent/pkg/utils"
 )
 
 // userModelConfigService 封装用户模型配置业务用例实现
@@ -55,23 +54,23 @@ func (s *userModelConfigService) Create(ctx context.Context, userID string, req 
 }
 
 // Update 更新用户模型配置
-func (s *userModelConfigService) Update(ctx context.Context, userID string, configID string, req requestdto.UpdateUserModelConfigRequest) error {
+func (s *userModelConfigService) Update(ctx context.Context, userID string, configID string, req requestdto.UpdateUserModelConfigRequest) (responsedto.UserModelConfigInfo, error) {
 	config, err := s.repo.GetByID(ctx, configID, userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return apperrors.New(apperrors.CodeModelConfigNotFound, "模型配置不存在")
+			return responsedto.UserModelConfigInfo{}, apperrors.New(apperrors.CodeModelConfigNotFound, "模型配置不存在")
 		}
-		return apperrors.WrapDefault(apperrors.CodeInternalError, err)
+		return responsedto.UserModelConfigInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 
 	// 如果修改了 model_id，检查是否重复
 	if req.ModelID != nil && *req.ModelID != config.ModelID {
 		exists, err := s.repo.ExistsByModelID(ctx, userID, *req.ModelID, configID)
 		if err != nil {
-			return apperrors.WrapDefault(apperrors.CodeInternalError, err)
+			return responsedto.UserModelConfigInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 		}
 		if exists {
-			return apperrors.NewDefault(apperrors.CodeModelConfigExists)
+			return responsedto.UserModelConfigInfo{}, apperrors.NewDefault(apperrors.CodeModelConfigExists)
 		}
 	}
 
@@ -82,8 +81,8 @@ func (s *userModelConfigService) Update(ctx context.Context, userID string, conf
 		config.ModelID = *req.ModelID
 		config.DisplayName = *req.ModelID
 	}
-	// 只有当 APIKey 非空且不是脱敏格式时才更新
-	if req.APIKey != nil && *req.APIKey != "" && !utils.IsMaskedAPIKey(*req.APIKey) {
+	// 只有当 APIKey 非空时才更新
+	if req.APIKey != nil && *req.APIKey != "" {
 		config.APIKey = *req.APIKey
 	}
 	if req.BaseURL != nil {
@@ -94,10 +93,10 @@ func (s *userModelConfigService) Update(ctx context.Context, userID string, conf
 	}
 
 	if err := s.repo.Update(ctx, config); err != nil {
-		return apperrors.WrapDefault(apperrors.CodeInternalError, err)
+		return responsedto.UserModelConfigInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 
-	return nil
+	return toModelConfigInfo(config), nil
 }
 
 // Delete 删除用户模型配置
@@ -164,7 +163,7 @@ func toModelConfigInfo(config *entity.UserModelConfig) responsedto.UserModelConf
 		APIFormat:   config.APIFormat,
 		ModelID:     config.ModelID,
 		BaseURL:     config.BaseURL,
-		APIKey:      utils.MaskAPIKey(config.APIKey),
+		APIKey:      config.APIKey,
 		CreatedAt:   config.CreatedAt,
 		UpdatedAt:   config.UpdatedAt,
 	}
