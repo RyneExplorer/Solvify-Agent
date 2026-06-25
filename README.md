@@ -14,7 +14,7 @@
 | 模型配置 | 系统默认模型 + 用户自定义模型，OpenAI 兼容 |
 | RAG 管线 | 混合检索（向量+关键词+RRF）→ 重排序 → 分块扩展 |
 | 工具系统 | Template 驱动 HTTP Provider，Agent 动态加载 |
-| 钉钉集成 | OAuth 登录、Wiki 文档同步 |
+| 钉钉集成 | OAuth 登录、文档同步 |
 | 多源同步 | SyncSource/SyncJob/SyncItem 全量增量同步 |
 | 后台管理 | 用户管理、会话管理、模型管理、工具管理 |
 
