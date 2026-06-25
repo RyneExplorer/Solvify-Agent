@@ -1,28 +1,108 @@
 app:
   name: solvify-agent
   version: 0.1.0
-  env: development
-  mode: release
+  env: development     # development / production / test
+  mode: release        # debug / release / test
+
+server:
+  host: ""
+  port: 8080
+  shutdown_timeout_seconds: 20
+
+# JWT 配置
+jwt:
+  secret: "your-jwt-secret"
+  expire_hours: 24
 
 log:
-  level: info
+  level: info          # debug / info / warn / error
   filename: logs/solvify-agent.log
-  max_size: 100
+  max_size: 100         # MB
   max_backups: 7
-  max_age: 30
+  max_age: 30           # 天
   compress: true
+
+# CORS 配置
+cors:
+  enabled: true
+  allow_origins:
+    - "*"
+  allow_methods:
+    - "GET"
+    - "POST"
+    - "PUT"
+    - "DELETE"
+    - "OPTIONS"
+  allow_headers:
+    - "Origin"
+    - "Content-Type"
+    - "Authorization"
+  expose_headers: []
+  allow_credentials: false
+  max_age: 0
 
 agent:
   enable_demo: true
+  max_iterations: 10
+  score_threshold: 0.7
 
+# 默认 LLM 配置（系统级）
 llm:
-  provider: mock
+  provider: mock          # openai / deepseek / zhipu / tongyi / mock
+  api_format: ""
   model: mock-knowledge-assistant
   api_key: ""
+  base_url: ""
+  temperature: 0.7
+  max_tokens: 2000
+  timeout: 30
 
+# Embedding 向量化模型配置
+embedding:
+  provider: openai
+  model: text-embedding-v4
+  api_key: ""
+  base_url: ""
+  dimension: 1024
+
+# RAG 检索配置
 rag:
   enabled: true
+  top_k: 3
+  score_threshold: 0.5
+  vector_weight: 0.7    # 向量检索权重
+  keyword_weight: 0.3   # 关键词检索权重
+  rrf_k: 60.0           # RRF 融合参数
+  # Rerank 重排序（可选）
+  reranker:
+    enabled: false
+    endpoint: ""         # 如: https://ai.gitee.com/v1/rerank
+    model: ""            # 如: Qwen3-Reranker-0.6B
+    api_key: ""
+    top_n: 3
+    timeout: 10
+    score_threshold: 0.5
+  # 相邻分块扩展（可选）
+  expander:
+    enabled: false
+    window_size: 1
+    max_chunk_tokens: 1000
+    dedup_threshold: 0.8
 
+# 工具配置
+tools:
+  enabled: true
+  web_search:
+    api_key: ""
+    base_url: ""
+
+# 钉钉集成配置
+dingtalk:
+  app_key: ""
+  app_secret: ""
+  oauth_redirect_uri: "http://localhost:5173/dingtalk/bind"
+
+# 数据库配置
 database:
   postgres:
     host: "127.0.0.1"
@@ -42,10 +122,9 @@ database:
     db: 0
     pool_size: 10
 
-tools:
-  enabled: true
-
-server:
-  host: ""
-  port: 8080
-  shutdown_timeout_seconds: 10
+# 邮箱配置（SMTP，用于验证码发送）
+email:
+  host: "smtp.qq.com"
+  port: 465
+  username: ""
+  password: ""
