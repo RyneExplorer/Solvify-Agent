@@ -11,7 +11,7 @@ import (
 // UserModelConfigServiceInterface 定义用户模型配置服务接口
 type UserModelConfigServiceInterface interface {
 	Create(ctx context.Context, userID string, req requestdto.CreateUserModelConfigRequest) (responsedto.UserModelConfigInfo, error)
-	Update(ctx context.Context, userID string, configID string, req requestdto.UpdateUserModelConfigRequest) error
+	Update(ctx context.Context, userID string, configID string, req requestdto.UpdateUserModelConfigRequest) (responsedto.UserModelConfigInfo, error)
 	Delete(ctx context.Context, userID string, configID string) error
 	Get(ctx context.Context, userID string, configID string) (responsedto.UserModelConfigInfo, error)
 	List(ctx context.Context, userID string) (responsedto.ListUserModelConfigsResponse, error)

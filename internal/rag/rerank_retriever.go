@@ -81,10 +81,11 @@ func NewRerankRetrieverFromConfig(inner Retriever) *RerankRetriever {
 
 // rerankRequest 描述 Rerank API 请求体
 type rerankRequest struct {
-	Query     string   `json:"query"`
-	Documents []string `json:"documents"`
-	TopN      int      `json:"top_n,omitempty"`
-	Model     string   `json:"model,omitempty"`
+	Query       string   `json:"query"`
+	Documents   []string `json:"documents"`
+	Model       string   `json:"model,omitempty"`
+	TopN        int      `json:"top_n,omitempty"`
+	Instruction string   `json:"instruction,omitempty"`
 }
 
 // rerankResult 描述单条 Rerank 结果
@@ -134,14 +135,13 @@ func (r *RerankRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	}
 
 	// 用重排序分数替换原始分数
-	for i, item := range reranked {
+	for _, item := range reranked {
 		if item.Index >= 0 && item.Index < len(result.Documents) {
 			oldScore := result.Documents[item.Index].Score
 			result.Documents[item.Index].Score = item.RelevanceScore
 			logger.Infof("[Rerank]   文档#%d [%s] 分数: %.4f → %.4f",
 				item.Index, result.Documents[item.Index].DocumentID, oldScore, item.RelevanceScore)
 		}
-		_ = i
 	}
 
 	// 按新分数降序排序
@@ -179,7 +179,6 @@ func (r *RerankRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 
 // rerank 调用外部 Rerank API
 func (r *RerankRetriever) rerank(ctx context.Context, query string, docs []Document) ([]rerankResult, error) {
-	// 构造文档内容列表
 	documents := make([]string, 0, len(docs))
 	for _, doc := range docs {
 		documents = append(documents, doc.Content)
@@ -191,8 +190,8 @@ func (r *RerankRetriever) rerank(ctx context.Context, query string, docs []Docum
 	reqBody := rerankRequest{
 		Query:     query,
 		Documents: documents,
-		TopN:      r.topN,
 		Model:     r.model,
+		TopN:      r.topN,
 	}
 
 	body, err := json.Marshal(reqBody)

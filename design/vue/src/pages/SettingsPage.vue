@@ -121,51 +121,6 @@
           </section>
         </template>
 
-        <!-- Status tab -->
-        <template v-if="activeTab === 'status'">
-          <section>
-            <div class="flex items-center justify-between mb-3">
-              <h2 class="text-sm font-semibold text-slate-900">基础设施状态</h2>
-              <span class="text-xs text-slate-400">管理员配置</span>
-            </div>
-            <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
-              <div
-                  v-for="item in infra"
-                  :key="item.name"
-                  class="flex items-center justify-between px-4 py-3 border-b border-slate-100 last:border-0"
-              >
-                <div>
-                  <div class="text-sm font-medium text-slate-900">{{ item.name }}</div>
-                  <div class="text-xs text-slate-400 mt-0.5">{{ item.detail }}</div>
-                </div>
-                <AppBadge :variant="item.variant">{{ item.status }}</AppBadge>
-              </div>
-            </div>
-          </section>
-
-          <section>
-            <div class="flex items-center justify-between mb-3">
-              <h2 class="text-sm font-semibold text-slate-900">第三方平台集成</h2>
-              <span class="text-xs text-slate-400">{{ intg.filter(i => i.status === '已连接').length }}/{{ intg.length }} 已连接</span>
-            </div>
-            <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
-              <div
-                  v-for="item in intg"
-                  :key="item.name"
-                  class="flex items-center justify-between px-4 py-3 border-b border-slate-100 last:border-0"
-              >
-                <div>
-                  <div class="text-sm font-medium text-slate-900">{{ item.name }}</div>
-                  <div class="text-xs text-slate-400 mt-0.5">{{ item.desc }}</div>
-                </div>
-                <div class="flex items-center gap-3">
-                  <span class="text-xs text-slate-400">已同步 {{ item.synced }}</span>
-                  <AppBadge :variant="item.status === '已连接' ? 'success' : 'neutral'">{{ item.status }}</AppBadge>
-                </div>
-              </div>
-            </div>
-          </section>
-        </template>
       </div>
 
       <!-- Right column: summary card -->
@@ -182,11 +137,6 @@
               <div class="text-xs text-slate-400 mb-1">已启用工具</div>
               <div class="text-lg font-semibold text-slate-900">{{ userToolConfigs.filter(c => c.is_enabled).length }}</div>
               <div class="text-xs text-slate-400 mt-0.5">共 {{ userToolConfigs.length }} 个配置</div>
-            </div>
-            <div v-if="activeTab === 'status'">
-              <div class="text-xs text-slate-400 mb-1">运行中服务</div>
-              <div class="text-lg font-semibold text-slate-900">{{ infra.filter(i => i.status === '运行中').length }}</div>
-              <div class="text-xs text-slate-400 mt-0.5">共 {{ infra.length }} 个基础设施</div>
             </div>
             <div class="border-t border-slate-200 pt-3">
               <div class="text-xs text-slate-400 leading-relaxed">{{ tabHint }}</div>
@@ -284,8 +234,6 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useModelConfig } from '@/composables/useModelConfig'
 import { useToolConfig } from '@/composables/useToolConfig'
-import { getDingTalkBinding } from '@/api/dingtalk'
-import { listSyncSources } from '@/api/sync'
 import AppButton from '@/components/ui/AppButton.vue'
 import AppBadge from '@/components/ui/AppBadge.vue'
 import AppSelect from '@/components/ui/AppSelect.vue'
@@ -297,20 +245,16 @@ const activeTab = ref('model')
 const tabs = [
   { key: 'model', label: 'AI 模型' },
   { key: 'search', label: '工具配置' },
-  { key: 'status', label: '系统状态' },
 ]
 
 const tabHint = computed(() => {
   if (activeTab.value === 'model') return '系统模型由管理员统一配置；自定义模型仅当前用户可用。'
-  if (activeTab.value === 'search') return '在深度模式下，系统会调用已启用的工具进行联网或知识库检索。'
-  return '基础设施状态由管理员维护，普通用户不可修改。'
+  return '在深度模式下，系统会调用已启用的工具进行联网或知识库检索。'
 })
 
 // ── Composables ──
 const { systemModels, userModels, loadAll: loadModels, createConfig: createModel, updateConfig: updateModel, deleteConfig: deleteModel } = useModelConfig()
 const { toolTemplates, userToolConfigs, loadAll: loadTools, createConfig: createTool, updateConfig: updateTool, deleteConfig: deleteTool } = useToolConfig()
-const dingtalkBound = ref(false)
-const dingtalkSyncCount = ref(0)
 
 // ── Modal ──
 const showModal = ref(false)
@@ -353,36 +297,6 @@ const selectedExistingProviderConfig = computed(() => {
   if (editId.value || !tForm.provider_id) return null
   return userToolConfigs.value.find(c => c.provider_id === tForm.provider_id) ?? null
 })
-
-// ── Static data ──
-const infra = [
-  { name: '向量数据库', detail: 'PostgreSQL (pgvector)', status: '运行中', variant: 'success' as const },
-  { name: 'RAG 引擎', detail: 'Eino Framework', status: '运行中', variant: 'success' as const },
-  { name: '默认 AI 模型', detail: 'GPT-4 (系统级)', status: '系统配置', variant: 'neutral' as const },
-]
-const intg = computed(() => [
-  {
-    name: '钉钉',
-    desc: '通过钉钉 Web 扫码绑定后同步知识库',
-    synced: `${dingtalkSyncCount.value} 个知识库`,
-    status: dingtalkBound.value ? '已连接' : '未连接',
-  },
-])
-
-// loadDingTalkIntegrationStatus 读取钉钉绑定和同步源状态
-async function loadDingTalkIntegrationStatus() {
-  try {
-    const [bindingRes, sourcesRes] = await Promise.all([
-      getDingTalkBinding(),
-      listSyncSources(),
-    ])
-    dingtalkBound.value = Boolean(bindingRes.data?.bound)
-    dingtalkSyncCount.value = (sourcesRes.data || []).filter(item => item.platform === 'dingtalk').length
-  } catch {
-    dingtalkBound.value = false
-    dingtalkSyncCount.value = 0
-  }
-}
 
 // ── Actions ──
 function openModelCreate() { modalMode.value = 'model'; editId.value = null; mForm.api_format = 'openai'; mForm.base_url = ''; mForm.model_id = ''; mForm.api_key = ''; cfgText.value = ''; showModal.value = true }
@@ -471,5 +385,5 @@ async function doSave() {
   }
 }
 
-onMounted(() => { loadModels(); loadTools(); loadDingTalkIntegrationStatus() })
+onMounted(() => { loadModels(); loadTools() })
 </script>

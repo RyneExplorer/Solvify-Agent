@@ -8,7 +8,6 @@ import (
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/repository"
 	apperrors "solvify-agent/pkg/errors"
-	"solvify-agent/pkg/utils"
 )
 
 // modelService 封装系统模型管理业务用例实现
@@ -129,7 +128,7 @@ func toModelInfo(m entity.Model) responsedto.ModelInfo {
 		Provider:  m.Provider,
 		ModelID:   m.ModelID,
 		BaseURL:   m.BaseURL,
-		APIKey:    utils.MaskAPIKey(m.APIKey),
+		APIKey:    m.APIKey,
 		IsEnabled: m.IsEnabled,
 	}
 }

@@ -102,14 +102,6 @@
       </div>
     </div>
 
-    <!-- KB tab -->
-    <div v-if="activeTab === 'kb'">
-      <AppCard>
-        <h3 class="text-base font-semibold text-slate-900 mb-3" style="font-family: 'Space Grotesk', sans-serif;">知识库全局管理</h3>
-        <p class="text-sm text-slate-400">查看所有租户的知识库状态，进行存储配额管理和异常排查。</p>
-      </AppCard>
-    </div>
-
     <!-- Models tab -->
     <div v-if="activeTab === 'models'">
       <div class="flex justify-between mb-4">
@@ -221,92 +213,6 @@
             </tr>
           </tbody>
         </table>
-      </AppCard>
-    </div>
-
-    <!-- Logs tab -->
-    <div v-if="activeTab === 'logs'">
-      <div class="flex gap-2 mb-4">
-        <AppSelect v-model="logLevel" class="w-32">
-          <el-option value="全部级别" label="全部级别" /><el-option value="ERROR" label="ERROR" /><el-option value="WARN" label="WARN" /><el-option value="INFO" label="INFO" />
-        </AppSelect>
-        <AppSelect v-model="logModule" class="w-32">
-          <el-option value="全部模块" label="全部模块" /><el-option value="Auth" label="Auth" /><el-option value="KB" label="KB" /><el-option value="LLM" label="LLM" /><el-option value="Search" label="Search" /><el-option value="Doc" label="Doc" />
-        </AppSelect>
-        <SearchInput v-model="logSearch" placeholder="搜索日志..." wrapper-class="w-80" />
-      </div>
-      <AppCard class="!p-0 overflow-hidden">
-        <table class="w-full text-sm border-collapse">
-          <thead>
-            <tr class="bg-slate-50 border-b border-slate-200">
-              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">时间</th>
-              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">级别</th>
-              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">模块</th>
-              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">消息</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(log, i) in logs" :key="i" class="border-b border-slate-100 last:border-b-0">
-              <td class="px-4 py-3 text-xs text-slate-900" style="font-family: 'JetBrains Mono', monospace;">{{ log.time }}</td>
-              <td class="px-4 py-3">
-                <AppBadge :variant="log.level === 'ERROR' ? 'error' : log.level === 'WARN' ? 'warning' : 'neutral'">
-                  {{ log.level }}
-                </AppBadge>
-              </td>
-              <td class="px-4 py-3 text-slate-900">{{ log.module }}</td>
-              <td class="px-4 py-3 text-slate-900">{{ log.message }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </AppCard>
-    </div>
-
-    <!-- Vector DB tab -->
-    <div v-if="activeTab === 'vector'">
-      <AppCard>
-        <h3 class="text-base font-semibold text-slate-900 mb-2" style="font-family: 'Space Grotesk', sans-serif;">向量数据库配置</h3>
-        <p class="text-[13px] text-slate-400 mb-4">配置系统使用的向量数据库引擎，修改后需重启服务生效。</p>
-        <div class="mb-4">
-          <label class="block text-[13px] font-medium text-slate-600 mb-1.5">引擎类型</label>
-          <AppSelect v-model="vectorEngine" class="w-full">
-            <el-option value="PostgreSQL (pgvector)" label="PostgreSQL (pgvector)" /><el-option value="Elasticsearch" label="Elasticsearch" /><el-option value="Milvus" label="Milvus" /><el-option value="Weaviate" label="Weaviate" />
-          </AppSelect>
-        </div>
-        <div class="mb-5">
-          <label class="block text-[13px] font-medium text-slate-600 mb-1.5">连接地址</label>
-          <input placeholder="postgresql://localhost:5432/solvify" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-3 text-slate-900 outline-none transition-colors focus:border-slate-900" />
-        </div>
-        <AppButton class="mr-2">测试连接</AppButton>
-        <AppButton variant="secondary">保存</AppButton>
-      </AppCard>
-    </div>
-
-    <!-- Integration tab -->
-    <div v-if="activeTab === 'integration'">
-      <AppCard>
-        <h3 class="text-base font-semibold text-slate-900 mb-2" style="font-family: 'Space Grotesk', sans-serif;">第三方平台集成</h3>
-        <p class="text-[13px] text-slate-400 mb-4">配置钉钉同源同步参数，实现知识库自动同步。</p>
-        <div v-for="(item, i) in adminIntegrations" :key="item.name"
-          class="flex justify-between items-center p-3.5 border border-slate-200 rounded-xl"
-          :class="{ 'mb-2': i < adminIntegrations.length - 1 }"
-        >
-          <div>
-            <div class="text-sm font-medium text-slate-900">{{ item.name }}</div>
-            <div class="text-xs text-slate-400 mt-0.5">{{ item.desc }}</div>
-          </div>
-          <div class="flex items-center gap-2">
-            <AppBadge :variant="item.status === '已连接' ? 'success' : 'neutral'">{{ item.status }}</AppBadge>
-            <AppButton variant="secondary" size="sm">配置</AppButton>
-          </div>
-        </div>
-      </AppCard>
-    </div>
-
-    <!-- Config tab -->
-    <div v-if="activeTab === 'config'">
-      <AppCard>
-        <h3 class="text-base font-semibold text-slate-900 mb-3" style="font-family: 'Space Grotesk', sans-serif;">全局配置管理</h3>
-        <p class="text-sm text-slate-400">管理全局系统配置参数，包括存储配额、调用限制等。</p>
       </AppCard>
     </div>
 
@@ -616,21 +522,12 @@ const sessionPageSize = ref(10)
 const sessionTotal = ref(0)
 const modelSearch = ref('')
 const toolSearch = ref('')
-const logLevel = ref('全部级别')
-const logModule = ref('全部模块')
-const logSearch = ref('')
-const vectorEngine = ref('PostgreSQL (pgvector)')
 
 const adminTabs = [
   { key: 'users', label: '用户管理' },
   { key: 'sessions', label: '会话管理' },
-  { key: 'kb', label: '知识库管理' },
   { key: 'models', label: '模型管理' },
   { key: 'tools', label: '工具管理' },
-  { key: 'logs', label: '系统日志' },
-  { key: 'vector', label: '向量数据库' },
-  { key: 'integration', label: '平台集成' },
-  { key: 'config', label: '配置管理' },
 ]
 
 const users = ref<AdminUser[]>([])
@@ -641,18 +538,6 @@ const sessionStatusOptions = [
   { value: 'active', label: '活跃' },
   { value: 'archived', label: '已归档' },
   { value: 'closed', label: '已关闭' },
-]
-
-const logs = [
-  { time: '2024-01-15 14:32:01', level: 'INFO', module: 'Auth', message: '用户 zhangsan 登录成功' },
-  { time: '2024-01-15 14:30:15', level: 'INFO', module: 'KB', message: '知识库「技术文档库」新增 5 篇文档' },
-  { time: '2024-01-15 14:28:44', level: 'WARN', module: 'LLM', message: 'GPT-4 API 调用超时，已降级到 GPT-3.5' },
-  { time: '2024-01-15 14:25:10', level: 'ERROR', module: 'Search', message: '联网搜索 API 返回 429 错误' },
-  { time: '2024-01-15 14:20:00', level: 'INFO', module: 'Doc', message: '文档「架构设计.pdf」处理完成' },
-]
-
-const adminIntegrations = [
-  { name: '钉钉', desc: '通过钉钉 Web 扫码绑定后同步知识库', status: '已连接' },
 ]
 
 // ── Models ──
