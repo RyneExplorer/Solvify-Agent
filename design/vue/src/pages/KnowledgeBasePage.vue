@@ -276,7 +276,7 @@ async function submitForm() {
 // 删除知识库
 async function confirmDelete(kb: KnowledgeBase) {
   try {
-    await ElMessageBox.confirm(`确认删除「${kb.name}」吗？删除后会进入软删除状态。`, '删除知识库', {
+    await ElMessageBox.confirm(`确认删除「${kb.name}」吗？`, '删除知识库', {
       confirmButtonText: '删除',
       cancelButtonText: '取消',
       type: 'warning',

@@ -16,19 +16,20 @@ const defaultConfigPath = "configs/config.yaml"
 
 // Config 描述应用全局配置
 type Config struct {
-	App       AppConfig       `mapstructure:"app"`
-	Log       LogConfig       `mapstructure:"log"`
-	CORS      CORSConfig      `mapstructure:"cors"`
-	Agent     AgentConfig     `mapstructure:"agent"`
-	LLM       LLMConfig       `mapstructure:"llm"`
-	Embedding EmbeddingConfig `mapstructure:"embedding"`
-	RAG       RAGConfig       `mapstructure:"rag"`
-	Tools     ToolsConfig     `mapstructure:"tools"`
-	DingTalk  DingTalkConfig  `mapstructure:"dingtalk"`
-	Server    ServerConfig    `mapstructure:"server"`
-	Database  DatabaseConfig  `mapstructure:"database"`
-	JWT       JWTConfig       `mapstructure:"jwt"`
-	Email     EmailConfig     `mapstructure:"email"`
+	App            AppConfig            `mapstructure:"app"`
+	Log            LogConfig            `mapstructure:"log"`
+	CORS           CORSConfig           `mapstructure:"cors"`
+	Agent          AgentConfig          `mapstructure:"agent"`
+	LLM            LLMConfig            `mapstructure:"llm"`
+	Embedding      EmbeddingConfig      `mapstructure:"embedding"`
+	RAG            RAGConfig            `mapstructure:"rag"`
+	Tools          ToolsConfig          `mapstructure:"tools"`
+	DingTalk       DingTalkConfig       `mapstructure:"dingtalk"`
+	DocumentParser DocumentParserConfig `mapstructure:"document_parser"`
+	Server         ServerConfig         `mapstructure:"server"`
+	Database       DatabaseConfig       `mapstructure:"database"`
+	JWT            JWTConfig            `mapstructure:"jwt"`
+	Email          EmailConfig          `mapstructure:"email"`
 }
 
 // AppConfig 描述应用基础信息
@@ -134,6 +135,13 @@ type DingTalkConfig struct {
 	AppKey           string `mapstructure:"app_key"`
 	AppSecret        string `mapstructure:"app_secret"`
 	OAuthRedirectURI string `mapstructure:"oauth_redirect_uri"`
+}
+
+// DocumentParserConfig 描述文档解析器配置
+type DocumentParserConfig struct {
+	PythonPath     string `mapstructure:"python_path"`
+	ScriptPath     string `mapstructure:"script_path"`
+	TimeoutSeconds int    `mapstructure:"timeout_seconds"`
 }
 
 // ServerConfig 描述进程关闭配置
@@ -292,6 +300,11 @@ func Default() *Config {
 		DingTalk: DingTalkConfig{
 			OAuthRedirectURI: "http://localhost:5173/dingtalk/bind",
 		},
+		DocumentParser: DocumentParserConfig{
+			PythonPath:     "python",
+			ScriptPath:     "pkg/documentparser/python/parse_document.py",
+			TimeoutSeconds: 30,
+		},
 		Server: ServerConfig{
 			Host:                   "",
 			Port:                   8080,
@@ -362,6 +375,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Database.Redis.PoolSize <= 0 {
 		return errors.New("database.redis.pool_size 必须大于 0")
+	}
+	if c.DocumentParser.TimeoutSeconds <= 0 {
+		return errors.New("document_parser.timeout_seconds 必须大于 0")
 	}
 	return nil
 }
@@ -460,6 +476,11 @@ func applyEnv(cfg *Config) {
 	cfg.DingTalk.AppKey = getEnv("DINGTALK_APP_KEY", cfg.DingTalk.AppKey)
 	cfg.DingTalk.AppSecret = getEnv("DINGTALK_APP_SECRET", cfg.DingTalk.AppSecret)
 	cfg.DingTalk.OAuthRedirectURI = getEnv("DINGTALK_OAUTH_REDIRECT_URI", cfg.DingTalk.OAuthRedirectURI)
+	cfg.DocumentParser.PythonPath = getEnv("DOCUMENT_PARSER_PYTHON_PATH", cfg.DocumentParser.PythonPath)
+	cfg.DocumentParser.ScriptPath = getEnv("DOCUMENT_PARSER_SCRIPT_PATH", cfg.DocumentParser.ScriptPath)
+	if value := os.Getenv("DOCUMENT_PARSER_TIMEOUT_SECONDS"); value != "" {
+		cfg.DocumentParser.TimeoutSeconds = parseInt(value, cfg.DocumentParser.TimeoutSeconds)
+	}
 	if value := os.Getenv("SHUTDOWN_TIMEOUT_SECONDS"); value != "" {
 		cfg.Server.ShutdownTimeoutSeconds = parseInt(value, cfg.Server.ShutdownTimeoutSeconds)
 	}

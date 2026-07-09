@@ -4,11 +4,14 @@ import (
 	"context"
 	"time"
 
+	"go.uber.org/zap"
+
 	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/repository"
 	apperrors "solvify-agent/pkg/errors"
+	"solvify-agent/pkg/logger"
 )
 
 const (
@@ -36,6 +39,10 @@ func (s *knowledgeBaseService) Create(ctx context.Context, userID string, req re
 		return dto.KnowledgeBaseResponse{}, err
 	}
 	if exists {
+		logger.Warn("知识库创建失败，名称已存在",
+			zap.String("name", req.Name),
+			zap.String("category", req.Category),
+		)
 		return dto.KnowledgeBaseResponse{}, apperrors.NewDefault(apperrors.CodeKnowledgeBaseDuplicated)
 	}
 
@@ -50,6 +57,11 @@ func (s *knowledgeBaseService) Create(ctx context.Context, userID string, req re
 	if err := s.knowledgeBaseRepo.Create(ctx, &kb); err != nil {
 		return dto.KnowledgeBaseResponse{}, err
 	}
+	logger.Info("知识库创建成功",
+		zap.String("name", kb.Name),
+		zap.String("category", kb.Category),
+		zap.String("source_type", kb.SourceType),
+	)
 	return knowledgeBaseResponse(kb), nil
 }
 
@@ -85,11 +97,19 @@ func (s *knowledgeBaseService) Update(ctx context.Context, userID, kbID string, 
 	if !ok {
 		return dto.KnowledgeBaseResponse{}, apperrors.NewDefault(apperrors.CodeKnowledgeBaseNotFound)
 	}
+	logger.Info("知识库更新成功",
+		zap.String("name", req.Name),
+		zap.String("category", req.Category),
+	)
 	return s.Detail(ctx, userID, kbID)
 }
 
 // Delete 软删除知识库
 func (s *knowledgeBaseService) Delete(ctx context.Context, userID, kbID string) error {
+	kb, err := s.findNormalKnowledgeBase(ctx, userID, kbID)
+	if err != nil {
+		return err
+	}
 	now := time.Now()
 	expiredAt := now.AddDate(0, 0, deleteRetentionDays)
 	ok, err := s.knowledgeBaseRepo.SoftDelete(ctx, userID, kbID, knowledgeBaseStatusNormal, knowledgeBaseStatusDeleted, now, expiredAt)
@@ -99,6 +119,11 @@ func (s *knowledgeBaseService) Delete(ctx context.Context, userID, kbID string) 
 	if !ok {
 		return apperrors.NewDefault(apperrors.CodeKnowledgeBaseNotFound)
 	}
+	logger.Info("知识库软删除成功",
+		zap.String("name", kb.Name),
+		zap.String("category", kb.Category),
+		zap.Time("delete_expired_at", expiredAt),
+	)
 	return nil
 }
 

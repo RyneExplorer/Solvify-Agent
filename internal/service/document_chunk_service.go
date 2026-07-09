@@ -20,10 +20,6 @@ const (
 	documentKeywordLimit     = 20
 )
 
-var processableTextFileTypes = map[string]struct{}{
-	"txt": {}, "md": {}, "markdown": {}, "html": {}, "csv": {}, "json": {},
-}
-
 var documentStopWords = map[string]struct{}{
 	"我们": {}, "你们": {}, "他们": {}, "这个": {}, "那个": {}, "可以": {}, "需要": {},
 	"进行": {}, "如果": {}, "时候": {}, "一个": {}, "相关": {}, "内容": {}, "文档": {},
@@ -44,12 +40,6 @@ type documentChunkService struct {
 // NewDocumentChunkService 创建文档分块服务
 func NewDocumentChunkService(embeddingService EmbeddingServiceInterface) DocumentChunkServiceInterface {
 	return &documentChunkService{embeddingService: embeddingService}
-}
-
-// SupportsFileType 判断文件类型是否支持正文处理
-func (s *documentChunkService) SupportsFileType(fileType string) bool {
-	_, ok := processableTextFileTypes[fileType]
-	return ok
 }
 
 // NormalizeContent 规整文档正文

@@ -26,29 +26,29 @@
           <span>Markdown 编辑器</span>
           <span>{{ content.length }} 字符</span>
         </div>
-        <div class="flex min-h-0 flex-1 flex-col gap-5 p-5">
+        <div class="flex min-h-0 flex-1 flex-col gap-2 p-3">
           <div>
-            <label class="block text-sm font-medium text-slate-700 mb-2">文档标题</label>
+            <label class="block text-xs font-medium text-slate-700 mb-0.5">文档标题</label>
             <input
               v-model="documentTitle"
               readonly
-              class="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 outline-none"
+              class="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm text-slate-700 outline-none"
             >
-            <p class="text-xs text-slate-400 mt-2 mb-0">当前后端仅保存正文版本，标题来自文档记录</p>
+            <p class="text-[11px] text-slate-400 mt-0.5 mb-0">当前后端仅保存正文版本，标题来自文档记录</p>
           </div>
 
           <div>
-            <label class="block text-sm font-medium text-slate-700 mb-2">变更说明</label>
+            <label class="block text-xs font-medium text-slate-700 mb-0.5">变更说明</label>
             <input
               v-model="changeSummary"
               maxlength="120"
               placeholder="例如：修正文档正文、补充说明"
-              class="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none focus:border-slate-900"
+              class="w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-900 outline-none focus:border-slate-900"
             >
           </div>
 
           <div class="flex min-h-0 flex-1 flex-col">
-            <label class="block text-sm font-medium text-slate-700 mb-2">文档内容</label>
+            <label class="block text-sm font-medium text-slate-700 mb-1">文档内容</label>
             <textarea
               v-model="content"
               class="min-h-0 flex-1 w-full resize-none rounded-xl border border-slate-200 bg-white px-4 py-4 text-sm leading-7 text-slate-800 outline-none focus:border-slate-900"

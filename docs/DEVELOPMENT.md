@@ -7,6 +7,7 @@
 ### 环境依赖
 
 - Go 1.26+
+- Python 3.10+（docx/pdf 文档解析）
 - PostgreSQL 15+（需启用 pgvector 扩展）
 - Redis 7+
 - （可选）钉钉企业应用凭证
@@ -16,6 +17,7 @@
 ```bash
 # 安装依赖
 go mod tidy
+pip install -r pkg/documentparser/python/requirements.txt
 
 # 初始化数据库（创建表结构 + 种子数据）
 go run cmd/seed/main.go
@@ -221,7 +223,8 @@ a.knowledgeBaseService = service.NewKnowledgeBaseService(knowledgeBaseRepo)
 
 - 路由：上传、列表、下载、删除、处理、版本管理、重建索引
 - 状态流转：1 已上传 → 2 处理中 → 3 已就绪 / 4 处理失败 / 5 已删除
-- 支持格式：PDF / Word / Txt / Markdown / HTML / CSV / Excel / PPT / JSON / 图片
+- 可解析格式：Txt / Markdown / HTML / CSV / JSON / DOCX / PDF（PDF 仅支持可提取文本）
+- 可上传但暂不解析：DOC / Excel / PPT / 图片
 - 处理管线：解析 → 分块（Chunk）→ 向量化（Embedding）→ 建立索引
 - 单文件 ≤ 100MB，自动计算 Token 数
 

@@ -60,7 +60,7 @@
       @drop.prevent="handleFileDrop"
     >
       <div class="text-base font-medium text-slate-900">{{ uploadPanelTitle }}</div>
-      <div class="text-[13px] text-slate-400 mt-2">支持 PDF/Word/Txt/Markdown/HTML/CSV/Excel/PPT/JSON/图片，单文件最大 100MB</div>
+      <div class="text-[13px] text-slate-400 mt-2">支持 TXT/Markdown/HTML/CSV/JSON/DOCX/PDF 文件类型，单文件最大 100MB</div>
       <p v-if="uploadError" class="text-xs text-red-500 mt-3 mb-0">{{ uploadError }}</p>
       <p v-if="lastJob" class="text-xs text-slate-500 mt-3 mb-0">
         已创建处理任务：{{ shortID(lastJob.id) }}，当前状态 {{ jobStatusText(lastJob.status) }}
@@ -70,7 +70,12 @@
     <AppCard class="!p-0 overflow-visible">
       <div v-if="documentsLoading" class="px-4 py-10 text-center text-sm text-slate-500">正在加载文档列表</div>
       <div v-else-if="documentsError" class="px-4 py-10 text-center text-sm text-red-500">{{ documentsError }}</div>
-      <div v-else-if="!knowledgeBaseID" class="px-4 py-10 text-center text-sm text-slate-500">请先从知识库页面进入文档管理</div>
+      <div v-else-if="!knowledgeBaseID" class="px-4 py-10 text-center text-sm text-slate-500">
+        <div class="flex flex-col items-center gap-3">
+          <div>请先从知识库页面进入文档管理</div>
+          <AppButton variant="secondary" size="sm" @click="goToKnowledgeBases">去选择知识库</AppButton>
+        </div>
+      </div>
       <div v-else-if="documents.length === 0" class="px-4 py-10 text-center text-sm text-slate-500">当前知识库还没有已导入文档</div>
       <table v-else class="w-full text-sm border-collapse">
         <thead>
@@ -115,7 +120,7 @@
                   >
                     查看原文
                   </a>
-                  <button class="menu-item" @click="openJobsFromMenu(doc)">任务历史</button>
+                  <button class="menu-item" @click="openJobsFromMenu(doc)">文档历史</button>
                   <button
                     v-if="doc.status === documentStatusFailed"
                     class="menu-item"
@@ -210,37 +215,64 @@
       <div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden">
         <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
           <div>
-            <h3 class="text-base font-semibold text-slate-900 m-0">处理任务历史</h3>
+            <h3 class="text-base font-semibold text-slate-900 m-0">文档历史</h3>
             <p class="text-xs text-slate-400 mt-1 mb-0">{{ selectedDocument?.file_name }}</p>
           </div>
           <AppButton variant="ghost" size="sm" @click="closeJobs">关闭</AppButton>
         </div>
-        <div class="p-5">
-          <div v-if="jobsLoading" class="text-sm text-slate-500">正在加载任务记录</div>
-          <div v-else-if="jobsError" class="text-sm text-red-500">{{ jobsError }}</div>
-          <div v-else-if="jobs.length === 0" class="text-sm text-slate-500">暂无任务记录</div>
-          <div v-else class="space-y-3">
-            <div v-for="job in jobs" :key="job.id" class="border border-slate-100 rounded-xl px-4 py-3">
-              <div class="flex items-center justify-between gap-3">
-                <div class="text-sm font-medium text-slate-900">{{ job.job_type }}</div>
-                <AppBadge :variant="jobStatusVariant(job.status)">{{ jobStatusText(job.status) }}</AppBadge>
-              </div>
-              <div class="text-xs text-slate-400 mt-2">
-                创建：{{ formatDate(job.created_at) }}
-                <span v-if="job.finished_at"> · 完成：{{ formatDate(job.finished_at) }}</span>
-              </div>
-              <div v-if="job.error_message" class="text-xs text-red-500 mt-2">{{ job.error_message }}</div>
+        <div class="max-h-[70vh] overflow-y-auto p-5">
+          <section>
+            <div class="mb-3 flex items-center justify-between gap-3">
+              <h4 class="m-0 text-sm font-semibold text-slate-900">版本历史</h4>
+              <span class="text-xs text-slate-400">{{ versions.length }} 个版本</span>
             </div>
-          </div>
+            <div v-if="versionsLoading" class="text-sm text-slate-500">正在加载版本记录</div>
+            <div v-else-if="versionsError" class="text-sm text-red-500">{{ versionsError }}</div>
+            <div v-else-if="versions.length === 0" class="rounded-xl border border-slate-100 px-4 py-3 text-sm text-slate-500">暂无版本记录</div>
+            <div v-else class="space-y-3">
+              <div v-for="version in versions" :key="version.id" class="rounded-xl border border-slate-100 px-4 py-3">
+                <div class="flex items-start justify-between gap-3">
+                  <div>
+                    <div class="text-sm font-medium text-slate-900">v{{ version.version_no }}</div>
+                    <div class="mt-1 text-sm text-slate-600">{{ versionChangeSummary(version.change_summary) }}</div>
+                  </div>
+                  <span class="shrink-0 text-xs text-slate-400">{{ formatDate(version.created_at) }}</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="mt-5 border-t border-slate-100 pt-5">
+            <div class="mb-3 flex items-center justify-between gap-3">
+              <h4 class="m-0 text-sm font-semibold text-slate-900">处理任务</h4>
+              <span class="text-xs text-slate-400">{{ jobs.length }} 条记录</span>
+            </div>
+            <div v-if="jobsLoading" class="text-sm text-slate-500">正在加载任务记录</div>
+            <div v-else-if="jobsError" class="text-sm text-red-500">{{ jobsError }}</div>
+            <div v-else-if="jobs.length === 0" class="rounded-xl border border-slate-100 px-4 py-3 text-sm text-slate-500">暂无任务记录</div>
+            <div v-else class="space-y-3">
+              <div v-for="job in jobs" :key="job.id" class="border border-slate-100 rounded-xl px-4 py-3">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="text-sm font-medium text-slate-900">{{ job.job_type }}</div>
+                  <AppBadge :variant="jobStatusVariant(job.status)">{{ jobStatusText(job.status) }}</AppBadge>
+                </div>
+                <div class="text-xs text-slate-400 mt-2">
+                  创建：{{ formatDate(job.created_at) }}
+                  <span v-if="job.finished_at"> · 完成：{{ formatDate(job.finished_at) }}</span>
+                </div>
+                <div v-if="job.error_message" class="text-xs text-red-500 mt-2">{{ job.error_message }}</div>
+              </div>
+            </div>
+          </section>
         </div>
       </div>
     </div>
 
     <div v-if="deleteDialogOpen" class="fixed inset-0 bg-slate-900/30 flex items-center justify-center px-4 z-50" @click.self="closeDeleteDialog">
-      <div class="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
+      <div class="bg-white rounded-2xl shadow-xl w-full max-w-sm overflow-hidden">
         <div class="px-5 py-4 border-b border-slate-100">
           <h3 class="text-base font-semibold text-slate-900 m-0">删除文档</h3>
-          <p class="text-sm text-slate-500 mt-2 mb-0">确认删除「{{ deletingDocument?.file_name || deletingDocument?.title }}」吗？删除后文档会进入软删除状态。</p>
+          <p class="text-sm text-slate-500 mt-2 mb-0">确认删除「{{ deletingDocument?.file_name || deletingDocument?.title }}」吗？</p>
         </div>
         <div v-if="deleteError" class="mx-5 mt-4 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-600">{{ deleteError }}</div>
         <div class="px-5 py-4 flex justify-end gap-2">
@@ -255,13 +287,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { deleteDocument, listDocumentJobs, listDocuments, processDocument, uploadDocument } from '@/api/document'
+import { deleteDocument, getDocumentJob, listDocumentJobs, listDocumentVersions, listDocuments, processDocument, uploadDocument } from '@/api/document'
 import { getKnowledgeBase } from '@/api/knowledge'
 import { getStorageQuota } from '@/api/storage'
 import { importSyncItem, listSyncItems, listSyncSources } from '@/api/sync'
-import type { Document, DocumentProcessingJob } from '@/types/document'
+import type { Document, DocumentProcessingJob, DocumentVersionListItem } from '@/types/document'
 import type { KnowledgeBase } from '@/types/knowledge'
 import type { StorageQuota } from '@/types/storage'
 import type { SyncItem } from '@/types/sync'
@@ -269,7 +301,12 @@ import AppCard from '../components/ui/AppCard.vue'
 import AppButton from '../components/ui/AppButton.vue'
 import AppBadge from '../components/ui/AppBadge.vue'
 
+const documentStatusUploaded = 1
+const documentStatusProcessing = 2
 const documentStatusFailed = 4
+const documentJobStatusPending = 1
+const documentJobStatusRunning = 2
+const documentPollingIntervalMs = 2000
 
 const route = useRoute()
 const router = useRouter()
@@ -289,6 +326,9 @@ const jobsPanelOpen = ref(false)
 const jobsLoading = ref(false)
 const jobsError = ref('')
 const jobs = ref<DocumentProcessingJob[]>([])
+const versionsLoading = ref(false)
+const versionsError = ref('')
+const versions = ref<DocumentVersionListItem[]>([])
 const selectedDocument = ref<Document | null>(null)
 const activeMenuID = ref('')
 const deleteDialogOpen = ref(false)
@@ -302,6 +342,7 @@ const syncItemsLoading = ref(false)
 const syncItemsError = ref('')
 const syncSourceID = ref('')
 const importingItemID = ref('')
+let documentPollingTimer: ReturnType<typeof window.setTimeout> | null = null
 
 const knowledgeBaseID = computed(() => {
   const value = route.query.knowledge_base_id
@@ -392,20 +433,73 @@ async function loadKnowledgeBaseDetail() {
 }
 
 // loadDocuments 读取当前知识库文档列表
-async function loadDocuments() {
+async function loadDocuments(options: { silent?: boolean; skipPollingSync?: boolean } = {}) {
   if (!knowledgeBaseID.value) {
     documents.value = []
+    stopDocumentPolling()
     return
   }
-  documentsLoading.value = true
-  documentsError.value = ''
+  if (!options.silent) {
+    documentsLoading.value = true
+    documentsError.value = ''
+  }
   try {
     const res = await listDocuments(knowledgeBaseID.value)
     documents.value = res.data
   } catch (error) {
-    documentsError.value = error instanceof Error ? error.message : '读取文档列表失败'
+    if (!options.silent) {
+      documentsError.value = error instanceof Error ? error.message : '读取文档列表失败'
+    }
   } finally {
-    documentsLoading.value = false
+    if (!options.silent) {
+      documentsLoading.value = false
+    }
+    if (!options.skipPollingSync) {
+      syncDocumentPolling()
+    }
+  }
+}
+
+// syncDocumentPolling 根据文档处理状态启动或停止轮询
+function syncDocumentPolling() {
+  if (!knowledgeBaseID.value || !documents.value.some(item => isDocumentProcessing(item.status))) {
+    stopDocumentPolling()
+    return
+  }
+  startDocumentPolling()
+}
+
+// startDocumentPolling 定时刷新处理中状态
+function startDocumentPolling() {
+  if (documentPollingTimer) return
+  documentPollingTimer = window.setTimeout(async () => {
+    documentPollingTimer = null
+    await loadDocuments({ silent: true, skipPollingSync: true })
+    await refreshLastJob()
+    if (jobsPanelOpen.value && selectedDocument.value) {
+      const latest = documents.value.find(item => item.id === selectedDocument.value?.id)
+      if (latest) selectedDocument.value = latest
+      await loadHistory(selectedDocument.value)
+    }
+    syncDocumentPolling()
+  }, documentPollingIntervalMs)
+}
+
+// stopDocumentPolling 停止文档状态轮询
+function stopDocumentPolling() {
+  if (!documentPollingTimer) return
+  window.clearTimeout(documentPollingTimer)
+  documentPollingTimer = null
+}
+
+// refreshLastJob 刷新上传提示中的最近任务状态
+async function refreshLastJob() {
+  if (!lastJob.value || !isJobProcessing(lastJob.value.status)) return
+  try {
+    const res = await getDocumentJob(lastJob.value.id)
+    lastJob.value = res.data
+  } catch {
+    // 轮询失败不打断列表状态刷新
   }
 }
 
@@ -480,7 +574,7 @@ async function retryProcess(doc: Document) {
   retryingID.value = doc.id
   try {
     lastJob.value = await processDocument(doc.id).then(res => res.data)
-    await Promise.all([loadDocuments(), loadJobs(doc)])
+    await Promise.all([loadDocuments(), loadHistory(doc)])
   } catch (error) {
     uploadError.value = error instanceof Error ? error.message : '重试处理失败'
   } finally {
@@ -506,6 +600,11 @@ async function importDingTalkItem(item: SyncItem) {
 // openImportedDocument 打开已导入文档
 function openImportedDocument(documentID: string) {
   router.push({ path: `/docs/${documentID}/edit`, query: { knowledge_base_id: knowledgeBaseID.value } })
+}
+
+// goToKnowledgeBases 跳转到知识库管理页面
+function goToKnowledgeBases() {
+  router.push({ path: '/kb' })
 }
 
 // editDocument 跳转到文档编辑页面
@@ -547,7 +646,7 @@ function closeDeleteDialog() {
   deleteError.value = ''
 }
 
-// confirmDeleteDocument 确认软删除文档
+// confirmDeleteDocument 确认删除文档
 async function confirmDeleteDocument() {
   const doc = deletingDocument.value
   if (!doc) return
@@ -568,7 +667,31 @@ async function confirmDeleteDocument() {
 async function openJobs(doc: Document) {
   selectedDocument.value = doc
   jobsPanelOpen.value = true
-  await loadJobs(doc)
+  await loadHistory(doc)
+}
+
+// loadHistory 读取文档版本历史和处理任务历史
+async function loadHistory(doc: Document) {
+  await Promise.all([loadVersions(doc), loadJobs(doc)])
+}
+
+// loadVersions 读取文档版本历史
+async function loadVersions(doc: Document) {
+  versionsLoading.value = true
+  versionsError.value = ''
+  try {
+    const res = await listDocumentVersions(doc.id)
+    versions.value = res.data
+  } catch (error) {
+    versionsError.value = error instanceof Error ? error.message : '读取版本记录失败'
+  } finally {
+    versionsLoading.value = false
+  }
+}
+
+// versionChangeSummary 规整版本变更说明展示
+function versionChangeSummary(value: string) {
+  return value.trim() || '未填写变更说明'
 }
 
 // loadJobs 读取文档处理任务历史
@@ -590,6 +713,9 @@ function closeJobs() {
   jobsPanelOpen.value = false
   selectedDocument.value = null
   jobs.value = []
+  versions.value = []
+  jobsError.value = ''
+  versionsError.value = ''
 }
 
 // documentStatusText 转换文档状态文案
@@ -612,6 +738,11 @@ function documentStatusVariant(status: number): 'success' | 'warning' | 'error' 
   return 'neutral'
 }
 
+// isDocumentProcessing 判断文档是否仍在处理链路中
+function isDocumentProcessing(status: number) {
+  return status === documentStatusUploaded || status === documentStatusProcessing
+}
+
 // jobStatusText 转换任务状态文案
 function jobStatusText(status: number) {
   const statusMap: Record<number, string> = {
@@ -629,6 +760,11 @@ function jobStatusVariant(status: number): 'success' | 'warning' | 'error' | 'ne
   if (status === 4) return 'error'
   if (status === 1 || status === 2) return 'warning'
   return 'neutral'
+}
+
+// isJobProcessing 判断处理任务是否仍未结束
+function isJobProcessing(status: number) {
+  return status === documentJobStatusPending || status === documentJobStatusRunning
 }
 
 // fileTypeText 规整文件类型展示
@@ -714,7 +850,12 @@ onMounted(() => {
   loadSyncItems()
 })
 
+onUnmounted(() => {
+  stopDocumentPolling()
+})
+
 watch(knowledgeBaseID, () => {
+  stopDocumentPolling()
   uploadError.value = ''
   lastJob.value = null
   activeMenuID.value = ''
