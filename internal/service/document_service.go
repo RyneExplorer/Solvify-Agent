@@ -8,16 +8,20 @@ import (
 	"mime/multipart"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/repository"
+	"solvify-agent/pkg/documentparser"
 	apperrors "solvify-agent/pkg/errors"
+	"solvify-agent/pkg/logger"
 )
 
 const (
@@ -48,6 +52,8 @@ var allowedDocumentFileTypes = map[string]struct{}{
 	"png": {}, "jpg": {}, "jpeg": {},
 }
 
+var excessiveBlankLineRegex = regexp.MustCompile(`\n{3,}`)
+
 // documentService 封装文档业务用例实现
 type documentService struct {
 	knowledgeBaseRepo   repository.KnowledgeBaseRepository
@@ -56,6 +62,7 @@ type documentService struct {
 	documentJobRepo     repository.DocumentProcessingJobRepository
 	storageQuotaRepo    repository.StorageQuotaRepository
 	chunkService        DocumentChunkServiceInterface
+	textExtractor       documentparser.TextExtractor
 	uploadRoot          string
 }
 
@@ -67,6 +74,7 @@ func NewDocumentServiceWithChunkService(
 	documentJobRepo repository.DocumentProcessingJobRepository,
 	storageQuotaRepo repository.StorageQuotaRepository,
 	chunkService DocumentChunkServiceInterface,
+	textExtractor documentparser.TextExtractor,
 	uploadRoot string,
 ) DocumentServiceInterface {
 	return &documentService{
@@ -76,6 +84,7 @@ func NewDocumentServiceWithChunkService(
 		documentJobRepo:     documentJobRepo,
 		storageQuotaRepo:    storageQuotaRepo,
 		chunkService:        chunkService,
+		textExtractor:       textExtractor,
 		uploadRoot:          uploadRoot,
 	}
 }
@@ -130,6 +139,10 @@ func (s *documentService) Upload(ctx context.Context, userID, kbID string, fileH
 		return dto.UploadDocumentResponse{}, err
 	}
 	doc.Status = documentStatusProcessing
+	logger.Info("文档上传完成，已创建处理任务", zap.String("file_name", doc.FileName),
+		zap.String("file_type", doc.FileType),
+		zap.Int64("file_size", doc.FileSize),
+	)
 	return dto.UploadDocumentResponse{
 		Document: documentResponse(doc),
 		Job:      documentProcessingJobResponse(job),
@@ -163,15 +176,28 @@ func (s *documentService) Detail(ctx context.Context, userID, documentID string)
 
 // Delete 软删除文档
 func (s *documentService) Delete(ctx context.Context, userID, documentID string) error {
+	doc, err := s.findDocument(ctx, userID, documentID)
+	if err != nil {
+		return err
+	}
 	now := time.Now()
 	expiredAt := now.AddDate(0, 0, deleteRetentionDays)
 	ok, err := s.documentRepo.SoftDelete(ctx, userID, documentID, documentStatusDeleted, now, expiredAt)
 	if err != nil {
+		logger.Error("文档软删除失败", zap.String("file_name", doc.FileName),
+			zap.String("file_type", doc.FileType),
+			zap.Error(err),
+		)
 		return err
 	}
 	if !ok {
 		return apperrors.NewDefault(apperrors.CodeDocumentNotFound)
 	}
+	logger.Info("文档软删除成功", zap.String("file_name", doc.FileName),
+		zap.String("file_type", doc.FileType),
+		zap.Int64("file_size", doc.FileSize),
+		zap.Time("delete_expired_at", expiredAt),
+	)
 	return nil
 }
 
@@ -189,6 +215,7 @@ func (s *documentService) Process(ctx context.Context, userID, documentID string
 	if err != nil {
 		return dto.DocumentProcessingJobResponse{}, err
 	}
+	logger.Info("手动触发文档处理任务", zap.String("file_type", doc.FileType))
 	return documentProcessingJobResponse(job), nil
 }
 
@@ -212,6 +239,10 @@ func (s *documentService) createAsyncProcessJob(ctx context.Context, doc entity.
 		return entity.DocumentProcessingJob{}, apperrors.NewDefault(apperrors.CodeDocumentStatusInvalid)
 	}
 
+	logger.Info("文档处理任务已创建", zap.String("file_name", doc.FileName),
+		zap.String("file_type", doc.FileType),
+		zap.Int64("file_size", doc.FileSize),
+	)
 	go s.runProcessJob(doc, job.ID)
 	return job, nil
 }
@@ -220,21 +251,38 @@ func (s *documentService) createAsyncProcessJob(ctx context.Context, doc entity.
 func (s *documentService) runProcessJob(doc entity.Document, jobID string) {
 	ctx := context.Background()
 	startedAt := time.Now()
+	logger.Info("文档处理任务开始", zap.String("file_name", doc.FileName),
+		zap.String("file_type", doc.FileType),
+	)
 
 	// 1. 先把任务从待处理推进到运行中，避免后台处理状态和任务状态脱节
 	ok, err := s.documentJobRepo.MarkRunning(ctx, doc.UserID, jobID, documentJobStatusPending, documentJobStatusRunning, startedAt)
 	if err != nil {
 		_ = s.documentRepo.MarkProcessFailed(ctx, doc.UserID, doc.ID, jobID, documentStatusFailed, documentJobStatusFailed, "文档处理任务启动失败", time.Now())
+		logger.Error("文档处理任务启动失败", zap.Duration("cost", time.Since(startedAt)),
+			zap.Error(err),
+		)
 		return
 	}
 	if !ok {
+		logger.Warn("文档处理任务状态已变化，跳过后台处理", zap.Duration("cost", time.Since(startedAt)))
 		return
 	}
 
 	// 2. 后台处理失败时只更新文档和任务状态，HTTP 请求已提前返回
 	if err := s.processDocumentContent(ctx, doc, jobID); err != nil {
 		_ = s.documentRepo.MarkProcessFailed(ctx, doc.UserID, doc.ID, jobID, documentStatusFailed, documentJobStatusFailed, err.Error(), time.Now())
+		logger.Error("文档处理任务失败", zap.String("file_name", doc.FileName),
+			zap.String("file_type", doc.FileType),
+			zap.Duration("cost", time.Since(startedAt)),
+			zap.Error(err),
+		)
+		return
 	}
+	logger.Info("文档处理任务成功", zap.String("file_name", doc.FileName),
+		zap.String("file_type", doc.FileType),
+		zap.Duration("cost", time.Since(startedAt)),
+	)
 }
 
 // ListJobs 查询文档处理任务列表
@@ -298,11 +346,16 @@ func (s *documentService) VersionDetail(ctx context.Context, userID, documentID,
 
 // CreateVersion 保存文档新版本并重建索引
 func (s *documentService) CreateVersion(ctx context.Context, userID, documentID string, req requestdto.CreateDocumentVersionRequest) (dto.DocumentProcessingJobResponse, error) {
+	startedAt := time.Now()
 	doc, err := s.findEditableDocument(ctx, userID, documentID)
 	if err != nil {
 		return dto.DocumentProcessingJobResponse{}, err
 	}
-	content := strings.TrimSpace(req.Content)
+	logger.Info("文档新版本保存开始", zap.String("file_name", doc.FileName),
+		zap.String("file_type", doc.FileType),
+		zap.Int("content_bytes", len(req.Content)),
+	)
+	content := normalizeDocumentDisplayContent(req.Content)
 	if content == "" {
 		return dto.DocumentProcessingJobResponse{}, apperrors.New(apperrors.CodeBadRequest, "文档正文不能为空")
 	}
@@ -317,25 +370,46 @@ func (s *documentService) CreateVersion(ctx context.Context, userID, documentID 
 	}
 	job, chunks, finishedAt, err := s.buildReindexPayload(ctx, doc, version.ID, content)
 	if err != nil {
+		logger.Error("文档新版本重建失败", zap.String("file_name", doc.FileName),
+			zap.String("file_type", doc.FileType),
+			zap.Duration("cost", time.Since(startedAt)),
+			zap.Error(err),
+		)
 		return dto.DocumentProcessingJobResponse{}, err
 	}
 
 	// 1. 新版本、任务和 chunks 替换必须作为一个数据库结果提交
 	if err := s.documentVersionRepo.SaveVersionAndReindex(ctx, doc, &job, &version, chunks, documentStatusReady, documentJobStatusSuccess, finishedAt); err != nil {
+		logger.Error("文档新版本入库失败", zap.String("file_name", doc.FileName),
+			zap.String("file_type", doc.FileType),
+			zap.Int("chunk_count", len(chunks)),
+			zap.Duration("cost", time.Since(startedAt)),
+			zap.Error(err),
+		)
 		return dto.DocumentProcessingJobResponse{}, err
 	}
 	job.Status = documentJobStatusSuccess
 	job.StartedAt = &finishedAt
 	job.FinishedAt = &finishedAt
+	logger.Info("文档新版本保存成功", zap.String("file_name", doc.FileName),
+		zap.String("file_type", doc.FileType),
+		zap.Int("content_bytes", len(content)),
+		zap.Int("chunk_count", len(chunks)),
+		zap.Duration("cost", time.Since(startedAt)),
+	)
 	return documentProcessingJobResponse(job), nil
 }
 
 // Reindex 基于最新版本重建文档分块
 func (s *documentService) Reindex(ctx context.Context, userID, documentID string) (dto.DocumentProcessingJobResponse, error) {
+	startedAt := time.Now()
 	doc, err := s.findEditableDocument(ctx, userID, documentID)
 	if err != nil {
 		return dto.DocumentProcessingJobResponse{}, err
 	}
+	logger.Info("文档重新索引开始", zap.String("file_name", doc.FileName),
+		zap.String("file_type", doc.FileType),
+	)
 	version, ok, err := s.documentVersionRepo.FindLatestByDocument(ctx, userID, documentID)
 	if err != nil {
 		return dto.DocumentProcessingJobResponse{}, err
@@ -346,63 +420,113 @@ func (s *documentService) Reindex(ctx context.Context, userID, documentID string
 
 	job, chunks, finishedAt, err := s.buildReindexPayload(ctx, doc, version.ID, version.Content)
 	if err != nil {
+		logger.Error("文档重新索引构建失败", zap.String("file_name", doc.FileName),
+			zap.String("file_type", doc.FileType),
+			zap.Duration("cost", time.Since(startedAt)),
+			zap.Error(err),
+		)
 		return dto.DocumentProcessingJobResponse{}, err
 	}
 
 	// 1. 手动 reindex 不新增版本，只替换当前文档可检索 chunks
 	if err := s.documentVersionRepo.ReindexVersion(ctx, doc, &job, version, chunks, documentStatusReady, documentJobStatusSuccess, finishedAt); err != nil {
+		logger.Error("文档重新索引入库失败", zap.String("file_name", doc.FileName),
+			zap.String("file_type", doc.FileType),
+			zap.Int("chunk_count", len(chunks)),
+			zap.Duration("cost", time.Since(startedAt)),
+			zap.Error(err),
+		)
 		return dto.DocumentProcessingJobResponse{}, err
 	}
 	job.Status = documentJobStatusSuccess
 	job.StartedAt = &finishedAt
 	job.FinishedAt = &finishedAt
+	logger.Info("文档重新索引成功", zap.String("file_name", doc.FileName),
+		zap.String("file_type", doc.FileType),
+		zap.Int("chunk_count", len(chunks)),
+		zap.Duration("cost", time.Since(startedAt)),
+	)
 	return documentProcessingJobResponse(job), nil
 }
 
 // processDocumentContent 处理文档正文、版本和分块入库
 func (s *documentService) processDocumentContent(ctx context.Context, doc entity.Document, jobID string) error {
-	if !s.chunkService.SupportsFileType(doc.FileType) {
+	if s.textExtractor == nil || !s.textExtractor.Supports(doc.FileType) {
 		return apperrors.New(apperrors.CodeDocumentStatusInvalid, "当前文件类型暂不支持自动解析")
 	}
 
-	// 1. 读取原始文件并解析为正文，当前阶段只支持文本类文件
-	contentBytes, err := os.ReadFile(doc.StoragePath)
+	// 1. 先按文件类型提取正文，文本类文件直接读取，docx/pdf 交给解析器
+	extractStartedAt := time.Now()
+	logger.Info("文档正文提取开始", zap.String("file_name", doc.FileName),
+		zap.String("file_type", doc.FileType),
+	)
+	rawContent, err := s.textExtractor.Extract(ctx, doc.StoragePath, doc.FileType)
 	if err != nil {
-		return apperrors.NewWithErr(apperrors.CodeInternalError, "读取文档文件失败", err)
+		return err
 	}
-	content := s.chunkService.NormalizeContent(string(contentBytes), doc.FileType)
-	if content == "" {
+	displayContent := normalizeDocumentDisplayContent(rawContent)
+	chunkContent := s.chunkService.NormalizeContent(displayContent, doc.FileType)
+	if displayContent == "" || chunkContent == "" {
 		return apperrors.New(apperrors.CodeDocumentStatusInvalid, "文档正文为空，无法处理")
 	}
+	logger.Info("文档正文提取完成", zap.String("file_type", doc.FileType),
+		zap.Int("raw_content_bytes", len(rawContent)),
+		zap.Int("content_bytes", len(displayContent)),
+		zap.Duration("cost", time.Since(extractStartedAt)),
+	)
 
 	// 2. 基于正文创建首个版本，并按固定窗口切出带 overlap 的 chunks
-	contentHash := hashText(content)
+	chunkStartedAt := time.Now()
+	contentHash := hashText(displayContent)
 	version := entity.DocumentVersion{
 		ID:            uuid.NewString(),
 		UserID:        doc.UserID,
 		DocumentID:    doc.ID,
 		VersionNo:     documentVersionInitialNo,
-		Content:       content,
+		Content:       displayContent,
 		ContentHash:   contentHash,
 		ChangeSummary: "首次解析生成版本",
 	}
-	chunks, err := s.chunkService.BuildChunks(ctx, doc, version.ID, s.chunkService.SplitContent(content))
+	contents := s.chunkService.SplitContent(chunkContent)
+	chunks, err := s.chunkService.BuildChunks(ctx, doc, version.ID, contents)
 	if err != nil {
 		return err
 	}
 	if len(chunks) == 0 {
 		return apperrors.New(apperrors.CodeDocumentStatusInvalid, "文档分块为空，无法处理")
 	}
+	logger.Info("文档分块构建完成", zap.Int("split_count", len(contents)),
+		zap.Int("chunk_count", len(chunks)),
+		zap.Duration("cost", time.Since(chunkStartedAt)),
+	)
 
 	// 3. 版本、分块、文档状态和任务状态必须在同一个事务中写入
 	finishedAt := time.Now()
-	return s.documentRepo.SaveProcessResult(ctx, doc, jobID, &version, chunks, documentStatusReady, documentJobStatusSuccess, finishedAt)
+	saveStartedAt := time.Now()
+	if err := s.documentRepo.SaveProcessResult(ctx, doc, jobID, &version, chunks, documentStatusReady, documentJobStatusSuccess, finishedAt); err != nil {
+		return err
+	}
+	logger.Info("文档处理结果已入库", zap.Int("chunk_count", len(chunks)),
+		zap.Duration("cost", time.Since(saveStartedAt)),
+	)
+	return nil
 }
 
 // hashText 计算正文哈希
 func hashText(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
+}
+
+// normalizeDocumentDisplayContent 规整用于版本展示和在线编辑的正文
+func normalizeDocumentDisplayContent(content string) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	lines := strings.Split(content, "\n")
+	for index, line := range lines {
+		lines[index] = strings.TrimRight(line, " \t")
+	}
+	return strings.TrimSpace(excessiveBlankLineRegex.ReplaceAllString(strings.Join(lines, "\n"), "\n\n"))
 }
 
 // findWritableKnowledgeBase 查询可上传的本地知识库
@@ -533,13 +657,14 @@ func (s *documentService) findEditableDocument(ctx context.Context, userID, docu
 
 // buildReindexPayload 构建 reindex 任务和分块数据
 func (s *documentService) buildReindexPayload(ctx context.Context, doc entity.Document, versionID, content string) (entity.DocumentProcessingJob, []entity.DocumentChunk, time.Time, error) {
-	content = strings.TrimSpace(content)
-	if content == "" {
+	displayContent := normalizeDocumentDisplayContent(content)
+	chunkContent := s.chunkService.NormalizeContent(displayContent, doc.FileType)
+	if displayContent == "" || chunkContent == "" {
 		return entity.DocumentProcessingJob{}, nil, time.Time{}, apperrors.New(apperrors.CodeBadRequest, "文档正文不能为空")
 	}
 
-	// 1. 先基于版本正文生成 chunks，失败时不写入任何版本或任务数据
-	chunks, err := s.chunkService.BuildChunks(ctx, doc, versionID, s.chunkService.SplitContent(content))
+	// 1. 先基于归一化检索正文生成 chunks，失败时不写入任何版本或任务数据
+	chunks, err := s.chunkService.BuildChunks(ctx, doc, versionID, s.chunkService.SplitContent(chunkContent))
 	if err != nil {
 		return entity.DocumentProcessingJob{}, nil, time.Time{}, err
 	}

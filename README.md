@@ -65,6 +65,7 @@
 ### 1. 环境要求
 
 - Go 1.26+
+- Python 3.10+（解析 docx/pdf 时需要）
 - PostgreSQL 15+（需 pgvector 扩展）
 - Redis 7+
 
@@ -94,6 +95,7 @@ go run cmd/seed/main.go
 
 ```bash
 go mod tidy
+pip install -r pkg/documentparser/python/requirements.txt
 go run cmd/server/main.go
 ```
 
@@ -207,6 +209,9 @@ go run cmd/server/main.go
 | `dingtalk.app_key` | `DINGTALK_APP_KEY` | `""` |
 | `dingtalk.app_secret` | `DINGTALK_APP_SECRET` | `""` |
 | `dingtalk.oauth_redirect_uri` | `DINGTALK_OAUTH_REDIRECT_URI` | — |
+| `document_parser.python_path` | `DOCUMENT_PARSER_PYTHON_PATH` | `"python"` |
+| `document_parser.script_path` | `DOCUMENT_PARSER_SCRIPT_PATH` | `"pkg/documentparser/python/parse_document.py"` |
+| `document_parser.timeout_seconds` | `DOCUMENT_PARSER_TIMEOUT_SECONDS` | `30` |
 | `database.postgres.host` | `POSTGRES_HOST` | `127.0.0.1` |
 | `database.postgres.port` | `POSTGRES_PORT` | `5432` |
 | `database.postgres.username` | `POSTGRES_USERNAME` | `postgres` |

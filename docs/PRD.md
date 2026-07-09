@@ -64,7 +64,8 @@ Solvify-Agent 是一个基于大语言模型的知识管理框架，旨在解决
 上传 → 解析 → 分块（Chunk） → 向量化（Embedding，1024 维） → 索引建立
 ```
 
-- 支持格式：PDF / Word / Txt / Markdown / HTML / CSV / Excel / PPT / JSON / 图片
+- 可解析格式：Txt / Markdown / HTML / CSV / JSON / DOCX / PDF（PDF 仅支持可提取文本）
+- 可上传但暂不解析：DOC / Excel / PPT / 图片
 - 单文件 ≤ 100MB
 - 状态：已上传(1) → 处理中(2) → 已就绪(3) / 失败(4) / 已删除(5)
 - 删除保留 30 天
