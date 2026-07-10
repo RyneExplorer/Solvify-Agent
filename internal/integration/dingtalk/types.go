@@ -79,6 +79,10 @@ func (v *dingTalkInt64) UnmarshalJSON(data []byte) error {
 			*v = dingTalkInt64(parsedAt.Unix())
 			return nil
 		}
+		if parsedAt, err := time.Parse("2006-01-02T15:04Z07:00", value); err == nil {
+			*v = dingTalkInt64(parsedAt.Unix())
+			return nil
+		}
 		parsed, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
 			return err

@@ -2,13 +2,39 @@ package dingtalk
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"solvify-agent/pkg/config"
 )
+
+// TestNodeUnmarshalModifiedTimeFormats 验证节点更新时间兼容时间戳和分钟精度时间
+func TestNodeUnmarshalModifiedTimeFormats(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		expected int64
+	}{
+		{name: "毫秒时间戳", value: `"1719999999000"`, expected: 1719999999000},
+		{name: "分钟精度时间", value: `"2026-07-01T19:22Z"`, expected: time.Date(2026, 7, 1, 19, 22, 0, 0, time.UTC).Unix()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var node Node
+			if err := json.Unmarshal([]byte(`{"modifiedTime":`+tt.value+`}`), &node); err != nil {
+				t.Fatalf("解析节点更新时间失败: %v", err)
+			}
+			if node.ModifiedAt != tt.expected {
+				t.Fatalf("节点更新时间不符合预期: got=%d want=%d", node.ModifiedAt, tt.expected)
+			}
+		})
+	}
+}
 
 // TestClientListNodesUsesHeaderToken 验证节点列表使用 Header 鉴权和分页参数
 func TestClientListNodesUsesHeaderToken(t *testing.T) {

@@ -145,9 +145,12 @@
           <div class="text-sm font-semibold text-slate-900">钉钉文件</div>
           <div class="text-xs text-slate-400 mt-1">未导入的文件只支持查看原文，不参与本地检索</div>
         </div>
-        <AppButton variant="secondary" size="sm" :disabled="syncItemsLoading" @click="loadSyncItems">
-          {{ syncItemsLoading ? '刷新中' : '刷新列表' }}
-        </AppButton>
+        <div class="flex items-center gap-3">
+          <span v-if="selectedSyncFileCount" class="text-xs text-slate-500">已选择 {{ selectedSyncFileCount }} 个文件</span>
+          <AppButton variant="secondary" size="sm" :disabled="syncItemsLoading" @click="loadSyncItems">
+            {{ syncItemsLoading ? '刷新中' : '刷新列表' }}
+          </AppButton>
+        </div>
       </div>
       <div v-if="syncItemsLoading" class="px-4 py-10 text-center text-sm text-slate-500">正在加载钉钉文件</div>
       <div v-else-if="syncItemsError" class="px-4 py-10 text-center text-sm text-red-500">{{ syncItemsError }}</div>
@@ -155,7 +158,17 @@
       <table v-else class="w-full text-sm border-collapse">
         <thead>
           <tr class="bg-slate-50 border-b border-slate-200">
-            <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">名称</th>
+            <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">
+              <div class="flex items-center gap-3">
+                <el-checkbox
+                  :model-value="allSyncItemsChecked"
+                  :indeterminate="syncItemsSelectionIndeterminate"
+                  aria-label="选择全部钉钉文件"
+                  @change="toggleAllSyncItems"
+                />
+                <span>名称</span>
+              </div>
+            </th>
             <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">类型</th>
             <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">大小</th>
             <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">导入状态</th>
@@ -164,14 +177,38 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="item in syncItems" :key="item.id" class="border-b border-slate-100 last:border-b-0">
+          <tr v-for="{ item, depth } in visibleSyncItems" :key="item.id" class="border-b border-slate-100 last:border-b-0">
             <td class="px-4 py-3">
-              <div class="font-medium text-slate-900">{{ item.name }}</div>
-              <div v-if="syncItemHint(item)" class="text-xs text-slate-400 mt-1">{{ syncItemHint(item) }}</div>
-              <div v-if="item.error_message" class="text-xs text-red-500 mt-1">{{ item.error_message }}</div>
+              <div class="flex items-start gap-2" :style="{ paddingLeft: `${depth * 24}px` }">
+                <el-checkbox
+                  class="mt-0.5"
+                  :model-value="selectedSyncItemIDs.has(item.external_id)"
+                  :indeterminate="isSyncItemIndeterminate(item)"
+                  :aria-label="`选择 ${item.name}`"
+                  @change="checked => toggleSyncItemSelection(item, checked)"
+                />
+                <button
+                  v-if="item.children.length"
+                  type="button"
+                  class="sync-tree-toggle"
+                  :title="expandedSyncItemIDs.has(item.external_id) ? '收起目录' : '展开目录'"
+                  @click="toggleSyncItemExpanded(item)"
+                >
+                  <span :class="expandedSyncItemIDs.has(item.external_id) ? 'rotate-90' : ''">›</span>
+                </button>
+                <span v-else class="w-5 shrink-0" />
+                <el-icon class="mt-0.5 h-5 w-5 shrink-0 text-lg" :class="syncItemIcon(item).color" aria-hidden="true">
+                  <component :is="syncItemIcon(item).component" />
+                </el-icon>
+                <div class="min-w-0">
+                  <div class="font-medium text-slate-900 break-words">{{ item.name }}</div>
+                  <div v-if="syncItemHint(item)" class="text-xs text-slate-400 mt-1">{{ syncItemHint(item) }}</div>
+                  <div v-if="item.error_message" class="text-xs text-red-500 mt-1">{{ item.error_message }}</div>
+                </div>
+              </div>
             </td>
             <td class="px-4 py-3 text-slate-900">{{ syncItemTypeText(item) }}</td>
-            <td class="px-4 py-3 text-slate-900">{{ formatBytes(item.file_size) }}</td>
+            <td class="px-4 py-3 text-slate-900">{{ item.item_type === 'FOLDER' ? '-' : formatBytes(item.file_size) }}</td>
             <td class="px-4 py-3">
               <AppBadge :variant="syncImportStatusVariant(item.import_status)">
                 {{ syncImportStatusText(item.import_status) }}
@@ -289,6 +326,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { Document as DocumentIcon, Files, Folder, Grid, Link, Picture } from '@element-plus/icons-vue'
 import { deleteDocument, getDocumentJob, listDocumentJobs, listDocumentVersions, listDocuments, processDocument, uploadDocument } from '@/api/document'
 import { getKnowledgeBase } from '@/api/knowledge'
 import { getStorageQuota } from '@/api/storage'
@@ -300,6 +338,15 @@ import type { SyncItem } from '@/types/sync'
 import AppCard from '../components/ui/AppCard.vue'
 import AppButton from '../components/ui/AppButton.vue'
 import AppBadge from '../components/ui/AppBadge.vue'
+
+interface SyncItemTreeNode extends SyncItem {
+  children: SyncItemTreeNode[]
+}
+
+interface VisibleSyncItem {
+  item: SyncItemTreeNode
+  depth: number
+}
 
 const documentStatusUploaded = 1
 const documentStatusProcessing = 2
@@ -342,11 +389,72 @@ const syncItemsLoading = ref(false)
 const syncItemsError = ref('')
 const syncSourceID = ref('')
 const importingItemID = ref('')
+const selectedSyncItemIDs = ref(new Set<string>())
+const expandedSyncItemIDs = ref(new Set<string>())
+const syncTreeSourceID = ref('')
 let documentPollingTimer: ReturnType<typeof window.setTimeout> | null = null
 
 const knowledgeBaseID = computed(() => {
   const value = route.query.knowledge_base_id
   return typeof value === 'string' ? value : ''
+})
+
+const syncItemTree = computed<SyncItemTreeNode[]>(() => {
+  const nodeMap = new Map<string, SyncItemTreeNode>()
+  for (const item of syncItems.value) {
+    nodeMap.set(item.external_id, { ...item, children: [] })
+  }
+
+  const roots: SyncItemTreeNode[] = []
+  for (const node of nodeMap.values()) {
+    const parent = nodeMap.get(node.parent_external_id)
+    if (parent && parent !== node) {
+      parent.children.push(node)
+    } else {
+      roots.push(node)
+    }
+  }
+
+  const branches = [roots]
+  while (branches.length) {
+    const branch = branches.pop()
+    if (!branch) continue
+    branch.sort((left, right) => {
+      if (left.item_type !== right.item_type) return left.item_type === 'FOLDER' ? -1 : 1
+      return left.name.localeCompare(right.name, 'zh-CN')
+    })
+    for (const node of branch) {
+      if (node.children.length) branches.push(node.children)
+    }
+  }
+  return roots
+})
+
+const visibleSyncItems = computed<VisibleSyncItem[]>(() => {
+  const visible: VisibleSyncItem[] = []
+  const stack = syncItemTree.value.slice().reverse().map(item => ({ item, depth: 0 }))
+  while (stack.length) {
+    const current = stack.pop()
+    if (!current) continue
+    visible.push(current)
+    if (!expandedSyncItemIDs.value.has(current.item.external_id)) continue
+    for (let index = current.item.children.length - 1; index >= 0; index -= 1) {
+      stack.push({ item: current.item.children[index], depth: current.depth + 1 })
+    }
+  }
+  return visible
+})
+
+const selectedSyncFileCount = computed(() => {
+  return syncItems.value.filter(item => item.item_type === 'FILE' && selectedSyncItemIDs.value.has(item.external_id)).length
+})
+
+const allSyncItemsChecked = computed(() => {
+  return syncItems.value.length > 0 && syncItems.value.every(item => selectedSyncItemIDs.value.has(item.external_id))
+})
+
+const syncItemsSelectionIndeterminate = computed(() => {
+  return selectedSyncItemIDs.value.size > 0 && !allSyncItemsChecked.value
 })
 
 const currentKnowledgeBaseText = computed(() => {
@@ -503,6 +611,73 @@ async function refreshLastJob() {
   }
 }
 
+// toggleSyncItemExpanded 切换钉钉目录展开状态
+function toggleSyncItemExpanded(item: SyncItemTreeNode) {
+  const next = new Set(expandedSyncItemIDs.value)
+  if (next.has(item.external_id)) {
+    next.delete(item.external_id)
+  } else {
+    next.add(item.external_id)
+  }
+  expandedSyncItemIDs.value = next
+}
+
+// toggleSyncItemSelection 切换节点及其全部子节点的勾选状态
+function toggleSyncItemSelection(item: SyncItemTreeNode, checked: boolean | string | number) {
+  const next = new Set(selectedSyncItemIDs.value)
+  const descendants = [item]
+  const shouldSelect = Boolean(checked)
+  while (descendants.length) {
+    const current = descendants.pop()
+    if (!current) continue
+    if (shouldSelect) {
+      next.add(current.external_id)
+    } else {
+      next.delete(current.external_id)
+    }
+    descendants.push(...current.children)
+  }
+
+  const postOrder: SyncItemTreeNode[] = []
+  const pending = [...syncItemTree.value]
+  while (pending.length) {
+    const current = pending.pop()
+    if (!current) continue
+    postOrder.push(current)
+    pending.push(...current.children)
+  }
+  for (let index = postOrder.length - 1; index >= 0; index -= 1) {
+    const current = postOrder[index]
+    if (!current.children.length) continue
+    if (current.children.every(child => next.has(child.external_id))) {
+      next.add(current.external_id)
+    } else {
+      next.delete(current.external_id)
+    }
+  }
+  selectedSyncItemIDs.value = next
+}
+
+// toggleAllSyncItems 切换全部钉钉节点的勾选状态
+function toggleAllSyncItems(checked: boolean | string | number) {
+  selectedSyncItemIDs.value = Boolean(checked)
+    ? new Set(syncItems.value.map(item => item.external_id))
+    : new Set()
+}
+
+// isSyncItemIndeterminate 判断目录是否处于部分勾选状态
+function isSyncItemIndeterminate(item: SyncItemTreeNode) {
+  if (!item.children.length || selectedSyncItemIDs.value.has(item.external_id)) return false
+  const descendants = [...item.children]
+  while (descendants.length) {
+    const current = descendants.pop()
+    if (!current) continue
+    if (selectedSyncItemIDs.value.has(current.external_id)) return true
+    descendants.push(...current.children)
+  }
+  return false
+}
+
 // loadSyncItems 读取当前知识库绑定的钉钉文件目录
 async function loadSyncItems() {
   syncItems.value = []
@@ -515,10 +690,28 @@ async function loadSyncItems() {
     const source = (sourceRes.data || []).find(item => {
       return item.knowledge_base_id === knowledgeBaseID.value && item.platform === 'dingtalk'
     })
-    if (!source) return
+    if (!source) {
+      selectedSyncItemIDs.value = new Set()
+      expandedSyncItemIDs.value = new Set()
+      syncTreeSourceID.value = ''
+      return
+    }
     syncSourceID.value = source.id
     const itemRes = await listSyncItems(source.id)
     syncItems.value = itemRes.data || []
+    const validIDs = new Set(syncItems.value.map(item => item.external_id))
+    if (syncTreeSourceID.value !== source.id) {
+      selectedSyncItemIDs.value = new Set()
+      expandedSyncItemIDs.value = new Set(
+        syncItemTree.value
+          .filter(item => item.item_type === 'FOLDER' && item.children.length)
+          .map(item => item.external_id),
+      )
+      syncTreeSourceID.value = source.id
+    } else {
+      selectedSyncItemIDs.value = new Set([...selectedSyncItemIDs.value].filter(id => validIDs.has(id)))
+      expandedSyncItemIDs.value = new Set([...expandedSyncItemIDs.value].filter(id => validIDs.has(id)))
+    }
   } catch (error) {
     syncItemsError.value = error instanceof Error ? error.message : '读取钉钉文件失败'
   } finally {
@@ -778,6 +971,20 @@ function syncItemTypeText(item: SyncItem) {
   return (item.extension || item.category || item.item_type || '-').toUpperCase()
 }
 
+// syncItemIcon 根据钉钉节点类型返回本地图标
+function syncItemIcon(item: SyncItem) {
+  const extension = item.extension.toLowerCase()
+  if (item.item_type === 'FOLDER') return { component: Folder, color: 'text-blue-500' }
+  if (['axls', 'xls', 'xlsx', 'csv'].includes(extension)) return { component: Grid, color: 'text-emerald-500' }
+  if (extension === 'dlink') return { component: Link, color: 'text-violet-500' }
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension)) return { component: Picture, color: 'text-cyan-500' }
+  if (extension === 'pdf') return { component: DocumentIcon, color: 'text-red-500' }
+  if (['adoc', 'doc', 'docx', 'txt', 'md', 'markdown', 'html'].includes(extension)) {
+    return { component: DocumentIcon, color: 'text-blue-500' }
+  }
+  return { component: Files, color: 'text-slate-400' }
+}
+
 // syncItemHint 返回钉钉文件辅助说明
 function syncItemHint(item: SyncItem) {
   if (isUnsupportedAliDocItem(item)) return '钉钉在线文档暂不支持自动导入'
@@ -859,6 +1066,9 @@ watch(knowledgeBaseID, () => {
   uploadError.value = ''
   lastJob.value = null
   activeMenuID.value = ''
+  selectedSyncItemIDs.value = new Set()
+  expandedSyncItemIDs.value = new Set()
+  syncTreeSourceID.value = ''
   loadKnowledgeBaseDetail()
   loadDocuments()
   loadSyncItems()
@@ -896,5 +1106,31 @@ watch(knowledgeBaseID, () => {
 .menu-item:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.sync-tree-toggle {
+  display: inline-flex;
+  width: 1.25rem;
+  height: 1.25rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 0.25rem;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.sync-tree-toggle:hover {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+.sync-tree-toggle span {
+  display: inline-block;
+  font-size: 1.25rem;
+  line-height: 1;
+  transition: transform 150ms ease;
 }
 </style>
