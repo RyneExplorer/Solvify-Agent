@@ -380,21 +380,3 @@ go test ./...
 - 使用 `httptest.NewServer` mock 外部 API（参考 `internal/integration/dingtalk/client_test.go`）
 
 **不要**为覆盖率写无意义测试，**不要**对实现细节做脆弱断言。
-
-## 提交前检查
-
-```bash
-go fmt ./...
-go test ./...
-go vet ./...
-```
-
-## 常见禁止项
-
-- ❌ 禁止在 Service 层直接写数据库查询
-- ❌ 禁止 Controller 直接调用 Repository 或 Agent
-- ❌ 禁止 DTO 和 Entity 混用
-- ❌ 禁止新增一次性工具函数或空壳抽象
-- ❌ 禁止为不可能发生的场景添加兜底逻辑
-- ❌ 禁止输出密钥、Token、密码、完整连接串
-- ❌ 禁止在 GET 请求中隐式写库
