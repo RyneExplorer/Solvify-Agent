@@ -69,6 +69,7 @@ embedding:
 rag:
   enabled: true
   top_k: 3
+  recall_k: 20          # Rerank 前召回量（仅 reranker.enabled=true 时生效）
   score_threshold: 0.5
   vector_weight: 0.7    # 向量检索权重
   keyword_weight: 0.3   # 关键词检索权重

@@ -180,9 +180,6 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	for _, doc := range vr.docs {
 		if doc.Score >= r.scoreThreshold {
 			filteredVector = append(filteredVector, doc)
-			logger.Infof("  ✓ 向量 [%s] score=%.4f title=%q", doc.DocumentID, doc.Score, doc.Title)
-		} else {
-			logger.Infof("  ✗ 向量 [%s] score=%.4f (低于阈值 %.2f)", doc.DocumentID, doc.Score, r.scoreThreshold)
 		}
 	}
 
@@ -220,10 +217,10 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 			Content:         item.Content,
 			Score:           item.Score,
 		})
-		logger.Infof("  → RRF [%s] score=%.4f title=%q", item.DocumentID, item.Score, item.Title)
 	}
 
-	logger.Infof("混合检索最终结果: %d 条 (向量过滤阈值=%.2f, TopK=%d)", len(docs), r.scoreThreshold, topK)
+	logger.Infof("混合检索最终结果: %d 条 (向量过滤阈值=%.2f, TopK=%d, 向量候选=%d, 关键词候选=%d)",
+		len(docs), r.scoreThreshold, topK, len(filteredVector), len(filteredKeyword))
 
 	return Result{
 		Hit:       len(docs) > 0,
@@ -524,9 +521,6 @@ func filterByMinScore(docs []scoredChunk, threshold float64, label string) []sco
 	for _, doc := range docs {
 		if doc.Score >= threshold {
 			filtered = append(filtered, doc)
-			logger.Infof("  ✓ %s [%s] score=%.4f title=%q", label, doc.DocumentID, doc.Score, doc.Title)
-		} else {
-			logger.Infof("  ✗ %s [%s] score=%.4f (低于阈值 %.2f)", label, doc.DocumentID, doc.Score, threshold)
 		}
 	}
 	return filtered
@@ -572,7 +566,6 @@ func (r *HybridRetriever) crossSourceFilter(
 		if fromVector && fromKeyword {
 			// 双路命中 → 高置信
 			result = append(result, doc)
-			logger.Infof("[交叉验证] ✓ 双路命中 [%s] title=%q", doc.DocumentID, doc.Title)
 			continue
 		}
 
@@ -580,12 +573,9 @@ func (r *HybridRetriever) crossSourceFilter(
 			// 仅向量侧命中
 			normScore := normV[doc.ID]
 			if normScore < crossSourceNormFloor {
-				logger.Infof("[交叉验证] ✗ 仅向量 [%s] normScore=%.4f < %.2f 丢弃 title=%q",
-					doc.DocumentID, normScore, crossSourceNormFloor, doc.Title)
 				continue
 			}
 			result = append(result, doc)
-			logger.Infof("[交叉验证] ✓ 仅向量 [%s] normScore=%.4f title=%q", doc.DocumentID, normScore, doc.Title)
 			continue
 		}
 
@@ -593,12 +583,9 @@ func (r *HybridRetriever) crossSourceFilter(
 			// 仅关键词侧命中
 			normScore := normK[doc.ID]
 			if normScore < crossSourceNormFloor {
-				logger.Infof("[交叉验证] ✗ 仅关键词 [%s] normScore=%.4f < %.2f 丢弃 title=%q",
-					doc.DocumentID, normScore, crossSourceNormFloor, doc.Title)
 				continue
 			}
 			result = append(result, doc)
-			logger.Infof("[交叉验证] ✓ 仅关键词 [%s] normScore=%.4f title=%q", doc.DocumentID, normScore, doc.Title)
 			continue
 		}
 	}
