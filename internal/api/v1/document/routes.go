@@ -6,6 +6,7 @@ import "github.com/gin-gonic/gin"
 func (ctrl *Controller) RegisterKnowledgeBaseRoutes(router *gin.RouterGroup) {
 	group := router.Group("/knowledge-bases/:id/documents")
 	group.POST("", ctrl.Upload)
+	group.POST("/notes", ctrl.CreateNote)
 	group.GET("", ctrl.List)
 }
 

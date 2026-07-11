@@ -32,13 +32,16 @@ func (r *documentRepository) SaveProcessResult(ctx context.Context, doc entity.D
 			}).Error; err != nil {
 			return err
 		}
-		return tx.Model(&entity.DocumentProcessingJob{}).
-			Where("id = ? AND user_id = ?", jobID, doc.UserID).
-			Updates(map[string]any{
-				"status":        successJobStatus,
-				"error_message": "",
-				"finished_at":   finishedAt,
-			}).Error
+		if jobID != "" {
+			return tx.Model(&entity.DocumentProcessingJob{}).
+				Where("id = ? AND user_id = ?", jobID, doc.UserID).
+				Updates(map[string]any{
+					"status":        successJobStatus,
+					"error_message": "",
+					"finished_at":   finishedAt,
+				}).Error
+		}
+		return nil
 	})
 }
 
@@ -53,12 +56,15 @@ func (r *documentRepository) MarkProcessFailed(ctx context.Context, userID, docu
 			}).Error; err != nil {
 			return err
 		}
-		return tx.Model(&entity.DocumentProcessingJob{}).
-			Where("id = ? AND user_id = ?", jobID, userID).
-			Updates(map[string]any{
-				"status":        failedJobStatus,
-				"error_message": errorMessage,
-				"finished_at":   finishedAt,
-			}).Error
+		if jobID != "" {
+			return tx.Model(&entity.DocumentProcessingJob{}).
+				Where("id = ? AND user_id = ?", jobID, userID).
+				Updates(map[string]any{
+					"status":        failedJobStatus,
+					"error_message": errorMessage,
+					"finished_at":   finishedAt,
+				}).Error
+		}
+		return nil
 	})
 }

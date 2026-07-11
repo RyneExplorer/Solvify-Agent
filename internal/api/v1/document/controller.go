@@ -42,6 +42,27 @@ func (ctrl *Controller) Upload(c *gin.Context) {
 	response.Success(c, output)
 }
 
+// CreateNote 将文本笔记保存到指定知识库
+func (ctrl *Controller) CreateNote(c *gin.Context) {
+	userID, kbID, ok := ctrl.userAndKnowledgeBaseID(c)
+	if !ok {
+		return
+	}
+
+	var req requestdto.CreateNoteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "标题和内容不能为空")
+		return
+	}
+
+	output, err := ctrl.documentService.CreateNote(c.Request.Context(), userID, kbID, req)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, output)
+}
+
 // List 查询知识库下文档列表
 func (ctrl *Controller) List(c *gin.Context) {
 	userID, kbID, ok := ctrl.userAndKnowledgeBaseID(c)

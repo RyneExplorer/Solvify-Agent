@@ -391,6 +391,7 @@ export function useChat() {
           id: 'e-' + Date.now(),
           role: 'error',
           content: msg,
+          retryable: true,
         })
       }
     } finally {
