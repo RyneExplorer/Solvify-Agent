@@ -13,6 +13,7 @@ func (ctrl *Controller) RegisterKnowledgeBaseRoutes(router *gin.RouterGroup) {
 func (ctrl *Controller) RegisterDocumentRoutes(router *gin.RouterGroup) {
 	group := router.Group("/documents")
 	group.GET("/:id", ctrl.Detail)
+	group.GET("/:id/preview", ctrl.Preview)
 	group.DELETE("/:id", ctrl.Delete)
 	group.POST("/:id/process", ctrl.Process)
 	group.GET("/:id/versions", ctrl.Versions)

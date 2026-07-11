@@ -105,6 +105,9 @@ type DentryInfo struct {
 	SpaceID    string `json:"spaceId"`
 }
 
+// DocumentBlock 描述钉钉在线文档块元素
+type DocumentBlock map[string]any
+
 type workspaceOutput struct {
 	Workspace Workspace `json:"workspace"`
 }
@@ -126,6 +129,13 @@ type nodeListOutput struct {
 type downloadInfoOutput struct {
 	Protocol            string              `json:"protocol"`
 	HeaderSignatureInfo headerSignatureInfo `json:"headerSignatureInfo"`
+}
+
+type documentBlocksOutput struct {
+	Result struct {
+		Data []DocumentBlock `json:"data"`
+	} `json:"result"`
+	Success bool `json:"success"`
 }
 
 type headerSignatureInfo struct {

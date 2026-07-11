@@ -121,6 +121,55 @@
           </section>
         </template>
 
+        <!-- Sync config tab -->
+        <template v-if="activeTab === 'sync'">
+          <section>
+            <div class="flex items-center justify-between mb-3">
+              <h2 class="text-sm font-semibold text-slate-900">钉钉账号</h2>
+              <AppBadge :variant="dingTalkBinding?.bound ? 'success' : 'neutral'">
+                {{ dingTalkBinding?.bound ? '已绑定' : '未绑定' }}
+              </AppBadge>
+            </div>
+
+            <div v-if="dingTalkBindingLoading" class="bg-white border border-slate-200 rounded-xl px-4 py-8 text-center text-sm text-slate-400">
+              正在加载绑定状态...
+            </div>
+
+            <div v-else class="bg-white border border-slate-200 rounded-xl p-5">
+              <div v-if="dingTalkBindingError" class="mb-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
+                {{ dingTalkBindingError }}
+              </div>
+
+              <div v-if="dingTalkBinding?.bound" class="flex items-center justify-between gap-4">
+                <div class="flex items-center gap-3 min-w-0">
+                  <img
+                    v-if="dingTalkBinding.avatar"
+                    :src="dingTalkBinding.avatar"
+                    alt=""
+                    class="w-11 h-11 rounded-full object-cover shrink-0"
+                  />
+                  <div v-else class="w-11 h-11 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center text-sm font-semibold shrink-0">
+                    钉
+                  </div>
+                  <div class="min-w-0">
+                    <div class="text-sm font-medium text-slate-900 truncate">{{ dingTalkBinding.nickname || '已绑定钉钉账号' }}</div>
+                    <div class="text-xs text-slate-400 mt-1 truncate">企业 corpId：{{ dingTalkBinding.corp_id || '-' }}</div>
+                  </div>
+                </div>
+                <AppButton variant="secondary" size="sm" @click="unbindDingTalk">解绑</AppButton>
+              </div>
+
+              <div v-else class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="text-sm font-medium text-slate-900">尚未绑定钉钉账号</div>
+                  <div class="text-xs text-slate-400 mt-1">绑定后可在知识库页面同步有权限访问的钉钉知识库</div>
+                </div>
+                <AppButton size="sm" @click="openDingTalkBinding">绑定</AppButton>
+              </div>
+            </div>
+          </section>
+        </template>
+
       </div>
 
       <!-- Right column: summary card -->
@@ -137,6 +186,11 @@
               <div class="text-xs text-slate-400 mb-1">已启用工具</div>
               <div class="text-lg font-semibold text-slate-900">{{ userToolConfigs.filter(c => c.is_enabled).length }}</div>
               <div class="text-xs text-slate-400 mt-0.5">共 {{ userToolConfigs.length }} 个配置</div>
+            </div>
+            <div v-if="activeTab === 'sync'">
+              <div class="text-xs text-slate-400 mb-1">钉钉账号</div>
+              <div class="text-lg font-semibold text-slate-900">{{ dingTalkBinding?.bound ? '已绑定' : '未绑定' }}</div>
+              <div class="text-xs text-slate-400 mt-0.5">{{ dingTalkBinding?.bound ? (dingTalkBinding.nickname || '当前账号') : '等待绑定' }}</div>
             </div>
             <div class="border-t border-slate-200 pt-3">
               <div class="text-xs text-slate-400 leading-relaxed">{{ tabHint }}</div>
@@ -226,35 +280,73 @@
         </div>
       </div>
     </Teleport>
+
+    <Teleport to="body">
+      <div v-if="dingTalkModalVisible" class="fixed inset-0 z-50 flex items-center justify-center bg-black/30" @click.self="dingTalkModalVisible = false">
+        <div class="bg-white rounded-2xl shadow-xl p-6 w-full max-w-sm mx-4">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-lg font-semibold text-slate-900">绑定钉钉账号</h3>
+            <button type="button" class="text-xl leading-none text-slate-400 hover:text-slate-600" @click="dingTalkModalVisible = false">×</button>
+          </div>
+          <p class="text-xs text-slate-400 mb-4">请使用钉钉扫码完成授权</p>
+          <div v-if="dingTalkBindingError" class="mb-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
+            {{ dingTalkBindingError }}
+          </div>
+          <div id="settings-dingtalk-login-frame" class="mx-auto w-[300px] h-[300px] border border-slate-100 rounded-xl overflow-hidden bg-slate-50" />
+          <div class="mt-4 flex justify-end gap-2">
+            <AppButton variant="secondary" @click="dingTalkModalVisible = false">取消</AppButton>
+            <AppButton variant="secondary" :disabled="dingTalkQrLoading" @click="renderDingTalkLoginFrame">
+              {{ dingTalkQrLoading ? '二维码加载中...' : '刷新二维码' }}
+            </AppButton>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useModelConfig } from '@/composables/useModelConfig'
 import { useToolConfig } from '@/composables/useToolConfig'
+import {
+  deleteDingTalkBinding,
+  exchangeDingTalkAuthCode,
+  getDingTalkBinding,
+  getDingTalkOAuthConfig,
+} from '@/api/dingtalk'
 import AppButton from '@/components/ui/AppButton.vue'
 import AppBadge from '@/components/ui/AppBadge.vue'
 import AppSelect from '@/components/ui/AppSelect.vue'
 import type { UserModelConfigInfo, CreateUserModelConfigRequest } from '@/types/model'
 import type { UserToolConfigInfo, CreateUserToolConfigRequest, ConfigSchema } from '@/types/tool'
+import type { DingTalkBinding } from '@/types/dingtalk'
 
 // ── Tabs ──
 const activeTab = ref('model')
 const tabs = [
   { key: 'model', label: 'AI 模型' },
   { key: 'search', label: '工具配置' },
+  { key: 'sync', label: '同步配置' },
 ]
 
 const tabHint = computed(() => {
   if (activeTab.value === 'model') return '系统模型由管理员统一配置；自定义模型仅当前用户可用。'
+  if (activeTab.value === 'sync') return '钉钉账号绑定状态与知识库页面保持一致，解绑不会删除已创建的同步知识库。'
   return '在深度模式下，系统会调用已启用的工具进行联网或知识库检索。'
 })
 
 // ── Composables ──
 const { systemModels, userModels, loadAll: loadModels, createConfig: createModel, updateConfig: updateModel, deleteConfig: deleteModel } = useModelConfig()
 const { toolTemplates, userToolConfigs, loadAll: loadTools, createConfig: createTool, updateConfig: updateTool, deleteConfig: deleteTool } = useToolConfig()
+
+const dingTalkBinding = ref<DingTalkBinding | null>(null)
+const dingTalkBindingLoading = ref(false)
+const dingTalkBindingError = ref('')
+const dingTalkModalVisible = ref(false)
+const dingTalkQrLoading = ref(false)
+const dingTalkBindingSubmitting = ref(false)
 
 // ── Modal ──
 const showModal = ref(false)
@@ -384,6 +476,134 @@ async function doSave() {
     ElMessage.error(e instanceof Error ? e.message : '保存失败')
   }
 }
+
+// 加载当前用户的钉钉绑定状态
+async function loadDingTalkBinding() {
+  dingTalkBindingLoading.value = true
+  dingTalkBindingError.value = ''
+  try {
+    const res = await getDingTalkBinding()
+    dingTalkBinding.value = res.data
+  } catch (error) {
+    dingTalkBindingError.value = error instanceof Error ? error.message : '钉钉绑定状态加载失败'
+  } finally {
+    dingTalkBindingLoading.value = false
+  }
+}
+
+// 打开钉钉扫码绑定弹窗
+async function openDingTalkBinding() {
+  dingTalkModalVisible.value = true
+  dingTalkBindingError.value = ''
+  await nextTick()
+  await renderDingTalkLoginFrame()
+}
+
+// 渲染钉钉扫码组件
+async function renderDingTalkLoginFrame() {
+  dingTalkQrLoading.value = true
+  dingTalkBindingError.value = ''
+  try {
+    await loadDingTalkScript()
+    const res = await getDingTalkOAuthConfig()
+    await nextTick()
+    const container = document.getElementById('settings-dingtalk-login-frame')
+    if (container) container.innerHTML = ''
+    if (!window.DTFrameLogin) throw new Error('钉钉扫码组件加载失败')
+    window.DTFrameLogin(
+      { id: 'settings-dingtalk-login-frame', width: 300, height: 300 },
+      {
+        redirect_uri: res.data.redirect_uri,
+        client_id: res.data.client_id,
+        scope: res.data.scope,
+        response_type: res.data.response_type,
+        prompt: res.data.prompt,
+        state: res.data.state,
+      },
+      async result => {
+        await bindDingTalk(result.authCode, result.state || res.data.state)
+      },
+      message => {
+        dingTalkBindingError.value = formatDingTalkLoginError(message)
+      },
+    )
+  } catch (error) {
+    dingTalkBindingError.value = error instanceof Error ? error.message : '二维码加载失败'
+  } finally {
+    dingTalkQrLoading.value = false
+  }
+}
+
+// 兑换授权码并刷新钉钉绑定状态
+async function bindDingTalk(authCode: string, state: string) {
+  if (!authCode || !state) {
+    dingTalkBindingError.value = '钉钉授权参数不能为空'
+    return
+  }
+  if (dingTalkBindingSubmitting.value || dingTalkBinding.value?.bound) return
+  dingTalkBindingSubmitting.value = true
+  try {
+    const res = await exchangeDingTalkAuthCode({ auth_code: authCode, state })
+    dingTalkBinding.value = res.data
+    dingTalkModalVisible.value = false
+    ElMessage.success('钉钉账号已绑定')
+  } catch (error) {
+    dingTalkBindingError.value = error instanceof Error ? error.message : '钉钉绑定失败'
+  } finally {
+    dingTalkBindingSubmitting.value = false
+  }
+}
+
+// 解除当前用户的钉钉账号绑定
+async function unbindDingTalk() {
+  try {
+    await ElMessageBox.confirm('确认解绑当前钉钉账号吗？', '解绑钉钉', {
+      confirmButtonText: '解绑',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    await deleteDingTalkBinding()
+    dingTalkBinding.value = { bound: false }
+    ElMessage.success('已解绑钉钉账号')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error(error instanceof Error ? error.message : '解绑失败')
+    }
+  }
+}
+
+// 加载钉钉扫码脚本
+function loadDingTalkScript() {
+  if (window.DTFrameLogin) return Promise.resolve()
+  const existing = document.querySelector<HTMLScriptElement>('script[data-dingtalk-login]')
+  if (existing) {
+    return new Promise<void>((resolve, reject) => {
+      existing.addEventListener('load', () => resolve(), { once: true })
+      existing.addEventListener('error', () => reject(new Error('钉钉扫码脚本加载失败')), { once: true })
+    })
+  }
+  return new Promise<void>((resolve, reject) => {
+    const script = document.createElement('script')
+    script.src = 'https://g.alicdn.com/dingding/h5-dingtalk-login/0.21.0/ddlogin.js'
+    script.async = true
+    script.dataset.dingtalkLogin = 'true'
+    script.onload = () => resolve()
+    script.onerror = () => reject(new Error('钉钉扫码脚本加载失败'))
+    document.head.appendChild(script)
+  })
+}
+
+// 格式化钉钉扫码组件错误
+function formatDingTalkLoginError(message: string) {
+  if (message.includes('应用不存在')) {
+    return '钉钉应用不存在，请检查应用配置和回调地址'
+  }
+  return message || '钉钉扫码失败'
+}
+
+watch(activeTab, value => {
+  if (value === 'sync') loadDingTalkBinding()
+})
 
 onMounted(() => { loadModels(); loadTools() })
 </script>

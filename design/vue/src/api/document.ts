@@ -1,4 +1,4 @@
-import { formRequest, request } from './client'
+import { blobRequest, formRequest, request } from './client'
 import type {
   CreateDocumentVersionRequest,
   Document,
@@ -25,6 +25,11 @@ export function uploadDocument(kbId: string, file: File) {
 // 查询文档详情
 export function getDocument(id: string) {
   return request<Document>(`/documents/${id}`)
+}
+
+// 获取原始文件预览内容
+export function getDocumentPreview(id: string) {
+  return blobRequest(`/documents/${id}/preview`)
 }
 
 // 删除文档

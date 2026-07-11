@@ -60,7 +60,7 @@
       @drop.prevent="handleFileDrop"
     >
       <div class="text-base font-medium text-slate-900">{{ uploadPanelTitle }}</div>
-      <div class="text-[13px] text-slate-400 mt-2">支持 TXT/Markdown/HTML/CSV/JSON/DOCX/PDF 文件类型，单文件最大 100MB</div>
+      <div class="text-[13px] text-slate-400 mt-2">支持 TXT/Markdown/HTML/CSV/JSON/DOCX/PDF/PPTX 文件类型，单文件最大 100MB</div>
       <p v-if="uploadError" class="text-xs text-red-500 mt-3 mb-0">{{ uploadError }}</p>
       <p v-if="lastJob" class="text-xs text-slate-500 mt-3 mb-0">
         已创建处理任务：{{ shortID(lastJob.id) }}，当前状态 {{ jobStatusText(lastJob.status) }}
@@ -110,6 +110,7 @@
                   class="absolute right-0 top-9 z-50 w-44 rounded-xl border border-slate-100 bg-white p-1.5 shadow-xl"
                 >
                   <button class="menu-item" @click="editDocument(doc)">编辑文档</button>
+                  <button v-if="!doc.external_url" class="menu-item" @click="openPreviewFromMenu(doc)">查看原文</button>
                   <a
                     v-if="doc.external_url"
                     class="menu-item"
@@ -155,7 +156,15 @@
       <div v-if="syncItemsLoading" class="px-4 py-10 text-center text-sm text-slate-500">正在加载钉钉文件</div>
       <div v-else-if="syncItemsError" class="px-4 py-10 text-center text-sm text-red-500">{{ syncItemsError }}</div>
       <div v-else-if="syncItems.length === 0" class="px-4 py-10 text-center text-sm text-slate-500">暂无钉钉文件，请先刷新目录</div>
-      <table v-else class="w-full text-sm border-collapse">
+      <table v-else class="w-full table-fixed text-sm border-collapse">
+        <colgroup>
+          <col class="w-[36%]" />
+          <col class="w-[9%]" />
+          <col class="w-[10%]" />
+          <col class="w-[10%]" />
+          <col class="w-[18%]" />
+          <col class="w-[17%]" />
+        </colgroup>
         <thead>
           <tr class="bg-slate-50 border-b border-slate-200">
             <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">
@@ -207,16 +216,16 @@
                 </div>
               </div>
             </td>
-            <td class="px-4 py-3 text-slate-900">{{ syncItemTypeText(item) }}</td>
-            <td class="px-4 py-3 text-slate-900">{{ item.item_type === 'FOLDER' ? '-' : formatBytes(item.file_size) }}</td>
-            <td class="px-4 py-3">
+            <td class="px-4 py-3 text-slate-900 whitespace-nowrap">{{ syncItemTypeText(item) }}</td>
+            <td class="px-4 py-3 text-slate-900 whitespace-nowrap">{{ item.item_type === 'FOLDER' ? '-' : formatBytes(item.file_size) }}</td>
+            <td class="px-4 py-3 whitespace-nowrap">
               <AppBadge :variant="syncImportStatusVariant(item.import_status)">
                 {{ syncImportStatusText(item.import_status) }}
               </AppBadge>
             </td>
-            <td class="px-4 py-3 text-slate-900">{{ formatDate(item.source_updated_at) }}</td>
+            <td class="px-4 py-3 text-slate-900 whitespace-nowrap">{{ formatDate(item.source_updated_at) }}</td>
             <td class="px-4 py-3">
-              <div class="flex flex-wrap gap-2">
+              <div class="flex flex-nowrap items-center gap-2 whitespace-nowrap">
                 <a
                   v-if="item.external_url"
                   class="text-sm text-accent-600 hover:text-accent-700"
@@ -305,6 +314,51 @@
       </div>
     </div>
 
+    <div v-if="previewDialogOpen" class="fixed inset-0 bg-slate-900/40 flex items-center justify-center px-4 z-50" @click.self="closePreview">
+      <div class="bg-white rounded-2xl shadow-xl w-full max-w-5xl overflow-hidden">
+        <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-4">
+          <div class="min-w-0">
+            <h3 class="text-base font-semibold text-slate-900 m-0">查看原文</h3>
+            <p class="text-xs text-slate-400 mt-1 mb-0 truncate">{{ previewDocument?.file_name }}</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <a v-if="previewURL" :href="previewURL" :download="previewDocument?.file_name" class="text-sm text-accent-600 hover:text-accent-700">下载原文件</a>
+            <AppButton variant="ghost" size="sm" @click="closePreview">关闭</AppButton>
+          </div>
+        </div>
+        <div class="h-[75vh] bg-slate-50 p-4">
+          <div v-if="previewLoading" class="h-full flex items-center justify-center text-sm text-slate-500">正在加载原文件</div>
+          <div v-else-if="previewError" class="h-full flex items-center justify-center text-sm text-red-500">{{ previewError }}</div>
+          <img v-else-if="previewKind === 'image'" :src="previewURL" :alt="previewDocument?.file_name" class="h-full w-full object-contain" />
+          <iframe v-else-if="previewKind === 'pdf'" :src="previewURL" :title="previewDocument?.file_name" class="h-full w-full border-0 rounded-xl bg-white" />
+          <div v-else-if="previewKind === 'docx'" class="h-full overflow-auto rounded-xl bg-white">
+            <div ref="docxPreviewContainer"></div>
+          </div>
+          <article v-else-if="previewKind === 'markdown'" class="md-content preview-text-panel" v-html="previewHTML" />
+          <pre v-else-if="previewKind === 'text'" class="preview-text-panel preview-source"><code>{{ previewText }}</code></pre>
+          <pre v-else-if="previewKind === 'json'" class="preview-text-panel preview-source preview-json"><code v-html="previewHTML" /></pre>
+          <div v-else-if="previewKind === 'csv'" class="preview-text-panel overflow-auto">
+            <table class="preview-csv-table">
+              <thead v-if="previewTable.length">
+                <tr>
+                  <th v-for="(cell, index) in previewTable[0]" :key="`header-${index}`">{{ cell }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, rowIndex) in previewTable.slice(1)" :key="rowIndex">
+                  <td v-for="(cell, cellIndex) in row" :key="cellIndex">{{ cell }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-else class="h-full flex flex-col items-center justify-center text-center">
+            <div class="text-sm font-medium text-slate-900">浏览器暂不支持直接预览该格式</div>
+            <div class="text-xs text-slate-500 mt-2">可下载原文件后使用本地应用打开</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div v-if="deleteDialogOpen" class="fixed inset-0 bg-slate-900/30 flex items-center justify-center px-4 z-50" @click.self="closeDeleteDialog">
       <div class="bg-white rounded-2xl shadow-xl w-full max-w-sm overflow-hidden">
         <div class="px-5 py-4 border-b border-slate-100">
@@ -324,10 +378,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Document as DocumentIcon, Files, Folder, Grid, Link, Picture } from '@element-plus/icons-vue'
-import { deleteDocument, getDocumentJob, listDocumentJobs, listDocumentVersions, listDocuments, processDocument, uploadDocument } from '@/api/document'
+import { marked } from 'marked'
+import Papa from 'papaparse'
+import DOMPurify from 'dompurify'
+import hljs from 'highlight.js/lib/core'
+import jsonLanguage from 'highlight.js/lib/languages/json'
+import { deleteDocument, getDocumentJob, getDocumentPreview, listDocumentJobs, listDocumentVersions, listDocuments, processDocument, uploadDocument } from '@/api/document'
 import { getKnowledgeBase } from '@/api/knowledge'
 import { getStorageQuota } from '@/api/storage'
 import { importSyncItem, listSyncItems, listSyncSources } from '@/api/sync'
@@ -381,6 +440,15 @@ const activeMenuID = ref('')
 const deleteDialogOpen = ref(false)
 const deletingDocument = ref<Document | null>(null)
 const deleteError = ref('')
+const previewDialogOpen = ref(false)
+const previewLoading = ref(false)
+const previewError = ref('')
+const previewDocument = ref<Document | null>(null)
+const previewURL = ref('')
+const previewHTML = ref('')
+const previewText = ref('')
+const previewTable = ref<string[][]>([])
+const docxPreviewContainer = ref<HTMLElement | null>(null)
 const knowledgeBase = ref<KnowledgeBase | null>(null)
 const knowledgeBaseLoading = ref(false)
 const knowledgeBaseError = ref('')
@@ -397,6 +465,20 @@ let documentPollingTimer: ReturnType<typeof window.setTimeout> | null = null
 const knowledgeBaseID = computed(() => {
   const value = route.query.knowledge_base_id
   return typeof value === 'string' ? value : ''
+})
+
+hljs.registerLanguage('json', jsonLanguage)
+
+const previewKind = computed<'image' | 'pdf' | 'docx' | 'markdown' | 'text' | 'json' | 'csv' | 'unsupported'>(() => {
+  const type = previewDocument.value?.file_type.toLowerCase() || ''
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(type)) return 'image'
+  if (type === 'pdf') return 'pdf'
+  if (type === 'docx') return 'docx'
+  if (['md', 'markdown'].includes(type)) return 'markdown'
+  if (['txt', 'html'].includes(type)) return 'text'
+  if (type === 'json') return 'json'
+  if (type === 'csv') return 'csv'
+  return 'unsupported'
 })
 
 const syncItemTree = computed<SyncItemTreeNode[]>(() => {
@@ -806,6 +888,89 @@ function editDocument(doc: Document) {
   router.push({ path: `/docs/${doc.id}/edit`, query: { knowledge_base_id: knowledgeBaseID.value } })
 }
 
+// openPreviewFromMenu 从操作菜单打开原始文件预览
+function openPreviewFromMenu(doc: Document) {
+  activeMenuID.value = ''
+  openPreview(doc)
+}
+
+// openPreview 加载并展示原始文件
+async function openPreview(doc: Document) {
+  closePreviewURL()
+  clearPreviewContent()
+  previewDocument.value = doc
+  previewDialogOpen.value = true
+  previewLoading.value = true
+  previewError.value = ''
+  try {
+    const blob = await getDocumentPreview(doc.id)
+    previewURL.value = URL.createObjectURL(blob)
+    if (previewKind.value === 'docx') {
+      previewLoading.value = false
+      await nextTick()
+      if (!docxPreviewContainer.value) throw new Error('DOCX 预览容器初始化失败')
+      const { renderAsync } = await import('docx-preview')
+      await renderAsync(blob, docxPreviewContainer.value, undefined, {
+        className: 'docx-preview',
+        inWrapper: true,
+        breakPages: true,
+      })
+    } else if (['markdown', 'text', 'json', 'csv'].includes(previewKind.value)) {
+      await renderTextPreview(blob, previewKind.value)
+    }
+    if (previewKind.value !== 'docx') previewLoading.value = false
+  } catch (error) {
+    previewError.value = error instanceof Error ? error.message : '读取原始文件失败'
+    previewLoading.value = false
+  }
+}
+
+// closePreview 关闭原始文件预览
+function closePreview() {
+  previewDialogOpen.value = false
+  previewDocument.value = null
+  previewError.value = ''
+  clearPreviewContent()
+  closePreviewURL()
+}
+
+// clearPreviewContent 清理文件预览内容
+function clearPreviewContent() {
+  if (docxPreviewContainer.value) docxPreviewContainer.value.innerHTML = ''
+  previewHTML.value = ''
+  previewText.value = ''
+  previewTable.value = []
+}
+
+// renderTextPreview 按文本文件类型生成预览内容
+async function renderTextPreview(blob: Blob, kind: 'markdown' | 'text' | 'json' | 'csv') {
+  const content = await blob.text()
+  if (kind === 'markdown') {
+    const html = marked.parse(content, { breaks: true, gfm: true }) as string
+    previewHTML.value = DOMPurify.sanitize(html)
+    return
+  }
+  if (kind === 'text') {
+    previewText.value = content
+    return
+  }
+  if (kind === 'json') {
+    const formatted = JSON.stringify(JSON.parse(content), null, 2)
+    previewHTML.value = hljs.highlight(formatted, { language: 'json' }).value
+    return
+  }
+  const result = Papa.parse<string[]>(content, { skipEmptyLines: 'greedy' })
+  if (result.errors.length) throw new Error(`CSV 解析失败：${result.errors[0].message}`)
+  previewTable.value = result.data
+}
+
+// closePreviewURL 释放预览文件地址
+function closePreviewURL() {
+  if (!previewURL.value) return
+  URL.revokeObjectURL(previewURL.value)
+  previewURL.value = ''
+}
+
 // toggleActionMenu 切换文档操作菜单
 function toggleActionMenu(documentID: string) {
   activeMenuID.value = activeMenuID.value === documentID ? '' : documentID
@@ -979,7 +1144,7 @@ function syncItemIcon(item: SyncItem) {
   if (extension === 'dlink') return { component: Link, color: 'text-violet-500' }
   if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension)) return { component: Picture, color: 'text-cyan-500' }
   if (extension === 'pdf') return { component: DocumentIcon, color: 'text-red-500' }
-  if (['adoc', 'doc', 'docx', 'txt', 'md', 'markdown', 'html'].includes(extension)) {
+  if (['adoc', 'doc', 'docx', 'pptx', 'txt', 'md', 'markdown', 'html'].includes(extension)) {
     return { component: DocumentIcon, color: 'text-blue-500' }
   }
   return { component: Files, color: 'text-slate-400' }
@@ -987,7 +1152,8 @@ function syncItemIcon(item: SyncItem) {
 
 // syncItemHint 返回钉钉文件辅助说明
 function syncItemHint(item: SyncItem) {
-  if (isUnsupportedAliDocItem(item)) return '钉钉在线文档暂不支持自动导入'
+  if (isAliSheetItem(item)) return '钉钉在线表格暂不支持自动导入'
+  if (isAliDocItem(item)) return '钉钉在线文档，可导入本地知识库'
   if (item.item_type === 'FOLDER') return item.has_children ? '目录' : '目录或快捷方式'
   return item.category || ''
 }
@@ -996,12 +1162,17 @@ function syncItemHint(item: SyncItem) {
 function canImportSyncItem(item: SyncItem) {
   if (item.item_type !== 'FILE') return false
   if (item.import_status === 2 || item.import_status === 3) return false
-  return !isUnsupportedAliDocItem(item)
+  return !isAliSheetItem(item)
 }
 
-// isUnsupportedAliDocItem 判断是否为暂不支持自动导入的钉钉在线文档
-function isUnsupportedAliDocItem(item: SyncItem) {
-  return item.category === 'ALIDOC' && ['adoc', 'axls'].includes(item.extension)
+// isAliDocItem 判断是否为钉钉在线文档
+function isAliDocItem(item: SyncItem) {
+  return item.category.toUpperCase() === 'ALIDOC' && item.extension.toLowerCase() === 'adoc'
+}
+
+// isAliSheetItem 判断是否为暂不支持导入的钉钉在线表格
+function isAliSheetItem(item: SyncItem) {
+  return item.category.toUpperCase() === 'ALIDOC' && item.extension.toLowerCase() === 'axls'
 }
 
 // syncImportStatusText 转换钉钉文件导入状态
@@ -1059,6 +1230,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopDocumentPolling()
+  closePreviewURL()
 })
 
 watch(knowledgeBaseID, () => {
@@ -1106,6 +1278,59 @@ watch(knowledgeBaseID, () => {
 .menu-item:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.preview-text-panel {
+  height: 100%;
+  overflow: auto;
+  border-radius: 0.75rem;
+  background: #fff;
+  padding: 1.5rem;
+  color: #334155;
+}
+
+.preview-source {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.875rem;
+  line-height: 1.7;
+}
+
+.preview-json :deep(.hljs-attr) {
+  color: #0369a1;
+}
+
+.preview-json :deep(.hljs-string) {
+  color: #047857;
+}
+
+.preview-json :deep(.hljs-number),
+.preview-json :deep(.hljs-literal) {
+  color: #7c3aed;
+}
+
+.preview-csv-table {
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.preview-csv-table th,
+.preview-csv-table td {
+  border: 1px solid #e2e8f0;
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  white-space: pre-wrap;
+}
+
+.preview-csv-table th {
+  position: sticky;
+  top: 0;
+  background: #f8fafc;
+  color: #0f172a;
+  font-weight: 600;
 }
 
 .sync-tree-toggle {

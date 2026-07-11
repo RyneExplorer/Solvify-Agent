@@ -19,7 +19,7 @@ var textFileTypes = map[string]struct{}{
 }
 
 var pythonFileTypes = map[string]struct{}{
-	"docx": {}, "pdf": {},
+	"docx": {}, "pdf": {}, "pptx": {},
 }
 
 // Config 描述文档文本解析器配置

@@ -143,6 +143,37 @@ func TestClientDownloadFileUsesReturnedHeaders(t *testing.T) {
 	}
 }
 
+// TestClientQueryDocumentBlocks 验证在线文档块元素查询参数和响应
+func TestClientQueryDocumentBlocks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1.0/oauth2/accessToken":
+			_, _ = w.Write([]byte(`{"accessToken":"token-1","expireIn":7200}`))
+		case "/v1.0/doc/suites/documents/doc-1/blocks":
+			if r.Method != http.MethodGet || r.URL.Query().Get("operatorId") != "union-1" {
+				t.Fatalf("块元素查询参数错误: %s %s", r.Method, r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"result":{"data":[{"blockType":"paragraph","paragraph":{"text":"正文"}}]},"success":true}`))
+		default:
+			t.Fatalf("未预期的请求路径: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(config.DingTalkConfig{AppKey: "app-key", AppSecret: "app-secret"})
+	client.httpClient = server.Client()
+	client.accessTokenURL = server.URL + "/v1.0/oauth2/accessToken"
+	client.apiBaseURL = server.URL
+
+	blocks, err := client.QueryDocumentBlocks(context.Background(), "union-1", "doc-1")
+	if err != nil {
+		t.Fatalf("查询在线文档块元素失败: %v", err)
+	}
+	if len(blocks) != 1 || blocks[0]["blockType"] != "paragraph" {
+		t.Fatalf("块元素响应解析错误: %+v", blocks)
+	}
+}
+
 // serverURL 从测试请求还原服务地址
 func serverURL(r *http.Request) string {
 	return "http://" + r.Host
