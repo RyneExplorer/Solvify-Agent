@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"gorm.io/datatypes"
 
 	"solvify-agent/internal/integration/dingtalk"
@@ -19,7 +20,9 @@ import (
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/repository"
+	"solvify-agent/pkg/documentparser"
 	apperrors "solvify-agent/pkg/errors"
+	"solvify-agent/pkg/logger"
 )
 
 const (
@@ -57,6 +60,7 @@ type syncService struct {
 	syncedDocumentRepo  repository.SyncedDocumentRepository
 	dingtalkBindingRepo repository.DingTalkBindingRepository
 	chunkService        DocumentChunkServiceInterface
+	textExtractor       documentparser.TextExtractor
 	dingtalkClient      DingTalkWikiClient
 	uploadRoot          string
 }
@@ -73,6 +77,8 @@ const (
 	syncItemImportStatusImporting = 2
 	syncItemImportStatusImported  = 3
 	syncItemImportStatusFailed    = 4
+
+	syncTaskOverviewLogFile = "sync_task_overview.log"
 )
 
 type syncRunResult struct {
@@ -80,6 +86,18 @@ type syncRunResult struct {
 	successCount int
 	failedCount  int
 	errors       []string
+}
+
+type syncTaskOverviewLog struct {
+	Time         string `json:"time"`
+	SourceName   string `json:"source_name"`
+	Platform     string `json:"platform"`
+	Status       string `json:"status"`
+	TotalCount   int    `json:"total_count"`
+	SuccessCount int    `json:"success_count"`
+	FailedCount  int    `json:"failed_count"`
+	CostMS       int64  `json:"cost_ms"`
+	ErrorSummary string `json:"error_summary,omitempty"`
 }
 
 // NewSyncService 创建同步服务
@@ -91,6 +109,7 @@ func NewSyncService(
 	syncedDocumentRepo repository.SyncedDocumentRepository,
 	dingtalkBindingRepo repository.DingTalkBindingRepository,
 	chunkService DocumentChunkServiceInterface,
+	textExtractor documentparser.TextExtractor,
 	dingtalkClient DingTalkWikiClient,
 	uploadRoot string,
 ) SyncServiceInterface {
@@ -102,6 +121,7 @@ func NewSyncService(
 		syncedDocumentRepo:  syncedDocumentRepo,
 		dingtalkBindingRepo: dingtalkBindingRepo,
 		chunkService:        chunkService,
+		textExtractor:       textExtractor,
 		dingtalkClient:      dingtalkClient,
 		uploadRoot:          uploadRoot,
 	}
@@ -135,6 +155,11 @@ func (s *syncService) CreateSource(ctx context.Context, userID string, req reque
 	if err := s.syncSourceRepo.Create(ctx, &source, knowledgeBaseSourceSync, syncPlatformDingTalk); err != nil {
 		return dto.SyncSourceResponse{}, err
 	}
+	logger.Info("同步源创建成功",
+		zap.String("name", source.Name),
+		zap.String("platform", source.Platform),
+		zap.Int("status", source.Status),
+	)
 	return syncSourceResponse(source), nil
 }
 
@@ -191,11 +216,20 @@ func (s *syncService) UpdateSource(ctx context.Context, userID, sourceID string,
 	if !ok {
 		return dto.SyncSourceResponse{}, apperrors.NewDefault(apperrors.CodeSyncSourceNotFound)
 	}
+	logger.Info("同步源更新成功",
+		zap.String("name", source.Name),
+		zap.String("platform", source.Platform),
+		zap.Int("status", source.Status),
+	)
 	return syncSourceResponse(source), nil
 }
 
 // DeleteSource 软删除同步源
 func (s *syncService) DeleteSource(ctx context.Context, userID, sourceID string) error {
+	source, err := s.findSource(ctx, userID, sourceID)
+	if err != nil {
+		return err
+	}
 	ok, err := s.syncSourceRepo.SoftDelete(ctx, userID, sourceID, syncSourceStatusNormal, syncSourceStatusDeleted, time.Now())
 	if err != nil {
 		return err
@@ -203,6 +237,10 @@ func (s *syncService) DeleteSource(ctx context.Context, userID, sourceID string)
 	if !ok {
 		return apperrors.NewDefault(apperrors.CodeSyncSourceNotFound)
 	}
+	logger.Info("同步源软删除成功",
+		zap.String("name", source.Name),
+		zap.String("platform", source.Platform),
+	)
 	return nil
 }
 
@@ -226,6 +264,10 @@ func (s *syncService) CreateJob(ctx context.Context, userID, sourceID string) (d
 	if err := s.syncJobRepo.Create(ctx, &job); err != nil {
 		return dto.SyncJobResponse{}, err
 	}
+	logger.Info("同步任务已创建",
+		zap.String("source_name", source.Name),
+		zap.String("platform", source.Platform),
+	)
 	go s.runJob(source, job.ID)
 	return syncJobResponse(job), nil
 }
@@ -319,8 +361,26 @@ func (s *syncService) ImportItem(ctx context.Context, userID, itemID string) (dt
 func (s *syncService) runJob(source entity.SyncSource, jobID string) {
 	ctx := context.Background()
 	startedAt := time.Now()
+	logger.Info("同步任务开始",
+		zap.String("source_name", source.Name),
+		zap.String("platform", source.Platform),
+	)
 	ok, err := s.syncJobRepo.MarkRunning(ctx, source.UserID, jobID, syncJobStatusPending, syncJobStatusRunning, startedAt)
-	if err != nil || !ok {
+	if err != nil {
+		logger.Error("同步任务启动失败",
+			zap.String("source_name", source.Name),
+			zap.String("platform", source.Platform),
+			zap.Duration("cost", time.Since(startedAt)),
+			zap.Error(err),
+		)
+		return
+	}
+	if !ok {
+		logger.Warn("同步任务状态已变化，跳过执行",
+			zap.String("source_name", source.Name),
+			zap.String("platform", source.Platform),
+			zap.Duration("cost", time.Since(startedAt)),
+		)
 		return
 	}
 	result := s.syncDingTalkSource(ctx, source)
@@ -334,12 +394,38 @@ func (s *syncService) runJob(source entity.SyncSource, jobID string) {
 	if len([]rune(errorMessage)) > 1000 {
 		errorMessage = string([]rune(errorMessage)[:1000])
 	}
-	_ = s.syncJobRepo.Finish(ctx, source.UserID, jobID, status, result.totalCount, result.successCount, result.failedCount, errorMessage, finishedAt)
+	if err := s.syncJobRepo.Finish(ctx, source.UserID, jobID, status, result.totalCount, result.successCount, result.failedCount, errorMessage, finishedAt); err != nil {
+		logger.Error("同步任务结果入库失败",
+			zap.String("source_name", source.Name),
+			zap.String("platform", source.Platform),
+			zap.Error(err),
+		)
+	}
 	var lastSyncAt *time.Time
 	if status == syncJobStatusSuccess {
 		lastSyncAt = &finishedAt
 	}
-	_ = s.syncSourceRepo.MarkSyncResult(ctx, source.UserID, source.ID, lastSyncAt, errorMessage)
+	if err := s.syncSourceRepo.MarkSyncResult(ctx, source.UserID, source.ID, lastSyncAt, errorMessage); err != nil {
+		logger.Error("同步源结果更新失败",
+			zap.String("source_name", source.Name),
+			zap.String("platform", source.Platform),
+			zap.Error(err),
+		)
+	}
+	cost := time.Since(startedAt)
+	logger.Info("同步任务数据总览",
+		zap.String("source_name", source.Name),
+		zap.String("platform", source.Platform),
+		zap.String("status", syncJobStatusText(status)),
+		zap.Int("total_count", result.totalCount),
+		zap.Int("success_count", result.successCount),
+		zap.Int("failed_count", result.failedCount),
+		zap.Duration("cost", cost),
+		zap.String("error_summary", errorMessage),
+	)
+	if err := writeSyncTaskOverviewLog(source, status, result, errorMessage, cost, finishedAt); err != nil {
+		logger.Warn("同步任务总览文件写入失败", zap.Error(err))
+	}
 }
 
 // syncDingTalkSource 同步钉钉知识库节点
@@ -409,13 +495,30 @@ func (s *syncService) saveSyncItem(ctx context.Context, source entity.SyncSource
 }
 
 // syncFileNode 下载并入库单个钉钉文件节点
-func (s *syncService) syncFileNode(ctx context.Context, source entity.SyncSource, cfg syncSourceConfig, node dingtalk.Node) error {
+func (s *syncService) syncFileNode(ctx context.Context, source entity.SyncSource, cfg syncSourceConfig, node dingtalk.Node) (err error) {
+	startedAt := time.Now()
 	fileName := filepath.Base(strings.TrimSpace(node.Name))
 	fileType := documentFileType(fileName)
 	if fileType == "" {
 		fileType = strings.ToLower(strings.TrimSpace(node.Extension))
 	}
-	if !s.chunkService.SupportsFileType(fileType) {
+	logger.Info("钉钉同步文件处理开始", zap.String("file_name", fileName),
+		zap.String("file_type", fileType),
+	)
+	defer func() {
+		if err == nil {
+			return
+		}
+		logger.Error("钉钉同步文件处理失败", zap.String("file_name", fileName),
+			zap.String("file_type", fileType),
+			zap.Duration("cost", time.Since(startedAt)),
+			zap.Error(err),
+		)
+	}()
+	if s.textExtractor == nil || !s.textExtractor.Supports(fileType) {
+		logger.Warn("钉钉同步文件暂不支持自动解析，保存占位文档", zap.String("file_name", fileName),
+			zap.String("file_type", fileType),
+		)
 		return s.saveUnsupportedFileNode(ctx, source, node, fileName, fileType)
 	}
 	dentry, err := s.dingtalkClient.QueryDentryID(ctx, cfg.OperatorUnionID, node.NodeID)
@@ -426,10 +529,25 @@ func (s *syncService) syncFileNode(ctx context.Context, source entity.SyncSource
 	if err != nil {
 		return err
 	}
-	content := s.chunkService.NormalizeContent(string(contentBytes), fileType)
-	if content == "" {
+	logger.Info("钉钉同步文件下载完成", zap.String("file_name", fileName),
+		zap.String("file_type", fileType),
+		zap.Int("file_size", len(contentBytes)),
+	)
+	extractStartedAt := time.Now()
+	rawContent, err := s.textExtractor.ExtractBytes(ctx, contentBytes, fileType)
+	if err != nil {
+		return err
+	}
+	displayContent := normalizeDocumentDisplayContent(rawContent)
+	chunkContent := s.chunkService.NormalizeContent(displayContent, fileType)
+	if displayContent == "" || chunkContent == "" {
 		return apperrors.New(apperrors.CodeDocumentStatusInvalid, "同步文档正文为空")
 	}
+	logger.Info("钉钉同步文件正文提取完成", zap.String("file_type", fileType),
+		zap.Int("raw_content_bytes", len(rawContent)),
+		zap.Int("content_bytes", len(displayContent)),
+		zap.Duration("cost", time.Since(extractStartedAt)),
+	)
 	doc, found, err := s.syncedDocumentRepo.FindByExternalID(ctx, source.UserID, documentSourceSync, node.NodeID, documentStatusDeleted)
 	if err != nil {
 		return err
@@ -461,25 +579,51 @@ func (s *syncService) syncFileNode(ctx context.Context, source entity.SyncSource
 		ID:            versionID,
 		UserID:        source.UserID,
 		DocumentID:    doc.ID,
-		Content:       content,
-		ContentHash:   hashSyncedText(content),
+		Content:       displayContent,
+		ContentHash:   hashSyncedText(displayContent),
 		ChangeSummary: "钉钉同步生成版本",
 	}
-	chunks, err := s.chunkService.BuildChunks(ctx, doc, versionID, s.chunkService.SplitContent(content))
+	chunkStartedAt := time.Now()
+	contents := s.chunkService.SplitContent(chunkContent)
+	chunks, err := s.chunkService.BuildChunks(ctx, doc, versionID, contents)
 	if err != nil {
 		return err
 	}
 	if len(chunks) == 0 {
 		return apperrors.New(apperrors.CodeDocumentStatusInvalid, "同步文档分块为空")
 	}
-	return s.syncedDocumentRepo.SaveSyncedDocument(ctx, doc, &version, chunks, documentStatusReady, time.Now())
+	logger.Info("钉钉同步文件分块构建完成", zap.Int("chunk_count", len(chunks)),
+		zap.Duration("cost", time.Since(chunkStartedAt)),
+	)
+	if err := s.syncedDocumentRepo.SaveSyncedDocument(ctx, doc, &version, chunks, documentStatusReady, time.Now()); err != nil {
+		return err
+	}
+	logger.Info("钉钉同步文件处理成功", zap.Duration("cost", time.Since(startedAt)))
+	return nil
 }
 
 // importFileItem 导入单个外部文件目录项
-func (s *syncService) importFileItem(ctx context.Context, source entity.SyncSource, cfg syncSourceConfig, item entity.SyncItem) (entity.Document, error) {
+func (s *syncService) importFileItem(ctx context.Context, source entity.SyncSource, cfg syncSourceConfig, item entity.SyncItem) (doc entity.Document, err error) {
+	startedAt := time.Now()
 	fileName := syncItemFileName(item)
 	fileType := syncItemFileType(item, fileName)
-	if !s.chunkService.SupportsFileType(fileType) {
+	logger.Info("钉钉文件导入开始", zap.String("file_name", fileName),
+		zap.String("file_type", fileType),
+	)
+	defer func() {
+		if err == nil {
+			return
+		}
+		logger.Error("钉钉文件导入失败", zap.String("file_name", fileName),
+			zap.String("file_type", fileType),
+			zap.Duration("cost", time.Since(startedAt)),
+			zap.Error(err),
+		)
+	}()
+	if s.textExtractor == nil || !s.textExtractor.Supports(fileType) {
+		logger.Warn("钉钉文件暂不支持自动解析，保存失败占位文档", zap.String("file_name", fileName),
+			zap.String("file_type", fileType),
+		)
 		doc := syncedDocumentFromItem(source, item, fileName, fileType, documentStatusFailed, fmt.Sprintf("%s 文件暂不支持自动解析，可通过钉钉原文链接查看", strings.ToUpper(fileType)))
 		if err := s.applyExistingDocumentID(ctx, &doc); err != nil {
 			return entity.Document{}, err
@@ -494,11 +638,26 @@ func (s *syncService) importFileItem(ctx context.Context, source entity.SyncSour
 	if err != nil {
 		return entity.Document{}, err
 	}
-	content := s.chunkService.NormalizeContent(string(contentBytes), fileType)
-	if content == "" {
+	logger.Info("钉钉文件下载完成", zap.String("file_name", fileName),
+		zap.String("file_type", fileType),
+		zap.Int("file_size", len(contentBytes)),
+	)
+	extractStartedAt := time.Now()
+	rawContent, err := s.textExtractor.ExtractBytes(ctx, contentBytes, fileType)
+	if err != nil {
+		return entity.Document{}, err
+	}
+	displayContent := normalizeDocumentDisplayContent(rawContent)
+	chunkContent := s.chunkService.NormalizeContent(displayContent, fileType)
+	if displayContent == "" || chunkContent == "" {
 		return entity.Document{}, apperrors.New(apperrors.CodeDocumentStatusInvalid, "同步文档正文为空")
 	}
-	doc := syncedDocumentFromItem(source, item, fileName, fileType, documentStatusReady, "")
+	logger.Info("钉钉文件正文提取完成", zap.String("file_type", fileType),
+		zap.Int("raw_content_bytes", len(rawContent)),
+		zap.Int("content_bytes", len(displayContent)),
+		zap.Duration("cost", time.Since(extractStartedAt)),
+	)
+	doc = syncedDocumentFromItem(source, item, fileName, fileType, documentStatusReady, "")
 	if err := s.applyExistingDocumentID(ctx, &doc); err != nil {
 		return entity.Document{}, err
 	}
@@ -515,18 +674,27 @@ func (s *syncService) importFileItem(ctx context.Context, source entity.SyncSour
 		ID:            versionID,
 		UserID:        source.UserID,
 		DocumentID:    doc.ID,
-		Content:       content,
-		ContentHash:   hashSyncedText(content),
+		Content:       displayContent,
+		ContentHash:   hashSyncedText(displayContent),
 		ChangeSummary: "钉钉导入生成版本",
 	}
-	chunks, err := s.chunkService.BuildChunks(ctx, doc, versionID, s.chunkService.SplitContent(content))
+	chunkStartedAt := time.Now()
+	contents := s.chunkService.SplitContent(chunkContent)
+	chunks, err := s.chunkService.BuildChunks(ctx, doc, versionID, contents)
 	if err != nil {
 		return entity.Document{}, err
 	}
 	if len(chunks) == 0 {
 		return entity.Document{}, apperrors.New(apperrors.CodeDocumentStatusInvalid, "同步文档分块为空")
 	}
-	return doc, s.syncedDocumentRepo.SaveSyncedDocument(ctx, doc, &version, chunks, documentStatusReady, time.Now())
+	logger.Info("钉钉文件分块构建完成", zap.Int("chunk_count", len(chunks)),
+		zap.Duration("cost", time.Since(chunkStartedAt)),
+	)
+	if err := s.syncedDocumentRepo.SaveSyncedDocument(ctx, doc, &version, chunks, documentStatusReady, time.Now()); err != nil {
+		return entity.Document{}, err
+	}
+	logger.Info("钉钉文件导入成功", zap.Duration("cost", time.Since(startedAt)))
+	return doc, nil
 }
 
 // applyExistingDocumentID 复用已有外部文档 ID
@@ -738,6 +906,47 @@ func sourceUpdatedAt(value int64) *time.Time {
 func hashSyncedText(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
+}
+
+// writeSyncTaskOverviewLog 追加写入同步任务总览日志文件
+func writeSyncTaskOverviewLog(source entity.SyncSource, status int, result syncRunResult, errorMessage string, cost time.Duration, finishedAt time.Time) error {
+	if err := os.MkdirAll("logs", 0755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(filepath.Join("logs", syncTaskOverviewLogFile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	payload := syncTaskOverviewLog{
+		Time:         finishedAt.Format(time.RFC3339),
+		SourceName:   source.Name,
+		Platform:     source.Platform,
+		Status:       syncJobStatusText(status),
+		TotalCount:   result.totalCount,
+		SuccessCount: result.successCount,
+		FailedCount:  result.failedCount,
+		CostMS:       cost.Milliseconds(),
+		ErrorSummary: errorMessage,
+	}
+	return json.NewEncoder(file).Encode(payload)
+}
+
+// syncJobStatusText 转换同步任务状态文案
+func syncJobStatusText(status int) string {
+	switch status {
+	case syncJobStatusPending:
+		return "待同步"
+	case syncJobStatusRunning:
+		return "同步中"
+	case syncJobStatusSuccess:
+		return "成功"
+	case syncJobStatusFailed:
+		return "失败"
+	default:
+		return "未知"
+	}
 }
 
 // syncSourceResponse 转换同步源响应

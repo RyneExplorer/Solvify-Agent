@@ -103,6 +103,12 @@ dingtalk:
   app_secret: ""
   oauth_redirect_uri: "http://localhost:5173/dingtalk/bind"
 
+# 文档解析配置（docx/pdf 解析依赖 Python 脚本）
+document_parser:
+  python_path: "python"
+  script_path: "pkg/documentparser/python/parse_document.py"
+  timeout_seconds: 30
+
 # 数据库配置
 database:
   postgres:

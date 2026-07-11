@@ -43,9 +43,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),         -- 创建时间
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),         -- 更新时间
     deleted_at TIMESTAMPTZ,                                -- 删除时间
-    delete_expired_at TIMESTAMPTZ,                         -- 删除保留到期时间
-
-    CONSTRAINT knowledge_bases_user_name_unique UNIQUE (user_id, name)
+    delete_expired_at TIMESTAMPTZ                          -- 删除保留到期时间
 );
 
 COMMENT ON TABLE knowledge_bases IS '知识库主表，所有知识库按用户隔离';
@@ -374,6 +372,10 @@ COMMENT ON COLUMN storage_quotas.updated_at IS '更新时间';
 -- 常用查询索引
 CREATE INDEX IF NOT EXISTS idx_knowledge_bases_user_id
     ON knowledge_bases(user_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS knowledge_bases_user_name_normal_unique
+    ON knowledge_bases(user_id, name)
+    WHERE status = 1;
 
 CREATE INDEX IF NOT EXISTS idx_documents_user_kb
     ON documents(user_id, knowledge_base_id);
