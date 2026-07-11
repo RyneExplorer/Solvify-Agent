@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -25,28 +26,31 @@ import (
 
 // processMessage 处理消息的核心流程（快速检索模式）
 //
-// 优化：查询改写（LLM 调用）与 RAG 检索并行执行。
-// 先用原始查询立即启动检索（~500ms），同时后台执行改写（~1-3s）。
-// 改写完成后若查询有变化，补充检索并合并结果，兼顾速度与召回质量。
+// 速度优化策略：
+// 1. 仅当问题含指代/省略时才触发 LLM 查询改写，否则跳过改写直接检索
+// 2. 需要改写时：改写与原始检索并行；改写有变化则以改写结果为准（不污染 merge）
+// 3. history 剔除本轮刚落库的 user 消息，避免 Prompt 重复
 func (s *chatService) processMessage(ctx context.Context, userID, sessionID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
 	// Step 1: 并行加载模型 + 历史对话
 	sendProgressEvent(eventCh, "正在加载上下文...")
-	client, history, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, 600)
+	client, history, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, 1500)
 	if err != nil {
 		sendErrorEvent(eventCh, err, err.Error())
 		return
 	}
+	// 剔除本轮刚保存的 user 消息，避免 buildMessages 中问题重复
+	history = excludeCurrentUserMessage(history, req.Content)
 
 	chatModel := client.ChatModel()
-	searchQuery := req.Content
 
-	// Step 2+3: 查询改写与 RAG 检索并行（快速路径优化）
+	// Step 2+3: 检索（条件改写，优先速度）
 	sendProgressEvent(eventCh, "正在检索知识库...")
 
 	var sources []dto.SourceInfo
 	var retrieveResult rag.Result
 
-	if len(history) > 0 {
+	needRewrite := len(history) > 0 && needsQueryRewrite(req.Content)
+	if needRewrite {
 		// 并行：查询改写 + 原始查询先行检索
 		g, gCtx := errgroup.WithContext(ctx)
 
@@ -57,9 +61,7 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 				logger.Warnf("查询改写失败，使用原始问题, sessionID=%s: %v", sessionID, err)
 				return nil // 改写失败不阻断流程
 			}
-			if rewritten != "" {
-				rewrittenQuery = rewritten
-			}
+			rewrittenQuery = strings.TrimSpace(rewritten)
 			return nil
 		})
 
@@ -75,18 +77,18 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 			return
 		}
 
-		// 改写查询有变化且原始检索结果较少时，用改写查询补充检索
-		if rewrittenQuery != "" && rewrittenQuery != req.Content &&
-			(!retrieveResult.Hit || len(retrieveResult.Documents) < config.Get().RAG.TopK) {
-			logger.Infof("原始检索结果不足 (%d 条)，用改写查询 %q 补充检索", len(retrieveResult.Documents), rewrittenQuery)
+		// 改写有变化时：以改写检索结果为准（避免指代误召回污染上下文）
+		if rewrittenQuery != "" && !strings.EqualFold(rewrittenQuery, strings.TrimSpace(req.Content)) {
+			logger.Infof("查询已改写: %q -> %q，使用改写结果覆盖检索", req.Content, rewrittenQuery)
 			sources2, result2, err2 := s.retrieveContext(ctx, userID, rewrittenQuery, req.KnowledgeBaseIDs)
-			if err2 == nil && result2.Hit {
-				sources, retrieveResult = mergeRetrieveResults(sources, retrieveResult, sources2, result2)
+			if err2 == nil {
+				sources, retrieveResult = sources2, result2
+			} else {
+				logger.Warnf("改写查询检索失败，保留原始检索结果: %v", err2)
 			}
 		}
 	} else {
-		sendProgressEvent(eventCh, "正在检索知识库...")
-		sources, retrieveResult, err = s.retrieveContext(ctx, userID, searchQuery, req.KnowledgeBaseIDs)
+		sources, retrieveResult, err = s.retrieveContext(ctx, userID, strings.TrimSpace(req.Content), req.KnowledgeBaseIDs)
 		if err != nil {
 			logger.Errorf("知识库检索失败, sessionID=%s: %v", sessionID, err)
 			sendErrorEvent(eventCh, err, "知识库检索失败")
@@ -107,9 +109,12 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 	if err != nil {
 		return
 	}
-	if fullContent != "" {
-		s.emitDoneAndSave(eventCh, sessionID, assistantMsgID, fullContent, req, sources, nil)
+	// 即使用户中断导致空内容，也结束 SSE（避免前端挂起）
+	if fullContent == "" {
+		eventCh <- dto.StreamEvent{Type: "done", MessageID: assistantMsgID, Content: "", Sources: sources, Done: true}
+		return
 	}
+	s.emitDoneAndSave(eventCh, sessionID, assistantMsgID, fullContent, req, sources, nil)
 }
 
 // ─── 深度思考模式 ───────────────────────────────────────────
@@ -218,6 +223,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 // ─── 共享辅助方法 ───────────────────────────────────────────
 
 // emitDoneAndSave 发送 done 事件并异步保存助手消息
+// 注意：保存失败只记日志，禁止再向 eventCh 写事件（外层 defer close 后会 panic）
 func (s *chatService) emitDoneAndSave(eventCh chan<- dto.StreamEvent, sessionID, msgID, content string, req requestdto.SendMessageRequest, sources []dto.SourceInfo, metadata datatypes.JSON) {
 	eventCh <- dto.StreamEvent{Type: "done", MessageID: msgID, Content: content, Sources: sources, Done: true}
 	go func() {
@@ -225,7 +231,6 @@ func (s *chatService) emitDoneAndSave(eventCh chan<- dto.StreamEvent, sessionID,
 		defer cancel()
 		if err := s.saveAssistantMessage(saveCtx, sessionID, msgID, content, req, sources, metadata); err != nil {
 			logger.Errorf("保存助手消息失败, messageID=%s: %v", msgID, err)
-			sendWarningEvent(eventCh, "消息保存失败", "回答已显示但可能未保存，请刷新页面确认")
 		}
 	}()
 }
@@ -234,7 +239,8 @@ func (s *chatService) emitDoneAndSave(eventCh chan<- dto.StreamEvent, sessionID,
 func (s *chatService) rewriteQuery(ctx context.Context, chatModel interface {
 	Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error)
 }, history []entity.ChatMessage, question string) (string, error) {
-	rewriteCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	// 快速模式：改写超时收紧，避免拖慢首 token
+	rewriteCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 
 	messages := buildRewritePrompt(history, question)
@@ -245,15 +251,67 @@ func (s *chatService) rewriteQuery(ctx context.Context, chatModel interface {
 	if msg == nil {
 		return "", nil
 	}
-	return msg.Content, nil
+	return strings.TrimSpace(msg.Content), nil
+}
+
+// excludeCurrentUserMessage 去掉 history 末尾与本轮问题相同的 user 消息
+// SendMessage 会先落库 user 消息，FindRecent 会把它带回 history
+func excludeCurrentUserMessage(history []entity.ChatMessage, current string) []entity.ChatMessage {
+	if len(history) == 0 {
+		return history
+	}
+	last := history[len(history)-1]
+	if last.Role == "user" && strings.TrimSpace(last.Content) == strings.TrimSpace(current) {
+		return history[:len(history)-1]
+	}
+	return history
+}
+
+// needsQueryRewrite 启发式判断是否需要 LLM 改写（指代/省略）
+// 无指代时直接跳过改写，省掉 1 次 LLM 调用，显著加快快速检索
+func needsQueryRewrite(question string) bool {
+	q := strings.TrimSpace(question)
+	if q == "" {
+		return false
+	}
+	// 注意：不要用单字「这/那/其」等过宽匹配，会误伤大量正常问句
+	pronouns := []string{
+		"它", "他", "她", "这个", "那个", "这些", "那些", "上面", "上述", "前面", "刚才",
+		"该问题", "该方法", "该方案", "其优势", "其缺点", "其原理",
+		"怎么样", "如何呢", "怎么说", "呢？", "呢?",
+		"it ", " this", " that", " these", " those", " they", " them", "the above",
+	}
+	lower := strings.ToLower(q)
+	for _, p := range pronouns {
+		if strings.Contains(lower, strings.ToLower(p)) {
+			return true
+		}
+	}
+	// 极短追问（如“为什么？”“呢？”）也需要上下文补全
+	if utf8.RuneCountInString(q) <= 6 {
+		return true
+	}
+	return false
 }
 
 // retrieveContext 执行 RAG 检索并转换为引用来源
 func (s *chatService) retrieveContext(ctx context.Context, userID, question string, knowledgeBaseIDs []string) ([]dto.SourceInfo, rag.Result, error) {
 	logger.Infof("RAG 检索开始: userID=%s, question=%q, kbIDs=%v", userID, question, knowledgeBaseIDs)
+	ragCfg := config.Get().RAG
+	// 有 Rerank 时扩大召回量，让重排有足够候选；无 Rerank 时直接用 TopK 保证速度
+	topK := ragCfg.TopK
+	if ragCfg.Reranker.Enabled {
+		if ragCfg.RecallK > 0 {
+			topK = ragCfg.RecallK
+		} else if topK > 0 {
+			topK = topK * 5
+		} else {
+			topK = 20
+		}
+	}
 	retrieveResult, err := s.retriever.Retrieve(ctx, rag.Query{
 		Question:         question,
-		TopK:             config.Get().RAG.TopK,
+		TopK:             topK,
 		KnowledgeBaseIDs: knowledgeBaseIDs,
 		UserID:           userID,
 	})
@@ -312,53 +370,6 @@ func (s *chatService) streamAndCollect(ctx context.Context, chatModel interface 
 	}
 
 	return fullContent, nil
-}
-
-// mergeRetrieveResults 合并两次检索结果，按 chunk ID 去重
-// 改写查询的结果排前面（相关性更高），原始查询结果补充在后
-func mergeRetrieveResults(originalSources []dto.SourceInfo, originalResult rag.Result,
-	supplementSources []dto.SourceInfo, supplementResult rag.Result) ([]dto.SourceInfo, rag.Result) {
-
-	seenChunkIDs := make(map[string]bool)
-	mergedDocs := make([]rag.Document, 0, len(supplementResult.Documents)+len(originalResult.Documents))
-
-	// 改写查询结果优先
-	for _, doc := range supplementResult.Documents {
-		if !seenChunkIDs[doc.ID] {
-			seenChunkIDs[doc.ID] = true
-			mergedDocs = append(mergedDocs, doc)
-		}
-	}
-
-	// 原始查询结果补充
-	for _, doc := range originalResult.Documents {
-		if !seenChunkIDs[doc.ID] {
-			seenChunkIDs[doc.ID] = true
-			mergedDocs = append(mergedDocs, doc)
-		}
-	}
-
-	// 合并 sources（按 document title 去重，改写查询的排前面）
-	mergedSources := make([]dto.SourceInfo, 0, len(supplementSources)+len(originalSources))
-	seenTitles := make(map[string]bool)
-
-	for _, src := range supplementSources {
-		if !seenTitles[src.Title] {
-			seenTitles[src.Title] = true
-			mergedSources = append(mergedSources, src)
-		}
-	}
-	for _, src := range originalSources {
-		if !seenTitles[src.Title] {
-			seenTitles[src.Title] = true
-			mergedSources = append(mergedSources, src)
-		}
-	}
-
-	return mergedSources, rag.Result{
-		Hit:       len(mergedDocs) > 0,
-		Documents: mergedDocs,
-	}
 }
 
 // toStreamEvent 将 Agent 事件转换为 SSE 流式事件

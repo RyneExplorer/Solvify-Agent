@@ -90,6 +90,7 @@ type EmbeddingConfig struct {
 type RAGConfig struct {
 	Enabled        bool           `mapstructure:"enabled"`
 	TopK           int            `mapstructure:"top_k"`
+	RecallK        int            `mapstructure:"recall_k"` // 混合检索召回量（Rerank 前），默认 TopK*5
 	ScoreThreshold float64        `mapstructure:"score_threshold"`
 	VectorWeight   float64        `mapstructure:"vector_weight"`
 	KeywordWeight  float64        `mapstructure:"keyword_weight"`
@@ -272,6 +273,7 @@ func Default() *Config {
 		RAG: RAGConfig{
 			Enabled:        true,
 			TopK:           3,
+			RecallK:        20,
 			ScoreThreshold: 0.7,
 			Reranker: RerankerConfig{
 				Enabled:        false,
