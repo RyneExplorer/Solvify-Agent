@@ -32,6 +32,7 @@ const (
 	documentStatusDeleted    = 5
 
 	documentSourceUpload = "upload"
+	documentSourceNote   = "note"
 
 	documentJobTypeProcess   = "process"
 	documentJobTypeReindex   = "reindex"
@@ -147,6 +148,76 @@ func (s *documentService) Upload(ctx context.Context, userID, kbID string, fileH
 		Document: documentResponse(doc),
 		Job:      documentProcessingJobResponse(job),
 	}, nil
+}
+
+// CreateNote 将文本内容作为笔记保存到知识库，异步完成分块和向量化
+func (s *documentService) CreateNote(ctx context.Context, userID, kbID string, req requestdto.CreateNoteRequest) (dto.DocumentResponse, error) {
+	kb, err := s.findWritableKnowledgeBase(ctx, userID, kbID)
+	if err != nil {
+		return dto.DocumentResponse{}, err
+	}
+
+	content := normalizeDocumentDisplayContent(req.Content)
+	if content == "" {
+		return dto.DocumentResponse{}, apperrors.New(apperrors.CodeBadRequest, "笔记内容不能为空")
+	}
+
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = "未命名笔记"
+	}
+
+	// 1. 创建文档记录（无文件，source_type = note）
+	doc := entity.Document{
+		UserID:          userID,
+		KnowledgeBaseID: kb.ID,
+		Title:           title,
+		FileName:        title + ".md",
+		FileType:        "md",
+		FileSize:        int64(len(content)),
+		SourceType:      documentSourceNote,
+		Status:          documentStatusProcessing,
+	}
+	if err := s.documentRepo.Create(ctx, &doc); err != nil {
+		return dto.DocumentResponse{}, err
+	}
+
+	// 2. 异步分块 + 向量化
+	go s.processNote(doc, content)
+
+	logger.Info("笔记已加入处理队列", zap.String("doc_id", doc.ID), zap.String("title", title))
+	return documentResponse(doc), nil
+}
+
+// processNote 异步处理笔记的分块、向量和持久化
+func (s *documentService) processNote(doc entity.Document, content string) {
+	ctx := context.Background()
+
+	chunkContent := s.chunkService.NormalizeContent(content, "md")
+	contents := s.chunkService.SplitContent(chunkContent)
+	chunks, err := s.chunkService.BuildChunks(ctx, doc, "", contents)
+	if err != nil || len(chunks) == 0 {
+		_ = s.documentRepo.MarkProcessFailed(ctx, doc.UserID, doc.ID, "", documentStatusFailed, documentJobStatusFailed, "笔记分块失败", time.Now())
+		logger.Error("笔记分块失败", zap.String("doc_id", doc.ID), zap.Error(err))
+		return
+	}
+
+	version := entity.DocumentVersion{
+		ID:            uuid.NewString(),
+		UserID:        doc.UserID,
+		DocumentID:    doc.ID,
+		VersionNo:     documentVersionInitialNo,
+		Content:       content,
+		ContentHash:   hashText(content),
+		ChangeSummary: "笔记创建",
+	}
+	finishedAt := time.Now()
+	if err := s.documentRepo.SaveProcessResult(ctx, doc, "", &version, chunks, documentStatusReady, documentJobStatusSuccess, finishedAt); err != nil {
+		logger.Error("笔记保存失败", zap.String("doc_id", doc.ID), zap.Error(err))
+		return
+	}
+
+	logger.Info("笔记处理完成", zap.String("doc_id", doc.ID), zap.Int("chunk_count", len(chunks)))
 }
 
 // List 查询知识库下文档列表

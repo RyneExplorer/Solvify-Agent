@@ -44,7 +44,7 @@
           :class="[
             collapsed ? 'px-3 py-2.5 justify-center' : 'px-3 py-2.5',
             isActive(item.key)
-              ? 'bg-accent-600 text-white font-medium'
+              ? 'text-accent-700 font-semibold bg-accent-50'
               : 'text-slate-600 hover:bg-slate-200/60 font-normal'
           ]"
         >
@@ -386,7 +386,7 @@ onUnmounted(() => {
 
 // ── Nav ──
 function isActive(key: string): boolean {
-  if (key === 'chat') return route.path.startsWith('/chat')
+  if (key === 'chat') return route.path === '/chat'
   return route.path === `/${key}`
 }
 

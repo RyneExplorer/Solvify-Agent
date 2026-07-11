@@ -61,3 +61,8 @@ export function getDocumentVersion(id: string, versionId: string) {
 export function createDocumentVersion(id: string, data: CreateDocumentVersionRequest) {
   return request<DocumentProcessingJob>(`/documents/${id}/versions`, { method: 'POST', body: data })
 }
+
+// 将文本笔记保存到知识库
+export function createNote(kbId: string, data: { title: string; content: string }) {
+  return request<Document>(`/knowledge-bases/${kbId}/documents/notes`, { method: 'POST', body: data })
+}

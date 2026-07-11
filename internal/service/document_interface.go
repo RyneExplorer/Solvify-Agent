@@ -11,6 +11,7 @@ import (
 // DocumentServiceInterface 定义文档服务接口
 type DocumentServiceInterface interface {
 	Upload(ctx context.Context, userID, kbID string, fileHeader *multipart.FileHeader) (dto.UploadDocumentResponse, error)
+	CreateNote(ctx context.Context, userID, kbID string, req requestdto.CreateNoteRequest) (dto.DocumentResponse, error)
 	List(ctx context.Context, userID, kbID string) ([]dto.DocumentResponse, error)
 	Detail(ctx context.Context, userID, documentID string) (dto.DocumentResponse, error)
 	Delete(ctx context.Context, userID, documentID string) error
