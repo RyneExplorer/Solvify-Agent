@@ -79,7 +79,8 @@
             :key="kb.id"
             :kb="kb"
             :source-label="sourceLabels.dingtalk"
-            @view="openDocuments"
+            @edit="openEdit"
+            @documents="openDocuments"
             @sync="syncDialogVisible = true"
             @delete="confirmDelete"
           />
@@ -94,6 +95,7 @@
             :key="kb.id"
             :kb="kb"
             :source-label="sourceLabels.web_search"
+            @documents="openDocuments"
             @view="openDocuments"
           >
             <div class="mt-2.5 px-3 py-2.5 bg-green-50 rounded-lg text-xs text-green-600">

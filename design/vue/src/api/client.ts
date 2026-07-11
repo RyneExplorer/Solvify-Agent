@@ -132,6 +132,25 @@ export async function formRequest<T>(
   return data
 }
 
+/** 获取需要鉴权的二进制响应 */
+export async function blobRequest(path: string): Promise<Blob> {
+  const headers: Record<string, string> = {}
+  const token = getToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+
+  const res = await fetch(`${BASE_URL}${path}`, { headers })
+  if (!res.ok) {
+    if (res.status === 401) {
+      removeToken()
+      routerInstance?.push('/login')
+      throw new Error('登录已过期，请重新登录')
+    }
+    const text = await res.text().catch(() => '')
+    throw new Error(text || `HTTP ${res.status}`)
+  }
+  return res.blob()
+}
+
 /** SSE stream request — returns a ReadableStream reader */
 export async function streamRequest(
   path: string,
