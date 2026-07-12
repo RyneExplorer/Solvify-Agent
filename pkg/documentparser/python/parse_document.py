@@ -122,17 +122,50 @@ def parse_pdf(path: str) -> str:
     return "\n\n".join(parts)
 
 
+def parse_pptx(path: str) -> str:
+    try:
+        from pptx import Presentation
+    except ImportError as exc:
+        raise RuntimeError("缺少 python-pptx 依赖，请先安装文档解析依赖") from exc
+
+    presentation = Presentation(path)
+    slides = []
+    for index, slide in enumerate(presentation.slides, start=1):
+        parts = [f"# 第 {index} 页"]
+        for shape in slide.shapes:
+            if getattr(shape, "has_table", False):
+                markdown = table_to_markdown(shape.table)
+                if markdown:
+                    parts.append(markdown)
+                continue
+            if not getattr(shape, "has_text_frame", False):
+                continue
+            for paragraph in shape.text_frame.paragraphs:
+                text = clean_text(paragraph.text)
+                if not text:
+                    continue
+                if getattr(paragraph, "level", 0) > 0 or paragraph.text.startswith(("•", "-")):
+                    parts.append(f"- {text.lstrip('•- ')}")
+                else:
+                    parts.append(text)
+        if len(parts) > 1:
+            slides.append("\n\n".join(parts))
+    return "\n\n".join(slides)
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="提取 docx/pdf 文档纯文本")
-    parser.add_argument("--type", required=True, choices=["docx", "pdf"])
+    parser = argparse.ArgumentParser(description="提取 docx/pdf/pptx 文档正文")
+    parser.add_argument("--type", required=True, choices=["docx", "pdf", "pptx"])
     parser.add_argument("--file", required=True)
     args = parser.parse_args()
 
     try:
         if args.type == "docx":
             content = parse_docx(args.file)
-        else:
+        elif args.type == "pdf":
             content = parse_pdf(args.file)
+        else:
+            content = parse_pptx(args.file)
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1

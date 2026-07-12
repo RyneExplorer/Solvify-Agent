@@ -49,7 +49,7 @@ const (
 
 var allowedDocumentFileTypes = map[string]struct{}{
 	"pdf": {}, "doc": {}, "docx": {}, "txt": {}, "md": {}, "markdown": {}, "html": {},
-	"csv": {}, "xls": {}, "xlsx": {}, "ppt": {}, "pptx": {}, "json": {},
+	"csv": {}, "xls": {}, "xlsx": {}, "pptx": {}, "json": {},
 	"png": {}, "jpg": {}, "jpeg": {},
 }
 
@@ -243,6 +243,18 @@ func (s *documentService) Detail(ctx context.Context, userID, documentID string)
 		return dto.DocumentResponse{}, err
 	}
 	return documentResponse(doc), nil
+}
+
+// Preview 查询当前用户可预览的原始文件
+func (s *documentService) Preview(ctx context.Context, userID, documentID string) (DocumentPreview, error) {
+	doc, err := s.findDocument(ctx, userID, documentID)
+	if err != nil {
+		return DocumentPreview{}, err
+	}
+	if _, err := os.Stat(doc.StoragePath); err != nil {
+		return DocumentPreview{}, apperrors.NewWithErr(apperrors.CodeInternalError, "原始文件不存在或无法读取", err)
+	}
+	return DocumentPreview{Path: doc.StoragePath, FileName: doc.FileName}, nil
 }
 
 // Delete 软删除文档
@@ -526,7 +538,7 @@ func (s *documentService) processDocumentContent(ctx context.Context, doc entity
 		return apperrors.New(apperrors.CodeDocumentStatusInvalid, "当前文件类型暂不支持自动解析")
 	}
 
-	// 1. 先按文件类型提取正文，文本类文件直接读取，docx/pdf 交给解析器
+	// 1. 先按文件类型提取正文，文本类文件直接读取，docx/pdf/pptx 交给解析器
 	extractStartedAt := time.Now()
 	logger.Info("文档正文提取开始", zap.String("file_name", doc.FileName),
 		zap.String("file_type", doc.FileType),

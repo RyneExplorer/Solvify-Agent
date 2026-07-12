@@ -65,7 +65,7 @@
 ### 1. 环境要求
 
 - Go 1.26+
-- Python 3.10+（解析 docx/pdf 时需要）
+- Python 3.10+（解析 docx/pdf/pptx 时需要）
 - PostgreSQL 15+（需 pgvector 扩展）
 - Redis 7+
 

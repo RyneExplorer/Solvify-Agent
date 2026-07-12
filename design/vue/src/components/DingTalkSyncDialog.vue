@@ -194,6 +194,7 @@ const failedWorkspaceIconIDs = ref(new Set<string>())
 const bindingLoading = ref(false)
 const workspaceLoading = ref(false)
 const qrLoading = ref(false)
+const bindingSubmitting = ref(false)
 const submitting = ref(false)
 const errorMessage = ref('')
 
@@ -282,6 +283,8 @@ async function exchangeAuthCode(authCode: string, state: string) {
     errorMessage.value = '钉钉授权参数不能为空'
     return
   }
+  if (bindingSubmitting.value || binding.value?.bound) return
+  bindingSubmitting.value = true
   try {
     const res = await exchangeDingTalkAuthCode({ auth_code: authCode, state })
     binding.value = res.data
@@ -289,6 +292,8 @@ async function exchangeAuthCode(authCode: string, state: string) {
     await loadWorkspaces()
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : '钉钉绑定失败'
+  } finally {
+    bindingSubmitting.value = false
   }
 }
 
