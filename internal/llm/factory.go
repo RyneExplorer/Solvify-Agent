@@ -29,6 +29,11 @@ type clientCacheKey struct {
 
 var llmClientCache sync.Map
 
+// NewOpenAIClientDirect 直接创建客户端（跳过缓存），用于连接测试
+func NewOpenAIClientDirect(ctx context.Context, cfg OpenAIClientConfig) (*OpenAIClient, error) {
+	return NewOpenAIClient(ctx, cfg)
+}
+
 // NewClientFromModelConfig 根据模型配置动态创建 LLM 客户端（带缓存）
 func NewClientFromModelConfig(ctx context.Context, cfg ModelConfig) (*OpenAIClient, error) {
 	switch cfg.Provider {

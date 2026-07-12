@@ -431,6 +431,11 @@ export function useChat() {
       .reverse()
       .find((m) => m.role === 'user')
     if (lastUser) {
+      // 删除原用户消息，避免 sendMessage 重复添加
+      const userIdx = messages.value.lastIndexOf(lastUser)
+      if (userIdx >= 0) {
+        messages.value.splice(userIdx, 1)
+      }
       input.value = lastUser.content
       sendMessage()
     }
@@ -452,6 +457,11 @@ export function useChat() {
         .reverse()
         .find((m) => m.role === 'user')
       if (lastUser) {
+        // 删除原用户消息，避免 sendMessage 重复添加
+        const userIdx = messages.value.lastIndexOf(lastUser)
+        if (userIdx >= 0) {
+          messages.value.splice(userIdx, 1)
+        }
         input.value = lastUser.content
         sendMessage()
       }
@@ -514,6 +524,7 @@ export function useChat() {
       gfm: true,
     }) as string
 
+    const urlToNumMap = new Map<string, number>()
     let webNum = 0
     for (let i = 0; i < cites.length; i++) {
       const c = cites[i]
@@ -524,9 +535,16 @@ export function useChat() {
         const safeTip = escapeAttr(chunkText.slice(0, 300) + (chunkText.length > 300 ? '...' : ''))
         citeHtml = `<span class="inline-cite-kb" title="${safeTip || docName}">📄${docName}</span>`
       } else {
-        webNum++
+        const url = c.url ?? ''
+        let num = urlToNumMap.get(url)
+        if (num === undefined) {
+          webNum++
+          num = webNum
+          urlToNumMap.set(url, num)
+        }
         const title = escapeHtml(c.title ?? '网页链接')
-        citeHtml = `<a class="inline-cite-web" href="${escapeAttr(c.url ?? '')}" target="_blank" rel="noopener" title="${title}">${toCircleNum(webNum)}</a>`
+        const safeUrl = escapeAttr(url)
+        citeHtml = `<a class="inline-cite-web" href="${safeUrl}" target="_blank" rel="noopener" title="${title}">[${num}]</a>`
       }
       html = html.replace(`%%CITE${i}%%`, citeHtml)
     }

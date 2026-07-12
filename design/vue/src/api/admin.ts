@@ -83,6 +83,22 @@ export function adminDeleteModel(id: string) {
   return request<null>(`/models/${id}`, { method: 'DELETE' })
 }
 
+export function adminTestModel(data: {
+  provider: string
+  model_id: string
+  base_url: string
+  api_key: string
+  config?: Record<string, unknown>
+}) {
+  return request<{
+    success: boolean
+    message: string
+    error?: string
+    response_time_ms: number
+    details?: string
+  }>('/models/test', { method: 'POST', body: data })
+}
+
 // ── Admin Tools ──
 
 export function adminListToolTypes() {
@@ -163,6 +179,22 @@ export function adminDeleteToolProvider(toolTypeId: string, providerId: string) 
   return request<null>(`/admin/tool-types/${toolTypeId}/providers/${providerId}`, {
     method: 'DELETE',
   })
+}
+
+export function adminTestTool(data: {
+  provider_type: string
+  provider_config?: Record<string, unknown>
+  user_config?: Record<string, unknown>
+  admin_config?: Record<string, unknown>
+  tool_input?: Record<string, unknown>
+}) {
+  return request<{
+    success: boolean
+    message: string
+    error?: string
+    response_time_ms: number
+    details?: string
+  }>('/admin/tools/test', { method: 'POST', body: data })
 }
 
 // ── Admin Sessions ──

@@ -26,7 +26,18 @@ func (r *toolTypeRepository) Update(ctx context.Context, toolType *entity.ToolTy
 }
 
 func (r *toolTypeRepository) Delete(ctx context.Context, id string) error {
-	return r.db.WithContext(ctx).Delete(&entity.ToolType{}, "id = ?", id).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(&entity.UserToolConfig{}, "tool_type_id = ?", id).Error; err != nil {
+			return err
+		}
+		if err := tx.Delete(&entity.ToolProvider{}, "tool_type_id = ?", id).Error; err != nil {
+			return err
+		}
+		if err := tx.Delete(&entity.ToolType{}, "id = ?", id).Error; err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (r *toolTypeRepository) GetByID(ctx context.Context, id string) (*entity.ToolType, error) {

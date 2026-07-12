@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
+	"solvify-agent/internal/llm"
 	requestdto "solvify-agent/internal/model/dto/request"
 	responsedto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
@@ -154,6 +156,51 @@ func (s *userModelConfigService) ResolveModelConfig(ctx context.Context, userID 
 		return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 	return config, nil
+}
+
+// Test 测试用户模型连接
+func (s *userModelConfigService) Test(ctx context.Context, req requestdto.TestModelRequest) (responsedto.TestResult, error) {
+	start := time.Now()
+
+	configJSON, _ := json.Marshal(req.Config)
+
+	client, err := llm.NewOpenAIClientDirect(ctx, llm.OpenAIClientConfig{
+		APIKey:  req.APIKey,
+		BaseURL: req.BaseURL,
+		Model:   req.ModelID,
+		Config:  configJSON,
+	})
+	if err != nil {
+		elapsed := time.Since(start)
+		return responsedto.TestResult{
+			Success:      false,
+			Message:      "模型连接失败",
+			Error:        err.Error(),
+			ResponseTime: elapsed.Milliseconds(),
+		}, nil
+	}
+
+	// 真正发送请求验证连接
+	testCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	if err := client.TestConnection(testCtx); err != nil {
+		elapsed := time.Since(start)
+		return responsedto.TestResult{
+			Success:      false,
+			Message:      "模型连接失败",
+			Error:        err.Error(),
+			ResponseTime: elapsed.Milliseconds(),
+		}, nil
+	}
+
+	elapsed := time.Since(start)
+	return responsedto.TestResult{
+		Success:      true,
+		Message:      "模型连接成功",
+		ResponseTime: elapsed.Milliseconds(),
+		Details:      "已发送测试请求并收到响应",
+	}, nil
 }
 
 func toModelConfigInfo(config *entity.UserModelConfig) responsedto.UserModelConfigInfo {

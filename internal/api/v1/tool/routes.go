@@ -29,6 +29,11 @@ func (c *Controller) RegisterRoutes(router *gin.RouterGroup) {
 	adminProviderGroup.PUT("/:providerId", c.UpdateToolProvider)
 	adminProviderGroup.DELETE("/:providerId", c.DeleteToolProvider)
 
+	// 管理员：工具测试
+	adminToolTestGroup := router.Group("/admin/tools/test")
+	adminToolTestGroup.Use(middleware.RequireAdmin())
+	adminToolTestGroup.POST("", c.TestToolProvider)
+
 	// 用户：工具模板浏览
 	toolGroup := router.Group("/user/tools")
 	toolGroup.GET("/templates", c.ListToolTemplates)
@@ -39,4 +44,5 @@ func (c *Controller) RegisterRoutes(router *gin.RouterGroup) {
 	configGroup.POST("", c.CreateUserToolConfig)
 	configGroup.PUT("/:id", c.UpdateUserToolConfig)
 	configGroup.DELETE("/:id", c.DeleteUserToolConfig)
+	configGroup.POST("/test", c.TestUserToolConfig)
 }

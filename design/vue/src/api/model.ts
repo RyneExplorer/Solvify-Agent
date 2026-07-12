@@ -62,3 +62,19 @@ export function updateUserModelConfig(
 export function deleteUserModelConfig(id: string) {
   return request<null>(`/user/model-configs/${id}`, { method: 'DELETE' })
 }
+
+export function testUserModelConfig(data: {
+  provider: string
+  model_id: string
+  base_url: string
+  api_key: string
+  config?: Record<string, unknown>
+}) {
+  return request<{
+    success: boolean
+    message: string
+    error?: string
+    response_time_ms: number
+    details?: string
+  }>('/user/model-configs/test', { method: 'POST', body: data })
+}

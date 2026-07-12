@@ -148,6 +148,22 @@ func (c *Controller) DeleteToolProvider(ctx *gin.Context) {
 	response.Success(ctx, nil)
 }
 
+// TestToolProvider 测试工具供应商连接
+func (c *Controller) TestToolProvider(ctx *gin.Context) {
+	var req request.TestToolRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(ctx, "请求参数错误")
+		return
+	}
+
+	result, err := c.providerService.Test(ctx.Request.Context(), req)
+	if err != nil {
+		response.BizError(ctx, err)
+		return
+	}
+	response.Success(ctx, result)
+}
+
 // ========== 用户接口：工具配置 ==========
 
 // ListToolTemplates 获取可用工具模板（用户视角）
@@ -274,4 +290,20 @@ func (c *Controller) DeleteUserToolConfig(ctx *gin.Context) {
 		return
 	}
 	response.Success(ctx, nil)
+}
+
+// TestUserToolConfig 测试用户工具配置连接
+func (c *Controller) TestUserToolConfig(ctx *gin.Context) {
+	var req request.TestToolRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(ctx, "请求参数错误")
+		return
+	}
+
+	result, err := c.providerService.Test(ctx.Request.Context(), req)
+	if err != nil {
+		response.BizError(ctx, err)
+		return
+	}
+	response.Success(ctx, result)
 }

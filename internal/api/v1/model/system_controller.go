@@ -95,3 +95,19 @@ func (ctrl *Controller) Delete(ctx *gin.Context) {
 	}
 	response.Success(ctx, nil)
 }
+
+// Test 测试模型连接
+func (ctrl *Controller) Test(ctx *gin.Context) {
+	var req requestdto.TestModelRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(ctx, "请求参数错误")
+		return
+	}
+
+	result, err := ctrl.modelService.Test(ctx.Request.Context(), req)
+	if err != nil {
+		response.BizError(ctx, err)
+		return
+	}
+	response.Success(ctx, result)
+}

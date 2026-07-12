@@ -8,97 +8,68 @@ import (
 	einoTool "github.com/cloudwego/eino/components/tool"
 )
 
-// toolDesc 工具名称和描述（从 Info() 提取，用于生成动态 system prompt）
 type toolDesc struct {
 	Name string
 	Desc string
 }
 
-// buildReActSystemPrompt 构建 ReAct 循环系统提示词
-// userTools: 从 DB 加载的用户工具列表，动态生成工具说明
 func buildReActSystemPrompt(ctx context.Context, userTools []einoTool.BaseTool) string {
 	var sb strings.Builder
 
-	sb.WriteString("你是 Solvify 知识助理，一个专业的 AI 助手。\n\n")
+	sb.WriteString("你是 Solvify 知识助理，专业的 AI 知识助手。\n\n")
 
-	sb.WriteString("## 引用格式（极其重要，必须严格遵守）\n")
-	sb.WriteString("引用知识库内容时，在句末插入引用标签：\n")
-	sb.WriteString("- KB 引用：<kb doc=\"文档名\" chunk_id=\"真实chunk_id\" />\n")
-	sb.WriteString("- Web 引用：<web url=\"https://...\" title=\"页面标题\" />\n\n")
-	sb.WriteString("规则：\n")
-	sb.WriteString("- 【必须】引用标签紧跟在支持该事实的句子末尾，不能换行\n")
-	sb.WriteString("- 【必须】chunk_id 使用工具返回的真实 ID（UUID 格式），不要编造\n")
-	sb.WriteString("- 【必须】如果使用了联网搜索工具，回答中必须使用 <web> 标签标注对应的网页来源\n")
-	sb.WriteString("- 【必须】同一句话中如果同时有 KB 和 Web 来源，可以同时插入两种标签\n")
-	sb.WriteString("- 【禁止】把引用集中放在答案末尾\n")
-	sb.WriteString("- 【禁止】把工具返回的原文复制到回答中\n\n")
-	sb.WriteString("示例：\n")
-	sb.WriteString("  ✅ RAG 是一种技术 <kb doc=\"RAG技术介绍\" chunk_id=\"550e8400-e29b-41d4-a716-446655440000\" />。\n")
-	sb.WriteString("  ✅ Go 1.18 加入泛型 <web url=\"https://go.dev/doc/\" title=\"Go Documentation\" />。\n")
-	sb.WriteString("  ❌ RAG 是一种技术 <kb doc=\"RAG技术介绍\" chunk_id=\"C1\" />。（错误：用了虚拟ID）\n")
-	sb.WriteString("  ❌ RAG 是一种技术。（错误：缺少引用）\n\n")
+	sb.WriteString("## 引用规则\n")
+	sb.WriteString("在句末插入引用标签，紧跟句子不放换行：\n")
+	sb.WriteString("- 知识库内容：<kb doc=\"文档名\" chunk_id=\"真实chunk_id\" />\n")
+	sb.WriteString("- 网页内容：<web url=\"https://...\" title=\"页面标题\" />\n")
+	sb.WriteString("- 其他工具结果不需要引用标签\n")
+	sb.WriteString("- 禁止集中放在末尾，禁止编造 chunk_id，禁止直接复制原文\n\n")
 
-	// 收集用户工具的 name + description
 	toolDescs := resolveToolDescs(ctx, userTools)
 
 	sb.WriteString("## 可用工具\n")
-	sb.WriteString("- **knowledge_search**: 语义搜索知识库，返回相关文档片段。需要查找信息时优先使用。\n")
+	sb.WriteString("- **knowledge_search**: 语义搜索知识库，优先用于查找信息\n")
+	sb.WriteString("- **grep_chunks**: 关键词精确匹配文档内容\n")
+	sb.WriteString("- **get_document_info**: 获取文档元数据（标题、类型、大小、分块数等）\n")
+	sb.WriteString("- **list_knowledge_chunks**: 列出知识库中的文档\n")
+	sb.WriteString("- **list_knowledge_bases**: 列出所有知识库\n")
 	for _, t := range toolDescs {
 		desc := t.Desc
 		if desc == "" {
-			desc = "用户配置的外部工具"
+			desc = "用户配置的工具"
 		}
 		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", t.Name, desc))
 	}
 	sb.WriteString("\n")
 
-	sb.WriteString("## 工作流程\n")
-	sb.WriteString("1. 用 knowledge_search 搜索知识库 1 次\n")
+	sb.WriteString("## 调用原则（必须严格遵守）\n")
+	sb.WriteString("1. **必须先调用 knowledge_search 检索知识库**，即使你认为知道答案也要先检索，不能跳过\n")
+	sb.WriteString("2. 根据检索结果决定是否需要补充：知识库信息不足时，再调用其他工具\n")
+	sb.WriteString("3. 不重复调用同一工具，检索结果已足够时直接回答\n")
+	sb.WriteString("4. 工具调用总计不超过 3 次\n")
+
 	if len(toolDescs) > 0 {
 		names := make([]string, len(toolDescs))
 		for i, t := range toolDescs {
 			names[i] = t.Name
 		}
-		sb.WriteString(fmt.Sprintf("2. 同时或随后调用 %s 获取最新互联网信息（最多 1 次）\n", strings.Join(names, " 或 ")))
-		sb.WriteString("   即使知识库有相关内容，也建议调用联网搜索补充最新、更全面的信息\n")
-		sb.WriteString("   调用时请按工具参数要求传入搜索关键词等必要参数\n")
-	} else {
-		sb.WriteString("2. 如果知识库信息不足，基于自身知识尽力回答\n")
+		sb.WriteString(fmt.Sprintf("5. 知识库结果不足或需要最新信息时，调用 %s 联网搜索（最多 1 次）\n", strings.Join(names, " 或 ")))
 	}
-	sb.WriteString("3. 综合所有信息，用自己的话组织回答，在句末插入引用标签\n")
-	sb.WriteString("4. 工具调用总计不超过 3 次\n\n")
+	sb.WriteString("\n")
+	sb.WriteString("**禁止**：不检索知识库直接用自身知识回答。第一步必须是 knowledge_search。\n\n")
 
-	sb.WriteString("## 回答格式（必须严格遵守，否则用户无法阅读）\n")
-	sb.WriteString("- **必须**使用 Markdown 二级标题 `##` 拆分主题，禁止将全部内容写成一两个大段落\n")
-	sb.WriteString("- **必须**用列表（`-`/`1.`）组织要点，每个要点 1-3 句话\n")
-	sb.WriteString("- 每个段落不超过 4 行，超过必须拆分\n")
-	sb.WriteString("- 标题要有逻辑层次，例如：概述 → 核心概念 → 详细说明 → 总结\n")
-	sb.WriteString("- 代码示例用 ``` 代码块包裹并标注语言\n")
-	sb.WriteString("- 回答末尾可加一个简短的总结段落\n\n")
-
-	sb.WriteString("示例结构：\n")
-	sb.WriteString("```\n")
-	sb.WriteString("## 概述\n")
-	sb.WriteString("简要说明主题是什么 <kb doc=\"来源\" chunk_id=\"...\" />\n\n")
-	sb.WriteString("## 核心要点\n")
-	sb.WriteString("- 要点1 <kb doc=\"来源\" chunk_id=\"...\" />\n")
-	sb.WriteString("- 要点2\n\n")
-	sb.WriteString("## 详细说明\n")
-	sb.WriteString("...\n\n")
-	sb.WriteString("## 总结\n")
-	sb.WriteString("一两句话总结\n")
-	sb.WriteString("```\n\n")
-
-	sb.WriteString("## 通用要求\n")
-	sb.WriteString("- 用自己的话回答，不要直接复制工具返回的原文\n")
-	sb.WriteString("- 使用中文 + Markdown 格式\n")
-	sb.WriteString("- 工具失败时用自己的知识尽力回答\n")
-	sb.WriteString("- 不要编造信息")
+	sb.WriteString("## 回答要求\n")
+	sb.WriteString("- 使用 Markdown 格式，根据内容复杂度自适应排版\n")
+	sb.WriteString("- 关键信息和结论用 **加粗** 标注\n")
+	sb.WriteString("- 多个要点用列表（`-` 或 `1.`）组织，有顺序的用有序列表\n")
+	sb.WriteString("- 简单问题简洁回答，复杂问题用 `##` 标题分章节\n")
+	sb.WriteString("- 用自己的话回答，不直接复制原文\n")
+	sb.WriteString("- 使用中文\n")
+	sb.WriteString("- 列表类问题直接呈现结果，不要提及工具或内部信息\n")
 
 	return sb.String()
 }
 
-// resolveToolDescs 从工具列表中提取名称和描述
 func resolveToolDescs(ctx context.Context, tools []einoTool.BaseTool) []toolDesc {
 	descs := make([]toolDesc, 0, len(tools))
 	for _, t := range tools {
@@ -107,7 +78,6 @@ func resolveToolDescs(ctx context.Context, tools []einoTool.BaseTool) []toolDesc
 			continue
 		}
 		desc := info.Desc
-		// 去掉过长的描述，保留核心功能说明
 		if len(desc) > 120 {
 			desc = desc[:120] + "..."
 		}

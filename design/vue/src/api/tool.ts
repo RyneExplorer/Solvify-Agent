@@ -39,3 +39,19 @@ export function updateUserToolConfig(
 export function deleteUserToolConfig(id: string) {
   return request<null>(`/user/tool-configs/${id}`, { method: 'DELETE' })
 }
+
+export function testUserToolConfig(data: {
+  provider_type: string
+  provider_id?: string
+  user_config?: Record<string, unknown>
+  admin_config?: Record<string, unknown>
+  tool_input?: Record<string, unknown>
+}) {
+  return request<{
+    success: boolean
+    message: string
+    error?: string
+    response_time_ms: number
+    details?: string
+  }>('/user/tool-configs/test', { method: 'POST', body: data })
+}

@@ -227,7 +227,7 @@ type AgentComponents struct {
 }
 
 // initAgentComponents 初始化 Agent 相关组件（Embedding、RAG、工具、Agent 引擎）
-func (a *App) initAgentComponents(toolFactory tool.ToolFactory) *AgentComponents {
+func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo repository.DocumentRepository, chunkRepo repository.ChunkRepository, kbRepo repository.KnowledgeBaseRepository) *AgentComponents {
 	embeddingFunc := a.initEmbedding()
 	vectorRetriever := a.initRetriever(embeddingFunc)
 
@@ -236,10 +236,34 @@ func (a *App) initAgentComponents(toolFactory tool.ToolFactory) *AgentComponents
 		return tool.NewKnowledgeSearchTool(vectorRetriever).WithContext(userID, kbIDs)
 	})
 
+	// grep_chunks 工厂：关键词精确匹配
+	grepFactory := agent.GrepChunksFactory(func(userID string, kbIDs []string) *tool.GrepChunksTool {
+		return tool.NewGrepChunksTool(chunkRepo).WithContext(userID, kbIDs)
+	})
+
+	// get_document_info 工厂：文档元数据
+	docInfoFactory := agent.GetDocumentInfoFactory(func(userID string) *tool.GetDocumentInfoTool {
+		return tool.NewGetDocumentInfoTool(documentRepo).WithContext(userID)
+	})
+
+	// list_knowledge_chunks 工厂：文档列表
+	listChunksFactory := agent.ListKnowledgeChunksFactory(func(userID string, kbIDs []string) *tool.ListKnowledgeChunksTool {
+		return tool.NewListKnowledgeChunksTool(documentRepo).WithContext(userID, kbIDs)
+	})
+
+	// list_knowledge_bases 工厂：知识库列表
+	listBasesFactory := agent.ListKnowledgeBasesFactory(func(userID string) *tool.ListKnowledgeBasesTool {
+		return tool.NewListKnowledgeBasesTool(kbRepo).WithContext(userID)
+	})
+
 	// 初始化 Agent Engine（eino ReAct Agent）
 	// 用户配置的工具（web_search 等）通过 ToolFactory 从 DB/Redis 动态加载
 	agentEngine := agent.NewEngine(
 		ksFactory,
+		grepFactory,
+		docInfoFactory,
+		listChunksFactory,
+		listBasesFactory,
 		toolFactory,
 		a.cfg.Agent,
 	)
@@ -292,8 +316,12 @@ func (a *App) initDependencies() {
 	toolRegistry.Register("http", providers.NewHTTPProvider()) // 通用 HTTP Provider
 	// ToolFactory——Agent 引擎从 DB/Redis 加载用户配置的工具
 	toolFactory := tool.NewFactory(toolRegistry, cachedUserToolConfigRepo, cachedToolTypeRepo)
-	// 初始化 Agent 组件（传入 ToolFactory 替换硬编码的 WebSearchTool）
-	ai := a.initAgentComponents(toolFactory)
+
+	// Chunk Repository（文档分块查询）
+	chunkRepo := repository.NewChunkRepository(a.postgresqlDB)
+
+	// 初始化 Agent 组件（传入 ToolFactory + DocumentRepo + ChunkRepo + KnowledgeBaseRepo）
+	ai := a.initAgentComponents(toolFactory, documentRepo, chunkRepo, knowledgeBaseRepo)
 
 	// 初始化 Service
 	userSvc := service.NewUserService(userRepo)
@@ -320,7 +348,6 @@ func (a *App) initDependencies() {
 	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo)
 	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry)
 	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo, toolRegistry)
-	chunkRepo := repository.NewChunkRepository(a.postgresqlDB)
 	searchSvc := service.NewSearchService(chatMessageRepo, chunkRepo)
 
 	// 路由

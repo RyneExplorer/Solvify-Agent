@@ -10,4 +10,5 @@ func (ctrl *Controller) RegisterRoutes(router *gin.RouterGroup) {
 	modelGroup.POST("", ctrl.Create)
 	modelGroup.PUT("/:id", ctrl.Update)
 	modelGroup.DELETE("/:id", ctrl.Delete)
+	modelGroup.POST("/test", ctrl.Test)
 }
