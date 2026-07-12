@@ -2,13 +2,39 @@ package dingtalk
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"solvify-agent/pkg/config"
 )
+
+// TestNodeUnmarshalModifiedTimeFormats 验证节点更新时间兼容时间戳和分钟精度时间
+func TestNodeUnmarshalModifiedTimeFormats(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		expected int64
+	}{
+		{name: "毫秒时间戳", value: `"1719999999000"`, expected: 1719999999000},
+		{name: "分钟精度时间", value: `"2026-07-01T19:22Z"`, expected: time.Date(2026, 7, 1, 19, 22, 0, 0, time.UTC).Unix()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var node Node
+			if err := json.Unmarshal([]byte(`{"modifiedTime":`+tt.value+`}`), &node); err != nil {
+				t.Fatalf("解析节点更新时间失败: %v", err)
+			}
+			if node.ModifiedAt != tt.expected {
+				t.Fatalf("节点更新时间不符合预期: got=%d want=%d", node.ModifiedAt, tt.expected)
+			}
+		})
+	}
+}
 
 // TestClientListNodesUsesHeaderToken 验证节点列表使用 Header 鉴权和分页参数
 func TestClientListNodesUsesHeaderToken(t *testing.T) {
@@ -114,6 +140,37 @@ func TestClientDownloadFileUsesReturnedHeaders(t *testing.T) {
 	}
 	if string(data) != "hello" || hash == "" {
 		t.Fatalf("下载内容解析错误: data=%q hash=%s", string(data), hash)
+	}
+}
+
+// TestClientQueryDocumentBlocks 验证在线文档块元素查询参数和响应
+func TestClientQueryDocumentBlocks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1.0/oauth2/accessToken":
+			_, _ = w.Write([]byte(`{"accessToken":"token-1","expireIn":7200}`))
+		case "/v1.0/doc/suites/documents/doc-1/blocks":
+			if r.Method != http.MethodGet || r.URL.Query().Get("operatorId") != "union-1" {
+				t.Fatalf("块元素查询参数错误: %s %s", r.Method, r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"result":{"data":[{"blockType":"paragraph","paragraph":{"text":"正文"}}]},"success":true}`))
+		default:
+			t.Fatalf("未预期的请求路径: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(config.DingTalkConfig{AppKey: "app-key", AppSecret: "app-secret"})
+	client.httpClient = server.Client()
+	client.accessTokenURL = server.URL + "/v1.0/oauth2/accessToken"
+	client.apiBaseURL = server.URL
+
+	blocks, err := client.QueryDocumentBlocks(context.Background(), "union-1", "doc-1")
+	if err != nil {
+		t.Fatalf("查询在线文档块元素失败: %v", err)
+	}
+	if len(blocks) != 1 || blocks[0]["blockType"] != "paragraph" {
+		t.Fatalf("块元素响应解析错误: %+v", blocks)
 	}
 }
 

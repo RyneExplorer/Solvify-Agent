@@ -45,3 +45,18 @@ func (c *Client) DownloadFile(ctx context.Context, operatorID, spaceID, dentryID
 	sum := sha256.Sum256(data)
 	return data, hex.EncodeToString(sum[:]), nil
 }
+
+// QueryDocumentBlocks 查询钉钉在线文档块元素
+func (c *Client) QueryDocumentBlocks(ctx context.Context, operatorID, documentID string) ([]DocumentBlock, error) {
+	values := url.Values{}
+	values.Set("operatorId", strings.TrimSpace(operatorID))
+	rawPath := "/v1.0/doc/suites/documents/" + url.PathEscape(documentID) + "/blocks"
+	var output documentBlocksOutput
+	if err := c.Do(ctx, http.MethodGet, c.apiURL(rawPath, values), nil, &output); err != nil {
+		return nil, err
+	}
+	if !output.Success {
+		return nil, apperrors.New(apperrors.CodeDingTalkAPICallFailed, "钉钉在线文档块元素查询失败")
+	}
+	return output.Result.Data, nil
+}

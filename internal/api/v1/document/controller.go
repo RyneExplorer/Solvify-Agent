@@ -1,6 +1,10 @@
 package document
 
 import (
+	"mime"
+	"net/url"
+	"path/filepath"
+
 	"github.com/gin-gonic/gin"
 
 	"solvify-agent/internal/middleware"
@@ -91,6 +95,27 @@ func (ctrl *Controller) Detail(c *gin.Context) {
 		return
 	}
 	response.Success(c, output)
+}
+
+// Preview 返回当前用户有权访问的原始文件流
+func (ctrl *Controller) Preview(c *gin.Context) {
+	userID, documentID, ok := ctrl.userAndDocumentID(c)
+	if !ok {
+		return
+	}
+
+	preview, err := ctrl.documentService.Preview(c.Request.Context(), userID, documentID)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	contentType := mime.TypeByExtension(filepath.Ext(preview.FileName))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", "inline; filename*=UTF-8''"+url.PathEscape(preview.FileName))
+	c.File(preview.Path)
 }
 
 // Delete 软删除文档

@@ -1,43 +1,47 @@
 <template>
-  <AppCard>
+  <AppCard
+    class="cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg"
+    @click="$emit('documents', kb)"
+  >
     <div class="flex justify-between items-start gap-3 mb-3.5">
       <div class="min-w-0">
-        <h3 class="text-base font-semibold text-slate-900 m-0 truncate">{{ kb.name }}</h3>
+        <h3 class="text-base font-semibold text-slate-900 m-0 truncate" @click.stop>{{ kb.name }}</h3>
         <div class="flex items-center gap-2 mt-1">
-          <span class="text-xs text-slate-400">{{ kb.category || '未分类' }}</span>
+          <span class="text-xs text-slate-400" @click.stop>{{ kb.category || '未分类' }}</span>
           <span
             v-if="sourceLabel"
             class="text-[11px] font-medium inline-block rounded-full px-2 py-0.5"
             :style="{ color: sourceLabel.color, backgroundColor: sourceLabel.color + '15' }"
+            @click.stop
           >
             {{ sourceLabel.text }}
           </span>
         </div>
       </div>
-      <AppBadge :variant="statusVariant">
+      <AppBadge :variant="statusVariant" @click.stop>
         {{ statusText }}
       </AppBadge>
     </div>
 
-    <p v-if="kb.description" class="text-[13px] text-slate-500 leading-5 mb-3 line-clamp-2">
+    <p v-if="kb.description" class="text-[13px] text-slate-500 leading-5 mb-3 line-clamp-2" @click.stop>
       {{ kb.description }}
     </p>
-    <p v-else class="text-[13px] text-slate-400 leading-5 mb-3">暂无描述</p>
+    <p v-else class="text-[13px] text-slate-400 leading-5 mb-3" @click.stop>暂无描述</p>
 
     <div class="flex gap-6 text-[13px] text-slate-400 mb-3.5">
-      <span>{{ kb.document_count }} 篇文档</span>
-      <span>{{ sizeText }}</span>
+      <span @click.stop>{{ kb.document_count }} 篇文档</span>
+      <span @click.stop>{{ sizeText }}</span>
     </div>
 
     <div class="flex justify-between items-center">
-      <span class="text-xs text-slate-400">{{ timeLabel }} {{ updatedText }}</span>
+      <span class="text-xs text-slate-400" @click.stop>{{ timeLabel }} {{ updatedText }}</span>
       <div class="flex gap-1">
-        <AppButton v-if="isLocal" variant="ghost" size="sm" @click="$emit('edit', kb)">编辑</AppButton>
-        <AppButton v-if="isLocal" variant="ghost" size="sm" @click="$emit('documents', kb)">文档</AppButton>
-        <AppButton v-if="isLocal" variant="ghost" size="sm" class="!text-red-600 hover:!bg-red-50" @click="$emit('delete', kb)">删除</AppButton>
-        <AppButton v-if="!isLocal" variant="ghost" size="sm" @click="$emit('view', kb)">查看</AppButton>
-        <AppButton v-if="isDingTalk" variant="ghost" size="sm" @click="$emit('sync', kb)">刷新目录</AppButton>
-        <AppButton v-if="isDingTalk" variant="ghost" size="sm" class="!text-red-600 hover:!bg-red-50" @click="$emit('delete', kb)">删除</AppButton>
+        <AppButton v-if="isLocal || isDingTalk" variant="ghost" size="sm" @click.stop="$emit('edit', kb)">编辑</AppButton>
+        <AppButton v-if="isLocal" variant="ghost" size="sm" @click.stop="$emit('documents', kb)">文档</AppButton>
+        <AppButton v-if="isLocal" variant="ghost" size="sm" class="!text-red-600 hover:!bg-red-50" @click.stop="$emit('delete', kb)">删除</AppButton>
+        <AppButton v-if="!isLocal && !isDingTalk" variant="ghost" size="sm" @click.stop="$emit('view', kb)">查看</AppButton>
+        <AppButton v-if="isDingTalk" variant="ghost" size="sm" @click.stop="$emit('sync', kb)">刷新目录</AppButton>
+        <AppButton v-if="isDingTalk" variant="ghost" size="sm" class="!text-red-600 hover:!bg-red-50" @click.stop="$emit('delete', kb)">删除</AppButton>
       </div>
     </div>
 

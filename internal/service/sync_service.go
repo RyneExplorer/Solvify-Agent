@@ -49,6 +49,7 @@ type DingTalkWikiClient interface {
 	ListNodes(ctx context.Context, operatorID, parentNodeID, nextToken string, maxResults int) ([]dingtalk.Node, string, error)
 	QueryDentryID(ctx context.Context, operatorID, dentryUUID string) (dingtalk.DentryInfo, error)
 	DownloadFile(ctx context.Context, operatorID, spaceID, dentryID string) ([]byte, string, error)
+	QueryDocumentBlocks(ctx context.Context, operatorID, documentID string) ([]dingtalk.DocumentBlock, error)
 }
 
 // syncService 封装同步业务用例实现
@@ -328,8 +329,8 @@ func (s *syncService) ImportItem(ctx context.Context, userID, itemID string) (dt
 	if !strings.EqualFold(item.ItemType, "FILE") {
 		return dto.DocumentResponse{}, apperrors.New(apperrors.CodeBadRequest, "目录不能导入为本地文档")
 	}
-	if isUnsupportedAliDocItem(item) {
-		return dto.DocumentResponse{}, apperrors.New(apperrors.CodeDocumentFileTypeInvalid, "钉钉在线文档暂不支持自动导入，请查看原文")
+	if isAliSheetItem(item) {
+		return dto.DocumentResponse{}, apperrors.New(apperrors.CodeDocumentFileTypeInvalid, "钉钉在线表格暂不支持自动导入，请查看原文")
 	}
 	source, err := s.findSource(ctx, userID, item.SyncSourceID)
 	if err != nil {
@@ -620,6 +621,9 @@ func (s *syncService) importFileItem(ctx context.Context, source entity.SyncSour
 			zap.Error(err),
 		)
 	}()
+	if isAliDocItem(item) {
+		return s.importAliDocItem(ctx, source, cfg, item, fileName)
+	}
 	if s.textExtractor == nil || !s.textExtractor.Supports(fileType) {
 		logger.Warn("钉钉文件暂不支持自动解析，保存失败占位文档", zap.String("file_name", fileName),
 			zap.String("file_type", fileType),
@@ -694,6 +698,49 @@ func (s *syncService) importFileItem(ctx context.Context, source entity.SyncSour
 		return entity.Document{}, err
 	}
 	logger.Info("钉钉文件导入成功", zap.Duration("cost", time.Since(startedAt)))
+	return doc, nil
+}
+
+// importAliDocItem 导入钉钉在线文档
+func (s *syncService) importAliDocItem(ctx context.Context, source entity.SyncSource, cfg syncSourceConfig, item entity.SyncItem, fileName string) (entity.Document, error) {
+	blocks, err := s.dingtalkClient.QueryDocumentBlocks(ctx, cfg.OperatorUnionID, item.ExternalID)
+	if err != nil {
+		return entity.Document{}, err
+	}
+	displayContent := dingtalk.DocumentBlocksToMarkdown(blocks)
+	displayContent = normalizeDocumentDisplayContent(displayContent)
+	chunkContent := s.chunkService.NormalizeContent(displayContent, "md")
+	if displayContent == "" || chunkContent == "" {
+		return entity.Document{}, apperrors.New(apperrors.CodeDocumentStatusInvalid, "钉钉在线文档正文为空")
+	}
+
+	doc := syncedDocumentFromItem(source, item, fileName, "adoc", documentStatusReady, "")
+	if err := s.applyExistingDocumentID(ctx, &doc); err != nil {
+		return entity.Document{}, err
+	}
+	doc.FileSize = 0
+	doc.FileHash = hashSyncedText(displayContent)
+	doc.StoragePath = ""
+	versionID := uuid.NewString()
+	version := entity.DocumentVersion{
+		ID:            versionID,
+		UserID:        source.UserID,
+		DocumentID:    doc.ID,
+		Content:       displayContent,
+		ContentHash:   hashSyncedText(displayContent),
+		ChangeSummary: "钉钉在线文档块元素导入生成版本",
+	}
+	chunks, err := s.chunkService.BuildChunks(ctx, doc, versionID, s.chunkService.SplitContent(chunkContent))
+	if err != nil {
+		return entity.Document{}, err
+	}
+	if len(chunks) == 0 {
+		return entity.Document{}, apperrors.New(apperrors.CodeDocumentStatusInvalid, "钉钉在线文档分块为空")
+	}
+	if err := s.syncedDocumentRepo.SaveSyncedDocument(ctx, doc, &version, chunks, documentStatusReady, time.Now()); err != nil {
+		return entity.Document{}, err
+	}
+	logger.Info("钉钉在线文档块元素导入成功", zap.String("file_name", fileName))
 	return doc, nil
 }
 
@@ -834,13 +881,20 @@ func isDingTalkFolderNode(node dingtalk.Node) bool {
 	return strings.EqualFold(strings.TrimSpace(node.Type), "FOLDER")
 }
 
-// isUnsupportedAliDocItem 判断是否为暂不支持自动导入的钉钉在线文档
-func isUnsupportedAliDocItem(item entity.SyncItem) bool {
+// isAliDocItem 判断是否为钉钉在线文档
+func isAliDocItem(item entity.SyncItem) bool {
 	if !strings.EqualFold(strings.TrimSpace(item.Category), "ALIDOC") {
 		return false
 	}
-	ext := strings.ToLower(strings.TrimSpace(item.Extension))
-	return ext == "adoc" || ext == "axls"
+	return strings.EqualFold(strings.TrimSpace(item.Extension), "adoc")
+}
+
+// isAliSheetItem 判断是否为钉钉在线表格
+func isAliSheetItem(item entity.SyncItem) bool {
+	if !strings.EqualFold(strings.TrimSpace(item.Category), "ALIDOC") {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(item.Extension), "axls")
 }
 
 // syncItemFileName 规整外部文件名
