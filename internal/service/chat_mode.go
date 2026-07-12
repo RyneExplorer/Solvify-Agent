@@ -438,7 +438,7 @@ func applyReasoningStep(steps *[]dto.ReasoningStep, e agent.Event) {
 			Detail:  e.Detail,
 			Status:  e.Status,
 		})
-	case agent.EventPlan, agent.EventToolCall, agent.EventToolResult, agent.EventWarning:
+	case agent.EventToolCall, agent.EventToolResult, agent.EventWarning:
 		*steps = append(*steps, dto.ReasoningStep{
 			Type:    e.Type,
 			Content: e.Title,

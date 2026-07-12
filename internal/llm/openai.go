@@ -12,6 +12,7 @@ import (
 
 	einoOpenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 )
 
 // sharedHTTPClient 所有 LLM 客户端共享的 HTTP 连接池
@@ -108,6 +109,14 @@ func NewOpenAIClient(ctx context.Context, cfg OpenAIClientConfig) (*OpenAIClient
 // ChatModel 返回底层 eino ChatModel，满足 model.ToolCallingChatModel 接口
 func (c *OpenAIClient) ChatModel() model.ToolCallingChatModel {
 	return c.chatModel
+}
+
+// TestConnection 发送一个最小化请求来验证模型连接是否真正可用
+func (c *OpenAIClient) TestConnection(ctx context.Context) error {
+	_, err := c.chatModel.Generate(ctx, []*schema.Message{
+		{Role: schema.User, Content: "hi"},
+	})
+	return err
 }
 
 func toDuration(seconds int) time.Duration {

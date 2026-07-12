@@ -31,13 +31,14 @@ type Event struct {
 	MessageID        string `json:"message_id,omitempty"`
 	Error            string `json:"error,omitempty"`
 	Done             bool   `json:"done"`
-	Retryable        bool   `json:"retryable,omitempty"` // 是否可重试
+	Retryable        bool   `json:"retryable,omitempty"`
+	// ToolResult 工具调用结果（完整内容，供前端展示）
+	ToolResult string `json:"tool_result,omitempty"`
 }
 
 // 事件类型常量
 const (
 	EventThinking   = "thinking"    // 思考/分析阶段
-	EventPlan       = "plan"        // 执行计划（保留兼容）
 	EventToolCall   = "tool_call"   // 工具调用
 	EventToolResult = "tool_result" // 工具结果
 	EventWarning    = "warning"     // 警告

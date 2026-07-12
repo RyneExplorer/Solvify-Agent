@@ -555,6 +555,11 @@ function regenerate() {
   // Find last user message content
   const lastUser = [...messages.value].reverse().find(m => m.role === 'user')
   if (lastUser) {
+    // 删除原用户消息，避免 sendMessage 重复添加
+    const userIdx = messages.value.lastIndexOf(lastUser)
+    if (userIdx >= 0) {
+      messages.value.splice(userIdx, 1)
+    }
     input.value = lastUser.content
     sendMessage()
   }
@@ -571,6 +576,11 @@ function retryMessage(errorMsg: Message) {
   // 找到最后一条用户消息并重试
   const lastUser = [...messages.value].reverse().find(m => m.role === 'user')
   if (lastUser) {
+    // 删除原用户消息，避免 sendMessage 重复添加
+    const userIdx = messages.value.lastIndexOf(lastUser)
+    if (userIdx >= 0) {
+      messages.value.splice(userIdx, 1)
+    }
     input.value = lastUser.content
     sendMessage()
   }
@@ -656,6 +666,7 @@ function formatContent(content: string, sources?: unknown[]): string {
 
   let html = marked.parse(processed, { breaks: true, gfm: true }) as string
 
+  const urlToNumMap = new Map<string, number>()
   let webNum = 0
   for (let i = 0; i < cites.length; i++) {
     const c = cites[i]
@@ -666,8 +677,16 @@ function formatContent(content: string, sources?: unknown[]): string {
       const safeTip = escapeAttr(chunkText.slice(0, 300) + (chunkText.length > 300 ? '...' : ''))
       citeHtml = `<span class="inline-cite-kb" title="${safeTip || safeDoc}">📄${safeDoc}</span>`
     } else if (c.type === 'web') {
-      webNum++
-      citeHtml = `<a class="inline-cite-web" href="${escapeAttr(c.url || '')}" target="_blank" rel="noopener" title="${escapeAttr(c.title || '')}">${toCircleNum(webNum)}</a>`
+      const url = c.url || ''
+      let num = urlToNumMap.get(url)
+      if (num === undefined) {
+        webNum++
+        num = webNum
+        urlToNumMap.set(url, num)
+      }
+      const safeTitle = escapeHtml(c.title || '网页链接')
+      const safeUrl = escapeAttr(url)
+      citeHtml = `<a class="inline-cite-web" href="${safeUrl}" target="_blank" rel="noopener" title="${safeTitle}">[${num}]</a>`
     }
     html = html.replace(`%%CITE${i}%%`, citeHtml!)
   }
@@ -704,10 +723,13 @@ function toCircleNum(n: number) { const c = '①②③④⑤⑥⑦⑧⑨⑩⑪�
   font-size: 11px; color: #059669; vertical-align: baseline;
 }
 .inline-cite-web {
-  display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px;
-  padding: 0 3px; background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.2);
-  border-radius: 8px; font-size: 10px; font-weight: 600; color: #3b82f6;
-  text-decoration: none; vertical-align: middle;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 18px; padding: 0 4px;
+  background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.2);
+  border-radius: 4px; font-size: 11px; font-weight: 600;
+  color: #3b82f6; text-decoration: none; vertical-align: middle;
 }
-.inline-cite-web:hover { background: rgba(59,130,246,0.2); transform: scale(1.1); }
+.inline-cite-web:hover { background: rgba(59,130,246,0.2); border-color: rgba(59,130,246,0.4); }
+
+
 </style>

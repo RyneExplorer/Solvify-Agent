@@ -80,12 +80,9 @@
                   :key="t.id"
                   class="px-4 py-3 border-b border-slate-100 last:border-0"
               >
-                <div class="flex items-center justify-between">
-                  <div>
-                    <div class="text-sm font-medium text-slate-900">{{ t.name }}</div>
-                    <div class="text-xs text-slate-400 mt-0.5">{{ t.description || t.tool_key }}</div>
-                  </div>
-                  <span class="text-[11px] text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">{{ t.execution_mode === 'sync' ? '同步' : '异步' }}</span>
+                <div>
+                  <div class="text-sm font-medium text-slate-900">{{ t.name }}</div>
+                  <div class="text-xs text-slate-400 mt-0.5">{{ t.description || t.tool_key }}</div>
                 </div>
               </div>
             </div>
@@ -212,6 +209,19 @@
             <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">Model ID</label><input v-model="mForm.model_id" placeholder="gpt-4" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" /></div>
             <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">API Key</label><input v-model="mForm.api_key" type="password" placeholder="sk-..." class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" /></div>
             <div class="mb-5"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">配置 (JSON 可选)</label><textarea v-model="cfgText" rows="3" placeholder='{"temperature": 0.7}' class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500 resize-none" /></div>
+
+            <!-- 测试结果 -->
+            <div v-if="modelTestResult" class="mb-5">
+              <div :class="['p-3 rounded-xl text-sm', modelTestResult.success ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800']">
+                <div class="flex items-center gap-2 mb-1">
+                  <span>{{ modelTestResult.success ? '✓' : '✗' }}</span>
+                  <span class="font-medium">{{ modelTestResult.message }}</span>
+                </div>
+                <div v-if="modelTestResult.response_time_ms" class="text-xs opacity-70">响应时间: {{ modelTestResult.response_time_ms }}ms</div>
+                <div v-if="modelTestResult.error" class="text-xs mt-1 opacity-70">错误: {{ modelTestResult.error }}</div>
+                <div v-if="modelTestResult.details" class="text-xs mt-1 opacity-70">详情: {{ modelTestResult.details }}</div>
+              </div>
+            </div>
           </template>
 
           <template v-if="modalMode === 'tool'">
@@ -271,10 +281,25 @@
               <label class="block text-[13px] font-medium text-slate-600 mb-1.5">配置 (JSON 可选)</label>
               <textarea v-model="cfgText" rows="4" placeholder='{"api_key": "..."}' class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500 resize-none" />
             </div>
+
+            <!-- 工具测试结果 -->
+            <div v-if="toolTestResult" class="mb-5">
+              <div :class="['p-3 rounded-xl text-sm', toolTestResult.success ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800']">
+                <div class="flex items-center gap-2 mb-1">
+                  <span>{{ toolTestResult.success ? '✓' : '✗' }}</span>
+                  <span class="font-medium">{{ toolTestResult.message }}</span>
+                </div>
+                <div v-if="toolTestResult.response_time_ms" class="text-xs opacity-70">响应时间: {{ toolTestResult.response_time_ms }}ms</div>
+                <div v-if="toolTestResult.error" class="text-xs mt-1 opacity-70">错误: {{ toolTestResult.error }}</div>
+                <div v-if="!toolTestResult.success && toolTestResult.details" class="text-xs mt-1 opacity-70">详情: {{ toolTestResult.details }}</div>
+              </div>
+            </div>
           </template>
 
           <div class="flex gap-2 justify-end">
             <AppButton variant="secondary" @click="showModal = false">取消</AppButton>
+            <AppButton v-if="modalMode === 'model'" variant="outline" :disabled="!mForm.model_id" :loading="modelTesting" @click="doTestModel">{{ modelTesting ? '测试中...' : '测试连接' }}</AppButton>
+            <AppButton v-if="modalMode === 'tool'" variant="outline" :disabled="!tForm.provider_id" :loading="toolTesting" @click="doTestTool">{{ toolTesting ? '测试中...' : '测试连接' }}</AppButton>
             <AppButton @click="doSave" :disabled="modalMode === 'model' ? !mForm.model_id : !tForm.provider_id">保存</AppButton>
           </div>
         </div>
@@ -321,6 +346,8 @@ import AppBadge from '@/components/ui/AppBadge.vue'
 import AppSelect from '@/components/ui/AppSelect.vue'
 import type { UserModelConfigInfo, CreateUserModelConfigRequest } from '@/types/model'
 import type { UserToolConfigInfo, CreateUserToolConfigRequest, ConfigSchema } from '@/types/tool'
+import { testUserModelConfig } from '@/api/model'
+import { testUserToolConfig } from '@/api/tool'
 import type { DingTalkBinding } from '@/types/dingtalk'
 
 // ── Tabs ──
@@ -357,6 +384,22 @@ const selToolType = ref('')
 
 const mForm = reactive<CreateUserModelConfigRequest>({ api_format: 'openai', base_url: '', model_id: '', api_key: '' })
 const tForm = reactive<CreateUserToolConfigRequest>({ tool_type_id: '', provider_id: '', display_name: '', config: {} })
+const modelTestResult = ref<{
+  success: boolean
+  message: string
+  error?: string
+  response_time_ms: number
+  details?: string
+} | null>(null)
+const toolTestResult = ref<{
+  success: boolean
+  message: string
+  error?: string
+  response_time_ms: number
+  details?: string
+} | null>(null)
+const modelTesting = ref(false)
+const toolTesting = ref(false)
 
 const modalTitle = computed(() => `${editId.value ? '编辑' : '添加'}${modalMode.value === 'model' ? '模型' : '工具'}`)
 const selProviders = computed(() => {
@@ -379,10 +422,14 @@ function onToolTypeChange() {
   tForm.tool_type_id = selToolType.value
   tForm.provider_id = ''
   toolConfigValues.value = {}
+  toolTestResult.value = null
+  toolTesting.value = false
 }
 
 function onProviderChange() {
   toolConfigValues.value = {}
+  toolTestResult.value = null
+  toolTesting.value = false
 }
 
 const selectedExistingProviderConfig = computed(() => {
@@ -391,10 +438,35 @@ const selectedExistingProviderConfig = computed(() => {
 })
 
 // ── Actions ──
-function openModelCreate() { modalMode.value = 'model'; editId.value = null; mForm.api_format = 'openai'; mForm.base_url = ''; mForm.model_id = ''; mForm.api_key = ''; cfgText.value = ''; showModal.value = true }
+function openModelCreate() { modalMode.value = 'model'; editId.value = null; mForm.api_format = 'openai'; mForm.base_url = ''; mForm.model_id = ''; mForm.api_key = ''; cfgText.value = ''; modelTestResult.value = null; showModal.value = true }
 function openModelEdit(m: UserModelConfigInfo) {
   modalMode.value = 'model'; editId.value = m.id; mForm.api_format = m.api_format; mForm.base_url = m.base_url; mForm.model_id = m.model_id; mForm.api_key = m.api_key || ''
-  cfgText.value = m.config ? JSON.stringify(m.config, null, 2) : ''; showModal.value = true
+  cfgText.value = m.config ? JSON.stringify(m.config, null, 2) : ''; modelTestResult.value = null; showModal.value = true
+}
+
+async function doTestModel() {
+  try {
+    modelTesting.value = true
+    modelTestResult.value = null
+    const config = cfgText.value ? JSON.parse(cfgText.value) : {}
+    const res = await testUserModelConfig({
+      provider: mForm.api_format,
+      model_id: mForm.model_id,
+      base_url: mForm.base_url,
+      api_key: mForm.api_key,
+      config,
+    })
+    modelTestResult.value = res.data
+  } catch (e: any) {
+    modelTestResult.value = {
+      success: false,
+      message: '测试失败',
+      error: e.message || '未知错误',
+      response_time_ms: 0,
+    }
+  } finally {
+    modelTesting.value = false
+  }
 }
 async function handleModelDelete(id: string) {
   try {
@@ -408,10 +480,38 @@ async function handleModelDelete(id: string) {
   }
 }
 
+async function doTestTool() {
+  try {
+    toolTesting.value = true
+    toolTestResult.value = null
+    const selectedProvider = selProviders.value.find(p => p.id === tForm.provider_id)
+    if (!selectedProvider) {
+      ElMessage.warning('请先选择供应商')
+      return
+    }
+    const res = await testUserToolConfig({
+      provider_type: selectedProvider.provider_type,
+      provider_id: selectedProvider.id,
+      user_config: { ...toolConfigValues.value },
+      tool_input: {},
+    })
+    toolTestResult.value = res.data
+  } catch (e: any) {
+    toolTestResult.value = {
+      success: false,
+      message: '测试失败',
+      error: e.message || '未知错误',
+      response_time_ms: 0,
+    }
+  } finally {
+    toolTesting.value = false
+  }
+}
+
 function openToolCreate() {
   modalMode.value = 'tool'; editId.value = null
   tForm.tool_type_id = ''; tForm.provider_id = ''; tForm.display_name = ''; tForm.config = {}
-  cfgText.value = ''; selToolType.value = ''; toolConfigValues.value = {}
+  cfgText.value = ''; selToolType.value = ''; toolConfigValues.value = {}; toolTestResult.value = null
   showModal.value = true
 }
 function openToolEdit(c: UserToolConfigInfo) {
@@ -421,6 +521,7 @@ function openToolEdit(c: UserToolConfigInfo) {
   // 加载已有的配置值到动态表单
   toolConfigValues.value = c.config ? { ...c.config } : {}
   cfgText.value = c.config ? JSON.stringify(c.config, null, 2) : ''
+  toolTestResult.value = null
   showModal.value = true
 }
 async function handleToolEnable(c: UserToolConfigInfo) {

@@ -45,6 +45,46 @@ func (r *documentRepository) ListByKnowledgeBase(ctx context.Context, userID, kb
 	return items, err
 }
 
+// ListWithChunkCount 查询知识库下文档列表，包含分块数和状态文本
+func (r *documentRepository) ListWithChunkCount(ctx context.Context, userID, kbID string) ([]DocumentWithChunkCount, error) {
+	var rows []struct {
+		entity.Document
+		ChunkCount int `gorm:"column:chunk_count"`
+	}
+
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT d.*, COALESCE(COUNT(dc.id), 0) as chunk_count
+		FROM documents d
+		LEFT JOIN document_chunks dc ON dc.document_id = d.id
+		WHERE d.user_id = ? AND d.knowledge_base_id = ? AND d.status <> 5
+		GROUP BY d.id
+		ORDER BY d.created_at DESC
+	`, userID, kbID).Scan(&rows).Error
+
+	if err != nil {
+		return nil, err
+	}
+
+	statusMap := map[int]string{
+		1: "已上传",
+		2: "处理中",
+		3: "就绪",
+		4: "失败",
+		5: "已删除",
+	}
+
+	result := make([]DocumentWithChunkCount, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, DocumentWithChunkCount{
+			Document:   row.Document,
+			ChunkCount: row.ChunkCount,
+			StatusText: statusMap[row.Document.Status],
+		})
+	}
+
+	return result, nil
+}
+
 // FindByID 查询当前用户未删除文档
 func (r *documentRepository) FindByID(ctx context.Context, userID, documentID string, deletedStatus int) (entity.Document, bool, error) {
 	var doc entity.Document

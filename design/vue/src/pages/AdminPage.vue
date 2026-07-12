@@ -150,7 +150,6 @@
             <tr class="bg-slate-50 border-b border-slate-200">
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">名称</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">Key</th>
-              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">执行模式</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">供应商数</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">状态</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">操作</th>
@@ -160,7 +159,6 @@
             <tr v-for="t in filteredToolTypes" :key="t.id" class="border-b border-slate-100 last:border-b-0">
               <td class="px-4 py-3 font-medium text-slate-900">{{ t.name }}</td>
               <td class="px-4 py-3 text-slate-500 font-mono text-xs">{{ t.tool_key }}</td>
-              <td class="px-4 py-3 text-slate-900">{{ t.execution_mode }}</td>
               <td class="px-4 py-3 text-slate-900">{{ t.provider_count }}</td>
               <td class="px-4 py-3"><AppBadge :variant="t.is_enabled ? 'success' : 'neutral'">{{ t.is_enabled ? '启用' : '停用' }}</AppBadge></td>
               <td class="px-4 py-3">
@@ -238,9 +236,23 @@
             <label class="block text-[13px] font-medium text-slate-600 mb-1.5">API Key</label>
             <input v-model="modelForm.api_key" type="password" placeholder="sk-..." class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
           </div>
+
+          <!-- 测试结果 -->
+          <div v-if="modelTestResult" class="mt-2">
+            <div :class="['p-3 rounded-xl text-sm', modelTestResult.success ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800']">
+              <div class="flex items-center gap-2 mb-1">
+                <span>{{ modelTestResult.success ? '✓' : '✗' }}</span>
+                <span class="font-medium">{{ modelTestResult.message }}</span>
+              </div>
+              <div v-if="modelTestResult.response_time_ms" class="text-xs opacity-70">响应时间: {{ modelTestResult.response_time_ms }}ms</div>
+              <div v-if="modelTestResult.error" class="text-xs mt-1 opacity-70">错误: {{ modelTestResult.error }}</div>
+              <div v-if="modelTestResult.details" class="text-xs mt-1 opacity-70">详情: {{ modelTestResult.details }}</div>
+            </div>
+          </div>
         </div>
         <div class="flex justify-end gap-2 mt-6">
           <AppButton variant="secondary" @click="modelModalVisible = false">取消</AppButton>
+          <AppButton variant="outline" :disabled="!modelFormValid" :loading="modelTesting" @click="testModel">{{ modelTesting ? '测试中...' : '测试连接' }}</AppButton>
           <AppButton :disabled="!modelFormValid" @click="saveModel">保存</AppButton>
         </div>
       </div>
@@ -259,13 +271,6 @@
           <div>
             <label class="block text-[13px] font-medium text-slate-600 mb-1.5">Tool Key</label>
             <input v-model="toolTypeForm.tool_key" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
-          </div>
-          <div>
-            <label class="block text-[13px] font-medium text-slate-600 mb-1.5">执行模式</label>
-            <AppSelect v-model="toolTypeForm.execution_mode" class="w-full">
-              <el-option value="sync" label="同步" />
-              <el-option value="async" label="异步" />
-            </AppSelect>
           </div>
           <div>
             <label class="block text-[13px] font-medium text-slate-600 mb-1.5">描述</label>
@@ -408,9 +413,23 @@
               <button type="button" @click="removeKV(toolProviderForm.rate_limit_rows, idx)" class="text-xs text-red-600 hover:text-red-700 px-1">删除</button>
             </div>
           </div>
+
+          <!-- 测试结果 -->
+          <div v-if="toolTestResult" class="mt-2">
+            <div :class="['p-3 rounded-xl text-sm', toolTestResult.success ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800']">
+              <div class="flex items-center gap-2 mb-1">
+                <span>{{ toolTestResult.success ? '✓' : '✗' }}</span>
+                <span class="font-medium">{{ toolTestResult.message }}</span>
+              </div>
+              <div v-if="toolTestResult.response_time_ms" class="text-xs opacity-70">响应时间: {{ toolTestResult.response_time_ms }}ms</div>
+              <div v-if="toolTestResult.error" class="text-xs mt-1 opacity-70">错误: {{ toolTestResult.error }}</div>
+              <div v-if="toolTestResult.details" class="text-xs mt-1 opacity-70">详情: {{ toolTestResult.details }}</div>
+            </div>
+          </div>
         </div>
         <div class="flex justify-end gap-2 mt-6">
           <AppButton variant="secondary" @click="toolProviderModalVisible = false">取消</AppButton>
+          <AppButton variant="outline" :disabled="!toolProviderFormValid" :loading="toolTesting" @click="testToolProvider">{{ toolTesting ? '测试中...' : '测试连接' }}</AppButton>
           <AppButton :disabled="!toolProviderFormValid" @click="saveToolProvider">保存</AppButton>
         </div>
       </div>
@@ -553,6 +572,14 @@ const modelModalVisible = ref(false)
 const editingModel = ref<ModelInfo | null>(null)
 const modelForm = ref({ provider: '', model_id: '', base_url: '', api_key: '' })
 const modelFormValid = computed(() => modelForm.value.provider.trim() && modelForm.value.model_id.trim())
+const modelTestResult = ref<{
+  success: boolean
+  message: string
+  error?: string
+  response_time_ms: number
+  details?: string
+} | null>(null)
+const modelTesting = ref(false)
 
 function openModelModal(model?: ModelInfo) {
   editingModel.value = model ?? null
@@ -578,6 +605,29 @@ async function saveModel() {
     ElMessage.success(editingModel.value ? '保存成功' : '添加成功')
   } catch (e: any) {
     ElMessage.error(e.message || '保存失败')
+  }
+}
+
+async function testModel() {
+  try {
+    modelTesting.value = true
+    modelTestResult.value = null
+    const res = await adminTestModel({
+      provider: modelForm.value.provider,
+      model_id: modelForm.value.model_id,
+      base_url: modelForm.value.base_url,
+      api_key: modelForm.value.api_key,
+    })
+    modelTestResult.value = res.data
+  } catch (e: any) {
+    modelTestResult.value = {
+      success: false,
+      message: '测试失败',
+      error: e.message || '未知错误',
+      response_time_ms: 0,
+    }
+  } finally {
+    modelTesting.value = false
   }
 }
 
@@ -757,15 +807,15 @@ const filteredToolTypes = computed(() => {
 })
 const toolTypeModalVisible = ref(false)
 const editingToolType = ref<ToolTypeInfo | null>(null)
-const toolTypeForm = ref({ name: '', tool_key: '', description: '', execution_mode: 'sync' })
+const toolTypeForm = ref({ name: '', tool_key: '', description: '' })
 const toolTypeFormValid = computed(() => toolTypeForm.value.name.trim() && toolTypeForm.value.tool_key.trim())
 
 function openToolTypeModal(toolType?: ToolTypeInfo) {
   editingToolType.value = toolType ?? null
   if (toolType) {
-    toolTypeForm.value = { name: toolType.name, tool_key: toolType.tool_key, description: toolType.description, execution_mode: toolType.execution_mode }
+    toolTypeForm.value = { name: toolType.name, tool_key: toolType.tool_key, description: toolType.description }
   } else {
-    toolTypeForm.value = { name: '', tool_key: '', description: '', execution_mode: 'sync' }
+    toolTypeForm.value = { name: '', tool_key: '', description: '' }
   }
   toolTypeModalVisible.value = true
 }
@@ -851,6 +901,14 @@ const toolProviderForm = ref<{
   response_mapping_rows: KVRow[]
 }>({ name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] })
 const toolProviderFormValid = computed(() => toolProviderForm.value.name.trim() && toolProviderForm.value.provider_key.trim() && toolProviderForm.value.provider_type.trim())
+const toolTestResult = ref<{
+  success: boolean
+  message: string
+  error?: string
+  response_time_ms: number
+  details?: string
+} | null>(null)
+const toolTesting = ref(false)
 
 function addSchemaField() {
   toolProviderForm.value.schema_fields.push({ key: '', title: '', type: 'string', description: '', default_value: '', required: true, secret: false })
@@ -1063,6 +1121,30 @@ async function saveToolProvider() {
     ElMessage.success(editingToolProvider.value ? '保存成功' : '添加成功')
   } catch (e: any) {
     ElMessage.error(e.message || '保存失败')
+  }
+}
+
+async function testToolProvider() {
+  try {
+    toolTesting.value = true
+    toolTestResult.value = null
+    const providerConfig = buildProviderConfig(toolProviderForm.value)
+    const res = await adminTestTool({
+      provider_type: toolProviderForm.value.provider_type,
+      provider_config: providerConfig,
+      admin_config: parseKVRows(toolProviderForm.value.admin_config_rows),
+      tool_input: {},
+    })
+    toolTestResult.value = res.data
+  } catch (e: any) {
+    toolTestResult.value = {
+      success: false,
+      message: '测试失败',
+      error: e.message || '未知错误',
+      response_time_ms: 0,
+    }
+  } finally {
+    toolTesting.value = false
   }
 }
 

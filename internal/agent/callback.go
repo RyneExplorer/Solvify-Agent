@@ -9,21 +9,18 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	toolComp "github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/schema"
 
 	"solvify-agent/pkg/logger"
 )
 
-// agentCallbackHandler 实现 eino callbacks.Handler，捕获 Agent 中间事件
 type agentCallbackHandler struct {
 	eventCh              chan<- Event
-	callCount            int               // 记录 LLM 调用轮次
-	pendingThinkingTitle string            // 当前正在运行的思考阶段标题（用于后续标记完成）
-	kbIDs                []string          // 当前请求的知识库 ID 列表（用于展示检索上下文）
-	toolDescMap          map[string]string // 工具名 → 描述（用于 formatToolStart 判断工具类别）
+	callCount            int
+	pendingThinkingTitle string
+	kbIDs                []string
+	toolDescMap          map[string]string
 }
 
-// newAgentCallbackHandler 创建 Agent 回调处理器
 func newAgentCallbackHandler(eventCh chan<- Event, kbIDs []string, toolDescMap map[string]string) callbacks.Handler {
 	h := &agentCallbackHandler{eventCh: eventCh, kbIDs: kbIDs, toolDescMap: toolDescMap}
 	return callbacks.NewHandlerBuilder().
@@ -33,7 +30,6 @@ func newAgentCallbackHandler(eventCh chan<- Event, kbIDs []string, toolDescMap m
 		Build()
 }
 
-// onStart 组件开始执行时的回调
 func (h *agentCallbackHandler) onStart(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
 	if info == nil {
 		return ctx
@@ -42,7 +38,6 @@ func (h *agentCallbackHandler) onStart(ctx context.Context, info *callbacks.RunI
 	switch info.Component {
 	case "ChatModel":
 		h.callCount++
-		// 完成上一个思考阶段（如果存在），实现 running → success 生命周期
 		h.completeThinking()
 
 		if h.callCount == 1 {
@@ -64,7 +59,6 @@ func (h *agentCallbackHandler) onStart(ctx context.Context, info *callbacks.RunI
 		}
 
 	case "Tool":
-		// 工具开始执行，展示具体搜索内容
 		toolInput := toolComp.ConvCallbackInput(input)
 		toolName := info.Name
 		query := ""
@@ -83,7 +77,6 @@ func (h *agentCallbackHandler) onStart(ctx context.Context, info *callbacks.RunI
 	return ctx
 }
 
-// onEnd 组件执行完成时的回调
 func (h *agentCallbackHandler) onEnd(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
 	if info == nil {
 		return ctx
@@ -94,15 +87,12 @@ func (h *agentCallbackHandler) onEnd(ctx context.Context, info *callbacks.RunInf
 		modelOutput := model.ConvCallbackOutput(output)
 		if modelOutput != nil && modelOutput.Message != nil {
 			if len(modelOutput.Message.ToolCalls) > 0 {
-				// LLM 决定调用工具 —— 思考阶段结束，展示执行计划
 				for _, tc := range modelOutput.Message.ToolCalls {
 					query := extractQueryFromArgs(tc.Function.Arguments)
 					logger.Infof("[Callback] LLM 决定调用: %s(%q)", tc.Function.Name, query)
 				}
 				h.completeThinking()
-				h.emitPlan(modelOutput.Message.ToolCalls)
 			} else {
-				// LLM 未产生工具调用，说明已准备生成最终答案
 				h.completeThinking()
 				h.pendingThinkingTitle = "正在生成答案"
 				h.emit(Event{
@@ -114,29 +104,27 @@ func (h *agentCallbackHandler) onEnd(ctx context.Context, info *callbacks.RunInf
 		}
 
 	case "Tool":
-		// 工具执行完成，展示结果摘要
 		toolOutput := toolComp.ConvCallbackOutput(output)
 		toolName := info.Name
-		title, detail := formatToolEnd(toolName, toolOutput, h.toolDescMap)
+		title, detail, toolResult := formatToolEnd(toolName, toolOutput, h.toolDescMap)
 		h.emit(Event{
-			Type:   EventToolResult,
-			Title:  title,
-			Detail: detail,
-			Status: "success",
+			Type:       EventToolResult,
+			Title:      title,
+			Detail:     detail,
+			Status:     "success",
+			ToolResult: toolResult,
 		})
 	}
 
 	return ctx
 }
 
-// onError 组件执行出错时的回调
 func (h *agentCallbackHandler) onError(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
 	if info == nil {
 		return ctx
 	}
 	logger.Errorf("[Callback] 组件出错: node=%s, component=%s, err=%v", info.Name, info.Component, err)
 
-	// 根据组件类型和错误信息生成友好的错误消息
 	title, detail, retryable := formatToolError(string(info.Component), info.Name, err)
 
 	h.emit(Event{
@@ -151,9 +139,6 @@ func (h *agentCallbackHandler) onError(ctx context.Context, info *callbacks.RunI
 	return ctx
 }
 
-// formatToolStart 格式化工具开始事件
-//
-// toolDescMap 为可选参数（用户工具名 → 描述），用于识别工具类别（搜索/联网/HTTP 等）
 func formatToolStart(toolName, query string, kbIDs []string, toolDescMap map[string]string) (title, detail string) {
 	switch toolName {
 	case "knowledge_search":
@@ -166,9 +151,22 @@ func formatToolStart(toolName, query string, kbIDs []string, toolDescMap map[str
 			detail += fmt.Sprintf(" | 知识库数：%d", len(kbIDs))
 		}
 		return "正在检索知识库", detail
+	case "grep_chunks":
+		if query != "" {
+			return "正在关键词搜索", fmt.Sprintf("关键词：%s", query)
+		}
+		return "正在关键词搜索", "精确匹配文档内容"
+	case "get_document_info":
+		if query != "" {
+			return "正在获取文档信息", fmt.Sprintf("文档ID：%s", query)
+		}
+		return "正在获取文档信息", "查询文档元数据"
+	case "list_knowledge_chunks":
+		return "正在列出文档", "获取知识库文档列表"
+	case "list_knowledge_bases":
+		return "正在列出知识库", "获取用户知识库列表"
 	}
 
-	// 用户配置的外部工具：根据描述判断是否为联网搜索类
 	desc := toolDescMap[toolName]
 	if isWebSearchTool(toolName, desc) {
 		if query != "" {
@@ -177,7 +175,6 @@ func formatToolStart(toolName, query string, kbIDs []string, toolDescMap map[str
 		return "正在联网搜索", "搜索互联网获取最新信息"
 	}
 
-	// 兜底：显示工具名 + 简短描述
 	label := toolName
 	if desc != "" {
 		label = desc
@@ -188,7 +185,6 @@ func formatToolStart(toolName, query string, kbIDs []string, toolDescMap map[str
 	return fmt.Sprintf("正在执行 %s", label), ""
 }
 
-// isWebSearchTool 判断工具是否为联网搜索类（基于工具名或描述关键词）
 func isWebSearchTool(name, desc string) bool {
 	combined := strings.ToLower(name + " " + desc)
 	for _, kw := range []string{"web", "search", "搜索", "联网", "tavily", "serp", "bocha", "sogou", "bing"} {
@@ -199,16 +195,16 @@ func isWebSearchTool(name, desc string) bool {
 	return false
 }
 
-// formatToolEnd 格式化工具完成事件
-func formatToolEnd(toolName string, output *toolComp.CallbackOutput, toolDescMap map[string]string) (title, detail string) {
+func formatToolEnd(toolName string, output *toolComp.CallbackOutput, toolDescMap map[string]string) (title, detail, toolResult string) {
 	response := ""
 	if output != nil {
 		response = output.Response
+		toolResult = response
 	}
 
 	switch toolName {
 	case "knowledge_search":
-		titles, count := parseSearchResultTitles(response)
+		titles, count := parseKnowledgeSearchResult(response)
 		if count > 0 {
 			detail = fmt.Sprintf("找到 %d 条相关资料", count)
 			if len(titles) > 0 {
@@ -218,25 +214,73 @@ func formatToolEnd(toolName string, output *toolComp.CallbackOutput, toolDescMap
 					detail += "：" + strings.Join(titles, "、")
 				}
 			}
-			return "知识库检索完成", detail
+			return "知识库检索完成", detail, toolResult
 		}
-		return "知识库检索完成", "未找到相关内容"
+		return "知识库检索完成", "未找到相关内容", toolResult
+	case "grep_chunks":
+		result := parseGrepResult(response)
+		if result.Success && result.Data != nil {
+			if dataList, ok := result.Data.([]interface{}); ok && len(dataList) > 0 {
+				return "关键词搜索完成", fmt.Sprintf("找到 %d 条匹配结果", len(dataList)), toolResult
+			}
+		}
+		return "关键词搜索完成", "未找到匹配内容", toolResult
+	case "get_document_info":
+		result := parseToolResponse(response)
+		if result.Success && result.Data != nil {
+			return "文档信息获取完成", "已获取文档详细信息", toolResult
+		}
+		return "文档信息获取完成", result.Message, toolResult
+	case "list_knowledge_chunks":
+		result := parseToolResponse(response)
+		if result.Success && result.Data != nil {
+			dataList, ok := result.Data.([]interface{})
+			if ok && len(dataList) > 0 {
+				return "文档列表获取完成", fmt.Sprintf("找到 %d 个文档", len(dataList)), toolResult
+			}
+		}
+		return "文档列表获取完成", result.Message, toolResult
+	case "list_knowledge_bases":
+		result := parseToolResponse(response)
+		if result.Success && result.Data != nil {
+			dataList, ok := result.Data.([]interface{})
+			if ok && len(dataList) > 0 {
+				return "知识库列表获取完成", fmt.Sprintf("找到 %d 个知识库", len(dataList)), toolResult
+			}
+		}
+		return "知识库列表获取完成", result.Message, toolResult
 	}
 
-	// 用户配置的外部工具：根据描述判断类别
 	desc := toolDescMap[toolName]
 	if isWebSearchTool(toolName, desc) {
 		if response != "" && response != "暂未配置" {
-			return "联网搜索完成", "已获取相关信息"
+			return "联网搜索完成", "已获取相关信息", toolResult
 		}
-		return "联网搜索不可用", "继续使用知识库信息回答"
+		return "联网搜索不可用", "继续使用知识库信息回答", toolResult
 	}
 
-	return fmt.Sprintf("%s 执行完成", toolName), ""
+	return fmt.Sprintf("%s 执行完成", toolName), "", toolResult
 }
 
-// parseSearchResultTitles 解析搜索结果 JSON，返回文档标题列表和总数
-func parseSearchResultTitles(response string) (titles []string, count int) {
+type ToolResponseData struct {
+	Success bool        `json:"success"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data"`
+}
+
+func parseToolResponse(response string) ToolResponseData {
+	var result ToolResponseData
+	if err := json.Unmarshal([]byte(response), &result); err != nil {
+		return ToolResponseData{Success: false, Message: response}
+	}
+	return result
+}
+
+func parseGrepResult(response string) ToolResponseData {
+	return parseToolResponse(response)
+}
+
+func parseKnowledgeSearchResult(response string) (titles []string, count int) {
 	var result struct {
 		Sources []struct {
 			Title string `json:"title"`
@@ -245,6 +289,7 @@ func parseSearchResultTitles(response string) (titles []string, count int) {
 	if err := json.Unmarshal([]byte(response), &result); err != nil {
 		return nil, 0
 	}
+
 	count = len(result.Sources)
 	seen := make(map[string]bool, count)
 	for _, s := range result.Sources {
@@ -256,51 +301,6 @@ func parseSearchResultTitles(response string) (titles []string, count int) {
 	return titles, count
 }
 
-// emitPlan 根据模型决定的工具调用生成执行计划事件
-func (h *agentCallbackHandler) emitPlan(toolCalls []schema.ToolCall) {
-	var parts []string
-	for _, tc := range toolCalls {
-		query := extractQueryFromArgs(tc.Function.Arguments)
-		switch tc.Function.Name {
-		case "knowledge_search":
-			kbInfo := ""
-			if len(h.kbIDs) > 0 {
-				kbInfo = fmt.Sprintf("（共 %d 个知识库）", len(h.kbIDs))
-			}
-			if query != "" {
-				parts = append(parts, fmt.Sprintf("检索知识库：%s %s", query, kbInfo))
-			} else {
-				parts = append(parts, fmt.Sprintf("语义搜索知识库 %s", kbInfo))
-			}
-		default:
-			// 用户工具：同样用 isWebSearchTool 判断类别
-			desc := h.toolDescMap[tc.Function.Name]
-			if isWebSearchTool(tc.Function.Name, desc) {
-				if query != "" {
-					parts = append(parts, fmt.Sprintf("联网搜索：%s", query))
-				} else {
-					parts = append(parts, "联网搜索获取最新信息")
-				}
-			} else if query != "" {
-				parts = append(parts, fmt.Sprintf("调用 %s：%s", tc.Function.Name, query))
-			} else {
-				parts = append(parts, fmt.Sprintf("调用 %s", tc.Function.Name))
-			}
-		}
-	}
-	detail := strings.Join(parts, "；")
-	if detail == "" {
-		detail = "准备执行工具调用"
-	}
-	h.emit(Event{
-		Type:   EventPlan,
-		Title:  "制定执行计划",
-		Detail: detail,
-		Status: "success",
-	})
-}
-
-// completeThinking 将当前运行的思考阶段标记为完成（running → success）
 func (h *agentCallbackHandler) completeThinking() {
 	if h.pendingThinkingTitle == "" {
 		return
@@ -313,13 +313,11 @@ func (h *agentCallbackHandler) completeThinking() {
 	h.pendingThinkingTitle = ""
 }
 
-// formatToolError 格式化工具错误消息
 func formatToolError(component, name string, err error) (title, detail string, retryable bool) {
 	errMsg := err.Error()
 
 	switch component {
 	case "Tool":
-		// 工具执行错误
 		if isWebSearchTool(name, "") {
 			if strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "超时") {
 				return "联网搜索超时", "搜索请求超时，请稍后重试", true
@@ -338,6 +336,18 @@ func formatToolError(component, name string, err error) (title, detail string, r
 
 		if name == "knowledge_search" {
 			return "知识库检索失败", "知识库查询异常，请稍后重试", true
+		}
+		if name == "grep_chunks" {
+			return "关键词搜索失败", "关键词搜索异常，请稍后重试", true
+		}
+		if name == "get_document_info" {
+			return "文档信息获取失败", "文档信息查询异常，请稍后重试", true
+		}
+		if name == "list_knowledge_chunks" {
+			return "文档列表获取失败", "文档列表查询异常，请稍后重试", true
+		}
+		if name == "list_knowledge_bases" {
+			return "知识库列表获取失败", "知识库列表查询异常，请稍后重试", true
 		}
 
 		return fmt.Sprintf("%s 执行失败", name), "工具调用失败，请稍后重试", true
@@ -365,7 +375,6 @@ func formatToolError(component, name string, err error) (title, detail string, r
 	}
 }
 
-// emit 发送事件（非阻塞）
 func (h *agentCallbackHandler) emit(e Event) {
 	logger.Infof("[Callback] 发送事件: type=%s, title=%s, status=%s, detail=%s",
 		e.Type, e.Title, e.Status, truncateStr(e.Detail, 60))

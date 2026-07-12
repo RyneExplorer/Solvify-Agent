@@ -16,4 +16,5 @@ type UserModelConfigServiceInterface interface {
 	Get(ctx context.Context, userID string, configID string) (responsedto.UserModelConfigInfo, error)
 	List(ctx context.Context, userID string) (responsedto.ListUserModelConfigsResponse, error)
 	ResolveModelConfig(ctx context.Context, userID string, configID string) (*entity.UserModelConfig, error)
+	Test(ctx context.Context, req requestdto.TestModelRequest) (responsedto.TestResult, error)
 }

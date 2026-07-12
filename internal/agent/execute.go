@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 
 	"github.com/cloudwego/eino/components/model"
 	einoTool "github.com/cloudwego/eino/components/tool"
@@ -18,10 +19,6 @@ import (
 	"solvify-agent/pkg/logger"
 )
 
-// Execute 执行 Agent 推理循环
-//
-// Agent 自主决定工具调用时机：knowledge_search / web_search
-// 内部使用 eino ReAct Agent，自动管理 Think → Act → Observe 循环
 func (e *Engine) Execute(ctx context.Context, req Request, chatModel model.ToolCallingChatModel) (<-chan Event, error) {
 	eventCh := make(chan Event, 100)
 
@@ -33,22 +30,29 @@ func (e *Engine) Execute(ctx context.Context, req Request, chatModel model.ToolC
 	return eventCh, nil
 }
 
-// runAgent 创建 eino ReAct Agent 并处理流式输出
 func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.ToolCallingChatModel, eventCh chan<- Event) {
-	// 1. 创建带用户上下文的 knowledge_search 工具
+	// 1. 创建带用户上下文的内置工具
 	ksTool := e.knowledgeSearchFactory(req.UserID, req.KnowledgeBaseIDs)
+	grepTool := e.grepChunksFactory(req.UserID, req.KnowledgeBaseIDs)
+	docInfoTool := e.getDocumentInfoFactory(req.UserID)
+	listChunksTool := e.listKnowledgeChunksFactory(req.UserID, req.KnowledgeBaseIDs)
+	listBasesTool := e.listKnowledgeBasesFactory(req.UserID)
 
 	// 2. 从 DB/Redis 加载用户配置的工具（联网搜索等）
 	userTools := e.toolFactory.CreateAgentTools(ctx, req.UserID)
 
-	// 3. 合并工具列表（先加载工具，再构建 prompt——因为 prompt 需要动态列出可用工具）
-	allTools := make([]einoTool.BaseTool, 0, 1+len(userTools))
+	// 3. 合并工具列表
+	allTools := make([]einoTool.BaseTool, 0, 5+len(userTools))
 	allTools = append(allTools, ksTool)
+	allTools = append(allTools, grepTool)
+	allTools = append(allTools, docInfoTool)
+	allTools = append(allTools, listChunksTool)
+	allTools = append(allTools, listBasesTool)
 	allTools = append(allTools, userTools...)
 
-	// 打印最终工具清单 + 构建 toolDescMap（供 callback 识别工具类别）
+	// 4. 打印最终工具清单 + 构建 toolDescMap
 	toolDescMap := make(map[string]string, len(allTools))
-	logger.Infof("[Agent] userID=%s, 工具总数=%d (knowledge_search + %d 用户工具)", req.UserID, len(allTools), len(userTools))
+	logger.Infof("[Agent] userID=%s, 工具总数=%d (内置5个 + %d 用户工具)", req.UserID, len(allTools), len(userTools))
 	for _, t := range allTools {
 		info, err := t.Info(ctx)
 		if err != nil {
@@ -59,20 +63,20 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 		logger.Infof("[Agent]   工具: name=%s, desc=%s", info.Name, truncateStr(info.Desc, 80))
 	}
 
-	// 4. 动态构建 system prompt（根据实际加载的工具列表生成）
+	// 5. 构建 system prompt
 	systemPrompt := buildReActSystemPrompt(ctx, userTools)
 	logger.Infof("[Agent] SystemPrompt (前200字符): %s", truncateStr(systemPrompt, 200))
 
-	// 5. 构建输入消息（历史 + 当前问题）
+	// 6. 构建输入消息（历史 + 当前问题）
 	inputMessages := buildInputMessages(req.Query, req.History)
 
-	// 6. 确定最大步数（每轮 Think+Act 算一步，默认给足空间）
+	// 7. 确定最大步数
 	maxStep := e.cfg.MaxIterations
 	if maxStep <= 0 {
-		maxStep = 8
+		maxStep = 5
 	}
 
-	// 7. 创建 eino ReAct Agent
+	// 8. 创建 eino ReAct Agent
 	agent, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel: chatModel,
 		ToolsConfig: compose.ToolsNodeConfig{
@@ -97,18 +101,34 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 		return
 	}
 
-	// 8. 注册回调处理器，捕获中间事件（思考、工具调用等）
+	// 9. 注册回调处理器
 	callbackHandler := newAgentCallbackHandler(eventCh, req.KnowledgeBaseIDs, toolDescMap)
 
-	// 9. 流式调用 Agent（通过回调捕获中间事件）
+	// 10. 流式调用 Agent
 	stream, err := agent.Stream(ctx, inputMessages, einoAgent.WithComposeOptions(compose.WithCallbacks(callbackHandler)))
 	if err != nil {
 		logger.Errorf("Agent 调用失败: %v", err)
+		errMsg := err.Error()
+
+		// 检测模型不支持工具调用的情况
+		if isToolChoiceUnsupportedError(errMsg) {
+			eventCh <- Event{
+				Type:      EventError,
+				Title:     "当前模型不支持工具调用",
+				Detail:    "该模型不支持工具调用功能，无法使用联网搜索、天气查询等工具。建议切换到支持工具调用的模型（如通义千问、智谱清言、DeepSeek 等），或使用快速模式。",
+				Error:     errMsg,
+				Status:    "error",
+				Retryable: false,
+				Done:      true,
+			}
+			return
+		}
+
 		eventCh <- Event{
 			Type:      EventError,
 			Title:     "深度推理失败",
 			Detail:    "深度思考模式执行异常，请重试或使用快速模式",
-			Error:     err.Error(),
+			Error:     errMsg,
 			Status:    "error",
 			Retryable: true,
 			Done:      true,
@@ -116,14 +136,10 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 		return
 	}
 
-	// 10. 读取流式消息，转换为 SSE 事件
+	// 11. 读取流式消息，转换为 SSE 事件
 	e.processStream(ctx, stream, ksTool, eventCh)
 }
 
-// processStream 读取 eino Agent 的流式输出，转换为 SSE 事件
-//
-// 注意："正在生成答案" (running) 已由 callback.go 在 ChatModel onEnd（无工具调用时）发出，
-// 这里只负责流式推送答案内容和最终的"正在生成答案" (success) 标记。
 func (e *Engine) processStream(ctx context.Context, stream *schema.StreamReader[*schema.Message], ksTool *tool.KnowledgeSearchTool, eventCh chan<- Event) {
 	defer stream.Close()
 
@@ -135,7 +151,6 @@ func (e *Engine) processStream(ctx context.Context, stream *schema.StreamReader[
 			break
 		}
 		if err != nil {
-			// 用户主动中断时，ctx 会被取消，不发送错误事件，直接结束
 			if ctx.Err() != nil {
 				logger.Infof("Agent 流被用户中断，已收集 %d 字符", len(fullAnswer))
 				break
@@ -156,15 +171,12 @@ func (e *Engine) processStream(ctx context.Context, stream *schema.StreamReader[
 			continue
 		}
 
-		// eino ReAct Agent 的 Stream() 只输出最终答案（分块）
 		if msg.Role == schema.Assistant && msg.Content != "" {
 			fullAnswer += msg.Content
-			// 直接发送文本（包含 <kb> 标签），前端负责解析
 			eventCh <- Event{Type: EventAnswer, Content: msg.Content}
 		}
 	}
 
-	// 构建 sources 列表
 	var sources []response.SourceInfo
 	type docInfo struct {
 		documentID      string
@@ -194,16 +206,12 @@ func (e *Engine) processStream(ctx context.Context, stream *schema.StreamReader[
 		})
 	}
 
-	// 标记答案生成完成
 	eventCh <- Event{Type: EventThinking, Title: "正在生成答案", Status: "success"}
 
-	// 发送来源信息（由 Service 层统一封装到最终 done 事件中）
 	if len(sources) > 0 {
 		eventCh <- Event{Type: EventSources, Sources: sources}
 	}
 
-	// 发送完成信号（Done=false，不终止 SSE——由 Service 层的 emitDoneAndSave 统一终止）
-	// Content 为完整答案，供 Service 层收集后持久化
 	eventCh <- Event{
 		Type:    EventDone,
 		Content: fullAnswer,
@@ -211,7 +219,6 @@ func (e *Engine) processStream(ctx context.Context, stream *schema.StreamReader[
 	}
 }
 
-// buildInputMessages 构建输入消息列表（历史对话 + 当前问题）
 func buildInputMessages(query string, history []entity.ChatMessage) []*schema.Message {
 	msgs := make([]*schema.Message, 0, len(history)+1)
 
@@ -228,7 +235,6 @@ func buildInputMessages(query string, history []entity.ChatMessage) []*schema.Me
 	return msgs
 }
 
-// extractQueryFromArgs 从工具参数 JSON 中提取 query 字段
 func extractQueryFromArgs(args string) string {
 	var params struct {
 		Query string `json:"query"`
@@ -239,10 +245,31 @@ func extractQueryFromArgs(args string) string {
 	return args
 }
 
-// truncateStr 截断字符串到指定长度
 func truncateStr(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+func isToolChoiceUnsupportedError(errMsg string) bool {
+	lower := strings.ToLower(errMsg)
+	keywords := []string{
+		"tool choice",
+		"tool_choice",
+		"enable-auto-tool-choice",
+		"tool-call-parser",
+		"tool_calls",
+		"function call",
+		"function_call",
+		"not_supported",
+		"not support",
+		"unsupported tool",
+	}
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
 }

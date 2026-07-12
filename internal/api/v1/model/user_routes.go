@@ -10,4 +10,5 @@ func (ctrl *UserModelController) RegisterRoutes(router *gin.RouterGroup) {
 	configGroup.GET("/:id", ctrl.Get)
 	configGroup.PUT("/:id", ctrl.Update)
 	configGroup.DELETE("/:id", ctrl.Delete)
+	configGroup.POST("/test", ctrl.Test)
 }

@@ -112,3 +112,19 @@ func (ctrl *UserModelController) Delete(ctx *gin.Context) {
 
 	response.Success(ctx, nil)
 }
+
+// Test 测试用户模型配置连接
+func (ctrl *UserModelController) Test(ctx *gin.Context) {
+	var req requestdto.TestModelRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(ctx, "请求参数错误")
+		return
+	}
+
+	result, err := ctrl.userModelConfigService.Test(ctx.Request.Context(), req)
+	if err != nil {
+		response.BizError(ctx, err)
+		return
+	}
+	response.Success(ctx, result)
+}

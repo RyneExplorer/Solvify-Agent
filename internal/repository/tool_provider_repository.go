@@ -26,7 +26,15 @@ func (r *toolProviderRepository) Update(ctx context.Context, provider *entity.To
 }
 
 func (r *toolProviderRepository) Delete(ctx context.Context, id string) error {
-	return r.db.WithContext(ctx).Delete(&entity.ToolProvider{}, "id = ?", id).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(&entity.UserToolConfig{}, "provider_id = ?", id).Error; err != nil {
+			return err
+		}
+		if err := tx.Delete(&entity.ToolProvider{}, "id = ?", id).Error; err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (r *toolProviderRepository) GetByID(ctx context.Context, id string) (*entity.ToolProvider, error) {
