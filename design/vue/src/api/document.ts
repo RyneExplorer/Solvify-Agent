@@ -71,3 +71,8 @@ export function createDocumentVersion(id: string, data: CreateDocumentVersionReq
 export function createNote(kbId: string, data: { title: string; content: string }) {
   return request<Document>(`/knowledge-bases/${kbId}/documents/notes`, { method: 'POST', body: data })
 }
+
+// 根据 chunk ID 查询原始内容
+export function getChunk(id: string) {
+  return request<{ id: string; content: string; section_title: string; document_id: string; knowledge_base_id: string; document_title: string; knowledge_base_name: string }>(`/chunks/${id}`)
+}

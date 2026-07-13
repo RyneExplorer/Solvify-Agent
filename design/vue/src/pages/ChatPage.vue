@@ -90,9 +90,13 @@
               <!-- Sources -->
               <div v-if="msg.role === 'assistant' && msg.sources?.filter(s => s?.title).length" class="mt-2 flex flex-wrap items-center gap-1.5">
                 <span class="text-[11px] text-slate-400">来源:</span>
-                <span v-for="(s, si) in msg.sources.filter(s => s?.title)" :key="si"
-                  :title="getSourceTooltip(s)"
-                  class="text-[11px] px-2 py-0.5 bg-slate-100 border border-slate-200 rounded-full text-slate-500 cursor-help hover:bg-slate-200 transition-colors">{{ s.title }}</span>
+                <span
+                  v-for="(s, si) in msg.sources.filter(s => s?.title)"
+                  :key="si"
+                  :data-chunk-ids="getSourceChunkIds(s)"
+                  :data-doc="cleanTitle(s.title)"
+                  class="text-[11px] px-2 py-0.5 bg-slate-100 border border-slate-200 rounded-full text-slate-500 cursor-help hover:bg-slate-200 transition-colors"
+                >{{ cleanTitle(s.title) }}</span>
               </div>
               <div v-if="msg.role === 'error' && msg.detail && msg.detail !== msg.content" class="mt-1 text-xs text-red-500">{{ msg.detail }}</div>
             </div>
@@ -165,6 +169,7 @@
         <div>
           <label class="text-xs text-slate-500 mb-1.5 block">选择知识库</label>
           <AppDropdownSelect
+            ref="noteKbDropdownRef"
             :model-label="selectedKbName"
             placeholder="请选择知识库"
           >
@@ -234,7 +239,8 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { useChat } from '@/composables/useChat'
+import { useChat, getTooltipContent, cleanTitle } from '@/composables/useChat'
+import { useMarkdownTooltip } from '@/composables/useMarkdownTooltip'
 import { createNote } from '@/api/document'
 import ChatInputCard from '@/components/ChatInputCard.vue'
 import AppDialog from '@/components/ui/AppDialog.vue'
@@ -246,20 +252,27 @@ const chat = useChat()
 const {
   activeSession: session, messages, collapsedTimelines, isLoading, streamContent, streamSources, streamTimeline, progressText,
   modelOptions, knowledgeBases, connected, input, selectedModel, selectedKBs, searchMode, kbTriggerText,
-  init, sendMessage, scrollToBottom, toggleKB, formatContent, getSourceTooltip, copyText, regenerate, retryLastMessage, stopGeneration,
-  selectSession, loadSessions, newChat,
+  init, sendMessage, scrollToBottom, toggleKB, formatContent, getSourceChunkIds, copyText, regenerate, retryLastMessage, stopGeneration,
+  selectSession, loadSessions, newChat, cleanTooltipText,
 } = chat
 
 const chatEl = ref<HTMLDivElement>()
 const hasMessages = computed(() => messages.value.length > 0)
+
+useMarkdownTooltip()
 
 // ── 保存笔记到知识库 ──
 const showNoteDialog = ref(false)
 const noteTitle = ref('')
 const noteContent = ref('')
 const noteTargetKB = ref('')
-const savingNote = ref(false)
 const kbSearch = ref('')
+const savingNote = ref(false)
+const noteKbDropdownRef = ref<InstanceType<typeof AppDropdownSelect>>()
+
+function closeNoteKbDropdown() {
+  noteKbDropdownRef.value?.close?.()
+}
 
 const localKBs = computed(() => knowledgeBases.value.filter(kb => kb.source_type === 'local'))
 const syncKBs = computed(() => knowledgeBases.value.filter(kb => kb.source_type !== 'local'))
@@ -281,6 +294,7 @@ const selectedKbName = computed(() => {
 function selectNoteKb(kb: { id: string; name: string }) {
   noteTargetKB.value = kb.id
   kbSearch.value = ''
+  closeNoteKbDropdown()
 }
 
 function openSaveNoteDialog(content: string) {
@@ -295,7 +309,8 @@ async function doSaveNote() {
   if (!noteTargetKB.value || savingNote.value) return
   savingNote.value = true
   try {
-    await createNote(noteTargetKB.value, { title: noteTitle.value, content: noteContent.value })
+    const cleanedContent = cleanTooltipText(noteContent.value)
+    await createNote(noteTargetKB.value, { title: noteTitle.value, content: cleanedContent })
     showNoteDialog.value = false
     ElMessage.success('已加入上传队列')
   } catch (e) {
