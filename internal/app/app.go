@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,25 +12,34 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 
 	"solvify-agent/internal/agent"
 	"solvify-agent/internal/api"
+	"solvify-agent/internal/integration/dingtalk"
 	"solvify-agent/internal/llm"
+	"solvify-agent/internal/middleware"
 	"solvify-agent/internal/rag"
+	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
 	"solvify-agent/internal/tool"
+	"solvify-agent/internal/tool/providers"
+	"solvify-agent/pkg/cache"
 	"solvify-agent/pkg/config"
+	"solvify-agent/pkg/database"
+	"solvify-agent/pkg/documentparser"
 	"solvify-agent/pkg/logger"
 )
 
-// App 是全局应用结构体，集中持有配置、依赖、路由和服务实例
+// App 是全局应用结构体，集中持有配置、基础设施和路由实例
 type App struct {
-	cfg         *config.Config
-	log         *zap.Logger
-	router      *api.Router
-	chatService *service.ChatService
-	server      *http.Server
+	cfg          *config.Config
+	postgresqlDB *gorm.DB
+	redis        *redis.Client
+	router       *api.Router
+	server       *http.Server
 }
 
 // NewApp 创建应用实例
@@ -45,6 +55,9 @@ func (a *App) Initialize() error {
 	if err := a.initLogger(); err != nil {
 		return err
 	}
+	if err := a.initDatabase(); err != nil {
+		return err
+	}
 
 	a.initDependencies()
 	a.initRouter()
@@ -53,18 +66,19 @@ func (a *App) Initialize() error {
 }
 
 // Run 启动 HTTP 服务并等待优雅关闭信号
-func (a *App) Run() error {
-	errCh := make(chan error, 1)
+func (a *App) Run() {
 	go func() {
-		a.log.Info("HTTP 服务已启动", zap.String("addr", a.server.Addr), zap.String("mode", a.cfg.App.Mode))
+		logger.Info("HTTP 服务已启动",
+			zap.String("addr", a.server.Addr),
+			zap.String("mode", a.cfg.App.Mode),
+		)
 		if err := a.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-			return
+			logger.Fatal("HTTP 服务启动失败", zap.Error(err))
 		}
-		errCh <- nil
 	}()
 
-	return a.gracefulShutdown(errCh)
+	// 优雅关闭
+	a.gracefulShutdown()
 }
 
 // Config 返回应用全局配置
@@ -82,90 +96,350 @@ func (a *App) initConfig() error {
 	return nil
 }
 
-// initLogger 初始化 zap 日志系统
+// initLogger 初始化日志
 func (a *App) initLogger() error {
-	log, err := logger.New(logger.Config{
-		Level:      a.cfg.Log.Level,
-		Filename:   a.cfg.Log.Filename,
-		MaxSize:    a.cfg.Log.MaxSize,
-		MaxBackups: a.cfg.Log.MaxBackups,
-		MaxAge:     a.cfg.Log.MaxAge,
-		Compress:   a.cfg.Log.Compress,
-	})
-	if err != nil {
+	if err := logger.Init(&a.cfg.Log); err != nil {
 		return fmt.Errorf("初始化日志失败: %w", err)
 	}
 
-	a.log = log
-	a.log.Info("配置加载成功",
-		zap.String("app", a.cfg.App.Name),
-		zap.String("version", a.cfg.App.Version),
-		zap.String("env", a.cfg.App.Env),
-		zap.String("mode", a.cfg.App.Mode),
-	)
+	logger.Info("=========================================")
+	logger.Info(fmt.Sprintf("欢迎使用 %s", a.cfg.App.Name))
+	logger.Info(fmt.Sprintf("版本: %s", a.cfg.App.Version))
+	logger.Info(fmt.Sprintf("环境: %s", a.cfg.App.Env))
+	logger.Info(fmt.Sprintf("模式: %s", a.cfg.App.Mode))
+	logger.Info("配置加载成功")
+	logger.Info("=========================================")
 	return nil
 }
 
-// initDependencies 初始化 Agent、Tool、RAG、LLM 和业务服务
-func (a *App) initDependencies() {
-	var retriever rag.Retriever
-	if a.cfg.RAG.Enabled {
-		retriever = rag.NewMemoryRetriever(rag.SeedDocuments())
+// initDatabase 初始化 PostgresSQL 和 Redis 连接
+func (a *App) initDatabase() error {
+	// postgresql
+	postgresqlDB, err := database.OpenPostgreSQL(&a.cfg.Database.Postgres)
+	if err != nil {
+		return fmt.Errorf("初始化 PostgreSQL 失败: %w", err)
 	}
+	a.postgresqlDB = postgresqlDB
+	//自动迁移数据库表结构
+	//if err := postgresqlDB.AutoMigrate(
+	//	&entity.User{},
+	//	&entity.Model{},
+	//	&entity.UserModelConfig{},
+	//	&entity.KnowledgeBase{},
+	//	&entity.StorageQuota{},
+	//	&entity.Document{},
+	//	&entity.DocumentProcessingJob{},
+	//	&entity.DocumentVersion{},
+	//	&entity.DocumentChunk{},
+	//	&entity.ChatSession{},
+	//	&entity.ChatMessage{},
+	//	&entity.ToolType{},
+	//	&entity.ToolProvider{},
+	//	&entity.UserToolConfig{},
+	//); err != nil {
+	//	return fmt.Errorf("数据库自动迁移失败: %w", err)
+	//}
 
-	var tools []tool.Tool
-	if a.cfg.Tools.Enabled {
-		tools = []tool.Tool{tool.NewCalculator()}
+	// redis
+	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
+	if err != nil {
+		_ = database.ClosePostgreSQL(a.postgresqlDB)
+		return fmt.Errorf("初始化 Redis 失败: %w", err)
 	}
-
-	knowledgeAgent := agent.NewKnowledgeAgent(agent.Options{
-		LLM:       llm.NewMockClient(a.cfg.LLM.Model),
-		Retriever: retriever,
-		Tools:     tools,
-		Logger:    a.log,
-		Model:     a.cfg.LLM.Model,
-	})
-	a.chatService = service.NewChatService(knowledgeAgent)
+	a.redis = redisClient
+	return nil
 }
 
-// initRouter 初始化 Gin 模式和项目路由
+// ensureStorageQuotaUniqueIndex 确保存储配额用户唯一索引存在
+func (a *App) ensureStorageQuotaUniqueIndex(db *gorm.DB) error {
+	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS storage_quotas_user_unique ON storage_quotas(user_id)").Error; err != nil {
+		return fmt.Errorf("创建存储配额用户唯一索引失败: %w", err)
+	}
+	return nil
+}
+
+// initEmbedding 初始化 Embedding 客户端，返回带缓存的向量化函数
+func (a *App) initEmbedding() rag.EmbeddingFunc {
+
+	embeddingClient, err := llm.NewEmbeddingClientFromConfig(context.Background(), &a.cfg.Embedding)
+	if err != nil {
+		logger.Fatal("初始化 Embedding 客户端失败", zap.Error(err))
+	}
+
+	// Embedding 缓存（相同文本 → 相同向量，缓存 24 小时）
+	embeddingCache := cache.New(a.redis, "emb:", 24*time.Hour)
+
+	return func(ctx context.Context, text string) ([]float64, error) {
+		cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
+		var vec []float64
+		if found, _ := embeddingCache.Get(ctx, cacheKey, &vec); found {
+			logger.Infof("[Embedding] 缓存命中: key=%s text=%q dim=%d", cacheKey[:8], text, len(vec))
+			return vec, nil
+		}
+		logger.Infof("[Embedding] 缓存未命中: key=%s text=%q, 调用 API...", cacheKey[:8], text)
+		vec, err := embeddingClient.Embed(ctx, text)
+		if err != nil {
+			logger.Errorf("[Embedding] API 调用失败: %v", err)
+			return nil, err
+		}
+		logger.Infof("[Embedding] API 返回: dim=%d", len(vec))
+		if err := embeddingCache.Set(ctx, cacheKey, vec, 0); err != nil {
+			logger.Warnf("[Embedding] 缓存写入失败: %v", err)
+		} else {
+			logger.Infof("[Embedding] 已写入缓存: key=%s", cacheKey[:8])
+		}
+		return vec, nil
+	}
+}
+
+// initRetriever 初始化 RAG 检索器（混合检索 + 可选装饰器链）
+func (a *App) initRetriever(embeddingFunc rag.EmbeddingFunc) rag.Retriever {
+	// 使用混合检索器（向量 + 关键词 + RRF 融合）
+	var retriever rag.Retriever = rag.NewHybridRetriever(rag.HybridRetrieverConfig{
+		DB:             a.postgresqlDB,
+		EmbeddingFunc:  embeddingFunc,
+		ScoreThreshold: a.cfg.RAG.ScoreThreshold,
+		VectorWeight:   a.cfg.RAG.VectorWeight,
+		KeywordWeight:  a.cfg.RAG.KeywordWeight,
+		RRFK:           a.cfg.RAG.RRFK,
+	})
+
+	// 可选：Rerank 重排序装饰器
+	if a.cfg.RAG.Reranker.Enabled {
+		retriever = rag.NewRerankRetrieverFromConfig(retriever)
+		logger.Info("Rerank 重排序已启用")
+	}
+
+	// 可选：相邻分块扩展装饰器
+	if a.cfg.RAG.Expander.Enabled {
+		retriever = rag.NewExpandRetrieverFromConfig(retriever, a.postgresqlDB)
+		logger.Info("相邻分块扩展已启用")
+	}
+
+	logger.Info("RAG 检索器初始化完成")
+	return retriever
+}
+
+// AgentComponents 持有 Agent 相关组件
+type AgentComponents struct {
+	Retriever   rag.Retriever
+	AgentEngine *agent.Engine
+}
+
+// initAgentComponents 初始化 Agent 相关组件（Embedding、RAG、工具、Agent 引擎）
+func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo repository.DocumentRepository, chunkRepo repository.ChunkRepository, kbRepo repository.KnowledgeBaseRepository) *AgentComponents {
+	embeddingFunc := a.initEmbedding()
+	vectorRetriever := a.initRetriever(embeddingFunc)
+
+	// knowledge_search 工厂：每次 Agent 请求创建带用户上下文的工具实例
+	ksFactory := agent.KnowledgeSearchFactory(func(userID string, kbIDs []string) *tool.KnowledgeSearchTool {
+		return tool.NewKnowledgeSearchTool(vectorRetriever).WithContext(userID, kbIDs)
+	})
+
+	// grep_chunks 工厂：关键词精确匹配
+	grepFactory := agent.GrepChunksFactory(func(userID string, kbIDs []string) *tool.GrepChunksTool {
+		return tool.NewGrepChunksTool(chunkRepo).WithContext(userID, kbIDs)
+	})
+
+	// get_document_info 工厂：文档元数据
+	docInfoFactory := agent.GetDocumentInfoFactory(func(userID string) *tool.GetDocumentInfoTool {
+		return tool.NewGetDocumentInfoTool(documentRepo).WithContext(userID)
+	})
+
+	// list_knowledge_chunks 工厂：文档列表
+	listChunksFactory := agent.ListKnowledgeChunksFactory(func(userID string, kbIDs []string) *tool.ListKnowledgeChunksTool {
+		return tool.NewListKnowledgeChunksTool(documentRepo).WithContext(userID, kbIDs)
+	})
+
+	// list_knowledge_bases 工厂：知识库列表
+	listBasesFactory := agent.ListKnowledgeBasesFactory(func(userID string) *tool.ListKnowledgeBasesTool {
+		return tool.NewListKnowledgeBasesTool(kbRepo).WithContext(userID)
+	})
+
+	// 初始化 Agent Engine（eino ReAct Agent）
+	// 用户配置的工具（web_search 等）通过 ToolFactory 从 DB/Redis 动态加载
+	agentEngine := agent.NewEngine(
+		ksFactory,
+		grepFactory,
+		docInfoFactory,
+		listChunksFactory,
+		listBasesFactory,
+		toolFactory,
+		a.cfg.Agent,
+	)
+
+	return &AgentComponents{
+		Retriever:   vectorRetriever,
+		AgentEngine: agentEngine,
+	}
+}
+
+// initDependencies 初始化业务依赖并创建路由
+func (a *App) initDependencies() {
+	// 初始化 Repository
+	knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
+	documentRepo := repository.NewDocumentRepository(a.postgresqlDB)
+	documentVersionRepo := repository.NewDocumentVersionRepository(a.postgresqlDB)
+	documentJobRepo := repository.NewDocumentProcessingJobRepository(a.postgresqlDB)
+	syncSourceRepo := repository.NewSyncSourceRepository(a.postgresqlDB)
+	syncJobRepo := repository.NewSyncJobRepository(a.postgresqlDB)
+	syncItemRepo := repository.NewSyncItemRepository(a.postgresqlDB)
+	syncedDocumentRepo := repository.NewSyncedDocumentRepository(a.postgresqlDB)
+	dingtalkBindingRepo := repository.NewDingTalkBindingRepository(a.postgresqlDB)
+	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
+	userRepo := repository.NewUserRepository(a.postgresqlDB)
+
+	// 模型配置缓存（10 分钟 TTL）
+	modelCache := cache.New(a.redis, "model:", 10*time.Minute)
+	modelRepo := repository.NewCachedModelRepository(repository.NewModelRepository(a.postgresqlDB), modelCache)
+	userModelConfigRepo := repository.NewCachedUserModelConfigRepository(repository.NewUserModelConfigRepository(a.postgresqlDB), modelCache)
+	chatSessionRepo := repository.NewChatSessionRepository(a.postgresqlDB)
+	chatMessageRepo := repository.NewChatMessageRepository(a.postgresqlDB)
+	// 工具配置——原始仓库
+	toolTypeRepo := repository.NewToolTypeRepository(a.postgresqlDB)
+	toolProviderRepo := repository.NewToolProviderRepository(a.postgresqlDB)
+	rawUserToolConfigRepo := repository.NewUserToolConfigRepository(a.postgresqlDB)
+
+	// Redis 缓存（写时失效，10 分钟 TTL 兜底）
+	toolTypeCache := cache.New(a.redis, "tool:type:", 10*time.Minute)
+	toolConfigCache := cache.New(a.redis, "tool:config:", 10*time.Minute)
+	userModelCache := cache.New(a.redis, "user:model:", 24*time.Hour)
+
+	// 缓存装饰器
+	cachedToolTypeRepo := repository.NewCachedToolTypeRepository(toolTypeRepo, toolTypeCache)
+	cachedUserToolConfigRepo := repository.NewCachedUserToolConfigRepository(rawUserToolConfigRepo, toolConfigCache)
+
+	// 预热所有已启用系统模型的 LLM 客户端（消除首次请求冷启动）
+	a.prewarmModelClients(modelRepo)
+	// 初始化工具 Provider 注册表——注册通用 Provider 类型
+	toolRegistry := tool.NewProviderRegistry()
+	toolRegistry.Register("http", providers.NewHTTPProvider()) // 通用 HTTP Provider
+	// ToolFactory——Agent 引擎从 DB/Redis 加载用户配置的工具
+	toolFactory := tool.NewFactory(toolRegistry, cachedUserToolConfigRepo, cachedToolTypeRepo)
+
+	// Chunk Repository（文档分块查询）
+	chunkRepo := repository.NewChunkRepository(a.postgresqlDB)
+
+	// 初始化 Agent 组件（传入 ToolFactory + DocumentRepo + ChunkRepo + KnowledgeBaseRepo）
+	ai := a.initAgentComponents(toolFactory, documentRepo, chunkRepo, knowledgeBaseRepo)
+
+	// 初始化 Service
+	userSvc := service.NewUserService(userRepo)
+	adminUserSvc := service.NewAdminUserService(userRepo)
+	adminSessionSvc := service.NewAdminSessionService(chatSessionRepo, chatMessageRepo)
+	authSvc := service.NewAuthService(userRepo, userSvc, a.redis)
+	modelService := service.NewModelService(modelRepo)
+	userModelConfigService := service.NewUserModelConfigService(userModelConfigRepo)
+	knowledgeBaseSvc := service.NewKnowledgeBaseService(knowledgeBaseRepo)
+	embeddingSvc := service.NewEmbeddingService(a.cfg.Embedding)
+	documentChunkSvc := service.NewDocumentChunkService(embeddingSvc)
+	textExtractor := documentparser.New(documentparser.Config{
+		PythonPath:     a.cfg.DocumentParser.PythonPath,
+		ScriptPath:     a.cfg.DocumentParser.ScriptPath,
+		TimeoutSeconds: a.cfg.DocumentParser.TimeoutSeconds,
+	})
+	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentVersionRepo, documentJobRepo, storageQuotaRepo, documentChunkSvc, textExtractor, "data/uploads")
+	dingtalkClient := dingtalk.NewClient(a.cfg.DingTalk)
+	dingtalkStateCache := cache.New(a.redis, "dingtalk:oauth:state:", 10*time.Minute)
+	dingtalkSvc := service.NewDingTalkService(a.cfg.DingTalk, dingtalkBindingRepo, dingtalkStateCache, dingtalkClient)
+	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncItemRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, textExtractor, dingtalkClient, "data/uploads")
+	storageSvc := service.NewStorageService(storageQuotaRepo)
+	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine)
+	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo)
+	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry)
+	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo, toolRegistry)
+	searchSvc := service.NewSearchService(chatMessageRepo, chunkRepo)
+
+	// 路由
+	a.router = api.NewRouter(
+		userSvc,
+		adminUserSvc,
+		adminSessionSvc,
+		searchSvc,
+		authSvc,
+		modelService,
+		userModelConfigService,
+		knowledgeBaseSvc,
+		documentSvc,
+		storageSvc,
+		chatSvc,
+		syncSvc,
+		dingtalkSvc,
+		chunkRepo,
+		toolTypeService,
+		toolProviderService,
+		userToolConfigService)
+}
+
+// prewarmModelClients 启动时预创建所有已启用系统模型的 LLM 客户端
+func (a *App) prewarmModelClients(modelRepo repository.ModelRepo) {
+	models, err := modelRepo.List(context.Background())
+	if err != nil {
+		logger.Warnf("预热模型客户端: 查询系统模型列表失败: %v", err)
+		return
+	}
+
+	infos := make([]llm.SystemModelInfo, 0, len(models))
+	for _, m := range models {
+		infos = append(infos, llm.SystemModelInfo{
+			ModelID: m.ModelID,
+			BaseURL: m.BaseURL,
+			APIKey:  m.APIKey,
+		})
+	}
+	logger.Infof("预热模型客户端: 从数据库加载到 %d 个已启用系统模型", len(infos))
+	llm.PrewarmClients(context.Background(), infos)
+}
+
+// initRouter 初始化路由
 func (a *App) initRouter() {
+	// 设置 Gin 模式
 	gin.SetMode(a.cfg.App.Mode)
-	a.router = api.NewRouter(a.chatService, a.log)
 }
 
 // initServer 初始化 HTTP Server
 func (a *App) initServer() {
+	engine := gin.New()
+	engine.Use(middleware.Recovery())
+	engine.Use(middleware.CORS())
+	engine.Use(middleware.Logger())
+	a.router.Setup(engine)
+
 	a.server = &http.Server{
 		Addr:              a.cfg.Server.Addr(),
-		Handler:           a.router.Engine(),
+		Handler:           engine,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 }
 
 // gracefulShutdown 监听退出信号并优雅关闭服务
-func (a *App) gracefulShutdown(errCh <-chan error) error {
+func (a *App) gracefulShutdown() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(quit)
 
-	select {
-	case err := <-errCh:
-		_ = logger.Sync()
-		return err
-	case <-quit:
-		a.log.Info("正在关闭 HTTP 服务")
-		timeout := time.Duration(a.cfg.Server.ShutdownTimeoutSeconds) * time.Second
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
+	<-quit
+	logger.Info("正在关闭 HTTP 服务")
+	timeout := time.Duration(a.cfg.Server.ShutdownTimeoutSeconds) * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
-		if err := a.server.Shutdown(ctx); err != nil {
-			a.log.Error("HTTP 服务关闭失败", zap.Error(err))
-			_ = logger.Sync()
-			return err
-		}
-
-		a.log.Info("HTTP 服务已停止")
-		return logger.Sync()
+	if err := a.server.Shutdown(ctx); err != nil {
+		logger.Fatal("HTTP 服务关闭失败", zap.Error(err))
 	}
+
+	if a.postgresqlDB != nil {
+		if err := database.ClosePostgreSQL(a.postgresqlDB); err != nil {
+			logger.Error("PostgresSQL 连接关闭失败", zap.Error(err))
+		}
+	}
+	if a.redis != nil {
+		if err := database.CloseRedis(a.redis); err != nil {
+			logger.Error("Redis 连接关闭失败", zap.Error(err))
+		}
+	}
+
+	logger.Info("HTTP 服务已停止")
+	logger.Info("=========================================")
+	_ = logger.Sync()
 }

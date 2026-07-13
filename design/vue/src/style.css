@@ -1,0 +1,84 @@
+:root {
+  --el-color-primary: #0f172a;
+  --el-color-primary-light-3: #334155;
+  --el-color-primary-light-5: #475569;
+  --el-color-primary-light-7: #94a3b8;
+  --el-color-primary-light-8: #cbd5e1;
+  --el-color-primary-light-9: #f1f5f9;
+  --el-color-primary-dark-2: #020617;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #f8fafc;
+}
+
+#app {
+  height: 100vh;
+  width: 100vw;
+}
+
+/* ── Markdown content ── */
+.md-content h1, .md-content h2, .md-content h3 { color: #1e293b; font-weight: 600; margin: 16px 0 8px; }
+.md-content p { margin: 0 0 8px; line-height: 1.7; }
+.md-content ul, .md-content ol { margin: 0 0 8px; padding-left: 20px; }
+.md-content li { margin-bottom: 2px; line-height: 1.7; }
+.md-content strong { color: #0f172a; font-weight: 600; }
+.md-content code { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px; padding: 1px 6px; font-size: 13px; color: #059669; }
+.md-content pre { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px; margin: 0 0 8px; overflow-x: auto; font-size: 13px; }
+.md-content pre code { background: none; border: none; padding: 0; color: #0f172a; }
+.md-content blockquote { border-left: 3px solid #10b981; padding: 6px 14px; margin: 0 0 8px; background: #ecfdf5; border-radius: 0 8px 8px 0; color: #475569; }
+.md-content table { width: 100%; border-collapse: collapse; margin: 0 0 8px; font-size: 13px; }
+.md-content th, .md-content td { border: 1px solid #e2e8f0; padding: 6px 10px; text-align: left; }
+.md-content th { background: #f8fafc; font-weight: 500; }
+
+/* ── Inline citations ── */
+.inline-cite-kb {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px;
+  background: #ecfdf5;
+  border: 1px solid rgba(16,185,129,0.2);
+  border-radius: 4px;
+  font-size: 11px;
+  color: #059669;
+  cursor: help;
+  transition: all 0.15s ease;
+}
+.inline-cite-kb:hover {
+  background: #d1fae5;
+  border-color: rgba(16,185,129,0.4);
+}
+.inline-cite-web {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 4px;
+  background: rgba(59,130,246,0.1);
+  border: 1px solid rgba(59,130,246,0.2);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #3b82f6;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  vertical-align: middle;
+}
+.inline-cite-web:hover {
+  background: rgba(59,130,246,0.2);
+  border-color: rgba(59,130,246,0.4);
+}
+
+

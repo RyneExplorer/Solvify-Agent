@@ -2,73 +2,129 @@ package api
 
 import (
 	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
 
-	"solvify-agent/internal/agent"
+	"solvify-agent/internal/api/v1/auth"
+	"solvify-agent/internal/api/v1/chat"
+	dingtalkapi "solvify-agent/internal/api/v1/dingtalk"
+	"solvify-agent/internal/api/v1/document"
+	"solvify-agent/internal/api/v1/knowledgebase"
+	"solvify-agent/internal/api/v1/model"
+	"solvify-agent/internal/api/v1/search"
+	"solvify-agent/internal/api/v1/storage"
+	syncapi "solvify-agent/internal/api/v1/sync"
+	"solvify-agent/internal/api/v1/tool"
+	"solvify-agent/internal/api/v1/user"
 	"solvify-agent/internal/middleware"
+	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
 )
 
-// Router 聚合 HTTP 路由依赖
+// Router 聚合 API 模块路由
 type Router struct {
-	service *service.ChatService
-	logger  *zap.Logger
-	engine  *gin.Engine
+	userCtrl          *user.Controller
+	authCtrl          *auth.Controller
+	searchCtrl        *search.Controller
+	knowledgeBaseCtrl *knowledgebase.Controller
+	documentCtrl      *document.Controller
+	storageCtrl       *storage.Controller
+	modelCtrl         *model.Controller
+	userModelCtrl     *model.UserModelController
+	chatCtrl          *chat.Controller
+	syncCtrl          *syncapi.Controller
+	dingtalkCtrl      *dingtalkapi.Controller
+	toolCtrl          *tool.Controller
+	authService       service.AuthServiceInterface
 }
 
-// NewRouter 创建 Gin 路由并注册接口
-func NewRouter(chatService *service.ChatService, logger *zap.Logger) *Router {
-	if logger == nil {
-		logger = zap.NewNop()
+// NewRouter 创建 API 路由聚合器
+func NewRouter(
+	userService service.UserServiceInterface,
+	adminUserService service.AdminUserServiceInterface,
+	adminSessionService service.AdminSessionServiceInterface,
+	searchService service.SearchServiceInterface,
+	authService service.AuthServiceInterface,
+	modelService service.ModelServiceInterface,
+	userModelConfigService service.UserModelConfigServiceInterface,
+	knowledgeBaseSvc service.KnowledgeBaseServiceInterface,
+	documentSvc service.DocumentServiceInterface,
+	storageSvc service.StorageServiceInterface,
+	chatSvc service.ChatServiceInterface,
+	syncSvc service.SyncServiceInterface,
+	dingtalkSvc service.DingTalkServiceInterface,
+	chunkRepo repository.ChunkRepository,
+	toolTypeService service.ToolTypeService,
+	toolProviderService service.ToolProviderService,
+	userToolConfigService service.UserToolConfigService,
+) *Router {
+	return &Router{
+		userCtrl:          user.NewController(userService, adminUserService),
+		authCtrl:          auth.NewController(authService, userService),
+		searchCtrl:        search.NewController(searchService),
+		modelCtrl:         model.NewController(modelService),
+		userModelCtrl:     model.NewUserModelController(userModelConfigService),
+		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseSvc),
+		documentCtrl:      document.NewController(documentSvc, chunkRepo),
+		storageCtrl:       storage.NewController(storageSvc),
+		syncCtrl:          syncapi.NewController(syncSvc),
+		dingtalkCtrl:      dingtalkapi.NewController(dingtalkSvc),
+		chatCtrl:          chat.NewController(chatSvc, adminSessionService),
+		toolCtrl:          tool.NewController(toolTypeService, toolProviderService, userToolConfigService),
+		authService:       authService,
 	}
-
-	engine := gin.New()
-	router := &Router{
-		service: chatService,
-		logger:  logger,
-		engine:  engine,
-	}
-
-	engine.Use(middleware.Recovery(logger))
-	engine.Use(middleware.Logger(logger))
-	router.routes(engine)
-	return router
 }
 
-// Engine 返回 Gin 引擎实例
-func (r *Router) Engine() *gin.Engine {
-	return r.engine
-}
+// Setup 注册项目 HTTP 路由
+func (r *Router) Setup(engine *gin.Engine) {
+	// 全局 CORS 中间件
+	engine.Use(middleware.CORS())
 
-// routes 注册 Gin HTTP 路由
-func (r *Router) routes(engine *gin.Engine) {
 	engine.GET("/health", r.health)
+
 	v1 := engine.Group("/api/v1")
-	v1.POST("/ask", r.ask)
+
+	// 公开认证路由
+	r.authCtrl.RegisterPublicRoutes(v1)
+
+	// 中间件认证
+	v1.Use(middleware.Auth(r.authService))
+
+	// 需要登录的认证路由
+	r.authCtrl.RegisterPrivateRoutes(v1)
+
+	// 用户管理
+	r.userCtrl.RegisterRoutes(v1)
+
+	// 搜索
+	r.searchCtrl.RegisterRoutes(v1)
+
+	// 模型管理
+	r.modelCtrl.RegisterRoutes(v1)
+	r.userModelCtrl.RegisterRoutes(v1)
+
+	// 聊天管理
+	r.chatCtrl.RegisterRoutes(v1)
+
+	// 知识库 & 文档
+	r.knowledgeBaseCtrl.RegisterRoutes(v1)
+	r.documentCtrl.RegisterKnowledgeBaseRoutes(v1)
+	r.documentCtrl.RegisterDocumentRoutes(v1)
+	r.documentCtrl.RegisterDocumentJobRoutes(v1)
+	r.documentCtrl.RegisterChunkRoutes(v1)
+	r.syncCtrl.RegisterRoutes(v1)
+	r.dingtalkCtrl.RegisterRoutes(v1)
+
+	// 存储
+	r.storageCtrl.RegisterRoutes(v1)
+
+	// 工具
+	r.toolCtrl.RegisterRoutes(v1)
 }
 
 // health 返回服务健康状态
-func (r *Router) health(ctx *gin.Context) {
-	response.Success(ctx, gin.H{
+func (r *Router) health(c *gin.Context) {
+	response.Success(c, gin.H{
 		"status":  "ok",
 		"service": "solvify-agent",
 	})
-}
-
-// ask 处理知识助理问答请求
-func (r *Router) ask(ctx *gin.Context) {
-	var input agent.Request
-	if err := ctx.ShouldBindJSON(&input); err != nil {
-		response.BadRequest(ctx, "请求体格式错误")
-		return
-	}
-
-	output, err := r.service.Ask(ctx.Request.Context(), input)
-	if err != nil {
-		response.BizError(ctx, err)
-		return
-	}
-
-	response.Success(ctx, output)
 }
