@@ -71,9 +71,13 @@
             <div v-if="msg.role === 'assistant' && (msg.sources?.length || extractWebCount(msg.content))" class="mt-2 flex flex-wrap items-center gap-1.5">
               <template v-if="msg.sources?.filter((s: any) => s?.title).length">
                 <span class="text-[11px] text-gray-400">知识库:</span>
-                <span v-for="(s, si) in msg.sources.filter((s: any) => s?.title)" :key="si"
-                  :title="getSourceTooltip(s)"
-                  class="text-[11px] px-2 py-0.5 bg-gray-100 border border-gray-200 rounded-full text-gray-500 cursor-help hover:bg-gray-200 transition-colors">{{ s.title }}</span>
+                <span
+                  v-for="(s, si) in msg.sources.filter((s: any) => s?.title)"
+                  :key="si"
+                  :data-chunk-ids="getSourceChunkIds(s)"
+                  :data-doc="cleanTitle(s.title)"
+                  class="text-[11px] px-2 py-0.5 bg-gray-100 border border-gray-200 rounded-full text-gray-500 cursor-help hover:bg-gray-200 transition-colors"
+                >{{ cleanTitle(s.title) }}</span>
               </template>
               <template v-if="extractWebSources(msg.content).length">
                 <span class="text-[11px] text-gray-400">联网搜索:</span>
@@ -258,6 +262,8 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
+import { useMarkdownTooltip } from '@/composables/useMarkdownTooltip'
+import { nextTipKey, setTooltip, getSourceChunkIds } from '@/composables/useChat'
 import { getToken } from '@/api/client'
 
 // ── Props ──
@@ -543,7 +549,9 @@ function handleKeyDown(e: KeyboardEvent) {
 }
 
 function copyText(text: string) {
-  navigator.clipboard.writeText(text).catch(() => {})
+  navigator.clipboard.writeText(text)
+    .then(() => ElMessage.success('已复制'))
+    .catch(() => ElMessage.error('复制失败'))
 }
 
 function regenerate() {
@@ -611,41 +619,10 @@ function extractWebCount(content: string): number {
   return extractWebSources(content).length
 }
 
-function getSourceTooltip(source: any): string {
-  if (!source) return ''
-  const chunks = source.chunks
-  if (!Array.isArray(chunks) || chunks.length === 0) return source.title || ''
+useMarkdownTooltip()
 
-  // 拼接所有 chunk 的内容，最多显示 500 字符
-  const parts: string[] = []
-  let totalLen = 0
-  for (const chunk of chunks) {
-    const text = chunk.content || chunk.quote || ''
-    if (!text) continue
-    if (totalLen + text.length > 500) {
-      parts.push(text.slice(0, 500 - totalLen) + '...')
-      break
-    }
-    parts.push(text)
-    totalLen += text.length
-  }
-  return parts.join('\n---\n') || source.title || ''
-}
-
-function formatContent(content: string, sources?: unknown[]): string {
+function formatContent(content: string, _sources?: unknown[]): string {
   if (!content) return ''
-
-  // Build a lookup from chunk_id -> chunk content for hover tooltips
-  const chunkMap = new Map<string, string>()
-  if (Array.isArray(sources)) {
-    for (const doc of sources) {
-      const chunks = (doc as any)?.chunks
-      if (!Array.isArray(chunks)) continue
-      for (const chunk of chunks) {
-        if (chunk?.id) chunkMap.set(chunk.id, chunk.content || chunk.quote || '')
-      }
-    }
-  }
 
   // Extract and replace <kb>/<web> tags with citations
   const cites: { type: string; doc?: string; chunkId?: string; url?: string; title?: string }[] = []
@@ -672,10 +649,10 @@ function formatContent(content: string, sources?: unknown[]): string {
     const c = cites[i]
     let citeHtml
     if (c.type === 'kb') {
-      const chunkText = c.chunkId ? chunkMap.get(c.chunkId) || '' : ''
-      const safeDoc = escapeHtml(c.doc || '')
-      const safeTip = escapeAttr(chunkText.slice(0, 300) + (chunkText.length > 300 ? '...' : ''))
-      citeHtml = `<span class="inline-cite-kb" title="${safeTip || safeDoc}">📄${safeDoc}</span>`
+      const safeDoc = escapeHtml(cleanTitle(c.doc || ''))
+      const chunkId = c.chunkId || ''
+      const docTitle = escapeAttr(c.doc || '')
+      citeHtml = `<span class="inline-cite-kb" data-chunk-id="${escapeAttr(chunkId)}" data-doc="${docTitle}">📄${safeDoc}</span>`
     } else if (c.type === 'web') {
       const url = c.url || ''
       let num = urlToNumMap.get(url)
@@ -684,9 +661,11 @@ function formatContent(content: string, sources?: unknown[]): string {
         num = webNum
         urlToNumMap.set(url, num)
       }
-      const safeTitle = escapeHtml(c.title || '网页链接')
+      const title = c.title || '网页链接'
+      const tipKey = nextTipKey()
+      setTooltip(tipKey, title)
       const safeUrl = escapeAttr(url)
-      citeHtml = `<a class="inline-cite-web" href="${safeUrl}" target="_blank" rel="noopener" title="${safeTitle}">[${num}]</a>`
+      citeHtml = `<a class="inline-cite-web" href="${safeUrl}" target="_blank" rel="noopener" data-tip-key="${tipKey}">[${num}]</a>`
     }
     html = html.replace(`%%CITE${i}%%`, citeHtml!)
   }
@@ -695,8 +674,26 @@ function formatContent(content: string, sources?: unknown[]): string {
 }
 
 function escapeHtml(s: string) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML }
-function escapeAttr(s: string) { return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }
+function escapeAttr(s: string) { return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'&#10;') }
 function toCircleNum(n: number) { const c = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'; return n >= 1 && n <= 20 ? c[n-1] : `[${n}]` }
+function cleanTooltipText(text: string): string {
+  if (!text) return ''
+  // Only remove actual metadata tags; do NOT globally strip `title=` / `doc=`
+  // because normal article text may legitimately contain those substrings.
+  return text
+    .replace(/<kb(?:\s[^>]*)?\s*\/?>\s*/gi, '')
+    .replace(/<web(?:\s[^>]*)?\s*\/?>\s*/gi, '')
+    .replace(/<\/?kb>/gi, '')
+    .replace(/<\/?web>/gi, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function cleanTitle(text: string): string {
+  if (!text) return ''
+  return text.replace(/[\r\n]+/g, ' ').trim()
+}
 </script>
 
 <style>
@@ -718,18 +715,21 @@ function toCircleNum(n: number) { const c = '①②③④⑤⑥⑦⑧⑨⑩⑪�
 
 /* Inline citations */
 .inline-cite-kb {
-  display: inline-flex; align-items: center; gap: 3px; padding: 0 6px;
-  background: #ecfdf5; border: 1px solid rgba(16,185,129,0.2); border-radius: 4px;
-  font-size: 11px; color: #059669; vertical-align: baseline;
+  display: inline-flex; align-items: center; gap: 3px; padding: 0 5px;
+  background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.2); border-radius: 4px;
+  font-size: 11px; color: #059669; cursor: help;
+}
+.inline-cite-kb:hover {
+  background: rgba(16,185,129,0.15);
 }
 .inline-cite-web {
   display: inline-flex; align-items: center; justify-content: center;
-  min-width: 20px; height: 18px; padding: 0 4px;
-  background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.2);
-  border-radius: 4px; font-size: 11px; font-weight: 600;
-  color: #3b82f6; text-decoration: none; vertical-align: middle;
+  min-width: 18px; height: 16px; padding: 0 4px;
+  background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.2); border-radius: 4px;
+  font-size: 11px; font-weight: 500; color: #3b82f6; text-decoration: none;
+  cursor: pointer; vertical-align: middle;
 }
-.inline-cite-web:hover { background: rgba(59,130,246,0.2); border-color: rgba(59,130,246,0.4); }
-
-
+.inline-cite-web:hover {
+  background: rgba(59,130,246,0.15);
+}
 </style>

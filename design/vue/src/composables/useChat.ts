@@ -1,4 +1,5 @@
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, inject } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
 import * as chatApi from '@/api/chat'
@@ -38,7 +39,32 @@ interface KnowledgeBaseOption {
   document_count?: number
 }
 
+// ── Tooltip content store (avoids HTML attribute escaping issues) ──
+
+const tooltipStore = new Map<string, string>()
+
+export function getTooltipContent(key: string): string {
+  return tooltipStore.get(key) ?? ''
+}
+
+let _tooltipSeq = 0
+export function nextTipKey(): string {
+  return `tip_${_tooltipSeq++}`
+}
+
+export function setTooltip(key: string, value: string): void {
+  tooltipStore.set(key, value)
+}
+
+export function cleanTitle(text: string): string {
+  if (!text) return ''
+  return text.replace(/[\r\n]+/g, ' ').trim()
+}
+
 export function useChat() {
+  const router = useRouter()
+  const refreshHistory = inject<() => Promise<void>>('refreshHistory')
+
   // ── Session ──
   const sessions = ref<ChatSession[]>([])
   const activeSessionId = ref<string | null>(null)
@@ -144,6 +170,7 @@ export function useChat() {
       })
       if (res.code === 0 && res.data) {
         sessions.value.unshift(res.data)
+        refreshHistory?.()
         return res.data.id
       }
     } catch { /* fall through */ }
@@ -211,6 +238,7 @@ export function useChat() {
         return
       }
       activeSessionId.value = id
+      router.push(`/chat/${id}`)
     }
 
     const modelOpt = modelOptions.value.find(
@@ -419,7 +447,9 @@ export function useChat() {
   }
 
   function copyText(text: string) {
-    navigator.clipboard.writeText(text).catch(() => {})
+    navigator.clipboard.writeText(text)
+      .then(() => ElMessage.success('已复制'))
+      .catch(() => ElMessage.error('复制失败'))
   }
 
   function regenerate() {
@@ -478,20 +508,8 @@ export function useChat() {
   }
 
   // ── Content formatting ──
-  function formatContent(content: string, sources?: unknown[]): string {
+  function formatContent(content: string, _sources?: unknown[]): string {
     if (!content) return ''
-
-    // Build chunk_id -> content mapping from sources
-    const chunkMap = new Map<string, string>()
-    if (Array.isArray(sources)) {
-      for (const doc of sources) {
-        const chunks = (doc as any)?.chunks
-        if (!Array.isArray(chunks)) continue
-        for (const chunk of chunks) {
-          if (chunk?.id) chunkMap.set(chunk.id, chunk.content || chunk.quote || '')
-        }
-      }
-    }
 
     const cites: {
       type: string
@@ -503,7 +521,7 @@ export function useChat() {
 
     let processed = content
     processed = processed.replace(
-      /<kb\s+doc="([^"]*)"\s+chunk_id="([^"]*)"\s*\/>/g,
+      /<kb\s+[^>]*?doc="([^"]*)"[^>]*?chunk_id="([^"]*)"[^>]*?\/?>/gi,
       (_, doc: string, chunkId: string) => {
         const idx = cites.length
         cites.push({ type: 'kb', doc, chunkId })
@@ -511,7 +529,7 @@ export function useChat() {
       },
     )
     processed = processed.replace(
-      /<web\s+url="([^"]*)"\s+title="([^"]*)"\s*\/>/g,
+      /<web\s+[^>]*?url="([^"]*)"[^>]*?title="([^"]*)"[^>]*?\/?>/gi,
       (_, url: string, title: string) => {
         const idx = cites.length
         cites.push({ type: 'web', url, title })
@@ -531,9 +549,9 @@ export function useChat() {
       let citeHtml: string
       if (c.type === 'kb') {
         const docName = escapeHtml(c.doc ?? '知识库文档')
-        const chunkText = c.chunkId ? chunkMap.get(c.chunkId) || '' : ''
-        const safeTip = escapeAttr(chunkText.slice(0, 300) + (chunkText.length > 300 ? '...' : ''))
-        citeHtml = `<span class="inline-cite-kb" title="${safeTip || docName}">📄${docName}</span>`
+        const chunkId = c.chunkId ?? ''
+        const docTitle = escapeAttr(c.doc ?? '')
+        citeHtml = `<span class="inline-cite-kb" data-chunk-id="${escapeAttr(chunkId)}" data-doc="${docTitle}">📄${docName}</span>`
       } else {
         const url = c.url ?? ''
         let num = urlToNumMap.get(url)
@@ -542,9 +560,11 @@ export function useChat() {
           num = webNum
           urlToNumMap.set(url, num)
         }
-        const title = escapeHtml(c.title ?? '网页链接')
+        const title = c.title ?? '网页链接'
+        const tipKey = nextTipKey()
+        tooltipStore.set(tipKey, title)
         const safeUrl = escapeAttr(url)
-        citeHtml = `<a class="inline-cite-web" href="${safeUrl}" target="_blank" rel="noopener" title="${title}">[${num}]</a>`
+        citeHtml = `<a class="inline-cite-web" href="${safeUrl}" target="_blank" rel="noopener" data-tip-key="${tipKey}">[${num}]</a>`
       }
       html = html.replace(`%%CITE${i}%%`, citeHtml)
     }
@@ -552,25 +572,29 @@ export function useChat() {
     return html
   }
 
-  // Get tooltip content for source document
-  function getSourceTooltip(source: any): string {
+  function cleanTooltipText(text: string): string {
+    if (!text) return ''
+    // Only remove actual metadata tags; do NOT globally strip `title=` / `doc=`
+    // because normal article text may legitimately contain those substrings.
+    return text
+      .replace(/<kb(?:\s[^>]*)?\s*\/?>\s*/gi, '')
+      .replace(/<web(?:\s[^>]*)?\s*\/?>\s*/gi, '')
+      .replace(/<\/?kb>/gi, '')
+      .replace(/<\/?web>/gi, '')
+      .replace(/\r\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
+  }
+
+  // Get comma-separated chunk IDs for a source document tooltip
+  function getSourceChunkIds(source: any): string {
     if (!source) return ''
     const chunks = source.chunks
-    if (!Array.isArray(chunks) || chunks.length === 0) return source.title || ''
-
-    const parts: string[] = []
-    let totalLen = 0
-    for (const chunk of chunks) {
-      const text = chunk.content || chunk.quote || ''
-      if (!text) continue
-      if (totalLen + text.length > 500) {
-        parts.push(text.slice(0, 500 - totalLen) + '...')
-        break
-      }
-      parts.push(text)
-      totalLen += text.length
-    }
-    return parts.join('\n---\n') || source.title || ''
+    if (!Array.isArray(chunks) || chunks.length === 0) return ''
+    return chunks
+      .map((chunk: any) => chunk.id)
+      .filter(Boolean)
+      .join(',')
   }
 
   // Extract web sources from content (for displaying web search links)
@@ -625,13 +649,14 @@ export function useChat() {
     scrollToBottom,
     toggleKB,
     formatContent,
-    getSourceTooltip,
+    getSourceChunkIds,
     extractWebSources,
     copyText,
     regenerate,
     retryLastMessage,
     stopGeneration,
     newChat,
+    cleanTooltipText,
   }
 }
 
@@ -649,6 +674,7 @@ function escapeAttr(s: string): string {
     .replace(/"/g, '&quot;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+    .replace(/\n/g, '&#10;')
 }
 
 function toCircleNum(n: number): string {
