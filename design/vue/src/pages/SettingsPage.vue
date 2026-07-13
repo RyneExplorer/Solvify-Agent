@@ -346,9 +346,9 @@ import AppBadge from '@/components/ui/AppBadge.vue'
 import AppSelect from '@/components/ui/AppSelect.vue'
 import type { UserModelConfigInfo, CreateUserModelConfigRequest } from '@/types/model'
 import type { UserToolConfigInfo, CreateUserToolConfigRequest, ConfigSchema } from '@/types/tool'
-import type { DingTalkBinding } from '@/types/dingtalk'
 import { testUserModelConfig } from '@/api/model'
 import { testUserToolConfig } from '@/api/tool'
+import type { DingTalkBinding } from '@/types/dingtalk'
 
 // ── Tabs ──
 const activeTab = ref('model')
