@@ -35,6 +35,7 @@ Thumbs.db
 tmp/
 tasks/
 
+docs/superpowers/
 docs/*
 !docs/architecture.md
 !docs/DEVELOPMENT.md
