@@ -1,5 +1,5 @@
 <template>
-  <div class="py-8 px-10">
+  <div class="py-8 px-10" @click="activeMenuID = ''">
     <div class="flex flex-wrap justify-between items-start gap-4 mb-6">
       <div>
         <h1 class="text-[28px] font-bold text-slate-900 m-0" style="font-family: 'Space Grotesk', sans-serif;">文档管理</h1>
@@ -104,10 +104,11 @@
             <td class="px-4 py-3 text-slate-900">{{ formatDate(doc.created_at) }}</td>
             <td class="px-4 py-3">
               <div class="relative inline-block">
-                <AppButton variant="ghost" size="sm" class="!px-2" @click="toggleActionMenu(doc.id)">...</AppButton>
+                <AppButton variant="ghost" size="sm" class="!px-2" @click.stop="toggleActionMenu(doc.id)">...</AppButton>
                 <div
                   v-if="activeMenuID === doc.id"
                   class="absolute right-0 top-9 z-50 w-44 rounded-xl border border-slate-100 bg-white p-1.5 shadow-xl"
+                  @click.stop
                 >
                   <button class="menu-item" @click="editDocument(doc)">编辑文档</button>
                   <button v-if="!doc.external_url" class="menu-item" @click="openPreviewFromMenu(doc)">查看原文</button>
@@ -381,6 +382,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Document as DocumentIcon, Files, Folder, Grid, Link, Picture } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
 import Papa from 'papaparse'
 import DOMPurify from 'dompurify'
@@ -835,7 +837,7 @@ async function uploadSelectedFile(file: File) {
   try {
     const res = await uploadDocument(knowledgeBaseID.value, file)
     lastJob.value = res.data.job
-    await Promise.all([loadDocuments(), loadStorageQuota()])
+    await Promise.all([loadDocuments(), loadStorageQuota(), loadSyncItems()])
   } catch (error) {
     const message = error instanceof Error ? error.message : '上传文档失败'
     uploadError.value = message.includes('存储配额') || message.includes('配额') ? '存储配额不足，请清理后再上传' : message
@@ -862,10 +864,19 @@ async function importDingTalkItem(item: SyncItem) {
   importingItemID.value = item.id
   syncItemsError.value = ''
   try {
-    await importSyncItem(item.id)
+    const res = await importSyncItem(item.id)
     await Promise.all([loadDocuments(), loadStorageQuota(), loadSyncItems()])
+    if (res.data.status !== documentStatusReady) {
+      const message = res.data.error_message || '钉钉文件解析失败'
+      syncItemsError.value = message
+      ElMessage.error(`导入失败：${message}`)
+      return
+    }
+    ElMessage.success('导入成功')
   } catch (error) {
-    syncItemsError.value = error instanceof Error ? error.message : '导入钉钉文件失败'
+    const message = error instanceof Error ? error.message : '导入钉钉文件失败'
+    syncItemsError.value = message
+    ElMessage.error(`导入失败：${message}`)
     await loadSyncItems()
   } finally {
     importingItemID.value = ''

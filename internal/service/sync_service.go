@@ -306,6 +306,9 @@ func (s *syncService) ListItems(ctx context.Context, userID, sourceID string) ([
 	if _, err := s.findSource(ctx, userID, sourceID); err != nil {
 		return nil, err
 	}
+	if err := s.syncItemRepo.ResetDeletedDocumentLinks(ctx, userID, sourceID, syncItemImportStatusPending, documentStatusDeleted); err != nil {
+		return nil, err
+	}
 	items, err := s.syncItemRepo.ListBySource(ctx, userID, sourceID)
 	if err != nil {
 		return nil, err
@@ -351,6 +354,16 @@ func (s *syncService) ImportItem(ctx context.Context, userID, itemID string) (dt
 	if err != nil {
 		_ = s.syncItemRepo.MarkImportFailed(ctx, userID, item.ID, syncItemImportStatusFailed, err.Error())
 		return dto.DocumentResponse{}, err
+	}
+	if doc.Status != documentStatusReady {
+		errorMessage := strings.TrimSpace(doc.ErrorMessage)
+		if errorMessage == "" {
+			errorMessage = "钉钉文件解析失败"
+		}
+		if err := s.syncItemRepo.MarkImportFailed(ctx, userID, item.ID, syncItemImportStatusFailed, errorMessage); err != nil {
+			return dto.DocumentResponse{}, err
+		}
+		return documentResponse(doc), nil
 	}
 	if err := s.syncItemRepo.MarkImported(ctx, userID, item.ID, doc.ID, syncItemImportStatusImported); err != nil {
 		return dto.DocumentResponse{}, err

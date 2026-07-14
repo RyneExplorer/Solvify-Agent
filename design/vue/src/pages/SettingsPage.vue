@@ -374,6 +374,7 @@ const dingTalkBindingError = ref('')
 const dingTalkModalVisible = ref(false)
 const dingTalkQrLoading = ref(false)
 const dingTalkBindingSubmitting = ref(false)
+const exchangedDingTalkAuthCodes = new Set<string>()
 
 // ── Modal ──
 const showModal = ref(false)
@@ -641,7 +642,9 @@ async function bindDingTalk(authCode: string, state: string) {
     dingTalkBindingError.value = '钉钉授权参数不能为空'
     return
   }
-  if (dingTalkBindingSubmitting.value || dingTalkBinding.value?.bound) return
+  const exchangeKey = `${state}:${authCode}`
+  if (dingTalkBindingSubmitting.value || dingTalkBinding.value?.bound || exchangedDingTalkAuthCodes.has(exchangeKey)) return
+  exchangedDingTalkAuthCodes.add(exchangeKey)
   dingTalkBindingSubmitting.value = true
   try {
     const res = await exchangeDingTalkAuthCode({ auth_code: authCode, state })

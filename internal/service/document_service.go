@@ -273,7 +273,7 @@ func (s *documentService) Delete(ctx context.Context, userID, documentID string)
 	}
 	now := time.Now()
 	expiredAt := now.AddDate(0, 0, deleteRetentionDays)
-	ok, err := s.documentRepo.SoftDelete(ctx, userID, documentID, documentStatusDeleted, now, expiredAt)
+	ok, err := s.documentRepo.SoftDelete(ctx, userID, documentID, documentStatusDeleted, syncItemImportStatusPending, now, expiredAt)
 	if err != nil {
 		logger.Error("文档软删除失败", zap.String("file_name", doc.FileName),
 			zap.String("file_type", doc.FileType),

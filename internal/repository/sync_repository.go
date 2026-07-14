@@ -201,6 +201,24 @@ func (r *syncItemRepository) Upsert(ctx context.Context, item entity.SyncItem) e
 	}).Create(&item).Error
 }
 
+// ResetDeletedDocumentLinks 清理已删除本地文档的同步关联
+func (r *syncItemRepository) ResetDeletedDocumentLinks(ctx context.Context, userID, sourceID string, pendingStatus, deletedDocumentStatus int) error {
+	return r.db.WithContext(ctx).
+		Model(&entity.SyncItem{}).
+		Where("user_id = ? AND sync_source_id = ? AND local_document_id IS NOT NULL", userID, sourceID).
+		Where(`NOT EXISTS (
+			SELECT 1 FROM documents
+			WHERE documents.id = sync_items.local_document_id
+				AND documents.user_id = sync_items.user_id
+				AND documents.status <> ?
+		)`, deletedDocumentStatus).
+		Updates(map[string]any{
+			"local_document_id": nil,
+			"import_status":     pendingStatus,
+			"error_message":     "",
+		}).Error
+}
+
 // ListBySource 查询同步源下外部文件目录项
 func (r *syncItemRepository) ListBySource(ctx context.Context, userID, sourceID string) ([]entity.SyncItem, error) {
 	var items []entity.SyncItem

@@ -155,6 +155,7 @@ import AppButton from '@/components/ui/AppButton.vue'
 import AppCard from '@/components/ui/AppCard.vue'
 import SearchInput from '@/components/ui/SearchInput.vue'
 import KBCard from '@/components/ui/KBCard.vue'
+import { getDingTalkBinding } from '@/api/dingtalk'
 import {
   createKnowledgeBase,
   deleteKnowledgeBase,
@@ -171,6 +172,7 @@ const errorMessage = ref('')
 const searchQuery = ref('')
 const dialogVisible = ref(false)
 const syncDialogVisible = ref(false)
+const bindingChecking = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')
 const editingID = ref('')
 const knowledgeBases = ref<KnowledgeBase[]>([])
@@ -306,7 +308,23 @@ async function deleteDingTalkSource(knowledgeBaseID: string) {
 }
 
 // 打开文档页面
-function openDocuments(kb: KnowledgeBase) {
+async function openDocuments(kb: KnowledgeBase) {
+  if (kb.source_type === 'sync' && sourceKey(kb) === 'dingtalk') {
+    if (bindingChecking.value) return
+    bindingChecking.value = true
+    try {
+      const res = await getDingTalkBinding()
+      if (!res.data?.bound) {
+        syncDialogVisible.value = true
+        return
+      }
+    } catch (err) {
+      ElMessage.error(err instanceof Error ? err.message : '钉钉绑定状态查询失败')
+      return
+    } finally {
+      bindingChecking.value = false
+    }
+  }
   router.push({ path: '/docs', query: { knowledge_base_id: kb.id } })
 }
 
