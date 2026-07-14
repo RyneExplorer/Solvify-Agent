@@ -9,7 +9,10 @@ import (
 	"net/http"
 	"strings"
 
+	"go.uber.org/zap"
+
 	"solvify-agent/internal/tool"
+	"solvify-agent/pkg/logger"
 )
 
 // HTTPProvider 通用 HTTP 供应商
@@ -121,11 +124,20 @@ func (p *HTTPProvider) Execute(ctx context.Context, config *tool.ExecuteConfig) 
 	}
 
 	// 11. 解析响应（根据 response_mapping）
+	var result string
 	if pc.ResponseMapping != nil && len(pc.ResponseMapping) > 0 {
-		return p.mapResponse(respBody, pc.ResponseMapping)
+		result, err = p.mapResponse(respBody, pc.ResponseMapping)
+	} else {
+		result = string(respBody)
 	}
 
-	return string(respBody), nil
+	logger.Info("HTTP工具执行结果",
+		zap.String("url", url),
+		zap.Int("status", resp.StatusCode),
+		zap.Int("result_length", len(result)),
+		zap.String("result_preview", truncate(result, 2000)))
+
+	return result, err
 }
 
 // setupAuth 设置认证
@@ -382,4 +394,11 @@ func base64Encode(s string) string {
 	}
 
 	return string(result)
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
