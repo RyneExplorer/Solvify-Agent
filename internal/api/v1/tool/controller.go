@@ -203,6 +203,7 @@ func (c *Controller) ListToolTemplates(ctx *gin.Context) {
 			Description:   tt.Description,
 			ExecutionMode: tt.ExecutionMode,
 			ProviderCount: tt.ProviderCount,
+			Providers:     []providerBrief{},
 		}
 		if providers != nil {
 			for _, p := range providers.Providers {

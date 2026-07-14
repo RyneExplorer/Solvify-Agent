@@ -361,7 +361,7 @@ const tabs = [
 const tabHint = computed(() => {
   if (activeTab.value === 'model') return '系统模型由管理员统一配置；自定义模型仅当前用户可用。'
   if (activeTab.value === 'sync') return '钉钉账号绑定状态与知识库页面保持一致，解绑不会删除已创建的同步知识库。'
-  return '在深度模式下，系统会调用已启用的工具进行联网或知识库检索。'
+  return '系统会调用已启用的工具'
 })
 
 // ── Composables ──
