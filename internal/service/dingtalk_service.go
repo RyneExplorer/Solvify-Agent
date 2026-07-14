@@ -38,6 +38,7 @@ type DingTalkOAuthClient interface {
 // DingTalkStateCache 定义扫码 state 缓存能力
 type DingTalkStateCache interface {
 	Get(ctx context.Context, key string, dest any) (bool, error)
+	GetDelete(ctx context.Context, key string, dest any) (bool, error)
 	Set(ctx context.Context, key string, value any, ttl time.Duration) error
 	Delete(ctx context.Context, key string) error
 }
@@ -182,14 +183,14 @@ func (s *dingtalkService) ListNodes(ctx context.Context, userID, workspaceID, pa
 // validateState 校验扫码 state 与当前用户一致
 func (s *dingtalkService) validateState(ctx context.Context, userID, state string) error {
 	var cached dingTalkOAuthState
-	found, err := s.stateCache.Get(ctx, state, &cached)
+	found, err := s.stateCache.GetDelete(ctx, state, &cached)
 	if err != nil {
 		return err
 	}
 	if !found || cached.UserID != userID {
 		return apperrors.New(apperrors.CodeBadRequest, "钉钉授权状态已失效")
 	}
-	return s.stateCache.Delete(ctx, state)
+	return nil
 }
 
 // ensureUnionAvailable 确保钉钉 unionId 没有绑定给其他用户

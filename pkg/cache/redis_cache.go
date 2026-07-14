@@ -44,6 +44,22 @@ func (c *RedisCache) Get(ctx context.Context, key string, dest any) (bool, error
 	return true, nil
 }
 
+// GetDelete 从缓存原子读取并删除数据
+func (c *RedisCache) GetDelete(ctx context.Context, key string, dest any) (bool, error) {
+	fullKey := c.keyPrefix + key
+	data, err := c.client.GetDel(ctx, fullKey).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("缓存读取并删除失败: %w", err)
+	}
+	if err := json.Unmarshal(data, dest); err != nil {
+		return false, fmt.Errorf("缓存反序列化失败: %w", err)
+	}
+	return true, nil
+}
+
 // Set 写入缓存，ttl 为 0 时使用默认 TTL
 func (c *RedisCache) Set(ctx context.Context, key string, value any, ttl time.Duration) error {
 	fullKey := c.keyPrefix + key
