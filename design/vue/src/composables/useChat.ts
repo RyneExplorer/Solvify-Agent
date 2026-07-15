@@ -181,7 +181,7 @@ export function useChat() {
     try {
       const res = await chatApi.getMessages(sessionId)
       if (res.code === 0) {
-        messages.value = (res.data.messages ?? []).map((m) => ({
+        const serverMessages = (res.data.messages ?? []).map((m) => ({
           id: m.id,
           role: m.role as 'user' | 'assistant',
           content: m.content,
@@ -192,6 +192,21 @@ export function useChat() {
             status: s.status ?? 'success',
           })),
         }))
+
+        // 保留未持久化的临时用户消息（ID 以 u- 开头）
+        // 避免服务器返回空数组时覆盖刚发送的消息
+        // 同时排除已在服务器上存在的消息（按内容去重）
+        const serverUserContents = new Set(
+          serverMessages.filter((m) => m.role === 'user').map((m) => m.content),
+        )
+        const localUserMsgs = messages.value.filter(
+          (m) =>
+            m.role === 'user' &&
+            m.id.startsWith('u-') &&
+            !serverUserContents.has(m.content),
+        )
+
+        messages.value = [...localUserMsgs, ...serverMessages]
         collapsedTimelines.value = new Set(
           messages.value
             .map((m, i) => (m.timeline?.length ? i : -1))
@@ -199,7 +214,8 @@ export function useChat() {
         )
       }
     } catch {
-      messages.value = []
+      // 出错时保留已有消息，不清空
+      messages.value = messages.value
     }
   }
 
@@ -218,7 +234,14 @@ export function useChat() {
       return
     }
 
-    input.value = ''
+    // 延迟清空输入框，避免跳转后问题丢失
+    // 如果是新会话，等会话创建成功后再清空
+    const isNewSession = !activeSessionId.value
+    if (!isNewSession) {
+      // 已有会话，立即清空
+      input.value = ''
+    }
+
     messages.value.push({ id: 'u-' + Date.now(), role: 'user', content })
     isLoading.value = true
     progressText.value = ''
@@ -226,17 +249,20 @@ export function useChat() {
     streamTimeline.value = []
 
     // Auto-create session
-    if (!activeSessionId.value) {
+    if (isNewSession) {
       const id = await createSession(content)
       if (!id) {
         messages.value.push({
           id: 'e-' + Date.now(),
           role: 'error',
           content: '创建会话失败',
+          retryable: true,
         })
         isLoading.value = false
         return
       }
+      // 会话创建成功，清空输入框
+      input.value = ''
       activeSessionId.value = id
       router.push(`/chat/${id}`)
     }
@@ -258,6 +284,7 @@ export function useChat() {
           id: 'e-' + Date.now(),
           role: 'error',
           content: '响应超时',
+          retryable: true,
         })
       }
     }, 120000)
@@ -365,7 +392,7 @@ export function useChat() {
                   role: 'error',
                   content: evt.title || '未知错误',
                   detail: evt.detail,
-                  retryable: evt.retryable,
+                  retryable: evt.retryable !== false,
                 })
                 return
 
