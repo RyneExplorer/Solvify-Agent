@@ -376,6 +376,10 @@ func getDefaultPlaceholderValue(ph string) interface{} {
 		return 3
 	case "format":
 		return "json"
+	case "stock_code":
+		return "sh600001"
+	case "currency":
+		return "usd"
 	default:
 		return "test"
 	}

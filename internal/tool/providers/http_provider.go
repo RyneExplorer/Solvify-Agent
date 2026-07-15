@@ -5,11 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go.uber.org/zap"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
-
-	"go.uber.org/zap"
+	"time"
 
 	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/logger"
@@ -23,8 +24,18 @@ type HTTPProvider struct {
 
 // NewHTTPProvider 创建 HTTP Provider
 func NewHTTPProvider() *HTTPProvider {
+	proxyFunc := func(req *http.Request) (*url.URL, error) {
+		return nil, nil
+	}
 	return &HTTPProvider{
-		client: &http.Client{},
+		client: &http.Client{
+			Timeout: 15 * time.Second,
+			Transport: &http.Transport{
+				Proxy:               proxyFunc,
+				TLSHandshakeTimeout: 10 * time.Second,
+				DisableKeepAlives:   false,
+			},
+		},
 	}
 }
 
@@ -120,7 +131,11 @@ func (p *HTTPProvider) Execute(ctx context.Context, config *tool.ExecuteConfig) 
 
 	// 10. 检查 HTTP 状态码
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("HTTP 请求失败: %d %s", resp.StatusCode, resp.Status)
+		bodyPreview := string(respBody)
+		if len(bodyPreview) > 500 {
+			bodyPreview = bodyPreview[:500]
+		}
+		return "", fmt.Errorf("HTTP 请求失败: %d %s, 响应: %s", resp.StatusCode, resp.Status, bodyPreview)
 	}
 
 	// 11. 解析响应（根据 response_mapping）

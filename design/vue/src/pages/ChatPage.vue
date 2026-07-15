@@ -83,7 +83,7 @@
                 <button v-if="msg.role === 'error' && msg.retryable" class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="重试" @click="retryLastMessage">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                 </button>
-                <button class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="保存到知识库" @click="openSaveNoteDialog(msg.content)">
+                <button v-if="msg.role === 'assistant'" class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="保存到知识库" @click="openSaveNoteDialog(msg.content)">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 21v-8H7v8M7 3v5h8"/></svg>
                 </button>
               </div>
