@@ -85,6 +85,7 @@ type EmbeddingConfig struct {
 	APIKey    string `mapstructure:"api_key"`
 	BaseURL   string `mapstructure:"base_url"`
 	Dimension int    `mapstructure:"dimension"`
+	BatchSize int    `mapstructure:"batch_size"`
 }
 
 // RAGConfig 描述检索增强配置
@@ -277,6 +278,7 @@ func Default() *Config {
 			Provider:  "openai",
 			Model:     "text-embedding-v4",
 			Dimension: 1024,
+			BatchSize: 10,
 		},
 		RAG: RAGConfig{
 			Enabled:        true,
@@ -428,6 +430,9 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("EMBEDDING_DIMENSION"); value != "" {
 		cfg.Embedding.Dimension = parseInt(value, cfg.Embedding.Dimension)
+	}
+	if value := os.Getenv("EMBEDDING_BATCH_SIZE"); value != "" {
+		cfg.Embedding.BatchSize = parseInt(value, cfg.Embedding.BatchSize)
 	}
 
 	// 数据库配置

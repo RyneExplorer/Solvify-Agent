@@ -14,7 +14,10 @@ import (
 	apperrors "solvify-agent/pkg/errors"
 )
 
-const defaultEmbeddingTimeoutSeconds = 60
+const (
+	defaultEmbeddingTimeoutSeconds = 60
+	defaultEmbeddingBatchSize      = 10
+)
 
 // embeddingService 封装 OpenAI 兼容文本向量调用
 type embeddingService struct {
@@ -51,49 +54,61 @@ func (s *embeddingService) EmbedTexts(ctx context.Context, texts []string) ([][]
 		return nil, apperrors.New(apperrors.CodeInternalError, "文本向量模型配置不完整")
 	}
 
-	reqBody, err := json.Marshal(embeddingRequest{
-		Model: s.cfg.Model,
-		Input: texts,
-	})
-	if err != nil {
-		return nil, apperrors.NewWithErr(apperrors.CodeInternalError, "构建向量请求失败", err)
+	batchSize := s.cfg.BatchSize
+	if batchSize <= 0 {
+		batchSize = defaultEmbeddingBatchSize
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.embeddingURL(), bytes.NewReader(reqBody))
-	if err != nil {
-		return nil, apperrors.NewWithErr(apperrors.CodeInternalError, "创建向量请求失败", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.cfg.APIKey)
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, apperrors.NewWithErr(apperrors.CodeInternalError, "调用文本向量模型失败", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
-	if err != nil {
-		return nil, apperrors.NewWithErr(apperrors.CodeInternalError, "读取向量响应失败", err)
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, normalizeEmbeddingHTTPError(resp.StatusCode, body, s.cfg.Model)
-	}
-
-	var parsed embeddingResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, apperrors.NewWithErr(apperrors.CodeInternalError, "解析向量响应失败", err)
-	}
-	if len(parsed.Data) != len(texts) {
-		return nil, apperrors.New(apperrors.CodeInternalError, "文本向量数量与分块数量不一致")
-	}
-
-	vectors := make([][]float32, len(parsed.Data))
-	for _, item := range parsed.Data {
-		if item.Index < 0 || item.Index >= len(parsed.Data) {
-			return nil, apperrors.New(apperrors.CodeInternalError, "文本向量响应索引异常")
+	vectors := make([][]float32, 0, len(texts))
+	for start := 0; start < len(texts); start += batchSize {
+		end := start + batchSize
+		if end > len(texts) {
+			end = len(texts)
 		}
-		vectors[item.Index] = item.Embedding
+		batchTexts := texts[start:end]
+		reqBody, err := json.Marshal(embeddingRequest{
+			Model: s.cfg.Model,
+			Input: batchTexts,
+		})
+		if err != nil {
+			return nil, apperrors.NewWithErr(apperrors.CodeInternalError, "构建向量请求失败", err)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.embeddingURL(), bytes.NewReader(reqBody))
+		if err != nil {
+			return nil, apperrors.NewWithErr(apperrors.CodeInternalError, "创建向量请求失败", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+s.cfg.APIKey)
+
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			return nil, apperrors.NewWithErr(apperrors.CodeInternalError, "调用文本向量模型失败", err)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, apperrors.NewWithErr(apperrors.CodeInternalError, "读取向量响应失败", readErr)
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			return nil, normalizeEmbeddingHTTPError(resp.StatusCode, body, s.cfg.Model)
+		}
+
+		var parsed embeddingResponse
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			return nil, apperrors.NewWithErr(apperrors.CodeInternalError, "解析向量响应失败", err)
+		}
+		if len(parsed.Data) != len(batchTexts) {
+			return nil, apperrors.New(apperrors.CodeInternalError, "文本向量数量与分块数量不一致")
+		}
+
+		batchVectors := make([][]float32, len(parsed.Data))
+		for _, item := range parsed.Data {
+			if item.Index < 0 || item.Index >= len(parsed.Data) {
+				return nil, apperrors.New(apperrors.CodeInternalError, "文本向量响应索引异常")
+			}
+			batchVectors[item.Index] = item.Embedding
+		}
+		vectors = append(vectors, batchVectors...)
 	}
 	return vectors, nil
 }

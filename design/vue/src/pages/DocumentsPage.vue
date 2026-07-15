@@ -411,6 +411,7 @@ interface VisibleSyncItem {
 
 const documentStatusUploaded = 1
 const documentStatusProcessing = 2
+const documentStatusReady = 3
 const documentStatusFailed = 4
 const documentJobStatusPending = 1
 const documentJobStatusRunning = 2
@@ -1024,7 +1025,7 @@ async function confirmDeleteDocument() {
     await deleteDocument(doc.id)
     deleteDialogOpen.value = false
     deletingDocument.value = null
-    await Promise.all([loadDocuments(), loadStorageQuota()])
+    await Promise.all([loadDocuments(), loadStorageQuota(), loadSyncItems()])
   } catch (error) {
     deleteError.value = error instanceof Error ? error.message : '删除文档失败'
   } finally {
