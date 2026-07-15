@@ -5,13 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go.uber.org/zap"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
-
-	"go.uber.org/zap"
 
 	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/logger"
