@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"gorm.io/datatypes"
@@ -39,13 +40,14 @@ func (s *userModelConfigService) Create(ctx context.Context, userID string, req 
 	}
 
 	config := &entity.UserModelConfig{
-		UserID:      userID,
-		DisplayName: req.ModelID,
-		APIFormat:   req.APIFormat,
-		BaseURL:     req.BaseURL,
-		ModelID:     req.ModelID,
-		APIKey:      req.APIKey,
-		Config:      toJSONB(req.Config),
+		UserID:           userID,
+		DisplayName:      req.ModelID,
+		APIFormat:        req.APIFormat,
+		BaseURL:          req.BaseURL,
+		ModelID:          req.ModelID,
+		APIKey:           req.APIKey,
+		Config:           toJSONB(req.Config),
+		MaxContextLength: llm.InferMaxContextLength(req.ModelID, req.MaxContextLength),
 	}
 
 	if err := s.repo.Create(ctx, config); err != nil {
@@ -93,10 +95,18 @@ func (s *userModelConfigService) Update(ctx context.Context, userID string, conf
 	if req.Config != nil {
 		config.Config = toJSONB(req.Config)
 	}
+	if req.MaxContextLength != nil {
+		config.MaxContextLength = *req.MaxContextLength
+	} else if req.ModelID != nil {
+		config.MaxContextLength = llm.InferMaxContextLength(*req.ModelID, 0)
+	}
 
 	if err := s.repo.Update(ctx, config); err != nil {
 		return responsedto.UserModelConfigInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
+
+	// 配置更新后重置运行时上下文窗口保护，允许使用新的声明值
+	llm.ResetEffectiveMaxContextLength(config.ModelID)
 
 	return toModelConfigInfo(config), nil
 }
@@ -195,24 +205,34 @@ func (s *userModelConfigService) Test(ctx context.Context, req requestdto.TestMo
 	}
 
 	elapsed := time.Since(start)
+
+	// 尝试通过 /v1/models 探测真实上下文窗口
+	detectedCtx, detectErr := llm.DetectContextLengthViaAPI(ctx, req.BaseURL, req.APIKey, req.ModelID)
+	details := "已发送测试请求并收到响应"
+	if detectErr == nil && detectedCtx > 0 {
+		details = fmt.Sprintf("已发送测试请求并收到响应；探测到上下文窗口 %d", detectedCtx)
+	}
+
 	return responsedto.TestResult{
-		Success:      true,
-		Message:      "模型连接成功",
-		ResponseTime: elapsed.Milliseconds(),
-		Details:      "已发送测试请求并收到响应",
+		Success:                  true,
+		Message:                  "模型连接成功",
+		ResponseTime:             elapsed.Milliseconds(),
+		Details:                  details,
+		DetectedMaxContextLength: detectedCtx,
 	}, nil
 }
 
 func toModelConfigInfo(config *entity.UserModelConfig) responsedto.UserModelConfigInfo {
 	info := responsedto.UserModelConfigInfo{
-		ID:          config.ID,
-		DisplayName: config.DisplayName,
-		APIFormat:   config.APIFormat,
-		ModelID:     config.ModelID,
-		BaseURL:     config.BaseURL,
-		APIKey:      config.APIKey,
-		CreatedAt:   config.CreatedAt,
-		UpdatedAt:   config.UpdatedAt,
+		ID:               config.ID,
+		DisplayName:      config.DisplayName,
+		APIFormat:        config.APIFormat,
+		ModelID:          config.ModelID,
+		BaseURL:          config.BaseURL,
+		APIKey:           config.APIKey,
+		MaxContextLength: config.MaxContextLength,
+		CreatedAt:        config.CreatedAt,
+		UpdatedAt:        config.UpdatedAt,
 	}
 
 	if len(config.Config) > 0 {

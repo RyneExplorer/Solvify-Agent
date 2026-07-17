@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"solvify-agent/internal/llm"
@@ -35,12 +36,13 @@ func (s *modelService) Create(ctx context.Context, req requestdto.CreateModelReq
 	}
 
 	model := &entity.Model{
-		Name:      req.ModelID,
-		Provider:  req.Provider,
-		ModelID:   req.ModelID,
-		BaseURL:   req.BaseURL,
-		APIKey:    req.APIKey,
-		IsEnabled: true,
+		Name:             req.ModelID,
+		Provider:         req.Provider,
+		ModelID:          req.ModelID,
+		BaseURL:          req.BaseURL,
+		APIKey:           req.APIKey,
+		IsEnabled:        true,
+		MaxContextLength: llm.InferMaxContextLength(req.ModelID, req.MaxContextLength),
 	}
 
 	if err := s.modelRepo.Create(ctx, model); err != nil {
@@ -84,10 +86,19 @@ func (s *modelService) Update(ctx context.Context, id string, req requestdto.Upd
 	if req.IsEnabled != nil {
 		model.IsEnabled = *req.IsEnabled
 	}
+	if req.MaxContextLength != nil {
+		model.MaxContextLength = *req.MaxContextLength
+	} else if req.ModelID != nil {
+		// model_id 变更时重新推断上下文窗口
+		model.MaxContextLength = llm.InferMaxContextLength(*req.ModelID, 0)
+	}
 
 	if err := s.modelRepo.Update(ctx, model); err != nil {
 		return apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
+
+	// 配置更新后重置运行时上下文窗口保护，允许使用新的声明值
+	llm.ResetEffectiveMaxContextLength(model.ModelID)
 
 	return nil
 }
@@ -161,22 +172,32 @@ func (s *modelService) Test(ctx context.Context, req requestdto.TestModelRequest
 	}
 
 	elapsed := time.Since(start)
+
+	// 尝试通过 /v1/models 探测真实上下文窗口
+	detectedCtx, detectErr := llm.DetectContextLengthViaAPI(ctx, req.BaseURL, req.APIKey, req.ModelID)
+	details := "已发送测试请求并收到响应"
+	if detectErr == nil && detectedCtx > 0 {
+		details = fmt.Sprintf("已发送测试请求并收到响应；探测到上下文窗口 %d", detectedCtx)
+	}
+
 	return responsedto.TestResult{
-		Success:      true,
-		Message:      "模型连接成功",
-		ResponseTime: elapsed.Milliseconds(),
-		Details:      "已发送测试请求并收到响应",
+		Success:                  true,
+		Message:                  "模型连接成功",
+		ResponseTime:             elapsed.Milliseconds(),
+		Details:                  details,
+		DetectedMaxContextLength: detectedCtx,
 	}, nil
 }
 
 func toModelInfo(m entity.Model) responsedto.ModelInfo {
 	return responsedto.ModelInfo{
-		ID:        m.ID,
-		Name:      m.Name,
-		Provider:  m.Provider,
-		ModelID:   m.ModelID,
-		BaseURL:   m.BaseURL,
-		APIKey:    m.APIKey,
-		IsEnabled: m.IsEnabled,
+		ID:               m.ID,
+		Name:             m.Name,
+		Provider:         m.Provider,
+		ModelID:          m.ModelID,
+		BaseURL:          m.BaseURL,
+		APIKey:           m.APIKey,
+		IsEnabled:        m.IsEnabled,
+		MaxContextLength: m.MaxContextLength,
 	}
 }

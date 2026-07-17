@@ -295,6 +295,8 @@ func (a *App) initDependencies() {
 	userModelConfigRepo := repository.NewCachedUserModelConfigRepository(repository.NewUserModelConfigRepository(a.postgresqlDB), modelCache)
 	chatSessionRepo := repository.NewChatSessionRepository(a.postgresqlDB)
 	chatMessageRepo := repository.NewChatMessageRepository(a.postgresqlDB)
+	memoryRepo := repository.NewMemoryRepository(a.postgresqlDB)
+	summaryRepo := repository.NewSummaryRepository(a.postgresqlDB)
 	// 工具配置——原始仓库
 	toolTypeRepo := repository.NewToolTypeRepository(a.postgresqlDB)
 	toolProviderRepo := repository.NewToolProviderRepository(a.postgresqlDB)
@@ -344,7 +346,8 @@ func (a *App) initDependencies() {
 	dingtalkSvc := service.NewDingTalkService(a.cfg.DingTalk, dingtalkBindingRepo, dingtalkStateCache, dingtalkClient)
 	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncItemRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, textExtractor, dingtalkClient, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
-	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine)
+	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo)
+	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc)
 	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo)
 	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry)
 	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo, toolRegistry)
