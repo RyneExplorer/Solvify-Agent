@@ -55,6 +55,40 @@ func (r *chatMessageRepository) DeleteBySessionID(ctx context.Context, sessionID
 	return r.db.WithContext(ctx).Where("session_id = ?", sessionID).Delete(&entity.ChatMessage{}).Error
 }
 
+// SearchRecentByKeywords 在指定会话中按关键词检索最近消息
+func (r *chatMessageRepository) SearchRecentByKeywords(ctx context.Context, sessionID string, keywords []string, limit int) ([]entity.ChatMessage, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	if len(keywords) == 0 {
+		return r.FindRecent(ctx, sessionID, limit)
+	}
+
+	query := r.db.WithContext(ctx).
+		Where("session_id = ?", sessionID)
+
+	// 多个关键词用 OR 连接，任意匹配即可
+	for _, kw := range keywords {
+		if kw == "" {
+			continue
+		}
+		query = query.Or("content ILIKE ?", "%"+kw+"%")
+	}
+
+	var messages []entity.ChatMessage
+	err := query.
+		Order("created_at DESC").
+		Limit(limit).
+		Find(&messages).Error
+
+	// 反转顺序，使其按时间正序
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
+
+	return messages, err
+}
+
 // SearchByKeyword 按关键字搜索用户历史消息
 func (r *chatMessageRepository) SearchByKeyword(ctx context.Context, userID, query string, topK int) ([]ChatMessageSearchRow, error) {
 	if topK <= 0 {

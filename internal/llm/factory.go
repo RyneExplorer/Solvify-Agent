@@ -12,11 +12,12 @@ import (
 
 // ModelConfig 描述从数据库解析出的模型配置
 type ModelConfig struct {
-	Provider string
-	ModelID  string
-	BaseURL  string
-	APIKey   string
-	Config   []byte // entity.Model.Config 或 entity.UserModelConfig.Config 的原始 JSON
+	Provider         string
+	ModelID          string
+	BaseURL          string
+	APIKey           string
+	Config           []byte // entity.Model.Config 或 entity.UserModelConfig.Config 的原始 JSON
+	MaxContextLength int
 }
 
 // clientCacheKey 用于缓存 key
@@ -46,10 +47,11 @@ func NewClientFromModelConfig(ctx context.Context, cfg ModelConfig) (*OpenAIClie
 		logger.Infof("[LLM] 客户端缓存未命中: modelID=%s, 创建新客户端...", cfg.ModelID)
 		t0 := time.Now()
 		client, err := NewOpenAIClient(ctx, OpenAIClientConfig{
-			APIKey:  cfg.APIKey,
-			BaseURL: cfg.BaseURL,
-			Model:   cfg.ModelID,
-			Config:  cfg.Config,
+			APIKey:           cfg.APIKey,
+			BaseURL:          cfg.BaseURL,
+			Model:            cfg.ModelID,
+			Config:           cfg.Config,
+			MaxContextLength: cfg.MaxContextLength,
 		})
 		logger.Infof("[LLM] 创建客户端耗时: modelID=%s, cost=%dms", cfg.ModelID, time.Since(t0).Milliseconds())
 		if err != nil {
