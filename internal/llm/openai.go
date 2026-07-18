@@ -46,16 +46,18 @@ func getSharedHTTPClient() *http.Client {
 
 // OpenAIClient 基于 eino-ext 实现 OpenAI 兼容 API 客户端
 type OpenAIClient struct {
-	chatModel *einoOpenai.ChatModel
-	model     string
+	chatModel        *einoOpenai.ChatModel
+	model            string
+	maxContextLength int
 }
 
 // OpenAIClientConfig 描述 OpenAI 客户端配置
 type OpenAIClientConfig struct {
-	APIKey  string
-	BaseURL string
-	Model   string
-	Config  []byte // 可选，数据库中的 JSON 扩展配置
+	APIKey           string
+	BaseURL          string
+	Model            string
+	Config           []byte // 可选，数据库中的 JSON 扩展配置
+	MaxContextLength int    // 模型最大上下文 token 长度
 }
 
 // ModelExtraConfig 描述数据库 Config JSON 中可配置的参数
@@ -100,15 +102,26 @@ func NewOpenAIClient(ctx context.Context, cfg OpenAIClientConfig) (*OpenAIClient
 		return nil, err
 	}
 
+	maxCtx := cfg.MaxContextLength
+	if maxCtx <= 0 {
+		maxCtx = 8192
+	}
+
 	return &OpenAIClient{
-		chatModel: cm,
-		model:     cfg.Model,
+		chatModel:        cm,
+		model:            cfg.Model,
+		maxContextLength: maxCtx,
 	}, nil
 }
 
 // ChatModel 返回底层 eino ChatModel，满足 model.ToolCallingChatModel 接口
 func (c *OpenAIClient) ChatModel() model.ToolCallingChatModel {
 	return c.chatModel
+}
+
+// MaxContextLength 返回模型最大上下文 token 长度
+func (c *OpenAIClient) MaxContextLength() int {
+	return c.maxContextLength
 }
 
 // TestConnection 发送一个最小化请求来验证模型连接是否真正可用

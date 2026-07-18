@@ -28,7 +28,7 @@ function normalizeProviderSchema(schema: unknown): ConfigSchema | null {
 function normalizeTemplates(templates: ToolTemplate[]): ToolTemplate[] {
   return templates.map((t) => ({
     ...t,
-    providers: t.providers.map((p) => ({
+    providers: (t.providers || []).map((p) => ({
       ...p,
       config_schema: normalizeProviderSchema(p.config_schema),
     })),

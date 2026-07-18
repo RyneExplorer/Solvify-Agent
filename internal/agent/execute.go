@@ -53,6 +53,9 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	// 4. 打印最终工具清单 + 构建 toolDescMap
 	toolDescMap := make(map[string]string, len(allTools))
 	logger.Infof("[Agent] userID=%s, 工具总数=%d (内置5个 + %d 用户工具)", req.UserID, len(allTools), len(userTools))
+	if len(userTools) == 0 {
+		logger.Warnf("[Agent] 未加载到用户配置的工具（如联网搜索），请检查用户工具配置是否已启用")
+	}
 	for _, t := range allTools {
 		info, err := t.Info(ctx)
 		if err != nil {

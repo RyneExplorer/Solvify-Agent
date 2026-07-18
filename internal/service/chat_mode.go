@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"gorm.io/datatypes"
 
 	"solvify-agent/internal/agent"
+	"solvify-agent/internal/llm"
 	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
@@ -31,15 +33,15 @@ import (
 // 2. 需要改写时：改写与原始检索并行；改写有变化则以改写结果为准（不污染 merge）
 // 3. history 剔除本轮刚落库的 user 消息，避免 Prompt 重复
 func (s *chatService) processMessage(ctx context.Context, userID, sessionID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	// Step 1: 并行加载模型 + 历史对话
+	// Step 1: 加载模型 + 增强历史对话
 	sendProgressEvent(eventCh, "正在加载上下文...")
-	client, history, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, 1500)
+	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content)
 	if err != nil {
 		sendErrorEvent(eventCh, err, err.Error())
 		return
 	}
 	// 剔除本轮刚保存的 user 消息，避免 buildMessages 中问题重复
-	history = excludeCurrentUserMessage(history, req.Content)
+	history := excludeCurrentUserMessage(enhancedCtx.History, req.Content)
 
 	chatModel := client.ChatModel()
 
@@ -98,7 +100,7 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 
 	// Step 4: 组装 Prompt（用原始问题，改写后的查询仅用于检索）
 	sendProgressEvent(eventCh, "正在整理资料...")
-	messages := buildMessages(history, req.Content, retrieveResult)
+	messages := buildMessages(history, req.Content, retrieveResult, enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.RetrievalBudget)
 
 	// Step 5: LLM 流式生成
 	assistantMsgID := uuid.New().String()
@@ -107,6 +109,7 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 	// Step 6: 保存助手消息
 	// LLM 流式生成失败时已发送 error 事件，此处直接返回，避免再发 done 导致前端重复显示
 	if err != nil {
+		llm.ReduceContextBudgetOnError(req.ModelID, err)
 		return
 	}
 	// 即使用户中断导致空内容，也结束 SSE（避免前端挂起）
@@ -115,6 +118,9 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 		return
 	}
 	s.emitDoneAndSave(eventCh, sessionID, assistantMsgID, fullContent, req, sources, nil)
+
+	// Step 7: 异步更新摘要和提取记忆
+	s.refreshContextAsync(ctx, userID, sessionID, enhancedCtx.History, chatModel)
 }
 
 // ─── 深度思考模式 ───────────────────────────────────────────
@@ -125,13 +131,16 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 	// 提前生成助手消息 ID，贯穿整个 SSE 生命周期
 	assistantMsgID := uuid.New().String()
 
-	// Step 1: 并行加载模型 + 历史对话
+	// Step 1: 加载模型 + 增强历史对话
 	sendProgressEvent(eventCh, "正在加载上下文...")
-	client, history, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, 2000)
+	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content)
 	if err != nil {
 		sendErrorEvent(eventCh, err, err.Error())
 		return
 	}
+	history := excludeCurrentUserMessage(enhancedCtx.History, req.Content)
+
+	chatModel := client.ChatModel()
 
 	// Step 2: 发送 start 事件（前端用 message_id 关联后续更新）
 	eventCh <- dto.StreamEvent{Type: "start", MessageID: assistantMsgID}
@@ -145,9 +154,10 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 		KnowledgeBaseIDs: req.KnowledgeBaseIDs,
 		ModelID:          req.ModelID,
 		ModelType:        req.ModelType,
-	}, client.ChatModel())
+	}, chatModel)
 	if err != nil {
 		logger.Errorf("Agent 执行失败, sessionID=%s: %v", sessionID, err)
+		llm.ReduceContextBudgetOnError(req.ModelID, err)
 		sendErrorEvent(eventCh, err, "Agent 执行失败")
 		return
 	}
@@ -181,6 +191,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 		}
 		if agentEvent.Type == agent.EventError {
 			agentErrorSeen = true
+			llm.ReduceContextBudgetOnError(req.ModelID, fmt.Errorf("%s", agentEvent.Error))
 		}
 
 		eventCh <- toStreamEvent(agentEvent)
@@ -218,6 +229,27 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID str
 		}))
 	}
 	s.emitDoneAndSave(eventCh, sessionID, assistantMsgID, fullContent, req, agentSources, metadata)
+
+	// 异步更新摘要和提取记忆
+	s.refreshContextAsync(ctx, userID, sessionID, enhancedCtx.History, chatModel)
+}
+
+// refreshContextAsync 异步更新会话摘要和提取用户记忆
+func (s *chatService) refreshContextAsync(ctx context.Context, userID, sessionID string, history []entity.ChatMessage, chatModel model.BaseChatModel) {
+	if s.contextSvc == nil {
+		return
+	}
+	go func() {
+		refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if _, err := s.contextSvc.SummarizeSession(refreshCtx, sessionID, chatModel); err != nil {
+			logger.Warnf("生成会话摘要失败: %v", err)
+		}
+		if _, err := s.contextSvc.ExtractMemories(refreshCtx, userID, sessionID, history, chatModel); err != nil {
+			logger.Warnf("提取用户记忆失败: %v", err)
+		}
+	}()
 }
 
 // ─── 共享辅助方法 ───────────────────────────────────────────

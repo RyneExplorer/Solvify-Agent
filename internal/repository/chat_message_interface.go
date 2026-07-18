@@ -25,4 +25,6 @@ type ChatMessageRepo interface {
 	DeleteBySessionID(ctx context.Context, sessionID string) error
 	// SearchByKeyword 按关键字搜索用户历史消息
 	SearchByKeyword(ctx context.Context, userID, query string, topK int) ([]ChatMessageSearchRow, error)
+	// SearchRecentByKeywords 在指定会话中按关键词检索最近消息
+	SearchRecentByKeywords(ctx context.Context, sessionID string, keywords []string, limit int) ([]entity.ChatMessage, error)
 }
