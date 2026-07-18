@@ -10,16 +10,17 @@ import (
 
 // UserModelConfig 描述用户自定义模型配置
 type UserModelConfig struct {
-	ID          string         `gorm:"type:varchar(36);primaryKey" json:"id"`
-	UserID      string         `gorm:"type:varchar(36);not null;index" json:"user_id"`
-	DisplayName string         `gorm:"type:varchar(100);not null" json:"display_name"`
-	APIFormat   string         `gorm:"type:varchar(20);not null" json:"api_format"`
-	BaseURL     string         `gorm:"type:varchar(500);not null" json:"base_url"`
-	ModelID     string         `gorm:"type:varchar(100);not null" json:"model_id"`
-	APIKey      string         `gorm:"type:varchar(500)" json:"api_key,omitempty"` // 可选，本地模型不需要
-	Config      datatypes.JSON `gorm:"type:jsonb" json:"config,omitempty"`
-	CreatedAt   time.Time      `gorm:"autoCreateTime" json:"created_at"`
-	UpdatedAt   time.Time      `gorm:"autoUpdateTime" json:"updated_at"`
+	ID               string         `gorm:"type:varchar(36);primaryKey" json:"id"`
+	UserID           string         `gorm:"type:varchar(36);not null;index" json:"user_id"`
+	DisplayName      string         `gorm:"type:varchar(100);not null" json:"display_name"`
+	APIFormat        string         `gorm:"type:varchar(20);not null" json:"api_format"`
+	BaseURL          string         `gorm:"type:varchar(500);not null" json:"base_url"`
+	ModelID          string         `gorm:"type:varchar(100);not null" json:"model_id"`
+	APIKey           string         `gorm:"type:varchar(500)" json:"api_key,omitempty"` // 可选，本地模型不需要
+	Config           datatypes.JSON `gorm:"type:jsonb" json:"config,omitempty"`
+	MaxContextLength int            `gorm:"default:8192" json:"max_context_length"`
+	CreatedAt        time.Time      `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt        time.Time      `gorm:"autoUpdateTime" json:"updated_at"`
 }
 
 // BeforeCreate 在创建前生成 UUID
