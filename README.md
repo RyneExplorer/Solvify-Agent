@@ -76,21 +76,7 @@
 </table>
 
 ## 🏢 系统架构
-
-```mermaid
-flowchart LR
-    UI["Vue 3 Web"] --> API["Gin API"]
-    API --> SVC["Service"]
-    SVC --> AGENT["Eino ReAct Agent"]
-    SVC --> REPO["Repository"]
-    SVC --> PARSER["Python 文档解析器"]
-    SVC --> DING["钉钉开放平台"]
-    AGENT --> RAG["Hybrid RAG"]
-    AGENT --> TOOLS["动态工具"]
-    RAG --> PG[("PostgreSQL + pgvector")]
-    REPO --> PG
-    REPO --> REDIS[("Redis")]
-```
+![architecture.png](screenshot%2Farchitecture.png)
 
 后端采用 MVC + Service + Agent 能力层组织：Controller 处理 HTTP 边界，Service 编排业务用例，Agent/RAG/Tool 负责智能能力，Repository 负责数据访问。详细边界见[架构说明](docs/architecture.md)
 
