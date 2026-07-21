@@ -54,9 +54,14 @@ func buildReActSystemPrompt(ctx context.Context, userTools []einoTool.BaseTool) 
 			names[i] = t.Name
 		}
 		sb.WriteString(fmt.Sprintf("5. 知识库结果不足或需要最新信息时，调用 %s 联网搜索（最多 1 次）\n", strings.Join(names, " 或 ")))
+		sb.WriteString("6. **当 knowledge_search 返回空结果或结果不相关时，必须调用联网搜索工具**，不能直接用自身知识回答\n")
+		sb.WriteString("7. 用户明确要求'联网搜索'、'搜索网页'、'最新信息'等时，即使知识库有结果也应调用联网搜索工具获取最新信息\n")
+	} else {
+		sb.WriteString("5. 没有可用的联网搜索工具，只能使用知识库内容回答\n")
 	}
 	sb.WriteString("\n")
-	sb.WriteString("**禁止**：不检索知识库直接用自身知识回答。第一步必须是 knowledge_search。\n\n")
+	sb.WriteString("**禁止**：不检索知识库直接用自身知识回答。第一步必须是 knowledge_search。\n")
+	sb.WriteString("**禁止**：知识库检索失败后不调用联网搜索工具而直接回答。\n\n")
 
 	sb.WriteString("## 回答要求\n")
 	sb.WriteString("- 使用 Markdown 格式，根据内容复杂度自适应排版\n")

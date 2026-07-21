@@ -244,13 +244,18 @@ func (ctrl *Controller) Reindex(c *gin.Context) {
 
 // ChunkDetail 查询 chunk 详情（用于引用预览）
 func (ctrl *Controller) ChunkDetail(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		return
+	}
+
 	chunkID := c.Param("id")
 	if chunkID == "" {
 		response.BadRequest(c, "chunk ID 不能为空")
 		return
 	}
 
-	chunk, found, err := ctrl.chunkRepo.FindByID(c.Request.Context(), chunkID)
+	chunk, found, err := ctrl.chunkRepo.FindByID(c.Request.Context(), userID, chunkID)
 	if err != nil {
 		response.InternalError(c, "查询 chunk 失败")
 		return
@@ -261,10 +266,13 @@ func (ctrl *Controller) ChunkDetail(c *gin.Context) {
 	}
 
 	response.Success(c, gin.H{
-		"id":            chunk.ID,
-		"content":       chunk.Content,
-		"section_title": chunk.SectionTitle,
-		"document_id":   chunk.DocumentID,
+		"id":                  chunk.ID,
+		"content":             chunk.Content,
+		"section_title":       chunk.SectionTitle,
+		"document_id":         chunk.DocumentID,
+		"knowledge_base_id":   chunk.KnowledgeBaseID,
+		"document_title":      chunk.DocumentTitle,
+		"knowledge_base_name": chunk.KnowledgeBaseName,
 	})
 }
 

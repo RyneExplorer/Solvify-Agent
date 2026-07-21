@@ -1,6 +1,10 @@
 <template>
   <el-dialog
     :model-value="modelValue"
+    :class="{ 'dingtalk-sync-dialog--qr': !binding?.bound }"
+    align-center
+    append-to-body
+    lock-scroll
     title="同步钉钉知识库"
     width="680px"
     @update:model-value="$emit('update:modelValue', $event)"
@@ -48,7 +52,6 @@
 
         <AppCard v-else class="text-center">
           <div class="text-sm font-medium text-slate-900 mb-2">请先绑定钉钉账号</div>
-          <div class="text-xs text-slate-400 mb-4">扫码授权后，后端会保存 unionId 用于知识库读取</div>
           <div id="dingtalk-login-frame" class="mx-auto w-[300px] h-[300px] border border-slate-100 rounded-xl overflow-hidden bg-slate-50" />
           <div class="mt-4 flex justify-center">
             <AppButton variant="secondary" :disabled="qrLoading" @click="renderLoginFrame">
@@ -62,7 +65,6 @@
         <div class="flex items-center justify-between mb-3">
           <div>
             <div class="text-sm font-semibold text-slate-900">选择钉钉知识库</div>
-            <div class="text-xs text-slate-400 mt-1">目前仅支持钉钉知识库同源同步</div>
           </div>
           <AppButton variant="secondary" size="sm" :disabled="workspaceLoading" @click="loadWorkspaces">
             刷新
@@ -197,6 +199,7 @@ const qrLoading = ref(false)
 const bindingSubmitting = ref(false)
 const submitting = ref(false)
 const errorMessage = ref('')
+const exchangedAuthCodes = new Set<string>()
 
 const selectedWorkspace = computed(() => workspaces.value.find(item => item.workspace_id === selectedWorkspaceID.value) || null)
 
@@ -283,7 +286,9 @@ async function exchangeAuthCode(authCode: string, state: string) {
     errorMessage.value = '钉钉授权参数不能为空'
     return
   }
-  if (bindingSubmitting.value || binding.value?.bound) return
+  const exchangeKey = `${state}:${authCode}`
+  if (bindingSubmitting.value || binding.value?.bound || exchangedAuthCodes.has(exchangeKey)) return
+  exchangedAuthCodes.add(exchangeKey)
   bindingSubmitting.value = true
   try {
     const res = await exchangeDingTalkAuthCode({ auth_code: authCode, state })
@@ -436,3 +441,15 @@ function formatDingTalkLoginError(message: string) {
 }
 
 </script>
+
+<style>
+.dingtalk-sync-dialog--qr {
+  margin: 0;
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+}
+
+.dingtalk-sync-dialog--qr .el-dialog__body {
+  overflow: hidden;
+}
+</style>

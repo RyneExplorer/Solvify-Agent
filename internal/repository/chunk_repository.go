@@ -6,8 +6,6 @@ import (
 	"strings"
 
 	"gorm.io/gorm"
-
-	"solvify-agent/internal/model/entity"
 )
 
 // DocumentSearchRow 文档关键字搜索数据库行
@@ -20,9 +18,20 @@ type DocumentSearchRow struct {
 	Score           float64 `gorm:"column:score"`
 }
 
+// ChunkDetail chunk 详情（含关联文档和知识库信息）
+type ChunkDetail struct {
+	ID                string `gorm:"column:id"`
+	DocumentID        string `gorm:"column:document_id"`
+	KnowledgeBaseID   string `gorm:"column:knowledge_base_id"`
+	Content           string `gorm:"column:content"`
+	SectionTitle      string `gorm:"column:section_title"`
+	DocumentTitle     string `gorm:"column:document_title"`
+	KnowledgeBaseName string `gorm:"column:knowledge_base_name"`
+}
+
 // ChunkRepository 定义 chunk 数据访问能力
 type ChunkRepository interface {
-	FindByID(ctx context.Context, chunkID string) (entity.DocumentChunk, bool, error)
+	FindByID(ctx context.Context, userID, chunkID string) (ChunkDetail, bool, error)
 	// SearchByKeyword 按关键字搜索文档内容
 	SearchByKeyword(ctx context.Context, userID, query string, topK int) ([]DocumentSearchRow, error)
 }
@@ -37,17 +46,20 @@ func NewChunkRepository(db *gorm.DB) ChunkRepository {
 	return &chunkRepository{db: db}
 }
 
-// FindByID 根据 ID 查询 chunk
-func (r *chunkRepository) FindByID(ctx context.Context, chunkID string) (entity.DocumentChunk, bool, error) {
-	var chunk entity.DocumentChunk
+// FindByID 根据 ID 查询当前用户的 chunk（含文档标题和知识库名称）
+func (r *chunkRepository) FindByID(ctx context.Context, userID, chunkID string) (ChunkDetail, bool, error) {
+	var row ChunkDetail
 	err := r.db.WithContext(ctx).
-		Select("id", "document_id", "content", "section_title").
-		Where("id = ?", chunkID).
-		First(&chunk).Error
+		Table("document_chunks dc").
+		Select("dc.id, dc.document_id, dc.knowledge_base_id, dc.content, dc.section_title, COALESCE(d.title, '') as document_title, COALESCE(kb.name, '') as knowledge_base_name").
+		Joins("LEFT JOIN documents d ON d.id = dc.document_id").
+		Joins("LEFT JOIN knowledge_bases kb ON kb.id = dc.knowledge_base_id").
+		Where("dc.id = ? AND dc.user_id = ?", chunkID, userID).
+		First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return entity.DocumentChunk{}, false, nil
+		return ChunkDetail{}, false, nil
 	}
-	return chunk, err == nil, err
+	return row, err == nil, err
 }
 
 // SearchByKeyword 按关键字搜索文档内容

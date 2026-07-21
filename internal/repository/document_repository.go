@@ -108,7 +108,7 @@ func (r *documentRepository) ExistsFileName(ctx context.Context, userID, kbID, f
 }
 
 // SoftDelete 软删除文档
-func (r *documentRepository) SoftDelete(ctx context.Context, userID, documentID string, deletedStatus int, deletedAt, expiredAt time.Time) (bool, error) {
+func (r *documentRepository) SoftDelete(ctx context.Context, userID, documentID string, deletedStatus, pendingImportStatus int, deletedAt, expiredAt time.Time) (bool, error) {
 	result := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var doc entity.Document
 		if err := tx.Where("id = ? AND user_id = ? AND status <> ?", documentID, userID, deletedStatus).First(&doc).Error; err != nil {
@@ -120,6 +120,15 @@ func (r *documentRepository) SoftDelete(ctx context.Context, userID, documentID 
 				"status":            deletedStatus,
 				"deleted_at":        deletedAt,
 				"delete_expired_at": expiredAt,
+			}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&entity.SyncItem{}).
+			Where("user_id = ? AND local_document_id = ?", userID, documentID).
+			Updates(map[string]any{
+				"local_document_id": nil,
+				"import_status":     pendingImportStatus,
+				"error_message":     "",
 			}).Error; err != nil {
 			return err
 		}

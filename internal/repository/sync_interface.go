@@ -29,6 +29,7 @@ type SyncJobRepository interface {
 // SyncItemRepository 定义外部同步文件目录项数据访问能力
 type SyncItemRepository interface {
 	Upsert(ctx context.Context, item entity.SyncItem) error
+	ResetDeletedDocumentLinks(ctx context.Context, userID, sourceID string, pendingStatus, deletedDocumentStatus int) error
 	ListBySource(ctx context.Context, userID, sourceID string) ([]entity.SyncItem, error)
 	FindByID(ctx context.Context, userID, itemID string) (entity.SyncItem, bool, error)
 	MarkImporting(ctx context.Context, userID, itemID string, importingStatus int) (bool, error)

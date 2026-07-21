@@ -14,7 +14,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, provide } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Sidebar from './components/Sidebar.vue'
 import { listSessions } from './api/chat'
@@ -57,6 +57,8 @@ async function loadHistory() {
     }
   } catch { /* silent */ }
 }
+
+provide('refreshHistory', loadHistory)
 
 // 登录成功后路由从 login 页跳出时，重新加载历史对话
 watch(isLoginPage, async (newVal, oldVal) => {

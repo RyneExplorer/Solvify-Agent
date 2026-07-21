@@ -19,10 +19,17 @@ type agentCallbackHandler struct {
 	pendingThinkingTitle string
 	kbIDs                []string
 	toolDescMap          map[string]string
+	// 去重：记录已发送的工具事件，避免重复
+	sentToolEvents map[string]bool
 }
 
 func newAgentCallbackHandler(eventCh chan<- Event, kbIDs []string, toolDescMap map[string]string) callbacks.Handler {
-	h := &agentCallbackHandler{eventCh: eventCh, kbIDs: kbIDs, toolDescMap: toolDescMap}
+	h := &agentCallbackHandler{
+		eventCh:        eventCh,
+		kbIDs:          kbIDs,
+		toolDescMap:    toolDescMap,
+		sentToolEvents: make(map[string]bool),
+	}
 	return callbacks.NewHandlerBuilder().
 		OnStartFn(h.onStart).
 		OnEndFn(h.onEnd).
@@ -66,6 +73,15 @@ func (h *agentCallbackHandler) onStart(ctx context.Context, info *callbacks.RunI
 			query = extractQueryFromArgs(toolInput.ArgumentsInJSON)
 		}
 		title, detail := formatToolStart(toolName, query, h.kbIDs, h.toolDescMap)
+
+		// 去重：检查是否已发送过相同的工具调用事件
+		eventKey := fmt.Sprintf("call:%s:%s", toolName, title)
+		if h.sentToolEvents[eventKey] {
+			logger.Warnf("[Callback] 跳过重复的工具调用事件: %s", eventKey)
+			return ctx
+		}
+		h.sentToolEvents[eventKey] = true
+
 		h.emit(Event{
 			Type:   EventToolCall,
 			Title:  title,
@@ -107,6 +123,15 @@ func (h *agentCallbackHandler) onEnd(ctx context.Context, info *callbacks.RunInf
 		toolOutput := toolComp.ConvCallbackOutput(output)
 		toolName := info.Name
 		title, detail, toolResult := formatToolEnd(toolName, toolOutput, h.toolDescMap)
+
+		// 去重：检查是否已发送过相同的工具完成事件
+		eventKey := fmt.Sprintf("result:%s:%s", toolName, title)
+		if h.sentToolEvents[eventKey] {
+			logger.Warnf("[Callback] 跳过重复的工具完成事件: %s", eventKey)
+			return ctx
+		}
+		h.sentToolEvents[eventKey] = true
+
 		h.emit(Event{
 			Type:       EventToolResult,
 			Title:      title,

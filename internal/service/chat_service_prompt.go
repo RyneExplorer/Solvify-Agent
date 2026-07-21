@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/cloudwego/eino/schema"
@@ -101,9 +102,10 @@ const quickModeSystemPrompt = `你是 Solvify-Agent（Solvify 知识助理），
 - 结构清晰：必要时用小标题或列表，避免一整段堆砌`
 
 // buildMessages 组装快速检索模式的 LLM 消息列表
-func buildMessages(history []entity.ChatMessage, question string, retrieveResult rag.Result) []*schema.Message {
+func buildMessages(history []entity.ChatMessage, question string, retrieveResult rag.Result, summary *entity.ChatSummary, memories []entity.UserMemory, retrievalBudget int) []*schema.Message {
+	systemPrompt := buildEnhancedSystemPrompt(quickModeSystemPrompt, summary, memories)
 	messages := []*schema.Message{
-		schema.SystemMessage(quickModeSystemPrompt),
+		schema.SystemMessage(systemPrompt),
 	}
 
 	for _, msg := range history {
@@ -116,7 +118,7 @@ func buildMessages(history []entity.ChatMessage, question string, retrieveResult
 	}
 
 	if retrieveResult.Hit {
-		contextText := buildContextText(retrieveResult.Documents)
+		contextText := buildContextText(retrieveResult.Documents, retrievalBudget)
 		questionText := fmt.Sprintf("%s---\n\n**问题**：%s", contextText, question)
 		messages = append(messages, schema.UserMessage(questionText))
 	} else {
@@ -127,10 +129,39 @@ func buildMessages(history []entity.ChatMessage, question string, retrieveResult
 	return messages
 }
 
+// buildEnhancedSystemPrompt 在基础 System Prompt 上注入摘要和记忆
+func buildEnhancedSystemPrompt(base string, summary *entity.ChatSummary, memories []entity.UserMemory) string {
+	var extras []string
+
+	if summary != nil && summary.Summary != "" {
+		extras = append(extras, "## 本次对话摘要\n"+summary.Summary)
+	}
+
+	if len(memories) > 0 {
+		var memoryText strings.Builder
+		memoryText.WriteString("## 关于用户的已知信息\n")
+		for _, m := range memories {
+			memoryText.WriteString("- ")
+			memoryText.WriteString(m.Content)
+			memoryText.WriteString("\n")
+		}
+		extras = append(extras, memoryText.String())
+	}
+
+	if len(extras) == 0 {
+		return base
+	}
+
+	return base + "\n\n" + strings.Join(extras, "\n\n")
+}
+
 // buildContextText 按 token 预算组装知识库上下文，优先保留高分 chunk
-func buildContextText(docs []rag.Document) string {
+func buildContextText(docs []rag.Document, retrievalBudget int) string {
+	if retrievalBudget <= 0 {
+		retrievalBudget = maxContextTokens
+	}
 	header := "## 知识库检索结果\n\n"
-	budget := maxContextTokens - tokenutil.Estimate(header)
+	budget := retrievalBudget - tokenutil.Estimate(header)
 	if budget < 200 {
 		budget = 200
 	}

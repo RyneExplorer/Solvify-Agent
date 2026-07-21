@@ -79,6 +79,13 @@ const (
 	CodeDingTalkConfigMissing     = 11001
 	CodeDingTalkAccessTokenFailed = 11002
 	CodeDingTalkAPICallFailed     = 11003
+
+	// 模型额度错误 12xxx
+	CodeModelQuotaExceeded = 12001
+
+	// 重排序配置错误 13xxx
+	CodeRerankerConfigNotFound = 13001
+	CodeRerankerTestFailed     = 13002
 )
 
 var codeMessages = map[int]string{
@@ -141,6 +148,11 @@ var codeMessages = map[int]string{
 	CodeDingTalkConfigMissing:     "钉钉应用配置缺失",
 	CodeDingTalkAccessTokenFailed: "获取钉钉 access_token 失败",
 	CodeDingTalkAPICallFailed:     "调用钉钉接口失败",
+
+	CodeModelQuotaExceeded: "模型调用次数已达本月上限",
+
+	CodeRerankerConfigNotFound: "重排序配置不存在",
+	CodeRerankerTestFailed:     "重排序服务连接测试失败",
 }
 
 // GetMessage 获取错误码对应的文本消息

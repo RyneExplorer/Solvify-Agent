@@ -167,7 +167,13 @@ func (s *documentService) CreateNote(ctx context.Context, userID, kbID string, r
 		title = "未命名笔记"
 	}
 
-	// 1. 创建文档记录（无文件，source_type = note）
+	// 1. 先保存文件到本地，再创建数据库记录，避免记录指向不存在的文件
+	storagePath, fileHash, err := s.saveStream(userID, kb.ID, "note-*.md", ".md", strings.NewReader(content))
+	if err != nil {
+		return dto.DocumentResponse{}, err
+	}
+
+	// 2. 创建文档记录（source_type = note）
 	doc := entity.Document{
 		UserID:          userID,
 		KnowledgeBaseID: kb.ID,
@@ -175,6 +181,8 @@ func (s *documentService) CreateNote(ctx context.Context, userID, kbID string, r
 		FileName:        title + ".md",
 		FileType:        "md",
 		FileSize:        int64(len(content)),
+		StoragePath:     storagePath,
+		FileHash:        fileHash,
 		SourceType:      documentSourceNote,
 		Status:          documentStatusProcessing,
 	}
@@ -182,7 +190,7 @@ func (s *documentService) CreateNote(ctx context.Context, userID, kbID string, r
 		return dto.DocumentResponse{}, err
 	}
 
-	// 2. 异步分块 + 向量化
+	// 3. 异步分块 + 向量化
 	go s.processNote(doc, content)
 
 	logger.Info("笔记已加入处理队列", zap.String("doc_id", doc.ID), zap.String("title", title))
@@ -265,7 +273,7 @@ func (s *documentService) Delete(ctx context.Context, userID, documentID string)
 	}
 	now := time.Now()
 	expiredAt := now.AddDate(0, 0, deleteRetentionDays)
-	ok, err := s.documentRepo.SoftDelete(ctx, userID, documentID, documentStatusDeleted, now, expiredAt)
+	ok, err := s.documentRepo.SoftDelete(ctx, userID, documentID, documentStatusDeleted, syncItemImportStatusPending, now, expiredAt)
 	if err != nil {
 		logger.Error("文档软删除失败", zap.String("file_name", doc.FileName),
 			zap.String("file_type", doc.FileType),
@@ -678,6 +686,12 @@ func (s *documentService) saveFile(userID, kbID string, fileHeader *multipart.Fi
 	}
 	defer file.Close()
 
+	ext := filepath.Ext(fileHeader.Filename)
+	return s.saveStream(userID, kbID, "upload-*"+ext, ext, file)
+}
+
+// saveStream 把数据流保存到本地并返回相对路径和哈希
+func (s *documentService) saveStream(userID, kbID, tempPattern, ext string, reader io.Reader) (string, string, error) {
 	dir := filepath.Join(s.uploadRoot, userID, kbID)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", "", err
@@ -685,13 +699,12 @@ func (s *documentService) saveFile(userID, kbID string, fileHeader *multipart.Fi
 
 	// 1. 先写临时文件并同步计算内容哈希
 	hasher := sha256.New()
-	ext := filepath.Ext(fileHeader.Filename)
-	tempFile, err := os.CreateTemp(dir, "upload-*"+ext)
+	tempFile, err := os.CreateTemp(dir, tempPattern)
 	if err != nil {
 		return "", "", err
 	}
 	tempPath := tempFile.Name()
-	if _, err := io.Copy(io.MultiWriter(tempFile, hasher), file); err != nil {
+	if _, err := io.Copy(io.MultiWriter(tempFile, hasher), reader); err != nil {
 		_ = tempFile.Close()
 		_ = os.Remove(tempPath)
 		return "", "", err

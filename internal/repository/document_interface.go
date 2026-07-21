@@ -14,7 +14,7 @@ type DocumentRepository interface {
 	ListWithChunkCount(ctx context.Context, userID, kbID string) ([]DocumentWithChunkCount, error)
 	FindByID(ctx context.Context, userID, documentID string, deletedStatus int) (entity.Document, bool, error)
 	ExistsFileName(ctx context.Context, userID, kbID, fileName string, deletedStatus int) (bool, error)
-	SoftDelete(ctx context.Context, userID, documentID string, deletedStatus int, deletedAt, expiredAt time.Time) (bool, error)
+	SoftDelete(ctx context.Context, userID, documentID string, deletedStatus, pendingImportStatus int, deletedAt, expiredAt time.Time) (bool, error)
 	SaveProcessResult(ctx context.Context, doc entity.Document, jobID string, version *entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus, successJobStatus int, finishedAt time.Time) error
 	MarkProcessFailed(ctx context.Context, userID, documentID, jobID string, failedDocumentStatus, failedJobStatus int, errorMessage string, finishedAt time.Time) error
 }

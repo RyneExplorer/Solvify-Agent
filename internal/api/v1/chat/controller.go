@@ -124,7 +124,6 @@ func (ctrl *Controller) SendMessage(c *gin.Context) {
 		response.BadRequest(c, "请求体格式错误")
 		return
 	}
-	fmt.Println(input)
 
 	eventCh, err := ctrl.chatSvc.SendMessage(c.Request.Context(), userID, sessionID, input)
 	if err != nil {

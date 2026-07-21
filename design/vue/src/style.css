@@ -45,40 +45,125 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  padding: 0 6px;
-  background: #ecfdf5;
+  padding: 0 5px;
+  background: rgba(16,185,129,0.08);
   border: 1px solid rgba(16,185,129,0.2);
   border-radius: 4px;
   font-size: 11px;
   color: #059669;
   cursor: help;
-  transition: all 0.15s ease;
 }
 .inline-cite-kb:hover {
-  background: #d1fae5;
-  border-color: rgba(16,185,129,0.4);
+  background: rgba(16,185,129,0.15);
 }
 .inline-cite-web {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 20px;
-  height: 18px;
+  min-width: 18px;
+  height: 16px;
   padding: 0 4px;
-  background: rgba(59,130,246,0.1);
+  background: rgba(59,130,246,0.08);
   border: 1px solid rgba(59,130,246,0.2);
   border-radius: 4px;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
   color: #3b82f6;
   text-decoration: none;
   cursor: pointer;
-  transition: all 0.15s ease;
   vertical-align: middle;
 }
 .inline-cite-web:hover {
-  background: rgba(59,130,246,0.2);
-  border-color: rgba(59,130,246,0.4);
+  background: rgba(59,130,246,0.15);
+}
+
+.inline-cite-kb, .inline-cite-web {
+  position: relative;
+}
+
+/* Markdown tooltip for all citations */
+.md-tooltip {
+  position: absolute;
+  z-index: 9999;
+  max-width: 500px;
+  min-width: 200px;
+  max-height: 360px;
+  overflow-y: auto;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.08);
+  padding: 14px 16px;
+  color: #1e293b;
+  font-size: 13px;
+  line-height: 1.7;
+  text-align: left;
+}
+.md-tooltip .md-tooltip-inner h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: #0f172a;
+}
+.md-tooltip .md-tooltip-inner p {
+  margin: 0 0 6px;
+}
+.md-tooltip .md-tooltip-inner p:last-child {
+  margin-bottom: 0;
+}
+.md-tooltip .md-tooltip-inner ul,
+.md-tooltip .md-tooltip-inner ol {
+  margin: 0;
+  padding-left: 18px;
+}
+.md-tooltip .md-tooltip-inner li {
+  margin-bottom: 2px;
+}
+.md-tooltip .md-tooltip-inner strong,
+.md-tooltip .md-tooltip-inner b {
+  font-weight: 600;
+  color: #0f172a;
+}
+.md-tooltip .md-tooltip-inner em,
+.md-tooltip .md-tooltip-inner i {
+  font-style: italic;
+}
+.md-tooltip .md-tooltip-inner h1 {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0 0 10px;
+  color: #0f172a;
+}
+.md-tooltip .md-tooltip-inner h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 12px 0 6px;
+  color: #0f172a;
+}
+.md-tooltip .md-tooltip-inner h4 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 10px 0 4px;
+  color: #1e293b;
+}
+.md-tooltip .md-tooltip-inner hr {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 12px 0;
+}
+.md-tooltip .md-tooltip-inner code {
+  background: rgba(148,163,184,0.1);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: monospace;
+}
+.md-tooltip .md-tooltip-inner blockquote {
+  margin: 0;
+  padding-left: 12px;
+  border-left: 3px solid #e2e8f0;
+  color: #64748b;
+  font-style: italic;
 }
 
 
