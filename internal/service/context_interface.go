@@ -22,6 +22,7 @@ type EnhancedContext struct {
 	History         []entity.ChatMessage
 	Summary         *entity.ChatSummary
 	Memories        []entity.UserMemory
+	UserCtx         UserContext
 	HistoryBudget   int // 实际使用的历史消息 token 预算
 	RetrievalBudget int // 实际使用的检索上下文 token 预算
 }
