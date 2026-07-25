@@ -45,14 +45,23 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 
 	chatModel := client.ChatModel()
 
-	// Step 2+3: 检索（条件改写，优先速度）
-	sendProgressEvent(eventCh, "正在检索知识库...")
+	// Step 2: 轻量意图分析，决定是否需要检索
+	intent := AnalyzeIntent(req.Content)
+	logger.Infof("意图识别: sessionID=%s, intent=%s, confidence=%.2f, reason=%s, skipRetrieval=%v",
+		sessionID, intent.Intent, intent.Confidence, intent.Reason, intent.SkipRetrieval)
 
 	var sources []dto.SourceInfo
 	var retrieveResult rag.Result
 
-	needRewrite := len(history) > 0 && needsQueryRewrite(req.Content)
-	if needRewrite {
+	if intent.SkipRetrieval {
+		sendProgressEvent(eventCh, "正在整理回答...")
+		// 问候/身份/元问题/闲聊/列表查询等直接跳过 RAG，由 System Prompt 指导回答
+	} else {
+		// Step 3: 检索（条件改写，优先速度）
+		sendProgressEvent(eventCh, "正在检索知识库...")
+
+		needRewrite := len(history) > 0 && needsQueryRewrite(req.Content)
+		if needRewrite {
 		// 并行：查询改写 + 原始查询先行检索
 		g, gCtx := errgroup.WithContext(ctx)
 
@@ -97,10 +106,11 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID stri
 			return
 		}
 	}
+}
 
 	// Step 4: 组装 Prompt（用原始问题，改写后的查询仅用于检索）
 	sendProgressEvent(eventCh, "正在整理资料...")
-	messages := buildMessages(history, req.Content, retrieveResult, enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.RetrievalBudget)
+	messages := buildMessages(history, req.Content, retrieveResult, enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx, enhancedCtx.RetrievalBudget)
 
 	// Step 5: LLM 流式生成
 	assistantMsgID := uuid.New().String()
