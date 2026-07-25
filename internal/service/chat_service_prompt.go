@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/cloudwego/eino/schema"
@@ -11,6 +12,28 @@ import (
 	"solvify-agent/internal/rag"
 	"solvify-agent/pkg/tokenutil"
 )
+
+// UserContext 注入到 System Prompt 的用户上下文信息
+type UserContext struct {
+	ID       string
+	Username string
+	Role     string
+	TimeStr  string
+}
+
+// NewUserContext 创建用户上下文，TimeStr 使用当前时间
+func NewUserContext(user entity.User) UserContext {
+	roleText := "普通用户"
+	if user.Role == 2 {
+		roleText = "管理员"
+	}
+	return UserContext{
+		ID:       user.ID,
+		Username: user.Username,
+		Role:     roleText,
+		TimeStr:  time.Now().Format("2006-01-02 15:04:05（Monday）"),
+	}
+}
 
 const (
 	// maxContextTokens 检索结果注入 Prompt 的最大 token 预算（估算值）
@@ -102,8 +125,8 @@ const quickModeSystemPrompt = `你是 Solvify-Agent（Solvify 知识助理），
 - 结构清晰：必要时用小标题或列表，避免一整段堆砌`
 
 // buildMessages 组装快速检索模式的 LLM 消息列表
-func buildMessages(history []entity.ChatMessage, question string, retrieveResult rag.Result, summary *entity.ChatSummary, memories []entity.UserMemory, retrievalBudget int) []*schema.Message {
-	systemPrompt := buildEnhancedSystemPrompt(quickModeSystemPrompt, summary, memories)
+func buildMessages(history []entity.ChatMessage, question string, retrieveResult rag.Result, summary *entity.ChatSummary, memories []entity.UserMemory, userCtx UserContext, retrievalBudget int) []*schema.Message {
+	systemPrompt := buildEnhancedSystemPrompt(quickModeSystemPrompt, summary, memories, userCtx)
 	messages := []*schema.Message{
 		schema.SystemMessage(systemPrompt),
 	}
@@ -129,9 +152,20 @@ func buildMessages(history []entity.ChatMessage, question string, retrieveResult
 	return messages
 }
 
-// buildEnhancedSystemPrompt 在基础 System Prompt 上注入摘要和记忆
-func buildEnhancedSystemPrompt(base string, summary *entity.ChatSummary, memories []entity.UserMemory) string {
+// buildEnhancedSystemPrompt 在基础 System Prompt 上注入时间、用户信息、摘要和记忆
+func buildEnhancedSystemPrompt(base string, summary *entity.ChatSummary, memories []entity.UserMemory, userCtx UserContext) string {
 	var extras []string
+
+	// 注入当前时间和用户上下文
+	userInfo := "## 当前信息\n"
+	userInfo += "- 当前时间：" + userCtx.TimeStr + "\n"
+	if userCtx.Username != "" {
+		userInfo += "- 用户：" + userCtx.Username + "\n"
+	}
+	if userCtx.Role != "" {
+		userInfo += "- 角色：" + userCtx.Role + "\n"
+	}
+	extras = append(extras, userInfo)
 
 	if summary != nil && summary.Summary != "" {
 		extras = append(extras, "## 本次对话摘要\n"+summary.Summary)

@@ -217,7 +217,10 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 	maxCtx := llm.GetEffectiveMaxContextLength(modelID, client.MaxContextLength())
 	historyBudget, retrievalBudget, memoryBudget := calculateContextBudgets(maxCtx)
 
-	// 3. 使用 ContextService 构建增强上下文
+	// 3. 加载用户基本信息
+	userCtx := s.loadUserContext(ctx, userID)
+
+	// 4. 使用 ContextService 构建增强上下文
 	var enhancedCtx *EnhancedContext
 	if s.contextSvc != nil {
 		t1 = time.Now()
@@ -242,13 +245,27 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 			RetrievalBudget: retrievalBudget,
 		}
 	}
+	enhancedCtx.UserCtx = userCtx
 
-	logger.Infof("增强上下文: 历史 %d 条(预算 %d), 记忆 %d 条(预算 %d), 检索预算 %d, 摘要存在=%v, 模型窗口=%d",
+	logger.Infof("增强上下文: 历史 %d 条(预算 %d), 记忆 %d 条(预算 %d), 检索预算 %d, 摘要存在=%v, 模型窗口=%d, 用户=%s",
 		len(enhancedCtx.History), enhancedCtx.HistoryBudget,
 		len(enhancedCtx.Memories), memoryBudget,
-		enhancedCtx.RetrievalBudget, enhancedCtx.Summary != nil, maxCtx)
+		enhancedCtx.RetrievalBudget, enhancedCtx.Summary != nil, maxCtx, userCtx.Username)
 	logger.Infof("[Timing] initContext 总耗时: cost=%dms", time.Since(t0).Milliseconds())
 	return client, enhancedCtx, nil
+}
+
+// loadUserContext 加载用户基本信息，失败时返回空上下文（不阻断主流程）
+func (s *chatService) loadUserContext(ctx context.Context, userID string) UserContext {
+	if s.userRepo == nil || userID == "" {
+		return NewUserContext(entity.User{})
+	}
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil {
+		logger.Warnf("加载用户信息失败, userID=%s: %v", userID, err)
+		return NewUserContext(entity.User{})
+	}
+	return NewUserContext(*user)
 }
 
 // calculateContextBudgets 根据模型最大上下文窗口，分配历史、检索、记忆的 token 预算
