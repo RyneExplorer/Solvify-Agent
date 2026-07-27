@@ -18,6 +18,9 @@ import (
 	"solvify-agent/pkg/tokenutil"
 )
 
+// 包级正则：程序启动时只编译一次，避免每次请求重复编译（每次请求重复编译开销约 2~5μs，10k QPS 场景可省几十毫秒）
+var tokenRegexp = regexp.MustCompile(`[\x{4e00}-\x{9fff}]+|[a-zA-Z0-9]+`)
+
 // contextService 上下文管理服务实现
 type contextService struct {
 	messageRepo repository.ChatMessageRepo
@@ -102,9 +105,14 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 	}
 
 	// 2. 根据当前问题检索相关历史
+	// 优先使用调用方预抽的同义词归一化关键词（来自 rewriteQuery 的 LLM 输出，质量更高）
+	// 没有的话 fallback 到 extractKeywords 纯正则（质量一般但零成本）
 	var relevant []entity.ChatMessage
 	if currentQuery != "" {
-		keywords := extractKeywords(currentQuery)
+		keywords := cfg.PreExtractedKeywords
+		if len(keywords) == 0 {
+			keywords = extractKeywords(currentQuery)
+		}
 		if len(keywords) > 0 {
 			var err error
 			relevant, err = s.messageRepo.SearchRecentByKeywords(ctx, sessionID, keywords, 5)
@@ -137,7 +145,8 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 
 // SummarizeSession 对会话生成或更新摘要
 func (s *contextService) SummarizeSession(ctx context.Context, sessionID string, chatModel model.BaseChatModel) (*entity.ChatSummary, error) {
-	messages, err := s.messageRepo.FindBySessionID(ctx, sessionID)
+	// 只需要 role + content，用轻量查询，sources/metadata 对摘要没意义
+	messages, err := s.messageRepo.FindBySessionIDForContext(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("加载会话消息失败: %w", err)
 	}
@@ -389,9 +398,8 @@ func extractKeywords(query string) []string {
 		"in": {}, "on": {}, "at": {}, "of": {}, "to": {}, "for": {}, "with": {},
 	}
 
-	// 按中文连续序列 或 英文/数字连续序列切分
-	tokenRe := regexp.MustCompile(`[\x{4e00}-\x{9fff}]+|[a-zA-Z0-9]+`)
-	parts := tokenRe.FindAllString(query, -1)
+	// 按中文连续序列 或 英文/数字连续序列切分（复用包级已编译正则，避免每次重复编译）
+	parts := tokenRegexp.FindAllString(query, -1)
 
 	seen := make(map[string]struct{})
 	var keywords []string
