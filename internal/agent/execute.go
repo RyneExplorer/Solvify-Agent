@@ -66,9 +66,10 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 		logger.Infof("[Agent]   工具: name=%s, desc=%s", info.Name, truncateStr(info.Desc, 80))
 	}
 
-	// 5. 构建 system prompt
-	systemPrompt := buildReActSystemPrompt(ctx, userTools)
-	logger.Infof("[Agent] SystemPrompt (前200字符): %s", truncateStr(systemPrompt, 200))
+	// 5. 构建 system prompt（ReAct 规则 + 摘要/记忆/用户上下文增强）
+	baseSystemPrompt := buildReActSystemPrompt(ctx, userTools)
+	systemPrompt := buildEnhancedSystemPromptForAgent(baseSystemPrompt, req.Summary, req.Memories, req.UserCtx)
+	logger.Infof("[Agent] SystemPrompt (前400字符): %s", truncateStr(systemPrompt, 400))
 
 	// 6. 构建输入消息（历史 + 当前问题）
 	inputMessages := buildInputMessages(req.Query, req.History)
@@ -275,4 +276,45 @@ func isToolChoiceUnsupportedError(errMsg string) bool {
 		}
 	}
 	return false
+}
+
+// buildEnhancedSystemPromptForAgent 在 ReAct 系统提示词上注入：时间/用户信息 + 对话摘要 + 用户记忆
+// 与快速模式的 buildEnhancedSystemPrompt 逻辑保持一致，确保双模式行为统一
+func buildEnhancedSystemPromptForAgent(base string, summary *entity.ChatSummary, memories []entity.UserMemory, userCtx PromptUserContext) string {
+	var extras []string
+
+	userInfo := "## 当前信息\n"
+	if userCtx.TimeStr != "" {
+		userInfo += "- 当前时间：" + userCtx.TimeStr + "\n"
+	}
+	if userCtx.Username != "" {
+		userInfo += "- 用户：" + userCtx.Username + "\n"
+	}
+	if userCtx.Role != "" {
+		userInfo += "- 角色：" + userCtx.Role + "\n"
+	}
+	if userInfo != "## 当前信息\n" {
+		extras = append(extras, userInfo)
+	}
+
+	if summary != nil && summary.Summary != "" {
+		extras = append(extras, "## 本次对话摘要\n"+summary.Summary)
+	}
+
+	if len(memories) > 0 {
+		var memoryText strings.Builder
+		memoryText.WriteString("## 关于用户的已知信息\n")
+		for _, m := range memories {
+			memoryText.WriteString("- ")
+			memoryText.WriteString(m.Content)
+			memoryText.WriteString("\n")
+		}
+		extras = append(extras, memoryText.String())
+	}
+
+	if len(extras) == 0 {
+		return base
+	}
+
+	return base + "\n\n" + strings.Join(extras, "\n\n")
 }
