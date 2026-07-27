@@ -33,10 +33,43 @@ func (r *chatMessageRepository) FindBySessionID(ctx context.Context, sessionID s
 	return messages, err
 }
 
+// FindBySessionIDForContext 会话摘要/记忆抽取场景专用：
+// 全量消息，但只 SELECT 构建 Prompt 需要的 5 个字段，sources/metadata 不传
+// 对 50 轮以上长会话可减少 90%+ 的数据传输
+func (r *chatMessageRepository) FindBySessionIDForContext(ctx context.Context, sessionID string) ([]entity.ChatMessage, error) {
+	var messages []entity.ChatMessage
+	err := r.db.WithContext(ctx).
+		Select("id, session_id, role, content, created_at").
+		Where("session_id = ?", sessionID).
+		Order("created_at ASC").
+		Find(&messages).Error
+	return messages, err
+}
+
 // FindRecent 获取会话的最近 N 条消息
 func (r *chatMessageRepository) FindRecent(ctx context.Context, sessionID string, limit int) ([]entity.ChatMessage, error) {
 	var messages []entity.ChatMessage
 	err := r.db.WithContext(ctx).
+		Where("session_id = ?", sessionID).
+		Order("created_at DESC").
+		Limit(limit).
+		Find(&messages).Error
+
+	// 反转顺序，使其按时间正序
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
+
+	return messages, err
+}
+
+// FindRecentForContext 上下文构建专用：只取构建 Prompt 必需的 5 个字段
+// 避免 SELECT * 把 sources/metadata 两个 JSON 大字段也传回来（可能 > 100KB/条），
+// 构建上下文只看 role+content，单条消息体积从 100KB 降到 ~100Byte
+func (r *chatMessageRepository) FindRecentForContext(ctx context.Context, sessionID string, limit int) ([]entity.ChatMessage, error) {
+	var messages []entity.ChatMessage
+	err := r.db.WithContext(ctx).
+		Select("id, session_id, role, content, created_at").
 		Where("session_id = ?", sessionID).
 		Order("created_at DESC").
 		Limit(limit).
