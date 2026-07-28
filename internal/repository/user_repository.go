@@ -79,6 +79,33 @@ func (r *userRepository) Delete(id string) error {
 	return r.db.Where("id = ?", id).Delete(&entity.User{}).Error
 }
 
+// UpdateProfile 局部更新用户画像字段（未设置的指针字段不参与更新）
+func (r *userRepository) UpdateProfile(id string, upd *UserProfileUpdate) error {
+	if upd == nil {
+		return nil
+	}
+	updates := map[string]interface{}{}
+	if upd.Department != nil {
+		updates["department"] = *upd.Department
+	}
+	if upd.Position != nil {
+		updates["position"] = *upd.Position
+	}
+	if upd.Expertise != nil {
+		updates["expertise"] = *upd.Expertise
+	}
+	if upd.PreferredLanguage != nil {
+		updates["preferred_language"] = *upd.PreferredLanguage
+	}
+	if upd.Timezone != nil {
+		updates["timezone"] = *upd.Timezone
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	return r.db.Model(&entity.User{}).Where("id = ?", id).Updates(updates).Error
+}
+
 // AdminList 管理员分页获取用户列表
 func (r *userRepository) AdminList(offset, limit int, filter *UserListFilter) ([]*entity.User, int64, error) {
 	var (

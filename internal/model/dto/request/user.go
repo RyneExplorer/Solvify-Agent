@@ -17,10 +17,30 @@ type LoginRequest struct {
 	Captcha   string `json:"captcha" binding:"required,len=4"`
 }
 
-// UpdateUserRequest 更新用户信息请求
+// UpdateUserRequest 更新用户基本信息请求（头像/邮箱）
 type UpdateUserRequest struct {
 	Avatar string `json:"avatar" binding:"omitempty,url,max=255"`
 	Email  string `json:"email" binding:"omitempty,email,max=100"`
+}
+
+// UpdateProfileRequest 更新用户画像请求（部门/职位/擅长/语言/时区）
+type UpdateProfileRequest struct {
+	Department        string `json:"department" binding:"omitempty,max=100"`
+	Position          string `json:"position" binding:"omitempty,max=100"`
+	Expertise         string `json:"expertise" binding:"omitempty,max=255"`
+	PreferredLanguage string `json:"preferred_language" binding:"omitempty,oneof=zh-CN en-US ja-JP ko-KR fr-FR de-DE es-ES"`
+	Timezone          string `json:"timezone" binding:"omitempty,max=50"`
+}
+
+// UpdateUserPreferenceRequest 更新用户偏好请求
+type UpdateUserPreferenceRequest struct {
+	DefaultModelID    *string  `json:"default_model_id" binding:"omitempty,max=36"`
+	PreferredKBIDs    []string `json:"preferred_kb_ids" binding:"omitempty,max=50"`
+	AnswerStyle       string   `json:"answer_style" binding:"omitempty,oneof=concise balanced detailed step_by_step"`
+	AutoDeepMode      *bool    `json:"auto_deep_mode"`
+	AutoDeepThreshold *int     `json:"auto_deep_threshold" binding:"omitempty,min=1,max=5"`
+	UseMarkdownTable  *bool    `json:"use_markdown_table"`
+	CitationStyle     string   `json:"citation_style" binding:"omitempty,oneof=none section_title doc_title_only"`
 }
 
 // ChangePasswordRequest 修改密码请求
@@ -60,3 +80,4 @@ type AdminUpdateUserRequest struct {
 type AdminResetPasswordRequest struct {
 	Password string `json:"password" binding:"required,min=6,max=50"`
 }
+
