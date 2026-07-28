@@ -27,12 +27,15 @@ const (
 // PromptBuilder 统一构建 LLM 消息和 System Prompt
 // 所有模式（快速检索 / 深度思考）必须通过 Builder 注入 System Prompt 和历史消息，
 // 避免两处各写各的导致摘要 / 记忆 / 用户上下文注入行为不一致。
+// 阶段二精简：只保留 profile（用户画像 entity.User）、preference（用户偏好 entity.UserPreference）
 type PromptBuilder struct {
 	mode       PromptMode
-	baseSystem string                // 快速 = quickModeSystemPrompt；深度 = ReAct 规则
-	summary    *entity.ChatSummary   // 会话摘要
-	memories   []entity.UserMemory   // 用户记忆
-	userCtx    UserContext           // 用户基本信息 + 当前时间
+	baseSystem string                    // 快速 = quickModeSystemPrompt；深度 = ReAct 规则
+	summary    *entity.ChatSummary       // 会话摘要
+	memories   []entity.UserMemory       // 用户记忆
+	userCtx    UserContext               // 用户基本信息 + 当前时间（保留已有结构）
+	profile    *entity.User              // 用户画像实体（扩展字段来源）
+	preference *entity.UserPreference    // 用户偏好（来源：UserPreference）
 }
 
 // NewPromptBuilder 快速模式创建（baseSystem 自动使用 quickModeSystemPrompt）
@@ -44,6 +47,47 @@ func NewPromptBuilder(mode PromptMode, baseSystem string, summary *entity.ChatSu
 		memories:   memories,
 		userCtx:    userCtx,
 	}
+}
+
+// WithProfile 绑定用户画像实体（可用于 System Prompt 注入）
+func (b *PromptBuilder) WithProfile(u *entity.User) *PromptBuilder {
+	b.profile = u
+	if u != nil {
+		if b.userCtx.Department == "" {
+			b.userCtx.Department = u.Department
+		}
+		if b.userCtx.Position == "" {
+			b.userCtx.Position = u.Position
+		}
+		if b.userCtx.Expertise == "" {
+			b.userCtx.Expertise = u.Expertise
+		}
+		if b.userCtx.Language == "" {
+			b.userCtx.Language = u.PreferredLanguage
+		}
+		if b.userCtx.Timezone == "" {
+			b.userCtx.Timezone = u.Timezone
+		}
+	}
+	return b
+}
+
+// WithPreference 绑定用户偏好实体
+func (b *PromptBuilder) WithPreference(p *entity.UserPreference) *PromptBuilder {
+	b.preference = p
+	if p != nil {
+		if b.userCtx.AnswerStyle == "" {
+			b.userCtx.AnswerStyle = p.AnswerStyle
+		}
+		if !b.userCtx.TableFirst {
+			b.userCtx.TableFirst = p.UseMarkdownTable
+		}
+		if b.userCtx.CitationStyle == "" {
+			b.userCtx.CitationStyle = p.CitationStyle
+		}
+		b.userCtx.AutoDeepMode = p.AutoDeepMode
+	}
+	return b
 }
 
 // BuildSystem 构建统一的增强 System Prompt（基础 + 当前信息 + 摘要 + 记忆）
@@ -132,6 +176,8 @@ func (b *PromptBuilder) BuildMessagesQuick(history []entity.ChatMessage, questio
 // BuildAgentRequestFields 深度模式：把 builder 中的摘要 / 记忆 / 用户上下文填充到 agent.Request 对应字段
 // 与快速模式调用 BuildMessagesQuick 等价，保证信息一致
 func (b *PromptBuilder) BuildAgentRequestFields(userID, query, modelID, modelType string, kbIDs []string, history []entity.ChatMessage) agentpkg.Request {
+	profile := b.profile
+	pref := b.preference
 	return agentpkg.Request{
 		UserID:           userID,
 		Query:            query,
@@ -142,12 +188,59 @@ func (b *PromptBuilder) BuildAgentRequestFields(userID, query, modelID, modelTyp
 		Summary:          b.summary,
 		Memories:         b.memories,
 		UserCtx: agentpkg.PromptUserContext{
-			ID:       b.userCtx.ID,
-			Username: b.userCtx.Username,
-			Role:     b.userCtx.Role,
-			TimeStr:  b.userCtx.TimeStr,
+			ID:                 b.userCtx.ID,
+			Username:           b.userCtx.Username,
+			Role:               b.userCtx.Role,
+			TimeStr:            b.userCtx.TimeStr,
+			Department:         takeStringOrProfile(profile, "Department"),
+			Position:           takeStringOrProfile(profile, "Position"),
+			Expertise:          takeStringOrProfile(profile, "Expertise"),
+			Language:           takeStringOrProfile(profile, "PreferredLanguage"),
+			Timezone:           takeStringOrProfile(profile, "Timezone"),
+			AnswerStyle:        takeAnswerStyle(pref),
+			TableFirst:         takeTableFirst(pref),
+			CitationStyle:      takeCitationStyle(pref),
 		},
 	}
+}
+
+// takeStringOrProfile 从 Profile entity 取出字段值（或空）
+func takeStringOrProfile(u *entity.User, field string) string {
+	if u == nil {
+		return ""
+	}
+	switch field {
+	case "Department":
+		return u.Department
+	case "Position":
+		return u.Position
+	case "Expertise":
+		return u.Expertise
+	case "PreferredLanguage":
+		return u.PreferredLanguage
+	case "Timezone":
+		return u.Timezone
+	}
+	return ""
+}
+
+func takeAnswerStyle(p *entity.UserPreference) string {
+	if p == nil {
+		return ""
+	}
+	return p.AnswerStyle
+}
+func takeTableFirst(p *entity.UserPreference) bool {
+	if p == nil {
+		return true
+	}
+	return p.UseMarkdownTable
+}
+func takeCitationStyle(p *entity.UserPreference) string {
+	if p == nil {
+		return "section_title"
+	}
+	return p.CitationStyle
 }
 
 // 为避免 agent 循环导入 + 保留函数式调用接口，这里提供两个纯函数：

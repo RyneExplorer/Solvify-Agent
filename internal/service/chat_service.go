@@ -36,6 +36,7 @@ type chatService struct {
 	userCache           *cache.RedisCache
 	agentEngine         *agent.Engine
 	contextSvc          ContextServiceInterface
+	prefSvc             UserPreferenceService
 }
 
 // NewChatService 创建聊天业务服务
@@ -49,6 +50,7 @@ func NewChatService(
 	userCache *cache.RedisCache,
 	agentEngine *agent.Engine,
 	contextSvc ContextServiceInterface,
+	prefSvc UserPreferenceService,
 ) ChatServiceInterface {
 	return &chatService{
 		sessionRepo:         sessionRepo,
@@ -60,6 +62,7 @@ func NewChatService(
 		userCache:           userCache,
 		agentEngine:         agentEngine,
 		contextSvc:          contextSvc,
+		prefSvc:             prefSvc,
 	}
 }
 
@@ -248,10 +251,21 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 	}
 	enhancedCtx.UserCtx = userCtx
 
-	logger.Infof("增强上下文: 历史 %d 条(预算 %d), 记忆 %d 条(预算 %d), 检索预算 %d, 摘要存在=%v, 模型窗口=%d, 用户=%s",
+	// 填充阶段二用户画像、偏好（任何失败不阻断主流程）
+	if userEntity, err := s.userRepo.FindByID(userID); err == nil && userEntity != nil {
+		enhancedCtx.Profile = userEntity
+		if s.prefSvc != nil {
+			if p, e := s.prefSvc.GetByUserID(ctx, userID); e == nil {
+				enhancedCtx.Preference = p
+			}
+		}
+	}
+
+	logger.Infof("增强上下文: 历史 %d 条(预算 %d), 记忆 %d 条(预算 %d), 检索预算 %d, 摘要存在=%v, 模型窗口=%d, 用户=%s, 偏好=%v",
 		len(enhancedCtx.History), enhancedCtx.HistoryBudget,
 		len(enhancedCtx.Memories), memoryBudget,
-		enhancedCtx.RetrievalBudget, enhancedCtx.Summary != nil, maxCtx, userCtx.Username)
+		enhancedCtx.RetrievalBudget, enhancedCtx.Summary != nil, maxCtx, userCtx.Username,
+		enhancedCtx.Preference != nil)
 	logger.Infof("[Timing] initContext 总耗时: cost=%dms", time.Since(t0).Milliseconds())
 	return client, enhancedCtx, nil
 }

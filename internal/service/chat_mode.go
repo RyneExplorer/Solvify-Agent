@@ -191,7 +191,9 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID, use
 
 	// Step 4: 组装 Prompt（用统一 PromptBuilder，与深度模式共用 System/History 注入逻辑）
 	sendProgressEvent(eventCh, "正在整理资料...")
-	pb := NewPromptBuilder(PromptModeQuick, quickModeSystemPrompt, enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx)
+	pb := NewPromptBuilder(PromptModeQuick, quickModeSystemPrompt, enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx).
+		WithProfile(enhancedCtx.Profile).
+		WithPreference(enhancedCtx.Preference)
 	messages := pb.BuildMessagesQuick(history, req.Content, retrieveResult, enhancedCtx.RetrievalBudget)
 
 	// Step 5: LLM 流式生成
@@ -240,7 +242,9 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 
 	// Step 3: 委托 eino ReAct Agent 执行（通过统一 PromptBuilder 传入摘要/记忆/用户上下文，双模式一致）
 	sendProgressEvent(eventCh, "正在深度推理...")
-	agentPB := NewPromptBuilder(PromptModeDeep, "", enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx)
+	agentPB := NewPromptBuilder(PromptModeDeep, "", enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx).
+		WithProfile(enhancedCtx.Profile).
+		WithPreference(enhancedCtx.Preference)
 	agentReq := agentPB.BuildAgentRequestFields(userID, req.Content, req.ModelID, req.ModelType, req.KnowledgeBaseIDs, history)
 	agentEventCh, err := s.agentEngine.Execute(ctx, agentReq, chatModel)
 	if err != nil {
