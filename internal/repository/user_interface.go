@@ -19,6 +19,7 @@ type UserRepository interface {
 	FindByEmail(email string) (*entity.User, error)
 	Create(user *entity.User) error
 	Update(id string, updates map[string]interface{}) error
+	UpdateProfile(id string, upd *UserProfileUpdate) error
 	Delete(id string) error
 	AdminList(offset, limit int, filter *UserListFilter) ([]*entity.User, int64, error)
 	ExistsByUsername(username string) (bool, error)

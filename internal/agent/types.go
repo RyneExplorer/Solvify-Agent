@@ -6,10 +6,19 @@ import (
 )
 
 type PromptUserContext struct {
-	ID       string
-	Username string
-	Role     string
-	TimeStr  string
+	ID                 string
+	Username           string
+	Role               string
+	TimeStr            string
+	Department         string
+	Position           string
+	Expertise          string
+	Language           string
+	Timezone           string
+	AnswerStyle        string
+	TableFirst         bool
+	CitationStyle      string
+	RoleTemplatePrompt string
 }
 
 // Request 描述 Agent 执行请求

@@ -26,6 +26,8 @@ type EnhancedContext struct {
 	UserCtx         UserContext
 	HistoryBudget   int // 实际使用的历史消息 token 预算
 	RetrievalBudget int // 实际使用的检索上下文 token 预算
+	Profile         *entity.User           // 当前用户画像实体（来源：user表扩展字段）
+	Preference      *entity.UserPreference // 当前用户偏好（来源：user_preferences 表）
 }
 
 // ContextServiceInterface 上下文管理服务接口

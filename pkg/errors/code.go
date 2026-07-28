@@ -86,6 +86,13 @@ const (
 	// 重排序配置错误 13xxx
 	CodeRerankerConfigNotFound = 13001
 	CodeRerankerTestFailed     = 13002
+
+	// 用户画像/偏好/角色模板错误 14xxx
+	CodeRoleTemplateExists   = 14001
+	CodeRoleTemplateNotFound = 14002
+	CodeRoleTemplateBuiltin  = 14003
+	CodeInvalidAnswerStyle   = 14004
+	CodeInvalidLanguage      = 14005
 )
 
 var codeMessages = map[int]string{
@@ -153,6 +160,12 @@ var codeMessages = map[int]string{
 
 	CodeRerankerConfigNotFound: "重排序配置不存在",
 	CodeRerankerTestFailed:     "重排序服务连接测试失败",
+
+	CodeRoleTemplateExists:   "角色模板已存在",
+	CodeRoleTemplateNotFound: "角色模板不存在",
+	CodeRoleTemplateBuiltin:  "内置角色模板不允许删除",
+	CodeInvalidAnswerStyle:   "回答风格不合法",
+	CodeInvalidLanguage:      "语言代码不合法",
 }
 
 // GetMessage 获取错误码对应的文本消息

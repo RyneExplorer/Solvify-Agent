@@ -14,11 +14,21 @@ import (
 )
 
 // UserContext 注入到 System Prompt 的用户上下文信息
+// 阶段二精简：保留 Profile/Preference 两类画像字段，直接影响回答
 type UserContext struct {
-	ID       string
-	Username string
-	Role     string
-	TimeStr  string
+	ID            string
+	Username      string
+	Role          string
+	TimeStr       string
+	Department    string
+	Position      string
+	Expertise     string
+	Language      string
+	Timezone      string
+	AnswerStyle   string
+	AutoDeepMode  bool
+	TableFirst    bool
+	CitationStyle string
 }
 
 // NewUserContext 创建用户上下文，TimeStr 使用当前时间
@@ -28,11 +38,28 @@ func NewUserContext(user entity.User) UserContext {
 		roleText = "管理员"
 	}
 	return UserContext{
-		ID:       user.ID,
-		Username: user.Username,
-		Role:     roleText,
-		TimeStr:  time.Now().Format("2006-01-02 15:04:05（Monday）"),
+		ID:         user.ID,
+		Username:   user.Username,
+		Role:       roleText,
+		TimeStr:    time.Now().Format("2006-01-02 15:04:05（Monday）"),
+		Department: user.Department,
+		Position:   user.Position,
+		Expertise:  user.Expertise,
+		Language:   user.PreferredLanguage,
+		Timezone:   user.Timezone,
 	}
+}
+
+// WithPreference 把用户偏好填充到 UserContext
+func (u UserContext) WithPreference(p *entity.UserPreference) UserContext {
+	if p == nil {
+		return u
+	}
+	u.AnswerStyle = p.AnswerStyle
+	u.AutoDeepMode = p.AutoDeepMode
+	u.TableFirst = p.UseMarkdownTable
+	u.CitationStyle = p.CitationStyle
+	return u
 }
 
 const (
@@ -153,19 +180,86 @@ func buildMessages(history []entity.ChatMessage, question string, retrieveResult
 }
 
 // buildEnhancedSystemPrompt 在基础 System Prompt 上注入时间、用户信息、摘要和记忆
+// 阶段二注入：用户画像（部门/职位/擅长/语言/时区）+ 回答偏好（风格/表格化/引用格式）
 func buildEnhancedSystemPrompt(base string, summary *entity.ChatSummary, memories []entity.UserMemory, userCtx UserContext) string {
 	var extras []string
 
-	// 注入当前时间和用户上下文
 	userInfo := "## 当前信息\n"
-	userInfo += "- 当前时间：" + userCtx.TimeStr + "\n"
+	if userCtx.TimeStr != "" {
+		userInfo += "- 当前时间：" + userCtx.TimeStr + "\n"
+	}
+	if userCtx.Timezone != "" {
+		userInfo += "- 用户时区：" + userCtx.Timezone + "\n"
+	}
 	if userCtx.Username != "" {
 		userInfo += "- 用户：" + userCtx.Username + "\n"
 	}
 	if userCtx.Role != "" {
-		userInfo += "- 角色：" + userCtx.Role + "\n"
+		userInfo += "- 系统角色：" + userCtx.Role + "\n"
 	}
-	extras = append(extras, userInfo)
+	if userCtx.Department != "" {
+		userInfo += "- 部门：" + userCtx.Department + "\n"
+	}
+	if userCtx.Position != "" {
+		userInfo += "- 职位：" + userCtx.Position + "\n"
+	}
+	if userCtx.Expertise != "" {
+		userInfo += "- 擅长/关注：" + userCtx.Expertise + "\n"
+	}
+	if userCtx.Language != "" {
+		userInfo += "- 偏好语言：" + userCtx.Language + "\n"
+	}
+	if userInfo != "## 当前信息\n" {
+		extras = append(extras, userInfo)
+	}
+
+	if userCtx.AnswerStyle != "" || userCtx.TableFirst || userCtx.CitationStyle != "" {
+		var prefText strings.Builder
+		prefText.WriteString("## 用户回答偏好\n")
+		switch userCtx.AnswerStyle {
+		case "concise":
+			prefText.WriteString("- 回答风格：简洁凝练，直击要点，3~5 句说完，不过度展开\n")
+		case "detailed":
+			prefText.WriteString("- 回答风格：详细展开，先结论再分点论述，必要时给例子和注意事项\n")
+		case "step_by_step":
+			prefText.WriteString("- 回答风格：分步讲解，用 1/2/3…编号或小标题组织步骤\n")
+		default:
+			prefText.WriteString("- 回答风格：平衡简洁与完整，先结论再展开\n")
+		}
+		if userCtx.TableFirst {
+			prefText.WriteString("- 结构化呈现：对比、列表、映射等数据优先用 Markdown 表格组织\n")
+		}
+		switch userCtx.CitationStyle {
+		case "none":
+			prefText.WriteString("- 引用格式：正文不标注引用，引用信息仅由消息底部来源区展示\n")
+		case "doc_title_only":
+			prefText.WriteString("- 引用格式：正文引用时只提「根据《文档名》」，不要章节\n")
+		default:
+			prefText.WriteString("- 引用格式：正文引用时以「根据《文档名》· 章节标题」形式说明来源\n")
+		}
+		extras = append(extras, prefText.String())
+	}
+
+	if userCtx.Language != "" {
+		langHint := "## 回答语言\n"
+		switch userCtx.Language {
+		case "en-US":
+			langHint += "- 请使用英文回答（美式英语）。\n"
+		case "ja-JP":
+			langHint += "- 请使用日语回答。\n"
+		case "ko-KR":
+			langHint += "- 请使用韩语回答。\n"
+		case "fr-FR":
+			langHint += "- 请使用法语回答。\n"
+		case "de-DE":
+			langHint += "- 请使用德语回答。\n"
+		case "es-ES":
+			langHint += "- 请使用西班牙语回答。\n"
+		default:
+			langHint += "- 请使用简体中文回答。\n"
+		}
+		extras = append(extras, langHint)
+	}
 
 	if summary != nil && summary.Summary != "" {
 		extras = append(extras, "## 本次对话摘要\n"+summary.Summary)

@@ -288,6 +288,8 @@ func (a *App) initDependencies() {
 	dingtalkBindingRepo := repository.NewDingTalkBindingRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
 	userRepo := repository.NewUserRepository(a.postgresqlDB)
+	// 阶段二：用户偏好 Repository
+	userPreferenceRepo := repository.NewUserPreferenceRepository(a.postgresqlDB)
 
 	// 模型配置缓存（10 分钟 TTL）
 	modelCache := cache.New(a.redis, "model:", 10*time.Minute)
@@ -326,7 +328,9 @@ func (a *App) initDependencies() {
 	ai := a.initAgentComponents(toolFactory, documentRepo, chunkRepo, knowledgeBaseRepo)
 
 	// 初始化 Service
-	userSvc := service.NewUserService(userRepo)
+	// 阶段二：创建 UserPreference Service，作为 UserService 依赖
+	prefSvc := service.NewUserPreferenceService(userPreferenceRepo)
+	userSvc := service.NewUserService(userRepo, prefSvc)
 	adminUserSvc := service.NewAdminUserService(userRepo)
 	adminSessionSvc := service.NewAdminSessionService(chatSessionRepo, chatMessageRepo)
 	authSvc := service.NewAuthService(userRepo, userSvc, a.redis)
@@ -347,7 +351,7 @@ func (a *App) initDependencies() {
 	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncItemRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, textExtractor, dingtalkClient, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo)
-	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc)
+	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc)
 	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo)
 	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry)
 	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo, toolRegistry)
@@ -371,7 +375,9 @@ func (a *App) initDependencies() {
 		chunkRepo,
 		toolTypeService,
 		toolProviderService,
-		userToolConfigService)
+		userToolConfigService,
+		prefSvc,
+	)
 }
 
 // prewarmModelClients 启动时预创建所有已启用系统模型的 LLM 客户端
