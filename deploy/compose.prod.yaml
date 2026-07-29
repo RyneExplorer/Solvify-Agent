@@ -1,0 +1,123 @@
+name: solvify-agent
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USERNAME:?POSTGRES_USERNAME 未配置}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未配置}
+      POSTGRES_DB: ${POSTGRES_DATABASE:?POSTGRES_DATABASE 未配置}
+      TZ: ${POSTGRES_TIMEZONE:-Asia/Shanghai}
+    expose:
+      - "5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init/001-init-schema.sql:/docker-entrypoint-initdb.d/001-init-schema.sql:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    logging: *default-logging
+    networks:
+      - solvify
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD 未配置}
+    command:
+      - /bin/sh
+      - -c
+      - exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli -a "$${REDIS_PASSWORD}" ping 2>/dev/null | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    logging: *default-logging
+    networks:
+      - solvify
+
+  migrate:
+    image: pgvector/pgvector:pg16
+    profiles:
+      - migration
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未配置}
+    command:
+      - psql
+      - --set=ON_ERROR_STOP=1
+      - --host=postgres
+      - --username=${POSTGRES_USERNAME:?POSTGRES_USERNAME 未配置}
+      - --dbname=${POSTGRES_DATABASE:?POSTGRES_DATABASE 未配置}
+      - --file=/migrations/001-init-schema.sql
+    volumes:
+      - ./postgres/init/001-init-schema.sql:/migrations/001-init-schema.sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *default-logging
+    networks:
+      - solvify
+
+  backend:
+    image: ${BACKEND_IMAGE:?BACKEND_IMAGE 未配置}
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${SOLVIFY_ROOT:-/opt/solvify-agent}/shared/.env
+    expose:
+      - "8080"
+    volumes:
+      - ${SOLVIFY_ROOT:-/opt/solvify-agent}/shared/config.yaml:/app/configs/config.yaml:ro
+      - ${SOLVIFY_ROOT:-/opt/solvify-agent}/shared/data:/app/data
+      - ${SOLVIFY_ROOT:-/opt/solvify-agent}/shared/logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    stop_grace_period: 30s
+    logging: *default-logging
+    networks:
+      - solvify
+
+  frontend:
+    image: ${FRONTEND_IMAGE:?FRONTEND_IMAGE 未配置}
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-18888}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    logging: *default-logging
+    networks:
+      - solvify
+
+networks:
+  solvify:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+

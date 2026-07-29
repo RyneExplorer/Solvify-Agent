@@ -24,12 +24,12 @@
 
 ## 4. 最终架构
 
-生产服务器只对外开放 TCP `80`。Compose 内部使用独立网络连接以下服务：
+生产服务器只对外开放应用端口 TCP `18888`。Compose 内部使用独立网络连接以下服务：
 
 | 服务 | 镜像 | 职责 | 对外端口 |
 | --- | --- | --- | --- |
-| `frontend` | GHCR 前端镜像 | Nginx 托管 Vue 静态资源，并反向代理 `/api/` 和 `/health` | `80` |
-| `backend` | GHCR 后端镜像 | 运行 Go API，并提供 Python 文档解析能力 | 无 |
+| `frontend` | GHCR 公开前端镜像 | Nginx 托管 Vue 静态资源，并反向代理 `/api/` 和 `/health` | 宿主机 `18888` → 容器 `80` |
+| `backend` | GHCR 公开后端镜像 | 运行 Go API，并提供 Python 文档解析能力 | 无 |
 | `postgres` | pgvector PostgreSQL 官方镜像 | 持久化业务数据和向量索引 | 无 |
 | `redis` | Redis 官方镜像 | 缓存、验证码和 Token 黑名单 | 无 |
 | `migrate` | pgvector PostgreSQL 官方镜像 | 部署时一次性执行幂等数据库脚本 | 无 |
@@ -72,6 +72,8 @@
 - `ghcr.io/<repository>-frontend:<commit-sha>`
 
 每次 `main` 发布同时更新 `latest` 标签。生产 Compose 始终使用不可变的提交 SHA 标签，`latest` 只用于人工查看和临时测试。
+
+GitHub Actions 使用仓库自带的 `GITHUB_TOKEN` 推送镜像，不需要配置 Docker Hub 用户名或 Token。服务器匿名拉取公开镜像；两个包首次发布后需要在 GitHub Packages 中分别将可见性手动设置为 `Public`。
 
 ## 6. CI/CD 工作流
 
@@ -119,10 +121,9 @@ Compose 与脚本作业执行：
 
 1. 配置 SSH 私钥和已验证的 `known_hosts`
 2. 将 Compose、数据库脚本和部署脚本同步到 `/opt/solvify-agent/releases/<commit-sha>`
-3. 通过标准输入让服务器临时登录 GHCR
-4. 调用服务器上的部署脚本并传入两个 SHA 镜像地址
-5. 部署完成后退出 GHCR 登录
-6. 从 GitHub Runner 请求 `http://<DEPLOY_HOST>/health` 做外部检查
+3. 调用服务器上的部署脚本并传入两个 SHA 镜像地址
+4. 服务器匿名拉取两个公开 GHCR 镜像并更新 Compose 服务
+5. 从 GitHub Runner 请求 `http://<DEPLOY_HOST>:18888/health` 做外部检查
 
 ## 7. 生产配置与密钥
 
@@ -135,8 +136,8 @@ Compose 与脚本作业执行：
 | `DEPLOY_USER` | 部署用户 |
 | `DEPLOY_SSH_KEY` | 部署专用 SSH 私钥 |
 | `DEPLOY_KNOWN_HOSTS` | 预先核验的服务器主机公钥记录 |
-| `GHCR_USERNAME` | GHCR 拉取账号 |
-| `GHCR_PULL_TOKEN` | 仅授予 `read:packages` 的 GHCR Token |
+
+`DEPLOY_USER` 是 Linux 生产服务器上的部署账号，不是 GitHub 用户。公开 GHCR 方案不需要额外的镜像仓库账号或 Token。
 
 ### 7.2 服务器本地配置
 
@@ -153,7 +154,7 @@ Compose 与脚本作业执行：
     └── logs/
 ```
 
-`shared/.env` 保存数据库、Redis、LLM、Embedding 和第三方集成环境变量；`shared/config.yaml` 保存 JWT、邮件和 Agent 等当前项目只能从 YAML 读取的配置。两个文件权限为 `0600`，部署流程不会覆盖它们。
+`shared/.env` 保存数据库、Redis、LLM、Embedding 和第三方集成环境变量；`shared/config.yaml` 保存 JWT、邮件和 Agent 等当前项目只能从 YAML 读取的配置。`.env` 权限为 `0600`；`config.yaml` 权限为 `0640`，并通过容器运行组只读访问。部署流程不会覆盖它们。
 
 仓库只提供无真实凭据的示例文件。镜像、Compose、Actions 日志和 Git 历史中不写入生产密码、Token、密钥或完整连接串。
 
@@ -237,6 +238,6 @@ tasks/todo.md
 - 生产服务器为 `linux/amd64`
 - 服务器已安装 Docker Engine、Docker Compose v2、OpenSSH 和 `flock`
 - 部署用户可执行 Docker 命令并可写 `/opt/solvify-agent`
-- 防火墙允许 SSH 端口和 TCP `80`
-- GHCR Token 对两个私有镜像拥有读取权限
+- 防火墙允许 SSH 端口和 TCP `18888`
+- 两个 GHCR 镜像包在首次发布后已手动设置为公开
 - 当前阶段直接通过服务器地址访问，不配置 HTTPS

@@ -217,7 +217,7 @@ func TestClientGetCurrentUserInfoUsesUserToken(t *testing.T) {
 		if r.Header.Get("x-acs-dingtalk-access-token") != "user-token" {
 			t.Fatalf("用户信息接口未使用个人 token Header")
 		}
-		_, _ = w.Write([]byte(`{"nick":"张三","avatarUrl":"https://example.com/a.png","openId":"open-1","unionId":"union-1","email":"a@example.com"}`))
+		_, _ = w.Write([]byte(`{"nick":"张三","avatarUrl":"https://example.com/architecture.png","openId":"open-1","unionId":"union-1","email":"a@example.com"}`))
 	}))
 	defer server.Close()
 
