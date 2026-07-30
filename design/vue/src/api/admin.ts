@@ -2,7 +2,7 @@ import { request } from './client'
 import type { ModelInfo } from '@/types/model'
 import type { ToolTypeInfo, ToolProviderInfo } from '@/types/tool'
 import type { AdminUser } from '@/types/auth'
-import type { AdminSession } from '@/types/chat'
+import type { AdminSession, MetricsSnapshot } from '@/types/chat'
 
 // ── Admin Users ──
 
@@ -219,4 +219,10 @@ export function adminDeleteSession(id: string) {
 
 export function adminCleanupSessions() {
   return request<{ deleted: number }>('/admin/sessions/cleanup', { method: 'POST' })
+}
+
+// ── Observability (Admin) ──
+
+export function adminGetObservabilityMetrics() {
+  return request<MetricsSnapshot>('/chat/admin/observability/metrics')
 }

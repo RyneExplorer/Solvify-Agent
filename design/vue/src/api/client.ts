@@ -73,7 +73,10 @@ export async function request<T>(
     throw new Error(text || `HTTP ${res.status}`)
   }
 
-  const data = await res.json()
+  const traceId = res.headers.get('X-Trace-ID') || undefined
+  const requestId = res.headers.get('X-Request-ID') || undefined
+
+  const data = (await res.json()) as ApiResponse<T>
   // Server-side token invalid / auth error
   if (data.code === 401 || data.code === 403) {
     removeToken()
@@ -83,6 +86,9 @@ export async function request<T>(
   // Business error
   if (data.code !== 0) {
     throw new Error(data.message || '请求失败')
+  }
+  if (traceId || requestId) {
+    data._meta = { trace_id: traceId, request_id: requestId }
   }
   return data
 }
@@ -120,7 +126,10 @@ export async function formRequest<T>(
     throw new Error(text || `HTTP ${res.status}`)
   }
 
-  const data = await res.json()
+  const traceId = res.headers.get('X-Trace-ID') || undefined
+  const requestId = res.headers.get('X-Request-ID') || undefined
+
+  const data = (await res.json()) as ApiResponse<T>
   if (data.code === 401 || data.code === 403) {
     removeToken()
     routerInstance?.push('/login')
@@ -128,6 +137,9 @@ export async function formRequest<T>(
   }
   if (data.code !== 0) {
     throw new Error(data.message || '请求失败')
+  }
+  if (traceId || requestId) {
+    data._meta = { trace_id: traceId, request_id: requestId }
   }
   return data
 }
@@ -151,12 +163,16 @@ export async function blobRequest(path: string): Promise<Blob> {
   return res.blob()
 }
 
+export type StreamReaderWithMeta = ReadableStreamDefaultReader<Uint8Array> & {
+  _meta?: { trace_id?: string; request_id?: string }
+}
+
 /** SSE stream request — returns a ReadableStream reader */
 export async function streamRequest(
   path: string,
   body: unknown,
   signal?: AbortSignal,
-): Promise<ReadableStreamDefaultReader<Uint8Array>> {
+): Promise<StreamReaderWithMeta> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   }
@@ -183,5 +199,11 @@ export async function streamRequest(
     throw new Error(text || `HTTP ${res.status}`)
   }
 
-  return res.body!.getReader()
+  const reader = res.body!.getReader() as StreamReaderWithMeta
+  const traceId = res.headers.get('X-Trace-ID') || undefined
+  const requestId = res.headers.get('X-Request-ID') || undefined
+  if (traceId || requestId) {
+    reader._meta = { trace_id: traceId, request_id: requestId }
+  }
+  return reader
 }

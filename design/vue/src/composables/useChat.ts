@@ -6,7 +6,7 @@ import * as chatApi from '@/api/chat'
 import * as modelApi from '@/api/model'
 import * as authApi from '@/api/auth'
 import { request } from '@/api/client'
-import type { ChatSession } from '@/types/chat'
+import type { ChatSession, FeedbackRequest } from '@/types/chat'
 import type { StreamEvent } from '@/types/chat'
 
 // ── Local types for UI display ──
@@ -25,6 +25,10 @@ interface DisplayMessage {
   retryable?: boolean
   sources?: StreamEvent['sources']
   timeline?: TimelineStep[]
+  trace_id?: string
+  feedback_rating?: 1 | -1
+  feedback_reasons?: string[]
+  feedback_comment?: string
 }
 
 interface ModelOption {
@@ -291,15 +295,17 @@ export function useChat() {
 
     try {
       const reader = await chatApi.sendMessage(activeSessionId.value, {
-        content,
-        model_id: selectedModel.value,
-        model_type: modelOpt?.modelType ?? 'system',
-        search_mode: searchMode.value,
-        knowledge_base_ids: selectedKBs.value.length ? selectedKBs.value : knowledgeBases.value.map(k => k.id),
-      }, abortController.signal)
+      content,
+      model_id: selectedModel.value,
+      model_type: modelOpt?.modelType ?? 'system',
+      search_mode: searchMode.value,
+      knowledge_base_ids: selectedKBs.value.length ? selectedKBs.value : knowledgeBases.value.map(k => k.id),
+    }, abortController.signal)
 
-      const decoder = new TextDecoder()
-      let buffer = ''
+    const traceId = reader._meta?.trace_id
+
+    const decoder = new TextDecoder()
+    let buffer = ''
 
       while (true) {
         const { done, value } = await reader.read()
@@ -413,6 +419,7 @@ export function useChat() {
                     streamTimeline.value.length > 0
                       ? [...streamTimeline.value]
                       : undefined,
+                  trace_id: traceId,
                 })
                 if (streamTimeline.value.length > 0) {
                   collapsedTimelines.value.add(messages.value.length - 1)
@@ -438,6 +445,7 @@ export function useChat() {
             content: streamContent.value || finalContent,
             sources: finalSources.length ? finalSources : (streamSources.value?.length ? [...streamSources.value] : undefined),
             timeline: streamTimeline.value.length ? [...streamTimeline.value] : undefined,
+            trace_id: traceId,
           })
         }
       } else {
@@ -531,6 +539,30 @@ export function useChat() {
   function stopGeneration() {
     if (abortController) {
       abortController.abort()
+    }
+  }
+
+  // ── Feedback ──
+  async function submitFeedback(
+    messageId: string,
+    req: FeedbackRequest,
+  ): Promise<void> {
+    const idx = messages.value.findIndex((m) => m.id === messageId)
+    if (idx < 0) return
+    const target = messages.value[idx]
+    try {
+      await chatApi.submitFeedback(messageId, req)
+      const next = [...messages.value]
+      next[idx] = {
+        ...target,
+        feedback_rating: req.rating,
+        feedback_reasons: req.reasons ?? [],
+        feedback_comment: req.comment,
+      }
+      messages.value = next
+      ElMessage.success(req.rating === 1 ? '感谢您的反馈' : '感谢反馈，我们会持续优化')
+    } catch (e: unknown) {
+      ElMessage.error(e instanceof Error ? e.message : '提交反馈失败')
     }
   }
 
@@ -682,6 +714,7 @@ export function useChat() {
     regenerate,
     retryLastMessage,
     stopGeneration,
+    submitFeedback,
     newChat,
     cleanTooltipText,
   }
