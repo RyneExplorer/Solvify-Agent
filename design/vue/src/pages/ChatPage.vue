@@ -73,7 +73,7 @@
                 <template v-else>{{ msg.content }}</template>
               </div>
               <!-- Actions -->
-              <div v-if="msg.role === 'assistant' || msg.role === 'error'" class="flex items-center gap-1 mt-2">
+              <div v-if="msg.role === 'assistant' || msg.role === 'error'" class="flex items-center gap-1 mt-2 flex-wrap">
                 <button class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="复制" @click="copyText(msg.content)">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
                 </button>
@@ -86,6 +86,25 @@
                 <button v-if="msg.role === 'assistant'" class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="保存到知识库" @click="openSaveNoteDialog(msg.content)">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 21v-8H7v8M7 3v5h8"/></svg>
                 </button>
+                <span class="mx-1 w-px h-4 bg-slate-200" />
+                <button
+                  v-if="msg.role === 'assistant'"
+                  class="p-1.5 rounded-md hover:bg-slate-100 transition-colors"
+                  :class="msg.feedback_rating === 1 ? 'text-emerald-600 bg-emerald-50' : 'text-slate-400'"
+                  title="有帮助"
+                  @click="quickFeedback(msg, 1)"
+                >
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M14 9V5a3 3 0 00-3-3l-4 9v11h11.28a2 2 0 002-1.7l1.38-9A2 2 0 0019.72 9H14zM7 22H4a2 2 0 01-2-2v-7a2 2 0 012-2h3"/></svg>
+                </button>
+                <button
+                  v-if="msg.role === 'assistant'"
+                  class="p-1.5 rounded-md hover:bg-slate-100 transition-colors"
+                  :class="msg.feedback_rating === -1 ? 'text-red-600 bg-red-50' : 'text-slate-400'"
+                  title="没帮助"
+                  @click="openFeedbackDialog(msg, -1)"
+                >
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M10 15v4a3 3 0 003 3l4-9V2H5.72a2 2 0 00-2 1.7l-1.38 9A2 2 0 004.28 15H10zM17 2h3a2 2 0 012 2v7a2 2 0 01-2 2h-3"/></svg>
+                </button>
               </div>
               <!-- Sources -->
               <div v-if="msg.role === 'assistant' && msg.sources?.filter(s => s?.title).length" class="mt-2 flex flex-wrap items-center gap-1.5">
@@ -97,6 +116,29 @@
                   :data-doc="cleanTitle(s.title)"
                   class="text-[11px] px-2 py-0.5 bg-slate-100 border border-slate-200 rounded-full text-slate-500 cursor-help hover:bg-slate-200 transition-colors"
                 >{{ cleanTitle(s.title) }}</span>
+              </div>
+              <!-- Meta: trace id / feedback reasons -->
+              <div v-if="msg.role === 'assistant' && (msg.trace_id || msg.feedback_reasons?.length)" class="mt-2 flex flex-wrap items-center gap-2">
+                <div v-if="msg.trace_id" class="flex items-center gap-1 text-[11px] text-slate-400">
+                  <span>Trace</span>
+                  <code class="px-1.5 py-0.5 bg-slate-100 rounded-md font-mono" :title="msg.trace_id">{{ msg.trace_id.slice(0, 10) }}…</code>
+                  <button
+                    type="button"
+                    class="p-1 rounded hover:bg-slate-100 hover:text-slate-600"
+                    title="复制 Trace ID"
+                    @click="copyText(msg.trace_id!)"
+                  >
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                  </button>
+                </div>
+                <div v-if="msg.feedback_reasons?.length" class="flex flex-wrap items-center gap-1">
+                  <span class="text-[11px] text-slate-400">反馈:</span>
+                  <span
+                    v-for="r in msg.feedback_reasons"
+                    :key="r"
+                    class="text-[10px] px-1.5 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-100"
+                  >{{ r }}</span>
+                </div>
               </div>
               <div v-if="msg.role === 'error' && msg.detail && msg.detail !== msg.content" class="mt-1 text-xs text-red-500">{{ msg.detail }}</div>
             </div>
@@ -232,6 +274,38 @@
         </div>
       </template>
     </AppDialog>
+
+    <!-- Feedback Dialog (dislike) -->
+    <AppDialog v-model="showFeedbackDialog" title="为什么觉得这条回答不好？" size="sm">
+      <div class="space-y-3">
+        <div class="text-xs text-slate-400">请选择最贴切的原因（可多选，可选）：</div>
+        <div class="flex flex-wrap gap-2">
+          <button
+            v-for="r in feedbackReasonOptions"
+            :key="r"
+            type="button"
+            @click="toggleFeedbackReason(r)"
+            class="px-3 py-1.5 text-xs rounded-full border transition-colors"
+            :class="feedbackReasons.includes(r) ? 'border-red-300 bg-red-50 text-red-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'"
+          >{{ r }}</button>
+        </div>
+        <div>
+          <label class="text-xs text-slate-400 mb-1 block">补充说明（可选）</label>
+          <textarea
+            v-model="feedbackComment"
+            rows="3"
+            class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-3 py-2 text-slate-800 outline-none focus:border-slate-800 resize-none"
+            placeholder="描述您期望的答案、缺失的信息等..."
+          />
+        </div>
+      </div>
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <AppButton variant="secondary" size="sm" @click="showFeedbackDialog = false">取消</AppButton>
+          <AppButton size="sm" variant="danger" @click="submitDialogFeedback">提交反馈</AppButton>
+        </div>
+      </template>
+    </AppDialog>
   </div>
 </template>
 
@@ -253,7 +327,7 @@ const {
   activeSession: session, messages, collapsedTimelines, isLoading, streamContent, streamSources, streamTimeline, progressText,
   modelOptions, knowledgeBases, connected, input, selectedModel, selectedKBs, searchMode, kbTriggerText,
   init, sendMessage, scrollToBottom, toggleKB, formatContent, getSourceChunkIds, copyText, regenerate, retryLastMessage, stopGeneration,
-  selectSession, loadSessions, newChat, cleanTooltipText,
+  selectSession, loadSessions, newChat, cleanTooltipText, submitFeedback,
 } = chat
 
 const chatEl = ref<HTMLDivElement>()
@@ -318,6 +392,54 @@ async function doSaveNote() {
   } finally {
     savingNote.value = false
   }
+}
+
+// ── Feedback ──
+const showFeedbackDialog = ref(false)
+const feedbackMsgId = ref('')
+const feedbackRating = ref<1 | -1>(-1)
+const feedbackComment = ref('')
+const feedbackReasons = ref<string[]>([])
+const feedbackReasonOptions: string[] = [
+  '回答不准确',
+  '答非所问',
+  '信息过时',
+  '胡说八道 / 幻觉',
+  '引用来源不对',
+  '格式排版差',
+  '语气不当 / 冒犯',
+  '回答太啰嗦',
+  '回答太简短',
+  '期望更好的分析',
+  '其他',
+]
+
+function quickFeedback(msg: { id: string }, rating: 1 | -1) {
+  submitFeedback(msg.id, { rating })
+}
+
+function openFeedbackDialog(msg: { id: string }, rating: 1 | -1) {
+  feedbackMsgId.value = msg.id
+  feedbackRating.value = rating
+  feedbackReasons.value = []
+  feedbackComment.value = ''
+  showFeedbackDialog.value = true
+}
+
+function toggleFeedbackReason(r: string) {
+  const i = feedbackReasons.value.indexOf(r)
+  if (i >= 0) feedbackReasons.value.splice(i, 1)
+  else feedbackReasons.value.push(r)
+}
+
+async function submitDialogFeedback() {
+  if (!feedbackMsgId.value) return
+  showFeedbackDialog.value = false
+  await submitFeedback(feedbackMsgId.value, {
+    rating: feedbackRating.value,
+    reasons: feedbackReasons.value.length ? [...feedbackReasons.value] : undefined,
+    comment: feedbackComment.value.trim() || undefined,
+  })
 }
 
 watch(
