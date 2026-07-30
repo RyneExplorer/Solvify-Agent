@@ -82,6 +82,7 @@ type Feedback struct {
 	UserID      string    `json:"user_id"`
 	SessionID   string    `json:"session_id,omitempty"`
 	Rating      int       `json:"rating"`
+	Reasons     []string  `json:"reasons,omitempty"`
 	ReasonTag   string    `json:"reason_tag,omitempty"`
 	Comment     string    `json:"comment,omitempty"`
 	TraceID     string    `json:"trace_id,omitempty"`

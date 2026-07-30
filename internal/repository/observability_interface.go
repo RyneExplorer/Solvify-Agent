@@ -18,6 +18,7 @@ type ChatTraceRepo interface {
 	CreateChatTrace(ctx context.Context, trace *entity.ChatTrace) error
 	FindByID(ctx context.Context, id string) (*entity.ChatTrace, error)
 	ListBySession(ctx context.Context, sessionID, userID string, offset, limit int) ([]entity.ChatTrace, int64, error)
+	ListAll(ctx context.Context, sessionID string, status string, offset, limit int) ([]entity.ChatTrace, int64, error)
 	DeleteOlderThan(ctx context.Context, before time.Time) (int64, error)
 }
 

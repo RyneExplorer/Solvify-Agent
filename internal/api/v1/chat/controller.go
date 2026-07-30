@@ -204,12 +204,13 @@ func (ctrl *Controller) GetTrace(c *gin.Context) {
 	if !ok {
 		return
 	}
+	isAdmin := middleware.IsCurrentUserAdmin(c)
 	traceID := c.Param("trace_id")
 	if traceID == "" {
 		response.BadRequest(c, "trace_id 不能为空")
 		return
 	}
-	trace, err := ctrl.chatSvc.GetTrace(c.Request.Context(), userID, traceID)
+	trace, err := ctrl.chatSvc.GetTrace(c.Request.Context(), userID, traceID, isAdmin)
 	if err != nil {
 		response.BizError(c, err)
 		return
@@ -222,8 +223,9 @@ func (ctrl *Controller) ListSessionTraces(c *gin.Context) {
 	if !ok {
 		return
 	}
-	offset, limit := listParams(c, 0, 20)
-	out, err := ctrl.chatSvc.ListSessionTraces(c.Request.Context(), userID, sessionID, offset, limit)
+	isAdmin := middleware.IsCurrentUserAdmin(c)
+	offset, limit := listParams(c, 0, 50)
+	out, err := ctrl.chatSvc.ListSessionTraces(c.Request.Context(), userID, sessionID, isAdmin, offset, limit)
 	if err != nil {
 		response.BizError(c, err)
 		return
@@ -231,11 +233,36 @@ func (ctrl *Controller) ListSessionTraces(c *gin.Context) {
 	response.Success(c, out)
 }
 
-func (ctrl *Controller) MetricsSnapshot(c *gin.Context) {
-	if !middleware.IsCurrentUserAdmin(c) {
-		response.Forbidden(c, "无权限访问")
+func (ctrl *Controller) AdminListTraces(c *gin.Context) {
+	var (
+		sessionID = c.Query("session_id")
+		status    = c.Query("status")
+	)
+	rating, _ := strconv.Atoi(c.Query("rating"))
+	offset, limit := listParams(c, 0, 50)
+	out, err := ctrl.chatSvc.AdminListTraces(c.Request.Context(), sessionID, rating, status, offset, limit)
+	if err != nil {
+		response.BizError(c, err)
 		return
 	}
+	response.Success(c, out)
+}
+
+func (ctrl *Controller) AdminGetTrace(c *gin.Context) {
+	traceID := c.Param("trace_id")
+	if traceID == "" {
+		response.BadRequest(c, "trace_id 不能为空")
+		return
+	}
+	trace, err := ctrl.chatSvc.GetTrace(c.Request.Context(), "", traceID, true)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, trace)
+}
+
+func (ctrl *Controller) MetricsSnapshot(c *gin.Context) {
 	snap, err := ctrl.chatSvc.GetMetricsSnapshot()
 	if err != nil {
 		response.BizError(c, err)

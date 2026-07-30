@@ -339,6 +339,10 @@ func (r *defaultRecorder) MetricsSnapshot() (map[string]any, error) {
 	return snap, nil
 }
 
+func (r *defaultRecorder) Config() config.ObservabilityConfig { return r.cfg }
+
+func (r *defaultRecorder) SamplingRate() float64 { return r.cfg.SamplingRate }
+
 func (r *defaultRecorder) Shutdown(ctx context.Context) error {
 	if r.sinks != nil {
 		return r.sinks.Shutdown(ctx)

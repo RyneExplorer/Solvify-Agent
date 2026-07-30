@@ -18,6 +18,7 @@ import (
 	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/cache"
+	"solvify-agent/pkg/config"
 	apperrors "solvify-agent/pkg/errors"
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/tokenutil"
@@ -537,16 +538,22 @@ func (s *chatService) SubmitFeedback(ctx context.Context, userID, messageID stri
 			}
 		}
 	}
+	primaryTag := ""
+	if len(req.Reasons) > 0 {
+		primaryTag = req.Reasons[0]
+	}
 	fb := &entity.MessageFeedback{
 		ID:        uuid.New().String(),
 		MessageID: messageID,
 		UserID:    userID,
 		SessionID: msg.SessionID,
 		Rating:    req.Rating,
-		ReasonTag: req.ReasonTag,
+		ReasonTag: primaryTag,
 		Comment:   req.Comment,
+		IsQuick:   req.IsQuick,
 		TraceID:   traceID,
 	}
+	fb.SetReasons(req.Reasons)
 	if s.obsRepo != nil {
 		if e := s.obsRepo.CreateFeedback(ctx, fb); e != nil {
 			return fmt.Errorf("保存反馈失败: %w", e)
@@ -555,7 +562,7 @@ func (s *chatService) SubmitFeedback(ctx context.Context, userID, messageID stri
 	if s.obs != nil {
 		s.obs.Incr(ctx, "chat_feedback_total", map[string]string{
 			"rating":      ratingLabel(req.Rating),
-			"reason_tag":  reasonTagOrDefault(req.ReasonTag),
+			"reason_tag":  reasonTagOrDefault(primaryTag),
 			"has_comment": boolLabel(req.Comment != ""),
 		}, 1)
 	}
@@ -565,7 +572,7 @@ func (s *chatService) SubmitFeedback(ctx context.Context, userID, messageID stri
 			UserID:    fb.UserID,
 			SessionID: fb.SessionID,
 			Rating:    fb.Rating,
-			ReasonTag: fb.ReasonTag,
+			Reasons:   fb.Reasons(),
 			Comment:   fb.Comment,
 			TraceID:   fb.TraceID,
 			CreatedAt: fb.CreatedAt,
@@ -585,20 +592,24 @@ func (s *chatService) ListFeedbacks(ctx context.Context, userID string, offset, 
 		offset = 0
 	}
 	if s.obsRepo == nil {
-		return FeedbackListResponse{Total: 0, Items: []any{}}, nil
+		return FeedbackListResponse{Total: 0, Feedbacks: []any{}}, nil
 	}
 	list, total, err := s.obsRepo.ListByUser(ctx, userID, offset, limit)
 	if err != nil {
 		return FeedbackListResponse{}, err
 	}
+	type out struct {
+		entity.MessageFeedback
+		Reasons []string `json:"reasons"`
+	}
 	items := make([]any, 0, len(list))
 	for _, f := range list {
-		items = append(items, f)
+		items = append(items, out{MessageFeedback: f, Reasons: f.Reasons()})
 	}
-	return FeedbackListResponse{Total: total, Items: items}, nil
+	return FeedbackListResponse{Total: total, Feedbacks: items}, nil
 }
 
-func (s *chatService) GetTrace(ctx context.Context, userID, traceID string) (*TraceResponse, error) {
+func (s *chatService) GetTrace(ctx context.Context, userID, traceID string, isAdmin bool) (*TraceResponse, error) {
 	if s.obsRepo == nil || traceID == "" {
 		return nil, fmt.Errorf("trace 存储未启用")
 	}
@@ -606,7 +617,7 @@ func (s *chatService) GetTrace(ctx context.Context, userID, traceID string) (*Tr
 	if err != nil {
 		return nil, fmt.Errorf("trace 不存在: %w", err)
 	}
-	if t.UserID != userID {
+	if !isAdmin && t.UserID != userID {
 		return nil, fmt.Errorf("无权限访问该 trace")
 	}
 	resp := &TraceResponse{
@@ -626,23 +637,28 @@ func (s *chatService) GetTrace(ctx context.Context, userID, traceID string) (*Tr
 	return resp, nil
 }
 
-func (s *chatService) ListSessionTraces(ctx context.Context, userID, sessionID string, offset, limit int) (TraceListResponse, error) {
+func (s *chatService) ListSessionTraces(ctx context.Context, userID, sessionID string, isAdmin bool, offset, limit int) (TraceListResponse, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	if limit > 100 {
-		limit = 100
+	if limit > 200 {
+		limit = 200
 	}
 	if offset < 0 {
 		offset = 0
 	}
 	if s.obsRepo == nil {
-		return TraceListResponse{Total: 0, Items: []any{}}, nil
+		return TraceListResponse{Total: 0, Traces: []any{}}, nil
 	}
-	if err := s.validateSession(ctx, userID, sessionID); err != nil {
-		return TraceListResponse{}, err
+	if !isAdmin {
+		if err := s.validateSession(ctx, userID, sessionID); err != nil {
+			return TraceListResponse{}, err
+		}
 	}
 	list, total, err := s.obsRepo.ListBySession(ctx, sessionID, userID, offset, limit)
+	if isAdmin {
+		list, total, err = s.obsRepo.ListAll(ctx, sessionID, "", offset, limit)
+	}
 	if err != nil {
 		return TraceListResponse{}, err
 	}
@@ -662,14 +678,195 @@ func (s *chatService) ListSessionTraces(ctx context.Context, userID, sessionID s
 			CreatedAt:  t.CreatedAt.Format("2006-01-02 15:04:05"),
 		})
 	}
-	return TraceListResponse{Total: total, Items: items}, nil
+	return TraceListResponse{Total: total, Traces: items}, nil
+}
+
+func (s *chatService) AdminListTraces(ctx context.Context, sessionID string, rating int, status string, offset, limit int) (TraceListResponse, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if s.obsRepo == nil {
+		return TraceListResponse{Total: 0, Traces: []any{}}, nil
+	}
+	list, total, err := s.obsRepo.ListAll(ctx, sessionID, status, offset, limit)
+	if err != nil {
+		return TraceListResponse{}, err
+	}
+	items := make([]any, 0, len(list))
+	for _, t := range list {
+		items = append(items, TraceResponse{
+			ID:         t.ID,
+			RequestID:  t.RequestID,
+			UserID:     t.UserID,
+			SessionID:  t.SessionID,
+			SampleRate: t.SampleRate,
+			Sampled:    t.Sampled,
+			DurationMs: t.DurationMs,
+			Status:     t.Status,
+			Error:      t.Error,
+			Attrs:      t.Attrs,
+			CreatedAt:  t.CreatedAt.Format("2006-01-02 15:04:05"),
+		})
+	}
+	return TraceListResponse{Total: total, Traces: items}, nil
 }
 
 func (s *chatService) GetMetricsSnapshot() (map[string]any, error) {
 	if s.obs == nil {
 		return nil, fmt.Errorf("observability 未启用")
 	}
-	return s.obs.MetricsSnapshot()
+	raw, err := s.obs.MetricsSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	rawCounters, _ := raw["counters"].([]any)
+	rawGauges, _ := raw["gauges"].([]any)
+	rawHistos, _ := raw["histograms"].([]any)
+	labelDropped, _ := raw["label_cardinality_dropped_total"].(int64)
+	var generatedTs string
+	if ts, ok := raw["generated_at_seconds"].(int64); ok {
+		generatedTs = time.Unix(ts, 0).Format(time.RFC3339)
+	}
+
+	samplingRate := 0.0
+	labelCardLimit := 0
+	bufferDropped := int64(0)
+	piiMasked := int64(0)
+	if ss, ok := raw["sink_stats"].(map[string]any); ok {
+		if v, ok := ss["dropped_records_total"].(int64); ok {
+			bufferDropped = v
+		}
+	}
+	if c, ok := s.obs.(interface{ SamplingRate() float64 }); ok {
+		samplingRate = c.SamplingRate()
+	} else if cfg := s.cfgObservability(); cfg != nil {
+		samplingRate = cfg.SamplingRate
+	}
+
+	labelsToMap := func(raw []any) map[string]string {
+		out := map[string]string{}
+		for _, r := range raw {
+			if m, ok := r.(map[string]any); ok {
+				k, _ := m["name"].(string)
+				v, _ := m["value"].(string)
+				if k != "" {
+					out[k] = v
+				}
+			}
+		}
+		return out
+	}
+	type namedSamples struct {
+		Name    string
+		Help    string
+		Samples []any
+	}
+	groupByMetric := func(rows []any) []namedSamples {
+		groups := map[string]*namedSamples{}
+		order := []string{}
+		for _, r := range rows {
+			m, ok := r.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := m["name"].(string)
+			if name == "" {
+				continue
+			}
+			if _, seen := groups[name]; !seen {
+				groups[name] = &namedSamples{Name: name}
+				order = append(order, name)
+			}
+			sample := map[string]any{}
+			labelsRaw, _ := m["labels"].([]any)
+			labelsM := labelsToMap(labelsRaw)
+			if len(labelsM) > 0 {
+				sample["labels"] = labelsM
+			}
+			switch {
+			case m["value"] != nil:
+				if v, ok := m["value"].(float64); ok {
+					sample["value"] = int64(v)
+				} else {
+					sample["value"] = m["value"]
+				}
+			case m["count"] != nil:
+				if v, ok := m["count"].(int64); ok {
+					sample["count"] = v
+				} else {
+					sample["count"] = m["count"]
+				}
+				if sum, ok := m["sum"].(float64); ok {
+					sample["sum"] = sum
+				}
+				if buckets, ok := m["buckets"].([]any); ok {
+					outB := make([]any, 0, len(buckets))
+					for _, b := range buckets {
+						bm, ok := b.(map[string]any)
+						if !ok {
+							continue
+						}
+						le := bm["le"]
+						if le == "+Inf" {
+						}
+						cnt, _ := bm["delta_count"].(int64)
+						outB = append(outB, map[string]any{"le": le, "count": cnt})
+					}
+					sample["buckets"] = outB
+				}
+			}
+			groups[name].Samples = append(groups[name].Samples, sample)
+		}
+		out := make([]namedSamples, 0, len(order))
+		for _, n := range order {
+			out = append(out, *groups[n])
+		}
+		return out
+	}
+	cGroups := groupByMetric(rawCounters)
+	gGroups := groupByMetric(rawGauges)
+	hGroups := groupByMetric(rawHistos)
+	counters := make([]any, 0, len(cGroups))
+	for _, c := range cGroups {
+		counters = append(counters, map[string]any{"name": c.Name, "help": "", "samples": c.Samples})
+	}
+	gauges := make([]any, 0, len(gGroups))
+	for _, g := range gGroups {
+		gauges = append(gauges, map[string]any{"name": g.Name, "help": "", "samples": g.Samples})
+	}
+	histos := make([]any, 0, len(hGroups))
+	for _, h := range hGroups {
+		histos = append(histos, map[string]any{"name": h.Name, "help": "", "samples": h.Samples})
+	}
+	return map[string]any{
+		"ts":                              generatedTs,
+		"counters":                        counters,
+		"gauges":                          gauges,
+		"histograms":                      histos,
+		"sampling_rate":                   samplingRate,
+		"label_cardinality_limit":         labelCardLimit,
+		"buffer_dropped_total":            bufferDropped,
+		"pii_masked_total":                piiMasked,
+		"label_cardinality_dropped_total": labelDropped,
+	}, nil
+}
+
+func (s *chatService) cfgObservability() *config.ObservabilityConfig {
+	if s.obs == nil {
+		return nil
+	}
+	type cfgProvider interface{ Config() config.ObservabilityConfig }
+	if p, ok := s.obs.(cfgProvider); ok {
+		c := p.Config()
+		return &c
+	}
+	return nil
 }
 
 func ratingLabel(r int) string {

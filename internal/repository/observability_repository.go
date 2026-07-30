@@ -80,7 +80,26 @@ func (r *observabilityRepository) ListBySession(ctx context.Context, sessionID, 
 		return nil, 0, err
 	}
 	var rows []entity.ChatTrace
-	err := q.Select("id, request_id, user_id, session_id, duration_ms, status, error, attrs, created_at").
+	err := q.Select("id, request_id, user_id, session_id, sample_rate, sampled, duration_ms, status, error, attrs, created_at").
+		Order("created_at DESC").
+		Offset(offset).Limit(limit).Find(&rows).Error
+	return rows, total, err
+}
+
+func (r *observabilityRepository) ListAll(ctx context.Context, sessionID string, status string, offset, limit int) ([]entity.ChatTrace, int64, error) {
+	var total int64
+	q := r.db.WithContext(ctx).Model(&entity.ChatTrace{})
+	if sessionID != "" {
+		q = q.Where("session_id = ?", sessionID)
+	}
+	if status != "" {
+		q = q.Where("status = ?", status)
+	}
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var rows []entity.ChatTrace
+	err := q.Select("id, request_id, user_id, session_id, sample_rate, sampled, duration_ms, status, error, attrs, created_at").
 		Order("created_at DESC").
 		Offset(offset).Limit(limit).Find(&rows).Error
 	return rows, total, err

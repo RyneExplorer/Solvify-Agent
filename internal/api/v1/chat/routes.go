@@ -30,9 +30,11 @@ func (ctrl *Controller) RegisterRoutes(router *gin.RouterGroup) {
 		adminGroup.POST("/cleanup", ctrl.AdminCleanupSessions)
 	}
 
-	metricsGroup := router.Group("/admin/observability")
-	metricsGroup.Use(middleware.RequireAdmin())
+	obsAdmin := router.Group("/admin/observability")
+	obsAdmin.Use(middleware.RequireAdmin())
 	{
-		metricsGroup.GET("/metrics", ctrl.MetricsSnapshot)
+		obsAdmin.GET("/metrics", ctrl.MetricsSnapshot)
+		obsAdmin.GET("/traces", ctrl.AdminListTraces)
+		obsAdmin.GET("/traces/:trace_id", ctrl.AdminGetTrace)
 	}
 }
