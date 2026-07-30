@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { ChatSpan } from '@/types/chat'
-import { computed, ref } from 'vue'
+import { computed, ref, inject } from 'vue'
 
 const props = defineProps<{
   span: ChatSpan
@@ -9,6 +9,7 @@ const props = defineProps<{
 
 const depth = computed(() => props.depth ?? 0)
 const expanded = ref(depth.value <= 1)
+const rootDurationMs = inject<number>('trace_root_duration_ms')
 
 const statusColor = computed(() => {
   switch (props.span.status) {
@@ -20,8 +21,10 @@ const statusColor = computed(() => {
 })
 
 const barPct = computed(() => {
-  if (!props.span.duration_ms || !props.span.self_root_duration_ms) return 0
-  return Math.max(1, Math.min(100, (props.span.duration_ms / props.span.self_root_duration_ms) * 100))
+  const dur = props.span.duration_ms
+  const root = rootDurationMs ?? props.span.duration_ms
+  if (!dur || !root) return 0
+  return Math.max(1, Math.min(100, (dur / root) * 100))
 })
 
 function toggle() {

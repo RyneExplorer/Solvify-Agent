@@ -394,13 +394,13 @@
       <!-- Traces -->
       <div v-if="activeObsTab === 'traces'">
         <div class="flex justify-between items-center mb-4">
-          <div class="flex gap-2 items-center">
+          <div class="flex gap-2 items-center flex-wrap">
             <input
               v-model="traceQuerySessionId"
-              placeholder="输入 Session ID 查询该会话下的 Traces..."
-              class="w-[380px] rounded-lg border border-slate-200 bg-slate-50 text-sm px-3 py-2 text-slate-800 outline-none focus:border-slate-800"
+              placeholder="Session ID（留空=全局查询最新）"
+              class="w-[320px] rounded-lg border border-slate-200 bg-slate-50 text-sm px-3 py-2 text-slate-800 outline-none focus:border-slate-800"
             />
-            <AppButton size="sm" @click="loadSessionTraces" :disabled="!traceQuerySessionId" :loading="obsTracesLoading">查询会话</AppButton>
+            <AppButton size="sm" @click="loadSessionTraces" :loading="obsTracesLoading">{{ traceQuerySessionId ? '查询会话' : '拉取最新 Traces' }}</AppButton>
             <div class="mx-2 w-px h-5 bg-slate-200" />
             <input
               v-model="traceQueryTraceId"
@@ -481,7 +481,7 @@
             <div>
               <div class="text-xs text-slate-400 mb-2">Span Tree</div>
               <div v-if="obsTraceDetail.span_tree" class="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
-                <trace-span-node :span="obsTraceDetail.span_tree" :depth="0" />
+                <trace-root-provider :root="obsTraceDetail.span_tree" />
               </div>
               <div v-else class="text-sm text-slate-400 px-3 py-8 text-center rounded-lg bg-slate-50">该 Trace 未记录 span_tree（可能未采样或采样后未写入）</div>
             </div>
@@ -773,7 +773,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { provide, ref, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AppCard from '../components/ui/AppCard.vue'
 import AppButton from '../components/ui/AppButton.vue'
@@ -782,7 +782,7 @@ import AppAvatar from '../components/ui/AppAvatar.vue'
 import AppSelect from '../components/ui/AppSelect.vue'
 import SearchInput from '../components/ui/SearchInput.vue'
 import StatCard from '../components/StatCard.vue'
-import TraceSpanNode from '../components/TraceSpanNode.vue'
+import TraceRootProvider from '../components/TraceRootProvider.vue'
 import type { ModelInfo } from '@/types/model'
 import type { ToolTypeInfo, ToolProviderInfo } from '@/types/tool'
 import type { AdminSession, TraceSummary, ChatTraceDetail, MetricsSnapshot } from '@/types/chat'
@@ -808,8 +808,9 @@ import {
   adminDeleteSession,
   adminCleanupSessions,
   adminGetObservabilityMetrics,
+  adminListTraces,
+  adminGetTrace,
 } from '@/api/admin'
-import { getTrace, listSessionTraces } from '@/api/chat'
 import type { AdminUser } from '@/types/auth'
 
 const activeTab = ref('users')
@@ -1506,15 +1507,15 @@ async function loadObsMetrics() {
 }
 
 async function loadSessionTraces() {
-  if (!traceQuerySessionId.value) return
   obsTracesLoading.value = true
   try {
-    const res = await listSessionTraces(traceQuerySessionId.value, {
+    const res = await adminListTraces({
+      session_id: traceQuerySessionId.value || undefined,
       page: obsTracePage.value,
       pageSize: obsTracePageSize.value,
     })
-    obsTraces.value = res.items || []
-    obsTracesTotal.value = res.total ?? res.items?.length ?? 0
+    obsTraces.value = res.traces || []
+    obsTracesTotal.value = res.total ?? 0
   } catch (e: any) {
     ElMessage.error(e.message || '加载 Traces 失败')
   } finally {
@@ -1527,7 +1528,7 @@ async function openTraceDetail(traceId: string) {
   obsTraceDetailLoading.value = true
   obsTraceDetail.value = null
   try {
-    obsTraceDetail.value = await getTrace(traceId)
+    obsTraceDetail.value = await adminGetTrace(traceId)
   } catch (e: any) {
     ElMessage.error(e.message || '加载 Trace 详情失败')
   } finally {

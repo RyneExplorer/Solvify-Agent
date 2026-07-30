@@ -2,7 +2,7 @@ import { request } from './client'
 import type { ModelInfo } from '@/types/model'
 import type { ToolTypeInfo, ToolProviderInfo } from '@/types/tool'
 import type { AdminUser } from '@/types/auth'
-import type { AdminSession, MetricsSnapshot } from '@/types/chat'
+import type { AdminSession, MetricsSnapshot, TraceSummary, ChatTraceDetail } from '@/types/chat'
 
 // ── Admin Users ──
 
@@ -224,5 +224,25 @@ export function adminCleanupSessions() {
 // ── Observability (Admin) ──
 
 export function adminGetObservabilityMetrics() {
-  return request<MetricsSnapshot>('/chat/admin/observability/metrics')
+  return request<MetricsSnapshot>('/admin/observability/metrics')
+}
+
+export function adminListTraces(params: {
+  page?: number
+  pageSize?: number
+  session_id?: string
+  status?: string
+  rating?: number
+}) {
+  const query = new URLSearchParams()
+  if (params.page !== undefined) query.set('page', String(params.page))
+  if (params.pageSize !== undefined) query.set('pageSize', String(params.pageSize))
+  if (params.session_id) query.set('session_id', params.session_id)
+  if (params.status) query.set('status', params.status)
+  if (params.rating !== undefined) query.set('rating', String(params.rating))
+  return request<{ traces: TraceSummary[]; total: number }>(`/admin/observability/traces?${query.toString()}`)
+}
+
+export function adminGetTrace(traceId: string) {
+  return request<ChatTraceDetail>(`/admin/observability/traces/${traceId}`)
 }
