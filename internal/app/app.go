@@ -21,6 +21,7 @@ import (
 	"solvify-agent/internal/integration/dingtalk"
 	"solvify-agent/internal/llm"
 	"solvify-agent/internal/middleware"
+	"solvify-agent/internal/observability"
 	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
@@ -38,6 +39,7 @@ type App struct {
 	cfg          *config.Config
 	postgresqlDB *gorm.DB
 	redis        *redis.Client
+	obsRecorder  observability.Recorder
 	router       *api.Router
 	server       *http.Server
 }
@@ -58,7 +60,6 @@ func (a *App) Initialize() error {
 	if err := a.initDatabase(); err != nil {
 		return err
 	}
-
 	a.initDependencies()
 	a.initRouter()
 	a.initServer()
@@ -267,6 +268,10 @@ func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo rep
 		toolFactory,
 		a.cfg.Agent,
 	)
+	// 阶段三：绑定可观测性 recorder
+	if a.obsRecorder != nil {
+		agentEngine.WithObservability(a.obsRecorder)
+	}
 
 	return &AgentComponents{
 		Retriever:   vectorRetriever,
@@ -288,8 +293,17 @@ func (a *App) initDependencies() {
 	dingtalkBindingRepo := repository.NewDingTalkBindingRepository(a.postgresqlDB)
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
 	userRepo := repository.NewUserRepository(a.postgresqlDB)
-	// 阶段二：用户偏好 Repository
 	userPreferenceRepo := repository.NewUserPreferenceRepository(a.postgresqlDB)
+	obsRepo := repository.NewObservabilityRepository(a.postgresqlDB)
+
+	// 阶段三：初始化可观测性 Recorder（DB Sink + 批量日志 Sink + 采样器 + PII）
+	obsCfg := a.cfg.Observability
+	if !obsCfg.Enabled {
+		a.obsRecorder = observability.NewRecorder(obsCfg)
+	} else {
+		a.obsRecorder = observability.NewRecorderWithDBSink(obsCfg, obsRepo)
+	}
+	logger.Infof("可观测性模块初始化: enabled=%v sample_rate=%.2f db_sink=%v", obsCfg.Enabled, obsCfg.SamplingRate, obsCfg.TraceTableEnabled)
 
 	// 模型配置缓存（10 分钟 TTL）
 	modelCache := cache.New(a.redis, "model:", 10*time.Minute)
@@ -328,7 +342,6 @@ func (a *App) initDependencies() {
 	ai := a.initAgentComponents(toolFactory, documentRepo, chunkRepo, knowledgeBaseRepo)
 
 	// 初始化 Service
-	// 阶段二：创建 UserPreference Service，作为 UserService 依赖
 	prefSvc := service.NewUserPreferenceService(userPreferenceRepo)
 	userSvc := service.NewUserService(userRepo, prefSvc)
 	adminUserSvc := service.NewAdminUserService(userRepo)
@@ -350,8 +363,8 @@ func (a *App) initDependencies() {
 	dingtalkSvc := service.NewDingTalkService(a.cfg.DingTalk, dingtalkBindingRepo, dingtalkStateCache, dingtalkClient)
 	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncItemRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, textExtractor, dingtalkClient, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
-	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo)
-	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc)
+	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo, a.obsRecorder)
+	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.obsRecorder, obsRepo)
 	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo)
 	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry)
 	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo, toolRegistry)
@@ -412,6 +425,10 @@ func (a *App) initServer() {
 	engine.Use(middleware.Recovery())
 	engine.Use(middleware.CORS())
 	engine.Use(middleware.Logger())
+	if a.obsRecorder != nil {
+		// 阶段三：可观测性链路中间件（生成 request_id、记录 HTTP 指标、panic 恢复）
+		engine.Use(observability.NewTraceMiddleware(a.obsRecorder).Handler())
+	}
 	a.router.Setup(engine)
 
 	a.server = &http.Server{
@@ -435,6 +452,15 @@ func (a *App) gracefulShutdown() {
 
 	if err := a.server.Shutdown(ctx); err != nil {
 		logger.Fatal("HTTP 服务关闭失败", zap.Error(err))
+	}
+
+	// 阶段三：优雅关闭可观测性 recorder（刷新批量 Sink）
+	if a.obsRecorder != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := a.obsRecorder.Shutdown(shutdownCtx); err != nil {
+			logger.Errorf("可观测性 recorder 关闭失败: %v", err)
+		}
 	}
 
 	if a.postgresqlDB != nil {

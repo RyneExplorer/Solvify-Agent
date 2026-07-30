@@ -209,3 +209,8 @@ func GetUserRole(c *gin.Context) int {
 func RequireAdmin() gin.HandlerFunc {
 	return RequireRole(2)
 }
+
+// IsCurrentUserAdmin 判断当前登录用户是否管理员（不自动拦截）
+func IsCurrentUserAdmin(c *gin.Context) bool {
+	return GetUserRole(c) == 2
+}
