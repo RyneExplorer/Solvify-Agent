@@ -214,6 +214,282 @@
       </AppCard>
     </div>
 
+    <!-- Observability tab -->
+    <div v-if="activeTab === 'observability'">
+      <div class="flex border-b border-slate-200 mb-6">
+        <button
+          v-for="t in obsTabs" :key="t.key"
+          @click="activeObsTab = t.key"
+          :class="[
+            'px-4 py-2.5 text-sm border-b-2 transition-colors cursor-pointer whitespace-nowrap',
+            activeObsTab === t.key
+              ? 'text-slate-900 font-medium border-slate-900'
+              : 'text-slate-400 border-transparent hover:text-slate-600'
+          ]"
+        >{{ t.label }}</button>
+      </div>
+
+      <!-- Metrics -->
+      <div v-if="activeObsTab === 'metrics'">
+        <div class="flex justify-between items-center mb-4">
+          <div>
+            <h2 class="text-sm font-semibold text-slate-900">实时指标快照</h2>
+            <p class="text-xs text-slate-400 mt-0.5">采集时间：{{ obsMetrics?.ts ? formatDate(obsMetrics.ts) : '-' }}</p>
+          </div>
+          <AppButton size="sm" @click="loadObsMetrics" :loading="obsMetricsLoading">刷新</AppButton>
+        </div>
+        <div class="grid grid-cols-5 gap-4 mb-6">
+          <StatCard
+            title="采样率"
+            :value="obsMetrics ? `${(obsMetrics.sampling_rate * 100).toFixed(0)}%` : '-'"
+            hint="Traces 默认采样比例"
+            accent="blue"
+          />
+          <StatCard
+            title="缓冲区丢弃总数"
+            :value="obsMetrics?.buffer_dropped_total ?? '-'"
+            hint="Sink 队列满后丢弃的记录"
+            accent="amber"
+          />
+          <StatCard
+            title="PII 脱敏次数"
+            :value="obsMetrics?.pii_masked_total ?? '-'"
+            hint="命中 PII 规则的字段数量"
+            accent="emerald"
+          />
+          <StatCard
+            title="标签基数丢弃"
+            :value="obsMetrics?.label_cardinality_dropped_total ?? '-'"
+            hint="超出单 metric label 组合上限被丢弃的样本"
+            accent="rose"
+          />
+          <StatCard
+            title="单 Metric 标签上限"
+            :value="obsMetrics?.label_cardinality_limit ?? '-'"
+            hint="每个指标最多允许的维度组合数"
+            accent="slate"
+          />
+        </div>
+        <div class="space-y-5">
+          <section>
+            <div class="flex items-center justify-between mb-2">
+              <h3 class="text-[13px] font-semibold text-slate-700">Counters (累计计数)</h3>
+              <span class="text-xs text-slate-400">{{ obsMetrics?.counters?.length || 0 }} 个</span>
+            </div>
+            <AppCard class="!p-0 overflow-hidden">
+              <table v-if="obsMetrics?.counters?.length" class="w-full text-sm border-collapse">
+                <thead>
+                  <tr class="bg-slate-50 border-b border-slate-200">
+                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Name</th>
+                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Labels</th>
+                    <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Value</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template v-for="m in obsMetrics.counters" :key="m.name">
+                    <tr v-for="(s, i) in m.samples" :key="m.name + '_' + i" class="border-b border-slate-100 last:border-b-0 hover:bg-slate-50/40">
+                      <td v-if="i === 0" :rowspan="m.samples.length" class="px-4 py-2.5 font-mono text-xs align-top text-slate-700">
+                        <div class="font-medium text-slate-900">{{ m.name }}</div>
+                        <div v-if="m.help" class="mt-1 text-[11px] text-slate-400">{{ m.help }}</div>
+                      </td>
+                      <td class="px-4 py-2.5 text-xs text-slate-600 align-top">
+                        <div v-if="s.labels && Object.keys(s.labels).length" class="flex flex-wrap gap-1">
+                          <span v-for="(v, k) in s.labels" :key="k" class="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 font-mono text-[11px]">{{ k }}={{ v }}</span>
+                        </div>
+                        <span v-else class="text-slate-300">-</span>
+                      </td>
+                      <td class="px-4 py-2.5 text-right text-slate-900 font-mono tabular-nums">{{ s.value }}</td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+              <div v-else class="px-4 py-10 text-center text-sm text-slate-400">暂无 Counters</div>
+            </AppCard>
+          </section>
+
+          <section>
+            <div class="flex items-center justify-between mb-2">
+              <h3 class="text-[13px] font-semibold text-slate-700">Gauges (瞬时值)</h3>
+              <span class="text-xs text-slate-400">{{ obsMetrics?.gauges?.length || 0 }} 个</span>
+            </div>
+            <AppCard class="!p-0 overflow-hidden">
+              <table v-if="obsMetrics?.gauges?.length" class="w-full text-sm border-collapse">
+                <thead>
+                  <tr class="bg-slate-50 border-b border-slate-200">
+                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Name</th>
+                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Labels</th>
+                    <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Value</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template v-for="m in obsMetrics.gauges" :key="m.name">
+                    <tr v-for="(s, i) in m.samples" :key="m.name + '_' + i" class="border-b border-slate-100 last:border-b-0 hover:bg-slate-50/40">
+                      <td v-if="i === 0" :rowspan="m.samples.length" class="px-4 py-2.5 font-mono text-xs align-top text-slate-700">
+                        <div class="font-medium text-slate-900">{{ m.name }}</div>
+                        <div v-if="m.help" class="mt-1 text-[11px] text-slate-400">{{ m.help }}</div>
+                      </td>
+                      <td class="px-4 py-2.5 text-xs text-slate-600 align-top">
+                        <div v-if="s.labels && Object.keys(s.labels).length" class="flex flex-wrap gap-1">
+                          <span v-for="(v, k) in s.labels" :key="k" class="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 font-mono text-[11px]">{{ k }}={{ v }}</span>
+                        </div>
+                        <span v-else class="text-slate-300">-</span>
+                      </td>
+                      <td class="px-4 py-2.5 text-right text-slate-900 font-mono tabular-nums">{{ s.value }}</td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+              <div v-else class="px-4 py-10 text-center text-sm text-slate-400">暂无 Gauges</div>
+            </AppCard>
+          </section>
+
+          <section>
+            <div class="flex items-center justify-between mb-2">
+              <h3 class="text-[13px] font-semibold text-slate-700">Histograms (分布)</h3>
+              <span class="text-xs text-slate-400">{{ obsMetrics?.histograms?.length || 0 }} 个</span>
+            </div>
+            <div v-if="obsMetrics?.histograms?.length" class="space-y-3">
+              <AppCard v-for="m in obsMetrics.histograms" :key="m.name">
+                <div class="flex items-start justify-between mb-3">
+                  <div>
+                    <div class="font-mono text-sm font-semibold text-slate-900">{{ m.name }}</div>
+                    <div v-if="m.help" class="text-[11px] text-slate-400 mt-0.5">{{ m.help }}</div>
+                  </div>
+                  <div class="text-right">
+                    <div class="text-[11px] text-slate-400">Total Count</div>
+                    <div class="font-mono text-slate-900 tabular-nums">{{ m.samples.reduce((a, b) => a + b.count, 0) }}</div>
+                  </div>
+                </div>
+                <div class="space-y-2">
+                  <div v-for="(s, i) in m.samples" :key="i" class="border border-slate-100 rounded-lg p-3">
+                    <div class="flex items-center justify-between mb-2">
+                      <div v-if="s.labels && Object.keys(s.labels).length" class="flex flex-wrap gap-1">
+                        <span v-for="(v, k) in s.labels" :key="k" class="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 font-mono text-[11px]">{{ k }}={{ v }}</span>
+                      </div>
+                      <div class="flex items-center gap-3 text-xs text-slate-500">
+                        <span>sum: <span class="font-mono text-slate-800 tabular-nums">{{ s.sum }}</span></span>
+                        <span>count: <span class="font-mono text-slate-800 tabular-nums">{{ s.count }}</span></span>
+                      </div>
+                    </div>
+                    <div class="grid grid-cols-5 gap-1">
+                      <div
+                        v-for="(b, bi) in s.buckets"
+                        :key="bi"
+                        class="flex flex-col items-center justify-center h-16 rounded-md border border-slate-200"
+                        :style="{ background: `linear-gradient(to top, rgba(16, 185, 129, 0.22) ${Math.min(100, s.count ? (b.count / s.count) * 100 : 0)}%, transparent 0)` }"
+                      >
+                        <div class="text-[10px] text-slate-400">≤ {{ b.le }}</div>
+                        <div class="text-[11px] font-mono text-slate-800 tabular-nums">{{ b.count }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </AppCard>
+            </div>
+            <div v-else class="AppCard px-4 py-10 text-center text-sm text-slate-400">暂无 Histograms</div>
+          </section>
+        </div>
+      </div>
+
+      <!-- Traces -->
+      <div v-if="activeObsTab === 'traces'">
+        <div class="flex justify-between items-center mb-4">
+          <div class="flex gap-2 items-center">
+            <input
+              v-model="traceQuerySessionId"
+              placeholder="输入 Session ID 查询该会话下的 Traces..."
+              class="w-[380px] rounded-lg border border-slate-200 bg-slate-50 text-sm px-3 py-2 text-slate-800 outline-none focus:border-slate-800"
+            />
+            <AppButton size="sm" @click="loadSessionTraces" :disabled="!traceQuerySessionId" :loading="obsTracesLoading">查询会话</AppButton>
+            <div class="mx-2 w-px h-5 bg-slate-200" />
+            <input
+              v-model="traceQueryTraceId"
+              placeholder="输入 Trace ID 查看详情..."
+              class="w-[320px] rounded-lg border border-slate-200 bg-slate-50 text-sm px-3 py-2 text-slate-800 outline-none focus:border-slate-800"
+            />
+            <AppButton size="sm" variant="outline" @click="openTraceById" :disabled="!traceQueryTraceId">查看 Trace</AppButton>
+          </div>
+        </div>
+        <AppCard class="!p-0 overflow-hidden">
+          <table v-if="obsTraces.length" class="w-full text-sm border-collapse">
+            <thead>
+              <tr class="bg-slate-50 border-b border-slate-200">
+                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Trace ID</th>
+                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Session</th>
+                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Status</th>
+                <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Duration</th>
+                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Sampled / Rate</th>
+                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Created</th>
+                <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="t in obsTraces" :key="t.id" class="border-b border-slate-100 last:border-b-0 hover:bg-slate-50/60">
+                <td class="px-4 py-3 font-mono text-xs text-slate-700">{{ t.id }}</td>
+                <td class="px-4 py-3 text-xs text-slate-500">{{ t.session_id || '-' }}</td>
+                <td class="px-4 py-3">
+                  <AppBadge :variant="traceStatusBadge(t.status)">{{ traceStatusText(t.status, t.error) }}</AppBadge>
+                </td>
+                <td class="px-4 py-3 text-right font-mono tabular-nums text-slate-800">{{ t.duration_ms }} ms</td>
+                <td class="px-4 py-3 text-xs text-slate-600">
+                  <AppBadge :variant="t.sampled ? 'success' : 'neutral'">{{ t.sampled ? '✓ Sampled' : '✗ Drop' }}</AppBadge>
+                  <span class="ml-2 text-slate-400">{{ (t.sample_rate * 100).toFixed(0) }}%</span>
+                </td>
+                <td class="px-4 py-3 text-xs text-slate-500">{{ formatDate(t.created_at) }}</td>
+                <td class="px-4 py-3 text-right"><AppButton size="sm" variant="ghost" @click="openTraceDetail(t.id)">查看详情</AppButton></td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-else class="px-4 py-12 text-center text-sm text-slate-400">暂无 Traces，请输入 Session ID 查询</div>
+        </AppCard>
+        <div v-if="obsTracesTotal > obsTracePageSize" class="flex justify-end mt-4">
+          <el-pagination v-model:current-page="obsTracePage" :page-size="obsTracePageSize" :total="obsTracesTotal" layout="prev, pager, next" background />
+        </div>
+      </div>
+    </div>
+
+    <!-- Trace Detail Dialog -->
+    <div v-if="traceDetailVisible" class="fixed inset-0 z-50 flex items-center justify-center">
+      <div class="absolute inset-0 bg-black/30" @click="traceDetailVisible = false" />
+      <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 w-[980px] max-h-[88vh] flex flex-col">
+        <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200 shrink-0">
+          <div>
+            <h3 class="text-lg font-semibold text-slate-900">Trace 详情</h3>
+            <div v-if="obsTraceDetail" class="text-xs text-slate-400 mt-1">
+              <span class="font-mono">{{ obsTraceDetail.id }}</span>
+              <span class="mx-2 text-slate-300">·</span>
+              Session：{{ obsTraceDetail.session_id || '-' }}
+              <span class="mx-2 text-slate-300">·</span>
+              耗时：{{ obsTraceDetail.duration_ms }} ms
+              <span class="mx-2 text-slate-300">·</span>
+              <AppBadge size="sm" :variant="traceStatusBadge(obsTraceDetail.status)">{{ traceStatusText(obsTraceDetail.status, obsTraceDetail.error) }}</AppBadge>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button type="button" class="text-xl leading-none text-slate-400 hover:text-slate-600" @click="traceDetailVisible = false">×</button>
+          </div>
+        </div>
+        <div class="p-6 overflow-y-auto">
+          <div v-if="obsTraceDetailLoading" class="py-16 text-center text-sm text-slate-400">加载中...</div>
+          <div v-else-if="!obsTraceDetail" class="py-16 text-center text-sm text-slate-400">未找到该 Trace</div>
+          <div v-else>
+            <div v-if="obsTraceDetail.error" class="mb-4 rounded-xl bg-red-50 border border-red-200 text-red-700 px-4 py-3 text-sm whitespace-pre-wrap">{{ obsTraceDetail.error }}</div>
+            <div class="mb-4">
+              <div class="text-xs text-slate-400 mb-1">Root Attrs</div>
+              <pre class="rounded-lg bg-slate-50 border border-slate-200 p-3 text-[11px] text-slate-700 overflow-auto">{{ JSON.stringify(obsTraceDetail.attrs || {}, null, 2) }}</pre>
+            </div>
+            <div>
+              <div class="text-xs text-slate-400 mb-2">Span Tree</div>
+              <div v-if="obsTraceDetail.span_tree" class="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+                <trace-span-node :span="obsTraceDetail.span_tree" :depth="0" />
+              </div>
+              <div v-else class="text-sm text-slate-400 px-3 py-8 text-center rounded-lg bg-slate-50">该 Trace 未记录 span_tree（可能未采样或采样后未写入）</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Model Modal -->
     <div v-if="modelModalVisible" class="fixed inset-0 z-50 flex items-center justify-center">
       <div class="absolute inset-0 bg-black/30" @click="modelModalVisible = false" />
@@ -505,9 +781,11 @@ import AppBadge from '../components/ui/AppBadge.vue'
 import AppAvatar from '../components/ui/AppAvatar.vue'
 import AppSelect from '../components/ui/AppSelect.vue'
 import SearchInput from '../components/ui/SearchInput.vue'
+import StatCard from '../components/StatCard.vue'
+import TraceSpanNode from '../components/TraceSpanNode.vue'
 import type { ModelInfo } from '@/types/model'
 import type { ToolTypeInfo, ToolProviderInfo } from '@/types/tool'
-import type { AdminSession } from '@/types/chat'
+import type { AdminSession, TraceSummary, ChatTraceDetail, MetricsSnapshot } from '@/types/chat'
 import {
   adminListUsers,
   adminCreateUser,
@@ -529,7 +807,9 @@ import {
   adminListSessions,
   adminDeleteSession,
   adminCleanupSessions,
+  adminGetObservabilityMetrics,
 } from '@/api/admin'
+import { getTrace, listSessionTraces } from '@/api/chat'
 import type { AdminUser } from '@/types/auth'
 
 const activeTab = ref('users')
@@ -547,10 +827,30 @@ const adminTabs = [
   { key: 'sessions', label: '会话管理' },
   { key: 'models', label: '模型管理' },
   { key: 'tools', label: '工具管理' },
+  { key: 'observability', label: '可观测性' },
 ]
 
 const users = ref<AdminUser[]>([])
 const sessions = ref<AdminSession[]>([])
+
+// ── Observability state ──
+const obsTabs = [
+  { key: 'metrics', label: '指标 Metrics' },
+  { key: 'traces', label: '链路 Traces' },
+]
+const activeObsTab = ref<'metrics' | 'traces'>('metrics')
+const obsMetrics = ref<MetricsSnapshot | null>(null)
+const obsMetricsLoading = ref(false)
+const obsTraces = ref<TraceSummary[]>([])
+const obsTracePage = ref(1)
+const obsTracePageSize = ref(50)
+const obsTracesTotal = ref(0)
+const obsTracesLoading = ref(false)
+const traceQuerySessionId = ref('')
+const traceQueryTraceId = ref('')
+const traceDetailVisible = ref(false)
+const obsTraceDetailLoading = ref(false)
+const obsTraceDetail = ref<ChatTraceDetail | null>(null)
 
 const sessionStatusOptions = [
   { value: '', label: '全部状态' },
@@ -1173,20 +1473,91 @@ async function deleteToolProvider(id: string) {
   }
 }
 
+// ── Observability methods ──
+function traceStatusBadge(status?: string): 'success' | 'danger' | 'warning' | 'neutral' {
+  switch (status) {
+    case 'ok': return 'success'
+    case 'error': return 'danger'
+    case 'slow': return 'warning'
+    default: return 'neutral'
+  }
+}
+function traceStatusText(status?: string, error?: string): string {
+  if (status === 'error' && error) return `Error · ${error.split('\n')[0]?.slice(0, 40) || '请求失败'}`
+  switch (status) {
+    case 'ok': return 'Ok'
+    case 'error': return 'Error'
+    case 'slow': return 'Slow (尾延迟)'
+    case 'cancelled': return 'Cancelled'
+    default: return status || '-'
+  }
+}
+
+async function loadObsMetrics() {
+  obsMetricsLoading.value = true
+  try {
+    const res = await adminGetObservabilityMetrics()
+    obsMetrics.value = res
+  } catch (e: any) {
+    ElMessage.error(e.message || '加载指标失败')
+  } finally {
+    obsMetricsLoading.value = false
+  }
+}
+
+async function loadSessionTraces() {
+  if (!traceQuerySessionId.value) return
+  obsTracesLoading.value = true
+  try {
+    const res = await listSessionTraces(traceQuerySessionId.value, {
+      page: obsTracePage.value,
+      pageSize: obsTracePageSize.value,
+    })
+    obsTraces.value = res.items || []
+    obsTracesTotal.value = res.total ?? res.items?.length ?? 0
+  } catch (e: any) {
+    ElMessage.error(e.message || '加载 Traces 失败')
+  } finally {
+    obsTracesLoading.value = false
+  }
+}
+
+async function openTraceDetail(traceId: string) {
+  traceDetailVisible.value = true
+  obsTraceDetailLoading.value = true
+  obsTraceDetail.value = null
+  try {
+    obsTraceDetail.value = await getTrace(traceId)
+  } catch (e: any) {
+    ElMessage.error(e.message || '加载 Trace 详情失败')
+  } finally {
+    obsTraceDetailLoading.value = false
+  }
+}
+
+function openTraceById() {
+  const id = traceQueryTraceId.value.trim()
+  if (!id) return
+  openTraceDetail(id)
+}
+
 watch(activeTab, (tab) => {
   if (tab === 'users') loadUsers()
   if (tab === 'sessions') loadSessions()
   if (tab === 'models') loadModels()
   if (tab === 'tools') loadToolTypes()
+  if (tab === 'observability' && !obsMetrics.value) loadObsMetrics()
 })
 
 watch(userSearch, () => loadUsers())
 watch([sessionSearch, sessionStatus, sessionPage], () => loadSessions())
+watch(obsTracePage, () => loadSessionTraces())
 
 onMounted(() => {
   if (activeTab.value === 'users') loadUsers()
   if (activeTab.value === 'sessions') loadSessions()
   if (activeTab.value === 'models') loadModels()
   if (activeTab.value === 'tools') loadToolTypes()
+  if (activeTab.value === 'observability') loadObsMetrics()
 })
 </script>
