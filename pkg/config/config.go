@@ -30,6 +30,7 @@ type Config struct {
 	Database       DatabaseConfig       `mapstructure:"database"`
 	JWT            JWTConfig            `mapstructure:"jwt"`
 	Email          EmailConfig          `mapstructure:"email"`
+	Observability  ObservabilityConfig  `mapstructure:"observability"`
 }
 
 // AppConfig 描述应用基础信息
@@ -194,6 +195,26 @@ type EmailConfig struct {
 	Password string `mapstructure:"password"`
 }
 
+// ObservabilityConfig 描述可观测配置
+type ObservabilityConfig struct {
+	Enabled              bool     `mapstructure:"enabled"`
+	SamplingRate         float64  `mapstructure:"sampling_rate"`
+	ErrorAlwaysSample    bool     `mapstructure:"error_always_sample"`
+	SlowThresholdMs      int      `mapstructure:"slow_threshold_ms"`
+	FeedbackAlwaysSample bool     `mapstructure:"feedback_always_sample"`
+	TraceTableEnabled    bool     `mapstructure:"trace_table_enabled"`
+	ExportLogEnabled     bool     `mapstructure:"export_log_enabled"`
+	MetricsFormat        string   `mapstructure:"metrics_format"`
+	SinkBufferSize       int      `mapstructure:"sink_buffer_size"`
+	SinkBatchSize        int      `mapstructure:"sink_batch_size"`
+	SinkFlushIntervalMs  int      `mapstructure:"sink_flush_interval_ms"`
+	PIIContentMaxChars   int      `mapstructure:"pii_content_max_chars"`
+	PIIMaskSecret        bool     `mapstructure:"pii_mask_secret"`
+	FeedbackEnabled      bool     `mapstructure:"feedback_enabled"`
+	WhiteListUserIDs     []string `mapstructure:"whitelist_user_ids"`
+	MaxCardinalityLabels int      `mapstructure:"max_cardinality_labels"`
+}
+
 var globalConfig *Config
 
 // Load 读取配置文件并应用环境变量覆盖
@@ -333,6 +354,23 @@ func Default() *Config {
 				PoolSize: 10,
 			},
 		},
+		Observability: ObservabilityConfig{
+			Enabled:              true,
+			SamplingRate:         0.2,
+			ErrorAlwaysSample:    true,
+			SlowThresholdMs:      5000,
+			FeedbackAlwaysSample: true,
+			TraceTableEnabled:    true,
+			ExportLogEnabled:     true,
+			MetricsFormat:        "json",
+			SinkBufferSize:       1024,
+			SinkBatchSize:        50,
+			SinkFlushIntervalMs:  200,
+			PIIContentMaxChars:   200,
+			PIIMaskSecret:        true,
+			FeedbackEnabled:      true,
+			MaxCardinalityLabels: 500,
+		},
 	}
 }
 
@@ -382,6 +420,31 @@ func (c *Config) Validate() error {
 	}
 	if c.DocumentParser.TimeoutSeconds <= 0 {
 		return errors.New("document_parser.timeout_seconds 必须大于 0")
+	}
+	if c.Observability.Enabled {
+		if c.Observability.SamplingRate < 0 || c.Observability.SamplingRate > 1 {
+			return errors.New("observability.sampling_rate 必须在 0 到 1 之间")
+		}
+		if c.Observability.SinkBufferSize <= 0 {
+			return errors.New("observability.sink_buffer_size 必须大于 0")
+		}
+		if c.Observability.SinkBatchSize <= 0 {
+			return errors.New("observability.sink_batch_size 必须大于 0")
+		}
+		if c.Observability.SinkFlushIntervalMs <= 0 {
+			return errors.New("observability.sink_flush_interval_ms 必须大于 0")
+		}
+		if c.Observability.PIIContentMaxChars < 0 {
+			return errors.New("observability.pii_content_max_chars 不能小于 0")
+		}
+		if c.Observability.MaxCardinalityLabels <= 0 {
+			return errors.New("observability.max_cardinality_labels 必须大于 0")
+		}
+		switch c.Observability.MetricsFormat {
+		case "json", "prometheus", "both", "none":
+		default:
+			return errors.New("observability.metrics_format 只支持 json/prometheus/both/none")
+		}
 	}
 	return nil
 }
@@ -526,6 +589,53 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("LOG_COMPRESS"); value != "" {
 		cfg.Log.Compress = parseBool(value, cfg.Log.Compress)
+	}
+
+	// Observability 配置
+	if value := os.Getenv("OBSERVABILITY_ENABLED"); value != "" {
+		cfg.Observability.Enabled = parseBool(value, cfg.Observability.Enabled)
+	}
+	if value := os.Getenv("OBSERVABILITY_SAMPLING_RATE"); value != "" {
+		cfg.Observability.SamplingRate = parseFloat(value, cfg.Observability.SamplingRate)
+	}
+	if value := os.Getenv("OBSERVABILITY_ERROR_ALWAYS_SAMPLE"); value != "" {
+		cfg.Observability.ErrorAlwaysSample = parseBool(value, cfg.Observability.ErrorAlwaysSample)
+	}
+	if value := os.Getenv("OBSERVABILITY_SLOW_THRESHOLD_MS"); value != "" {
+		cfg.Observability.SlowThresholdMs = parseInt(value, cfg.Observability.SlowThresholdMs)
+	}
+	if value := os.Getenv("OBSERVABILITY_FEEDBACK_ALWAYS_SAMPLE"); value != "" {
+		cfg.Observability.FeedbackAlwaysSample = parseBool(value, cfg.Observability.FeedbackAlwaysSample)
+	}
+	if value := os.Getenv("OBSERVABILITY_TRACE_TABLE_ENABLED"); value != "" {
+		cfg.Observability.TraceTableEnabled = parseBool(value, cfg.Observability.TraceTableEnabled)
+	}
+	if value := os.Getenv("OBSERVABILITY_EXPORT_LOG_ENABLED"); value != "" {
+		cfg.Observability.ExportLogEnabled = parseBool(value, cfg.Observability.ExportLogEnabled)
+	}
+	if v := os.Getenv("OBSERVABILITY_METRICS_FORMAT"); v != "" {
+		cfg.Observability.MetricsFormat = v
+	}
+	if value := os.Getenv("OBSERVABILITY_SINK_BUFFER_SIZE"); value != "" {
+		cfg.Observability.SinkBufferSize = parseInt(value, cfg.Observability.SinkBufferSize)
+	}
+	if value := os.Getenv("OBSERVABILITY_SINK_BATCH_SIZE"); value != "" {
+		cfg.Observability.SinkBatchSize = parseInt(value, cfg.Observability.SinkBatchSize)
+	}
+	if value := os.Getenv("OBSERVABILITY_SINK_FLUSH_INTERVAL_MS"); value != "" {
+		cfg.Observability.SinkFlushIntervalMs = parseInt(value, cfg.Observability.SinkFlushIntervalMs)
+	}
+	if value := os.Getenv("OBSERVABILITY_PII_CONTENT_MAX_CHARS"); value != "" {
+		cfg.Observability.PIIContentMaxChars = parseInt(value, cfg.Observability.PIIContentMaxChars)
+	}
+	if value := os.Getenv("OBSERVABILITY_PII_MASK_SECRET"); value != "" {
+		cfg.Observability.PIIMaskSecret = parseBool(value, cfg.Observability.PIIMaskSecret)
+	}
+	if value := os.Getenv("OBSERVABILITY_FEEDBACK_ENABLED"); value != "" {
+		cfg.Observability.FeedbackEnabled = parseBool(value, cfg.Observability.FeedbackEnabled)
+	}
+	if value := os.Getenv("OBSERVABILITY_MAX_CARDINALITY_LABELS"); value != "" {
+		cfg.Observability.MaxCardinalityLabels = parseInt(value, cfg.Observability.MaxCardinalityLabels)
 	}
 }
 
