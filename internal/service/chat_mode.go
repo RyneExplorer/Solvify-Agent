@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
+	"solvify-agent/internal/observability"
 	"solvify-agent/internal/rag"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
@@ -57,81 +59,101 @@ const queryRewriteShortRunes = 8
 // 2. 需要改写时：改写与原始检索并行；改写有变化则以改写结果为准（不污染 merge）
 // 3. history 剔除本轮刚落库的 user 消息，避免 Prompt 重复
 func (s *chatService) processMessage(ctx context.Context, userID, sessionID, userMsgID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	// Step 1: 加载模型 + 增强历史对话
+	obsOk := s.obs != nil
+	if obsOk {
+		_, span := s.obs.StartSpan(ctx, "chat.quick", observability.ComponentServiceChat, observability.Attrs{
+			"session_id": sessionID,
+			"user_id":    userID,
+			"model_id":   req.ModelID,
+			"search_mode": "quick",
+		})
+		defer func() {
+			status := observability.SpanStatusOK
+			var errVal error
+			if r := recover(); r != nil {
+				status = observability.SpanStatusError
+				errVal = fmt.Errorf("panic: %v", r)
+				sendErrorEvent(eventCh, fmt.Errorf("内部错误"), "处理过程中发生未预期错误")
+			}
+			s.obs.EndSpan(ctx, span, status, errVal, nil)
+			if s.obs != nil {
+				s.obs.AddRootAttrs(ctx, observability.Attrs{
+					"assistant_message_id": span.Attrs["assistant_message_id"],
+					"rag_hit":              span.Attrs["rag_hit"],
+					"intent":               span.Attrs["intent"],
+				})
+			}
+		}()
+		s.obs.Incr(ctx, "chat_quick_requests_total", map[string]string{
+			"model_id": req.ModelID,
+		}, 1)
+	}
+
 	sendProgressEvent(eventCh, "正在加载上下文...")
+	t0 := time.Now()
 	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content)
 	if err != nil {
+		if obsOk {
+			s.obs.AddRootAttrs(ctx, observability.Attrs{"init_ctx_error": err.Error()})
+			s.obs.Incr(ctx, "chat_quick_errors_total", map[string]string{"stage": "init_ctx"}, 1)
+		}
 		sendErrorEvent(eventCh, err, err.Error())
 		return
 	}
-	// 按消息 ID 剔除本轮刚保存的 user 消息，避免 Prompt 重复（不会因内容相同误删旧对话）
 	history := excludeByMessageID(enhancedCtx.History, userMsgID)
-
 	chatModel := client.ChatModel()
+	if obsOk {
+		s.obs.Observe(ctx, "chat_quick_init_ctx_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t0).Seconds())
+	}
 
-	// Step 2: 结构化改写 + 意图识别 + 关键词扩展（一次 LLM 产出 6 字段）
-	// 意图 chat/greeting 直接跳过检索；general/knowledge 才检索
 	sendProgressEvent(eventCh, "正在分析您的意图...")
 	rewritten := FallbackOriginalRewritten(req.Content)
-
-	// 快速模式：有历史对话才做 LLM 改写（独立问题用结构化结果 + 摘要），无历史用 AnalyzeIntent 快速意图分流
+	t1 := time.Now()
 	if len(history) > 0 {
 		rewritten = s.rewriteQuery(ctx, chatModel, history, req.Content, enhancedCtx.Summary)
 	} else {
-		// 无历史：直接复用 AnalyzeIntent 的意图结果（更准确），关键词用正则兜底
 		quickIntent := AnalyzeIntent(req.Content)
 		rewritten.Intent = quickIntent.Intent
 	}
-	logger.Infof("改写结果: sessionID=%s, 意图=%s, 是否改写=%v, 置信度=%.2f, 主查询=%q, 关键词=%v, 扩展查询=%v",
-		sessionID, rewritten.Intent, rewritten.Rewritten, rewritten.Confidence, rewritten.MainQuery, rewritten.Keywords, rewritten.ExpandedQueries)
+	if obsOk {
+		s.obs.Observe(ctx, "chat_quick_rewrite_seconds", map[string]string{"intent": string(rewritten.Intent)}, time.Since(t1).Seconds())
+		s.obs.AddRootAttrs(ctx, observability.Attrs{"intent": string(rewritten.Intent), "rewritten": fmt.Sprintf("%t", rewritten.Rewritten)})
+	}
 
-	// Step 3: 意图分流 + 检索（需要检索的情况才做）
 	var sources []dto.SourceInfo
 	var retrieveResult rag.Result
 
 	switch rewritten.Intent {
 	case IntentGreeting, IntentChitchat:
-		// 问候 / 闲聊：直接跳过 RAG，由快速模式的 System Prompt + LLM 直接礼貌回答
 		sendProgressEvent(eventCh, "正在整理回答...")
-		logger.Infof("意图=%s，跳过知识库检索", rewritten.Intent)
 
 	case IntentIdentity, IntentMeta, IntentListQuery:
-		// 身份 / 元问题 / 列表查询：由 AnalyzeIntent 已经打了 SkipRetrieval 标记，但我们统一还是走下面正常分支
-		// （SystemPrompt 里已内置身份/列表/元问题回答模板；有检索命中就参考，没有由通用回答兜底）
 		fallthrough
 
 	default:
-		// IntentQuestion（knowledge/general 通用知识库问答）：正常去检索
 		sendProgressEvent(eventCh, "正在检索知识库...")
-
-		// 多路并行检索：主查询 + 扩展查询，合并去重
 		queries := make([]string, 0, 1+len(rewritten.ExpandedQueries))
 		queries = append(queries, rewritten.MainQuery)
 		for _, eq := range rewritten.ExpandedQueries {
 			queries = append(queries, eq)
 		}
-		// 为了保证"改写前问题不漏结果；(原问题 也检索一次（兜底，合并结果去重）
 		origTrimmed := strings.TrimSpace(req.Content)
 		if origTrimmed != "" && origTrimmed != rewritten.MainQuery {
 			queries = append(queries, origTrimmed)
 		}
-
-		var (
-			mergedDocs  []rag.Document
-			mergedSrc   []dto.SourceInfo
-			mergeHit bool
-		)
-
+		t2 := time.Now()
 		if len(queries) == 1 {
 			var err2 error
 			sources, retrieveResult, err2 = s.retrieveContext(ctx, userID, rewritten.MainQuery, req.KnowledgeBaseIDs)
 			if err2 != nil {
+				if obsOk {
+					s.obs.Incr(ctx, "chat_quick_errors_total", map[string]string{"stage": "retrieve"}, 1)
+				}
 				logger.Errorf("知识库检索失败, sessionID=%s: %v", sessionID, err2)
 				sendErrorEvent(eventCh, err2, "知识库检索失败")
 				return
 			}
 		} else {
-			// 多路并行检索
 			type retPair struct {
 				srcs []dto.SourceInfo
 				res  rag.Result
@@ -145,7 +167,6 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID, use
 				g.Go(func() error {
 					s, r, e := s.retrieveContext(gCtx, userID, q, req.KnowledgeBaseIDs)
 					if e != nil {
-						// 单路检索失败不阻塞整体
 						logger.Warnf("多路检索单路失败 query=%q err=%v", q, e)
 						return nil
 					}
@@ -157,8 +178,12 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID, use
 			}
 			_ = g.Wait()
 
-			// 合并去重
 			seen := map[string]struct{}{}
+			var (
+				mergedDocs []rag.Document
+				mergedSrc  []dto.SourceInfo
+				mergeHit   bool
+			)
 			for _, rp := range results {
 				if rp.res.Hit {
 					mergeHit = true
@@ -180,40 +205,66 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID, use
 					mergedSrc = append(mergedSrc, src)
 				}
 			}
-
-			retrieveResult = rag.Result{
-				Hit:       mergeHit,
-				Documents: mergedDocs,
-			}
+			retrieveResult = rag.Result{Hit: mergeHit, Documents: mergedDocs}
 			sources = mergedSrc
+		}
+		if obsOk {
+			s.obs.Observe(ctx, "chat_quick_retrieve_seconds", map[string]string{
+				"queries": fmt.Sprintf("%d", len(queries)),
+				"hit":     fmt.Sprintf("%t", retrieveResult.Hit),
+			}, time.Since(t2).Seconds())
+			s.obs.Incr(ctx, "rag_retrievals_total", map[string]string{
+				"mode":      "quick",
+				"hit":       fmt.Sprintf("%t", retrieveResult.Hit),
+				"queries_n": fmt.Sprintf("%d", len(queries)),
+			}, 1)
+			s.obs.AddRootAttrs(ctx, observability.Attrs{
+				"rag_hit":       retrieveResult.Hit,
+				"rag_docs_n":    len(retrieveResult.Documents),
+				"rag_queries_n": len(queries),
+			})
 		}
 	}
 
-	// Step 4: 组装 Prompt（用统一 PromptBuilder，与深度模式共用 System/History 注入逻辑）
 	sendProgressEvent(eventCh, "正在整理资料...")
 	pb := NewPromptBuilder(PromptModeQuick, quickModeSystemPrompt, enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx).
 		WithProfile(enhancedCtx.Profile).
 		WithPreference(enhancedCtx.Preference)
 	messages := pb.BuildMessagesQuick(history, req.Content, retrieveResult, enhancedCtx.RetrievalBudget)
 
-	// Step 5: LLM 流式生成
 	assistantMsgID := uuid.New().String()
+	if obsOk {
+		s.obs.AddRootAttrs(ctx, observability.Attrs{"assistant_message_id": assistantMsgID})
+	}
+	t3 := time.Now()
 	fullContent, err := s.streamAndCollect(ctx, chatModel, messages, assistantMsgID, eventCh)
-
-	// Step 6: 保存助手消息
-	// LLM 流式生成失败时已发送 error 事件，此处直接返回，避免再发 done 导致前端重复显示
+	if obsOk {
+		s.obs.Observe(ctx, "chat_quick_llm_stream_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t3).Seconds())
+		s.obs.Incr(ctx, "llm_stream_requests_total", map[string]string{
+			"provider": providerLabel(client),
+			"model_id": req.ModelID,
+			"success":  fmt.Sprintf("%t", err == nil),
+		}, 1)
+	}
 	if err != nil {
 		llm.ReduceContextBudgetOnError(req.ModelID, err)
 		return
 	}
-	// 即使用户中断导致空内容，也结束 SSE（避免前端挂起）
 	if fullContent == "" {
 		eventCh <- dto.StreamEvent{Type: "done", MessageID: assistantMsgID, Content: "", Sources: sources, Done: true}
 		return
 	}
-	s.emitDoneAndSave(eventCh, sessionID, assistantMsgID, fullContent, req, sources, nil)
+	if obsOk {
+		s.obs.AddRootAttrs(ctx, observability.Attrs{
+			"assistant_chars": len([]rune(fullContent)),
+		})
+	}
+	s.emitDoneAndSave(eventCh, sessionID, assistantMsgID, fullContent, req, sources, nil, func(meta map[string]any) {
+		if obsOk && meta != nil {
+			meta["trace_id"] = observability.TraceIDFromContext(ctx)
+		}
+	})
 
-	// Step 7: 异步更新摘要和提取记忆
 	s.refreshContextAsync(ctx, userID, sessionID, enhancedCtx.History, chatModel)
 }
 
@@ -222,48 +273,76 @@ func (s *chatService) processMessage(ctx context.Context, userID, sessionID, use
 // processDeepMode 深度思考模式处理流程
 // 使用 eino ReAct Agent，自动管理 Think → Act → Observe 循环
 func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, userMsgID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	// 提前生成助手消息 ID，贯穿整个 SSE 生命周期
-	assistantMsgID := uuid.New().String()
+	obsOk := s.obs != nil
+	if obsOk {
+		_, span := s.obs.StartSpan(ctx, "chat.deep", observability.ComponentAgentEngine, observability.Attrs{
+			"session_id":  sessionID,
+			"user_id":     userID,
+			"model_id":    req.ModelID,
+			"search_mode": "deep",
+		})
+		defer func() {
+			status := observability.SpanStatusOK
+			var errVal error
+			if r := recover(); r != nil {
+				status = observability.SpanStatusError
+				errVal = fmt.Errorf("panic: %v", r)
+				eventCh <- dto.StreamEvent{Type: "error", Detail: "处理过程中发生未预期错误", Done: true}
+			}
+			s.obs.EndSpan(ctx, span, status, errVal, nil)
+		}()
+		s.obs.Incr(ctx, "chat_deep_requests_total", map[string]string{"model_id": req.ModelID}, 1)
+	}
 
-	// Step 1: 加载模型 + 增强历史对话
+	assistantMsgID := uuid.New().String()
+	if obsOk {
+		s.obs.AddRootAttrs(ctx, observability.Attrs{"assistant_message_id": assistantMsgID})
+	}
+
 	sendProgressEvent(eventCh, "正在加载上下文...")
+	t0 := time.Now()
 	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content)
 	if err != nil {
+		if obsOk {
+			s.obs.Incr(ctx, "chat_deep_errors_total", map[string]string{"stage": "init_ctx"}, 1)
+		}
 		sendErrorEvent(eventCh, err, err.Error())
 		return
 	}
-	// 按消息 ID 剔除本轮刚保存的 user 消息，避免 Prompt 重复
 	history := excludeByMessageID(enhancedCtx.History, userMsgID)
-
 	chatModel := client.ChatModel()
+	if obsOk {
+		s.obs.Observe(ctx, "chat_deep_init_ctx_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t0).Seconds())
+	}
 
-	// Step 2: 发送 start 事件（前端用 message_id 关联后续更新）
 	eventCh <- dto.StreamEvent{Type: "start", MessageID: assistantMsgID}
 
-	// Step 3: 委托 eino ReAct Agent 执行（通过统一 PromptBuilder 传入摘要/记忆/用户上下文，双模式一致）
 	sendProgressEvent(eventCh, "正在深度推理...")
 	agentPB := NewPromptBuilder(PromptModeDeep, "", enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx).
 		WithProfile(enhancedCtx.Profile).
 		WithPreference(enhancedCtx.Preference)
 	agentReq := agentPB.BuildAgentRequestFields(userID, req.Content, req.ModelID, req.ModelType, req.KnowledgeBaseIDs, history)
+	t1 := time.Now()
 	agentEventCh, err := s.agentEngine.Execute(ctx, agentReq, chatModel)
 	if err != nil {
+		if obsOk {
+			s.obs.Incr(ctx, "chat_deep_errors_total", map[string]string{"stage": "agent_execute"}, 1)
+		}
 		logger.Errorf("Agent 执行失败, sessionID=%s: %v", sessionID, err)
 		llm.ReduceContextBudgetOnError(req.ModelID, err)
 		sendErrorEvent(eventCh, err, "Agent 执行失败")
 		return
 	}
 
-	// Step 4: 转发 Agent 事件到 SSE 事件流 + 收集推理步骤和最终答案
 	var fullContent string
 	var agentSources []dto.SourceInfo
 	var reasoningSteps []dto.ReasoningStep
+	toolCallsN := 0
+	toolErrorsN := 0
 	toolEventSeen := false
 	agentErrorSeen := false
 
 	for agentEvent := range agentEventCh {
-		// Agent 的 done 事件仅用于收集完整答案，不透传到 SSE
-		// （SSE 的终止由 Service 层的 emitDoneAndSave 统一负责）
 		if agentEvent.Type == agent.EventDone {
 			if agentEvent.Content != "" {
 				fullContent = agentEvent.Content
@@ -274,12 +353,18 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 			continue
 		}
 
-		// 实时累积答案内容，确保用户中断时也能保存已生成的部分
 		if agentEvent.Type == agent.EventAnswer {
 			fullContent += agentEvent.Content
 		}
-		if agentEvent.Type == agent.EventToolCall || agentEvent.Type == agent.EventToolResult {
+		if agentEvent.Type == agent.EventToolCall {
 			toolEventSeen = true
+			toolCallsN++
+		}
+		if agentEvent.Type == agent.EventToolResult {
+			toolEventSeen = true
+			if agentEvent.Status == "error" {
+				toolErrorsN++
+			}
 		}
 		if agentEvent.Type == agent.EventError {
 			agentErrorSeen = true
@@ -293,13 +378,31 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		}
 		applyReasoningStep(&reasoningSteps, agentEvent)
 	}
+	if obsOk {
+		s.obs.Observe(ctx, "chat_deep_agent_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t1).Seconds())
+		s.obs.Incr(ctx, "agent_runs_total", map[string]string{
+			"error_seen": fmt.Sprintf("%t", agentErrorSeen),
+			"tool_calls": fmt.Sprintf("%d", toolCallsN),
+		}, 1)
+		s.obs.AddRootAttrs(ctx, observability.Attrs{
+			"tool_calls":    toolCallsN,
+			"tool_errors":   toolErrorsN,
+			"steps_n":       len(reasoningSteps),
+			"rag_docs_n":    len(agentSources),
+			"agent_error":   agentErrorSeen,
+			"tool_used":     toolEventSeen,
+			"assistant_chars": len([]rune(fullContent)),
+		})
+	}
 
-	// Step 5: 保存助手消息（含推理步骤）
 	if agentErrorSeen {
 		return
 	}
 	if !toolEventSeen && looksLikeExecutionPlan(fullContent) {
 		logger.Warnf("深度模式未产生工具调用，仅返回执行计划，sessionID=%s, content=%q", sessionID, fullContent)
+		if obsOk {
+			s.obs.Incr(ctx, "agent_plan_without_tool_total", nil, 1)
+		}
 		eventCh <- dto.StreamEvent{
 			Type:      "error",
 			Title:     "深度推理未完成",
@@ -309,20 +412,23 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		}
 		return
 	}
-	// 用户中断时可能没有最终答案，但有推理步骤也应保存
 	if fullContent == "" && len(reasoningSteps) == 0 {
 		return
 	}
 
 	var metadata datatypes.JSON
+	metaMap := map[string]any{}
 	if len(reasoningSteps) > 0 {
-		metadata = datatypes.JSON(mustMarshal(map[string]any{
-			"reasoning_steps": reasoningSteps,
-		}))
+		metaMap["reasoning_steps"] = reasoningSteps
 	}
-	s.emitDoneAndSave(eventCh, sessionID, assistantMsgID, fullContent, req, agentSources, metadata)
+	if obsOk {
+		metaMap["trace_id"] = observability.TraceIDFromContext(ctx)
+	}
+	if len(metaMap) > 0 {
+		metadata = datatypes.JSON(mustMarshal(metaMap))
+	}
+	s.emitDoneAndSave(eventCh, sessionID, assistantMsgID, fullContent, req, agentSources, metadata, nil)
 
-	// 异步更新摘要和提取记忆
 	s.refreshContextAsync(ctx, userID, sessionID, enhancedCtx.History, chatModel)
 }
 
@@ -348,15 +454,36 @@ func (s *chatService) refreshContextAsync(ctx context.Context, userID, sessionID
 
 // emitDoneAndSave 发送 done 事件并异步保存助手消息
 // 注意：保存失败只记日志，禁止再向 eventCh 写事件（外层 defer close 后会 panic）
-func (s *chatService) emitDoneAndSave(eventCh chan<- dto.StreamEvent, sessionID, msgID, content string, req requestdto.SendMessageRequest, sources []dto.SourceInfo, metadata datatypes.JSON) {
+func (s *chatService) emitDoneAndSave(eventCh chan<- dto.StreamEvent, sessionID, msgID, content string, req requestdto.SendMessageRequest, sources []dto.SourceInfo, metadata datatypes.JSON, metaHook func(map[string]any)) {
+	finalMeta := metadata
+	if metaHook != nil && len(metadata) == 0 {
+		m := map[string]any{}
+		metaHook(m)
+		if len(m) > 0 {
+			finalMeta = datatypes.JSON(mustMarshal(m))
+		}
+	} else if metaHook != nil && len(metadata) > 0 {
+		var m map[string]any
+		if err := json.Unmarshal(metadata, &m); err == nil {
+			metaHook(m)
+			finalMeta = datatypes.JSON(mustMarshal(m))
+		}
+	}
 	eventCh <- dto.StreamEvent{Type: "done", MessageID: msgID, Content: content, Sources: sources, Done: true}
 	go func() {
 		saveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := s.saveAssistantMessage(saveCtx, sessionID, msgID, content, req, sources, metadata); err != nil {
+		if err := s.saveAssistantMessage(saveCtx, sessionID, msgID, content, req, sources, finalMeta); err != nil {
 			logger.Errorf("保存助手消息失败, messageID=%s: %v", msgID, err)
 		}
 	}()
+}
+
+func providerLabel(client *llm.OpenAIClient) string {
+	if client == nil {
+		return "unknown"
+	}
+	return "openai_compatible"
 }
 
 // rewriteQuery 用 LLM 结合历史对话改写用户问题，一次返回结构化结果（主查询+扩展查询+关键词+意图）
@@ -416,11 +543,21 @@ func needsQueryRewrite(question string) bool {
 	return false
 }
 
-// retrieveContext 执行 RAG 检索并转换为引用来源
 func (s *chatService) retrieveContext(ctx context.Context, userID, question string, knowledgeBaseIDs []string) ([]dto.SourceInfo, rag.Result, error) {
 	logger.Infof("RAG 检索开始: userID=%s, question=%q, kbIDs=%v", userID, question, knowledgeBaseIDs)
+	obsOk := s.obs != nil
+	var span *observability.Span
+	if obsOk {
+		_, span = s.obs.StartSpan(ctx, "rag.retrieve", observability.ComponentRAGRetriever, observability.Attrs{
+			"kb_n": fmt.Sprintf("%d", len(knowledgeBaseIDs)),
+		})
+		defer func() {
+			if span != nil {
+				s.obs.EndSpan(ctx, span, observability.SpanStatusOK, nil, nil)
+			}
+		}()
+	}
 	ragCfg := config.Get().RAG
-	// 有 Rerank 时扩大召回量，让重排有足够候选；无 Rerank 时直接用 TopK 保证速度
 	topK := ragCfg.TopK
 	if ragCfg.Reranker.Enabled {
 		if ragCfg.RecallK > 0 {
@@ -438,23 +575,50 @@ func (s *chatService) retrieveContext(ctx context.Context, userID, question stri
 		UserID:           userID,
 	})
 	if err != nil {
+		if obsOk && span != nil {
+			span.Status = observability.SpanStatusError
+			span.Error = err.Error()
+		}
 		return nil, rag.Result{}, err
 	}
-
 	sources := groupDocumentsToSources(retrieveResult.Documents)
-
+	if obsOk && span != nil {
+		if span.Attrs == nil {
+			span.Attrs = observability.Attrs{}
+		}
+		span.Attrs["top_k"] = topK
+		span.Attrs["hit"] = retrieveResult.Hit
+		span.Attrs["docs_n"] = len(retrieveResult.Documents)
+	}
 	logger.Infof("RAG 检索完成: hit=%v, 命中 %d 篇文档, 共 %d 个 chunk",
 		retrieveResult.Hit, len(sources), len(retrieveResult.Documents))
 	return sources, retrieveResult, nil
 }
 
-// streamAndCollect 流式生成并推送 SSE 事件，返回已收集的内容（用户暂停时返回部分内容）
 func (s *chatService) streamAndCollect(ctx context.Context, chatModel interface {
 	Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error)
 }, messages []*schema.Message, assistantMsgID string, eventCh chan<- dto.StreamEvent) (string, error) {
 	sendProgressEvent(eventCh, "正在生成回答...")
+	obsOk := s.obs != nil
+	var span *observability.Span
+	if obsOk {
+		_, span = s.obs.StartSpan(ctx, "llm.stream", observability.ComponentLLMClient, observability.Attrs{})
+		defer func() {
+			if span != nil {
+				s.obs.EndSpan(ctx, span, observability.SpanStatusOK, nil, nil)
+			}
+		}()
+	}
+	t0 := time.Now()
 	streamReader, err := chatModel.Stream(ctx, messages)
 	if err != nil {
+		if obsOk {
+			s.obs.Incr(ctx, "llm_stream_errors_total", map[string]string{"stage": "open_stream"}, 1)
+			if span != nil {
+				span.Status = observability.SpanStatusError
+				span.Error = err.Error()
+			}
+		}
 		logger.Errorf("LLM 调用失败: %v", err)
 		sendErrorEvent(eventCh, err, "LLM 调用失败")
 		return "", err
@@ -464,6 +628,17 @@ func (s *chatService) streamAndCollect(ctx context.Context, chatModel interface 
 	eventCh <- dto.StreamEvent{
 		Type:      "start",
 		MessageID: assistantMsgID,
+	}
+
+	if obsOk {
+		ttftMs := time.Since(t0).Milliseconds()
+		s.obs.Observe(ctx, "llm_stream_ttft_seconds", nil, float64(ttftMs)/1000.0)
+		if span != nil {
+			if span.Attrs == nil {
+				span.Attrs = observability.Attrs{}
+			}
+			span.Attrs["ttft_ms"] = ttftMs
+		}
 	}
 
 	var fullContent string
@@ -477,6 +652,13 @@ func (s *chatService) streamAndCollect(ctx context.Context, chatModel interface 
 				logger.Infof("用户暂停，已收集 %d 字符", len(fullContent))
 				return fullContent, recvErr
 			}
+			if obsOk {
+				s.obs.Incr(ctx, "llm_stream_errors_total", map[string]string{"stage": "recv"}, 1)
+				if span != nil {
+					span.Status = observability.SpanStatusError
+					span.Error = recvErr.Error()
+				}
+			}
 			logger.Errorf("LLM 流式生成错误: %v", recvErr)
 			sendErrorEvent(eventCh, recvErr, "LLM 流式生成错误")
 			return fullContent, recvErr
@@ -489,6 +671,12 @@ func (s *chatService) streamAndCollect(ctx context.Context, chatModel interface 
 			Type:    "content",
 			Content: msg.Content,
 		}
+	}
+	if obsOk && span != nil {
+		if span.Attrs == nil {
+			span.Attrs = observability.Attrs{}
+		}
+		span.Attrs["chars"] = len(fullContent)
 	}
 
 	return fullContent, nil

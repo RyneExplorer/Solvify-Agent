@@ -13,36 +13,56 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"solvify-agent/internal/model/entity"
+	"solvify-agent/internal/observability"
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/tokenutil"
 )
 
-// 包级正则：程序启动时只编译一次，避免每次请求重复编译（每次请求重复编译开销约 2~5μs，10k QPS 场景可省几十毫秒）
 var tokenRegexp = regexp.MustCompile(`[\x{4e00}-\x{9fff}]+|[a-zA-Z0-9]+`)
 
-// contextService 上下文管理服务实现
 type contextService struct {
 	messageRepo repository.ChatMessageRepo
 	memoryRepo  repository.MemoryRepo
 	summaryRepo repository.SummaryRepo
+	obs         observability.Recorder
 }
 
-// NewContextService 创建上下文管理服务
 func NewContextService(
 	messageRepo repository.ChatMessageRepo,
 	memoryRepo repository.MemoryRepo,
 	summaryRepo repository.SummaryRepo,
+	obs ...observability.Recorder,
 ) ContextServiceInterface {
-	return &contextService{
+	s := &contextService{
 		messageRepo: messageRepo,
 		memoryRepo:  memoryRepo,
 		summaryRepo: summaryRepo,
 	}
+	if len(obs) > 0 && obs[0] != nil {
+		s.obs = obs[0]
+	}
+	return s
 }
 
-// BuildContext 构建增强后的对话上下文
+func (s *contextService) SetObservability(obs observability.Recorder) {
+	s.obs = obs
+}
+
 func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, currentQuery string, cfg BuildContextConfig, chatModel model.BaseChatModel) (*EnhancedContext, error) {
+	obsOk := s.obs != nil
+	var span *observability.Span
+	if obsOk {
+		_, span = s.obs.StartSpan(ctx, "ctx.build", observability.ComponentServiceContext, observability.Attrs{
+			"session_id": sessionID,
+			"has_query":  fmt.Sprintf("%t", currentQuery != ""),
+		})
+		defer func() {
+			if span != nil {
+				s.obs.EndSpan(ctx, span, observability.SpanStatusOK, nil, nil)
+			}
+		}()
+	}
 	if cfg.MaxTokens <= 0 {
 		cfg.MaxTokens = 1500
 	}
@@ -59,7 +79,6 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 		cfg.MemoryBudget = 800
 	}
 
-	// 1. 并行加载：摘要、记忆、最近消息
 	type loadResult struct {
 		summary  *entity.ChatSummary
 		memories []entity.UserMemory
@@ -104,9 +123,6 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 		}
 	}
 
-	// 2. 根据当前问题检索相关历史
-	// 优先使用调用方预抽的同义词归一化关键词（来自 rewriteQuery 的 LLM 输出，质量更高）
-	// 没有的话 fallback 到 extractKeywords 纯正则（质量一般但零成本）
 	var relevant []entity.ChatMessage
 	if currentQuery != "" {
 		keywords := cfg.PreExtractedKeywords
@@ -122,17 +138,19 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 		}
 	}
 
-	// 3. 合并 recent 和 relevant，按时间排序并去重
 	history := mergeMessages(recent, relevant)
-
-	// 4. 应用摘要压缩：如果有摘要，把摘要覆盖的早期消息替换为摘要
 	history = s.applySummary(history, summary)
-
-	// 5. 按 token 预算截断（从最早的消息开始截断，优先保留近期消息）
 	history = truncateHistoryByTokens(history, cfg.MaxTokens)
-
-	// 6. 按预算截断用户记忆，优先保留最近更新的记忆
 	memories = truncateMemoriesByTokens(memories, cfg.MemoryBudget)
+
+	if obsOk && span != nil {
+		if span.Attrs == nil {
+			span.Attrs = observability.Attrs{}
+		}
+		span.Attrs["history_n"] = len(history)
+		span.Attrs["memories_n"] = len(memories)
+		span.Attrs["has_summary"] = summary != nil
+	}
 
 	return &EnhancedContext{
 		History:         history,
@@ -143,26 +161,31 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 	}, nil
 }
 
-// SummarizeSession 对会话生成或更新摘要
 func (s *contextService) SummarizeSession(ctx context.Context, sessionID string, chatModel model.BaseChatModel) (*entity.ChatSummary, error) {
-	// 只需要 role + content，用轻量查询，sources/metadata 对摘要没意义
+	obsOk := s.obs != nil
+	var span *observability.Span
+	if obsOk {
+		_, span = s.obs.StartSpan(ctx, "ctx.summarize", observability.ComponentServiceContext, observability.Attrs{"session_id": sessionID})
+		defer func() {
+			if span != nil {
+				s.obs.EndSpan(ctx, span, observability.SpanStatusOK, nil, nil)
+			}
+		}()
+	}
 	messages, err := s.messageRepo.FindBySessionIDForContext(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("加载会话消息失败: %w", err)
 	}
 
 	if len(messages) < 10 {
-		// 消息太少，不需要摘要
 		return nil, nil
 	}
 
-	// 查找现有摘要
 	existing, err := s.summaryRepo.GetBySessionID(ctx, sessionID)
 	if err != nil {
 		logger.Warnf("查询会话摘要失败: %v", err)
 	}
 
-	// 确定需要摘要的消息范围
 	var startIdx int
 	if existing != nil && existing.LastMessageID != nil {
 		for i, m := range messages {
@@ -174,11 +197,9 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 	}
 
 	if startIdx >= len(messages) {
-		// 没有新消息需要摘要
 		return existing, nil
 	}
 
-	// 取前 80% 的消息做摘要（保留最近几轮作为近期上下文）
 	endIdx := len(messages) - 5
 	if endIdx <= startIdx {
 		endIdx = len(messages)
@@ -195,6 +216,9 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 	dialogue := buildDialogueText(summaryMessages)
 	summaryText, err := s.generateSummary(ctx, chatModel, dialogue, existing)
 	if err != nil {
+		if obsOk {
+			s.obs.Incr(ctx, "ctx_summary_errors_total", nil, 1)
+		}
 		return nil, fmt.Errorf("生成摘要失败: %w", err)
 	}
 
@@ -212,12 +236,27 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 	if err := s.summaryRepo.Upsert(ctx, newSummary); err != nil {
 		return nil, fmt.Errorf("保存摘要失败: %w", err)
 	}
+	if obsOk {
+		s.obs.Incr(ctx, "ctx_summary_updates_total", nil, 1)
+	}
 
 	return newSummary, nil
 }
 
-// ExtractMemories 从消息中提取用户长期记忆
 func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID string, messages []entity.ChatMessage, chatModel model.BaseChatModel) ([]entity.UserMemory, error) {
+	obsOk := s.obs != nil
+	var span *observability.Span
+	if obsOk {
+		_, span = s.obs.StartSpan(ctx, "ctx.extract_memories", observability.ComponentServiceContext, observability.Attrs{
+			"user_id": userID,
+			"msgs_n":  fmt.Sprintf("%d", len(messages)),
+		})
+		defer func() {
+			if span != nil {
+				s.obs.EndSpan(ctx, span, observability.SpanStatusOK, nil, nil)
+			}
+		}()
+	}
 	if len(messages) == 0 {
 		return nil, nil
 	}
@@ -225,6 +264,9 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 	dialogue := buildDialogueText(messages)
 	memories, err := s.generateMemories(ctx, chatModel, dialogue)
 	if err != nil {
+		if obsOk {
+			s.obs.Incr(ctx, "ctx_memory_errors_total", nil, 1)
+		}
 		return nil, fmt.Errorf("提取记忆失败: %w", err)
 	}
 
@@ -244,6 +286,9 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 			continue
 		}
 		result = append(result, m)
+	}
+	if obsOk {
+		s.obs.Incr(ctx, "ctx_memory_extracted_total", nil, int64(len(result)))
 	}
 
 	return result, nil

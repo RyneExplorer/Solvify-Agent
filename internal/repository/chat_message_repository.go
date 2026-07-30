@@ -23,6 +23,15 @@ func (r *chatMessageRepository) Create(ctx context.Context, message *entity.Chat
 	return r.db.WithContext(ctx).Create(message).Error
 }
 
+// FindByID 按 ID 获取消息
+func (r *chatMessageRepository) FindByID(ctx context.Context, id string) (*entity.ChatMessage, error) {
+	var msg entity.ChatMessage
+	if err := r.db.WithContext(ctx).Where("id = ?", id).First(&msg).Error; err != nil {
+		return nil, err
+	}
+	return &msg, nil
+}
+
 // FindBySessionID 获取会话的所有消息
 func (r *chatMessageRepository) FindBySessionID(ctx context.Context, sessionID string) ([]entity.ChatMessage, error) {
 	var messages []entity.ChatMessage

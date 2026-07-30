@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
+	"solvify-agent/internal/observability"
 	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/cache"
@@ -37,6 +39,8 @@ type chatService struct {
 	agentEngine         *agent.Engine
 	contextSvc          ContextServiceInterface
 	prefSvc             UserPreferenceService
+	obs                 observability.Recorder
+	obsRepo             repository.ObservabilityRepo
 }
 
 // NewChatService 创建聊天业务服务
@@ -51,8 +55,9 @@ func NewChatService(
 	agentEngine *agent.Engine,
 	contextSvc ContextServiceInterface,
 	prefSvc UserPreferenceService,
+	extra ...interface{},
 ) ChatServiceInterface {
-	return &chatService{
+	s := &chatService{
 		sessionRepo:         sessionRepo,
 		messageRepo:         messageRepo,
 		retriever:           retriever,
@@ -64,6 +69,20 @@ func NewChatService(
 		contextSvc:          contextSvc,
 		prefSvc:             prefSvc,
 	}
+	for _, it := range extra {
+		switch v := it.(type) {
+		case observability.Recorder:
+			s.obs = v
+		case repository.ObservabilityRepo:
+			s.obsRepo = v
+		}
+	}
+	return s
+}
+
+func (s *chatService) SetObservability(obs observability.Recorder, repo repository.ObservabilityRepo) {
+	s.obs = obs
+	s.obsRepo = repo
 }
 
 // SendMessage 发送消息并获取流式响应
@@ -76,9 +95,19 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 		return nil, err
 	}
 
-	// 缓存比对：如果模型 ID 不一致，更新缓存和数据库
 	if req.ModelID != "" {
 		s.updateUserLastModel(ctx, userID, req.ModelID)
+	}
+
+	if s.obs != nil {
+		ctx = s.obs.WithTraceRoot(ctx, observability.TraceRootAttrs{
+			UserID:     userID,
+			SessionID:  sessionID,
+			MessageID:  userMsgID,
+			RequestID:  requestIDFromCtx(ctx),
+			SearchMode: req.SearchMode,
+			ModelID:    req.ModelID,
+		})
 	}
 
 	eventCh := make(chan dto.StreamEvent, 100)
@@ -89,9 +118,23 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 		} else {
 			s.processMessage(ctx, userID, sessionID, userMsgID, req, eventCh)
 		}
+		if s.obs != nil {
+			s.obs.FlushTrace(ctx, userID, sessionID, userMsgID)
+		}
 	}()
 
 	return eventCh, nil
+}
+
+func requestIDFromCtx(ctx context.Context) string {
+	type iKey string
+	const key iKey = "request_id"
+	if v := ctx.Value(key); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return uuid.New().String()
 }
 
 // updateUserLastModel 更新用户上次使用的模型（缓存比对策略）
@@ -463,4 +506,204 @@ func truncateContentByTokens(content string, maxTokens int) string {
 		return ""
 	}
 	return string(runes[:cut])
+}
+
+// ─── 可观测：反馈 / Trace / Metrics 查询接口 ───────────────────────────────────
+
+func (s *chatService) SubmitFeedback(ctx context.Context, userID, messageID string, req FeedbackRequest) error {
+	if req.Rating != 1 && req.Rating != -1 {
+		return fmt.Errorf("rating 必须为 1 或 -1")
+	}
+	if messageID == "" || userID == "" {
+		return fmt.Errorf("message_id / user_id 不能为空")
+	}
+	msg, err := s.messageRepo.FindByID(ctx, messageID)
+	if err != nil {
+		return fmt.Errorf("查询消息失败: %w", err)
+	}
+	if msg == nil {
+		return fmt.Errorf("消息不存在或无权限")
+	}
+	if msg.SessionID != "" {
+		if vErr := s.validateSession(ctx, userID, msg.SessionID); vErr != nil {
+			return fmt.Errorf("消息不存在或无权限")
+		}
+	}
+	var traceID string
+	if raw := msg.Metadata; len(raw) > 0 {
+		if meta := metadataAsMap(raw); meta != nil {
+			if v, ok := meta["trace_id"].(string); ok {
+				traceID = v
+			}
+		}
+	}
+	fb := &entity.MessageFeedback{
+		ID:        uuid.New().String(),
+		MessageID: messageID,
+		UserID:    userID,
+		SessionID: msg.SessionID,
+		Rating:    req.Rating,
+		ReasonTag: req.ReasonTag,
+		Comment:   req.Comment,
+		TraceID:   traceID,
+	}
+	if s.obsRepo != nil {
+		if e := s.obsRepo.CreateFeedback(ctx, fb); e != nil {
+			return fmt.Errorf("保存反馈失败: %w", e)
+		}
+	}
+	if s.obs != nil {
+		s.obs.Incr(ctx, "chat_feedback_total", map[string]string{
+			"rating":      ratingLabel(req.Rating),
+			"reason_tag":  reasonTagOrDefault(req.ReasonTag),
+			"has_comment": boolLabel(req.Comment != ""),
+		}, 1)
+	}
+	if s.obs != nil {
+		s.obs.RecordFeedback(&observability.Feedback{
+			MessageID: fb.MessageID,
+			UserID:    fb.UserID,
+			SessionID: fb.SessionID,
+			Rating:    fb.Rating,
+			ReasonTag: fb.ReasonTag,
+			Comment:   fb.Comment,
+			TraceID:   fb.TraceID,
+			CreatedAt: fb.CreatedAt,
+		})
+	}
+	return nil
+}
+
+func (s *chatService) ListFeedbacks(ctx context.Context, userID string, offset, limit int) (FeedbackListResponse, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if s.obsRepo == nil {
+		return FeedbackListResponse{Total: 0, Items: []any{}}, nil
+	}
+	list, total, err := s.obsRepo.ListByUser(ctx, userID, offset, limit)
+	if err != nil {
+		return FeedbackListResponse{}, err
+	}
+	items := make([]any, 0, len(list))
+	for _, f := range list {
+		items = append(items, f)
+	}
+	return FeedbackListResponse{Total: total, Items: items}, nil
+}
+
+func (s *chatService) GetTrace(ctx context.Context, userID, traceID string) (*TraceResponse, error) {
+	if s.obsRepo == nil || traceID == "" {
+		return nil, fmt.Errorf("trace 存储未启用")
+	}
+	t, err := s.obsRepo.FindByID(ctx, traceID)
+	if err != nil {
+		return nil, fmt.Errorf("trace 不存在: %w", err)
+	}
+	if t.UserID != userID {
+		return nil, fmt.Errorf("无权限访问该 trace")
+	}
+	resp := &TraceResponse{
+		ID:         t.ID,
+		RequestID:  t.RequestID,
+		UserID:     t.UserID,
+		SessionID:  t.SessionID,
+		SampleRate: t.SampleRate,
+		Sampled:    t.Sampled,
+		DurationMs: t.DurationMs,
+		Status:     t.Status,
+		Error:      t.Error,
+		Attrs:      t.Attrs,
+		SpanTree:   t.SpanTree,
+		CreatedAt:  t.CreatedAt.Format("2006-01-02 15:04:05"),
+	}
+	return resp, nil
+}
+
+func (s *chatService) ListSessionTraces(ctx context.Context, userID, sessionID string, offset, limit int) (TraceListResponse, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if s.obsRepo == nil {
+		return TraceListResponse{Total: 0, Items: []any{}}, nil
+	}
+	if err := s.validateSession(ctx, userID, sessionID); err != nil {
+		return TraceListResponse{}, err
+	}
+	list, total, err := s.obsRepo.ListBySession(ctx, sessionID, userID, offset, limit)
+	if err != nil {
+		return TraceListResponse{}, err
+	}
+	items := make([]any, 0, len(list))
+	for _, t := range list {
+		items = append(items, TraceResponse{
+			ID:         t.ID,
+			RequestID:  t.RequestID,
+			UserID:     t.UserID,
+			SessionID:  t.SessionID,
+			SampleRate: t.SampleRate,
+			Sampled:    t.Sampled,
+			DurationMs: t.DurationMs,
+			Status:     t.Status,
+			Error:      t.Error,
+			Attrs:      t.Attrs,
+			CreatedAt:  t.CreatedAt.Format("2006-01-02 15:04:05"),
+		})
+	}
+	return TraceListResponse{Total: total, Items: items}, nil
+}
+
+func (s *chatService) GetMetricsSnapshot() (map[string]any, error) {
+	if s.obs == nil {
+		return nil, fmt.Errorf("observability 未启用")
+	}
+	return s.obs.MetricsSnapshot()
+}
+
+func ratingLabel(r int) string {
+	switch r {
+	case 1:
+		return "up"
+	case -1:
+		return "down"
+	default:
+		return "unknown"
+	}
+}
+
+func boolLabel(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+func reasonTagOrDefault(tag string) string {
+	if tag == "" {
+		return "none"
+	}
+	return tag
+}
+
+func metadataAsMap(raw datatypes.JSON) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	return m
 }
