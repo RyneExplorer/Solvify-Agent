@@ -56,9 +56,10 @@ func NewRouter(
 	toolTypeService service.ToolTypeService,
 	toolProviderService service.ToolProviderService,
 	userToolConfigService service.UserToolConfigService,
+	prefService service.UserPreferenceService,
 ) *Router {
 	return &Router{
-		userCtrl:          user.NewController(userService, adminUserService),
+		userCtrl:          user.NewController(userService, adminUserService, prefService),
 		authCtrl:          auth.NewController(authService, userService),
 		searchCtrl:        search.NewController(searchService),
 		modelCtrl:         model.NewController(modelService),

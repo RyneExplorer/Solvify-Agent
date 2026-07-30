@@ -36,6 +36,7 @@ type chatService struct {
 	userCache           *cache.RedisCache
 	agentEngine         *agent.Engine
 	contextSvc          ContextServiceInterface
+	prefSvc             UserPreferenceService
 }
 
 // NewChatService 创建聊天业务服务
@@ -49,6 +50,7 @@ func NewChatService(
 	userCache *cache.RedisCache,
 	agentEngine *agent.Engine,
 	contextSvc ContextServiceInterface,
+	prefSvc UserPreferenceService,
 ) ChatServiceInterface {
 	return &chatService{
 		sessionRepo:         sessionRepo,
@@ -60,6 +62,7 @@ func NewChatService(
 		userCache:           userCache,
 		agentEngine:         agentEngine,
 		contextSvc:          contextSvc,
+		prefSvc:             prefSvc,
 	}
 }
 
@@ -68,7 +71,8 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 	if err := s.validateSession(ctx, userID, sessionID); err != nil {
 		return nil, err
 	}
-	if err := s.saveUserMessage(ctx, sessionID, req); err != nil {
+	userMsgID, err := s.saveUserMessage(ctx, sessionID, req)
+	if err != nil {
 		return nil, err
 	}
 
@@ -81,9 +85,9 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 	go func() {
 		defer close(eventCh)
 		if req.SearchMode == "smart-reasoning" {
-			s.processDeepMode(ctx, userID, sessionID, req, eventCh)
+			s.processDeepMode(ctx, userID, sessionID, userMsgID, req, eventCh)
 		} else {
-			s.processMessage(ctx, userID, sessionID, req, eventCh)
+			s.processMessage(ctx, userID, sessionID, userMsgID, req, eventCh)
 		}
 	}()
 
@@ -238,7 +242,7 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 
 	// 兜底：传统截断
 	if enhancedCtx == nil {
-		msg, _ := s.messageRepo.FindRecent(ctx, sessionID, 20)
+		msg, _ := s.messageRepo.FindRecentForContext(ctx, sessionID, 20)
 		enhancedCtx = &EnhancedContext{
 			History:         truncateHistoryByTokens(msg, historyBudget),
 			HistoryBudget:   historyBudget,
@@ -247,10 +251,21 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 	}
 	enhancedCtx.UserCtx = userCtx
 
-	logger.Infof("增强上下文: 历史 %d 条(预算 %d), 记忆 %d 条(预算 %d), 检索预算 %d, 摘要存在=%v, 模型窗口=%d, 用户=%s",
+	// 填充阶段二用户画像、偏好（任何失败不阻断主流程）
+	if userEntity, err := s.userRepo.FindByID(userID); err == nil && userEntity != nil {
+		enhancedCtx.Profile = userEntity
+		if s.prefSvc != nil {
+			if p, e := s.prefSvc.GetByUserID(ctx, userID); e == nil {
+				enhancedCtx.Preference = p
+			}
+		}
+	}
+
+	logger.Infof("增强上下文: 历史 %d 条(预算 %d), 记忆 %d 条(预算 %d), 检索预算 %d, 摘要存在=%v, 模型窗口=%d, 用户=%s, 偏好=%v",
 		len(enhancedCtx.History), enhancedCtx.HistoryBudget,
 		len(enhancedCtx.Memories), memoryBudget,
-		enhancedCtx.RetrievalBudget, enhancedCtx.Summary != nil, maxCtx, userCtx.Username)
+		enhancedCtx.RetrievalBudget, enhancedCtx.Summary != nil, maxCtx, userCtx.Username,
+		enhancedCtx.Preference != nil)
 	logger.Infof("[Timing] initContext 总耗时: cost=%dms", time.Since(t0).Milliseconds())
 	return client, enhancedCtx, nil
 }
@@ -364,7 +379,7 @@ func (s *chatService) validateSession(ctx context.Context, userID, sessionID str
 	return nil
 }
 
-func (s *chatService) saveUserMessage(ctx context.Context, sessionID string, req requestdto.SendMessageRequest) error {
+func (s *chatService) saveUserMessage(ctx context.Context, sessionID string, req requestdto.SendMessageRequest) (string, error) {
 	userMsg := entity.ChatMessage{
 		ID:               uuid.New().String(),
 		SessionID:        sessionID,
@@ -373,7 +388,10 @@ func (s *chatService) saveUserMessage(ctx context.Context, sessionID string, req
 		SearchMode:       req.SearchMode,
 		KnowledgeBaseIDs: datatypes.JSON(mustMarshal(req.KnowledgeBaseIDs)),
 	}
-	return s.messageRepo.Create(ctx, &userMsg)
+	if err := s.messageRepo.Create(ctx, &userMsg); err != nil {
+		return "", err
+	}
+	return userMsg.ID, nil
 }
 
 func (s *chatService) saveAssistantMessage(ctx context.Context, sessionID, msgID, content string, req requestdto.SendMessageRequest, sources []dto.SourceInfo, metadata datatypes.JSON) error {
@@ -392,16 +410,57 @@ func (s *chatService) saveAssistantMessage(ctx context.Context, sessionID, msgID
 }
 
 // truncateHistoryByTokens 按 token 预算截断历史消息（从最新消息向前保留）
+// 如果最早一条消息单条超预算但剩余预算 >= 100 token，做内容头部截断保留，避免上下文彻底为空
 func truncateHistoryByTokens(messages []entity.ChatMessage, maxTokens int) []entity.ChatMessage {
 	var total int
 	var result []entity.ChatMessage
 	for i := len(messages) - 1; i >= 0; i-- {
-		msgTokens := tokenutil.Estimate(messages[i].Content)
-		if total+msgTokens > maxTokens {
-			break
+		msg := messages[i]
+		msgTokens := tokenutil.Estimate(msg.Content)
+		if total+msgTokens <= maxTokens {
+			total += msgTokens
+			result = append([]entity.ChatMessage{msg}, result...)
+			continue
 		}
-		total += msgTokens
-		result = append([]entity.ChatMessage{messages[i]}, result...)
+		// 预算不够装整条，但还有至少 100 token 空间 -> 截断内容头部保留上下文主题
+		remain := maxTokens - total
+		if remain >= 100 {
+			truncated := msg
+			truncated.Content = truncateContentByTokens(truncated.Content, remain) + "\n\n（内容过长，已截断）"
+			result = append([]entity.ChatMessage{truncated}, result...)
+		}
+		break
 	}
 	return result
+}
+
+// truncateContentByTokens 按 token 预算从文本头部截断，返回截断后的字符串
+// 为避免切在半个 UTF-8 rune，采用「字符数 × 类型权重」反推一个安全长度，再按 rune 截取
+func truncateContentByTokens(content string, maxTokens int) string {
+	if content == "" {
+		return ""
+	}
+	runes := []rune(content)
+	var total int
+	var cut int
+	for i, r := range runes {
+		var w float64
+		switch {
+		case r >= 0x4e00 && r <= 0x9fff:
+			w = 1.5
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			w = 0.25
+		default:
+			w = 0.5
+		}
+		if total+int(w) > maxTokens {
+			break
+		}
+		total += int(w)
+		cut = i + 1
+	}
+	if cut == 0 {
+		return ""
+	}
+	return string(runes[:cut])
 }

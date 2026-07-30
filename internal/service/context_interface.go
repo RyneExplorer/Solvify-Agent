@@ -10,11 +10,12 @@ import (
 
 // BuildContextConfig 构建上下文的配置
 type BuildContextConfig struct {
-	MaxTokens         int // 历史消息最大 token 预算（0 表示按模型窗口自动计算）
-	MaxMemories       int
-	MaxRecentMessages int
-	RetrievalBudget   int // 知识库检索上下文最大 token 预算
-	MemoryBudget      int // 用户记忆最大 token 预算
+	MaxTokens           int      // 历史消息最大 token 预算（0 表示按模型窗口自动计算）
+	MaxMemories         int
+	MaxRecentMessages   int
+	RetrievalBudget     int      // 知识库检索上下文最大 token 预算
+	MemoryBudget        int      // 用户记忆最大 token 预算
+	PreExtractedKeywords []string // 调用方预抽取的同义词归一化关键词（优先使用，为空时用 extractKeywords 纯正则兜底）
 }
 
 // EnhancedContext 增强后的对话上下文
@@ -25,6 +26,8 @@ type EnhancedContext struct {
 	UserCtx         UserContext
 	HistoryBudget   int // 实际使用的历史消息 token 预算
 	RetrievalBudget int // 实际使用的检索上下文 token 预算
+	Profile         *entity.User           // 当前用户画像实体（来源：user表扩展字段）
+	Preference      *entity.UserPreference // 当前用户偏好（来源：user_preferences 表）
 }
 
 // ContextServiceInterface 上下文管理服务接口

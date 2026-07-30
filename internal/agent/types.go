@@ -5,6 +5,22 @@ import (
 	"solvify-agent/internal/model/entity"
 )
 
+type PromptUserContext struct {
+	ID                 string
+	Username           string
+	Role               string
+	TimeStr            string
+	Department         string
+	Position           string
+	Expertise          string
+	Language           string
+	Timezone           string
+	AnswerStyle        string
+	TableFirst         bool
+	CitationStyle      string
+	RoleTemplatePrompt string
+}
+
 // Request 描述 Agent 执行请求
 type Request struct {
 	UserID           string               // 用户 ID（用于知识库检索权限）
@@ -13,6 +29,9 @@ type Request struct {
 	KnowledgeBaseIDs []string             // 知识库 ID 列表
 	ModelID          string               // 模型 ID
 	ModelType        string               // 模型类型（user/system）
+	Summary          *entity.ChatSummary  // 会话摘要（长对话压缩内容）
+	Memories         []entity.UserMemory  // 用户长期记忆（偏好/事实/约束/决策）
+	UserCtx          PromptUserContext    // 用户基本信息 + 当前时间
 }
 
 // Event 描述 Agent SSE 事件

@@ -14,34 +14,98 @@ import (
 type Controller struct {
 	userService      service.UserServiceInterface
 	adminUserService service.AdminUserServiceInterface
+	prefService      service.UserPreferenceService
 }
 
 // NewController 创建用户控制器
-func NewController(userService service.UserServiceInterface, adminUserService service.AdminUserServiceInterface) *Controller {
+func NewController(
+	userService service.UserServiceInterface,
+	adminUserService service.AdminUserServiceInterface,
+	prefService service.UserPreferenceService,
+) *Controller {
 	return &Controller{
 		userService:      userService,
 		adminUserService: adminUserService,
+		prefService:      prefService,
 	}
 }
 
-// GetProfile 获取当前用户信息
+// GetProfile 获取当前用户完整画像（基本信息 + 偏好）
 func (ctrl *Controller) GetProfile(c *gin.Context) {
 	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
 	}
 
-	user, err := ctrl.userService.GetUserByID(userID)
+	profile, err := ctrl.userService.GetProfile(userID)
 	if err != nil {
 		response.BizError(c, err)
 		return
 	}
 
-	response.Success(c, ctrl.userService.GetUserResponse(user))
+	response.Success(c, profile)
 }
 
-// UpdateProfile 更新当前用户信息
-func (ctrl *Controller) UpdateProfile(c *gin.Context) {
+// UpdateProfile 更新当前用户画像字段（部门/职位/擅长/语言/时区）
+func (ctrl *Controller) UpdateUserProfile(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		return
+	}
+
+	var req request.UpdateProfileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "请求参数错误")
+		return
+	}
+
+	if err := ctrl.userService.UpdateProfile(userID, &req); err != nil {
+		response.BizError(c, err)
+		return
+	}
+
+	response.Success(c, nil)
+}
+
+// GetPreference 获取当前用户偏好设置
+func (ctrl *Controller) GetPreference(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		return
+	}
+	ctx := c.Request.Context()
+	pref, err := ctrl.prefService.GetByUserID(ctx, userID)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, ctrl.prefService.ToDTO(pref))
+}
+
+// UpdatePreference 更新当前用户偏好设置（Upsert：不存在则创建）
+func (ctrl *Controller) UpdatePreference(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		return
+	}
+
+	var req request.UpdateUserPreferenceRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "请求参数错误")
+		return
+	}
+
+	ctx := c.Request.Context()
+	res, err := ctrl.prefService.Upsert(ctx, userID, &req)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, res)
+}
+
+// UpdateBasicInfo 更新当前用户基本信息（头像/邮箱）
+func (ctrl *Controller) UpdateBasicInfo(c *gin.Context) {
 	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
 		return
