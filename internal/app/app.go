@@ -228,7 +228,7 @@ type AgentComponents struct {
 }
 
 // initAgentComponents 初始化 Agent 相关组件（Embedding、RAG、工具、Agent 引擎）
-func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo repository.DocumentRepository, chunkRepo repository.ChunkRepository, kbRepo repository.KnowledgeBaseRepository) *AgentComponents {
+func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo repository.DocumentRepository, chunkRepo repository.DocumentChunkRepository, kbRepo repository.KnowledgeBaseRepository) *AgentComponents {
 	embeddingFunc := a.initEmbedding()
 	vectorRetriever := a.initRetriever(embeddingFunc)
 
@@ -304,6 +304,9 @@ func (a *App) initDependencies() {
 		a.obsRecorder = observability.NewRecorderWithDBSink(obsCfg, obsRepo)
 	}
 	logger.Infof("可观测性模块初始化: enabled=%v sample_rate=%.2f db_sink=%v", obsCfg.Enabled, obsCfg.SamplingRate, obsCfg.TraceTableEnabled)
+	// 注册 eino 全局 callback：所有走 eino 标准接口的组件（ChatModel / Retriever / Tool / Embedding / Agent / Graph）
+	// 会自动打 span 和通用指标，不用再在业务代码里手动成对 StartSpan/EndSpan。
+	observability.RegisterGlobalEinoCallback(a.obsRecorder)
 
 	// 模型配置缓存（10 分钟 TTL）
 	modelCache := cache.New(a.redis, "model:", 10*time.Minute)
@@ -311,7 +314,7 @@ func (a *App) initDependencies() {
 	userModelConfigRepo := repository.NewCachedUserModelConfigRepository(repository.NewUserModelConfigRepository(a.postgresqlDB), modelCache)
 	chatSessionRepo := repository.NewChatSessionRepository(a.postgresqlDB)
 	chatMessageRepo := repository.NewChatMessageRepository(a.postgresqlDB)
-	memoryRepo := repository.NewMemoryRepository(a.postgresqlDB)
+	memoryRepo := repository.NewUserMemoryRepository(a.postgresqlDB)
 	summaryRepo := repository.NewSummaryRepository(a.postgresqlDB)
 	// 工具配置——原始仓库
 	toolTypeRepo := repository.NewToolTypeRepository(a.postgresqlDB)
@@ -336,7 +339,7 @@ func (a *App) initDependencies() {
 	toolFactory := tool.NewFactory(toolRegistry, cachedUserToolConfigRepo, cachedToolTypeRepo)
 
 	// Chunk Repository（文档分块查询）
-	chunkRepo := repository.NewChunkRepository(a.postgresqlDB)
+	chunkRepo := repository.NewDocumentChunkRepository(a.postgresqlDB)
 
 	// 初始化 Agent 组件（传入 ToolFactory + DocumentRepo + ChunkRepo + KnowledgeBaseRepo）
 	ai := a.initAgentComponents(toolFactory, documentRepo, chunkRepo, knowledgeBaseRepo)

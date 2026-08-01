@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	einoOpenai "github.com/cloudwego/eino-ext/components/embedding/openai"
+	"github.com/cloudwego/eino/components/embedding"
 )
 
 // EmbeddingClient 基于 eino-ext 实现文本向量化客户端
@@ -70,6 +71,12 @@ func (c *EmbeddingClient) EmbedBatch(ctx context.Context, texts []string) ([][]f
 		return nil, c.normalizeError(err)
 	}
 	return results, nil
+}
+
+// GetEinoEmbedder 返回 eino 标准 embedding.Embedder 接口，方便在 eino Retriever/Indexer
+// 或 compose Graph 中作为通用组件传递。
+func (c *EmbeddingClient) GetEinoEmbedder() embedding.Embedder {
+	return c.embedder
 }
 
 func (c *EmbeddingClient) normalizeError(err error) error {

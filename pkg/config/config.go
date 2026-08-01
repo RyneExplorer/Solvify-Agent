@@ -62,9 +62,12 @@ type CORSConfig struct {
 
 // AgentConfig 描述 Agent 行为开关
 type AgentConfig struct {
-	EnableDemo     bool    `mapstructure:"enable_demo"`
-	MaxIterations  int     `mapstructure:"max_iterations"`
-	ScoreThreshold float64 `mapstructure:"score_threshold"`
+	EnableDemo              bool    `mapstructure:"enable_demo"`
+	MaxIterations           int     `mapstructure:"max_iterations"`
+	ScoreThreshold          float64 `mapstructure:"score_threshold"`
+	// QuickAgentMaxIterations 指定快速模式（eino ChatModelAgent）最多执行几个
+	// ReAct 循环，默认 2（最多 1 次工具调用+出答案）。
+	QuickAgentMaxIterations int `mapstructure:"quick_agent_max_iterations"`
 }
 
 // LLMConfig 描述模型调用配置
@@ -284,9 +287,10 @@ func Default() *Config {
 			Compress:   true,
 		},
 		Agent: AgentConfig{
-			EnableDemo:     true,
-			MaxIterations:  4,
-			ScoreThreshold: 0.7,
+			EnableDemo:              true,
+			MaxIterations:           4,
+			ScoreThreshold:          0.7,
+			QuickAgentMaxIterations: 2,
 		},
 		LLM: LLMConfig{
 			Provider:    "mock",
@@ -420,6 +424,12 @@ func (c *Config) Validate() error {
 	}
 	if c.DocumentParser.TimeoutSeconds <= 0 {
 		return errors.New("document_parser.timeout_seconds 必须大于 0")
+	}
+	if c.Agent.QuickAgentMaxIterations <= 0 {
+		return errors.New("agent.quick_agent_max_iterations 必须大于 0")
+	}
+	if c.Agent.MaxIterations <= 0 {
+		return errors.New("agent.max_iterations 必须大于 0")
 	}
 	if c.Observability.Enabled {
 		if c.Observability.SamplingRate < 0 || c.Observability.SamplingRate > 1 {
@@ -636,6 +646,17 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("OBSERVABILITY_MAX_CARDINALITY_LABELS"); value != "" {
 		cfg.Observability.MaxCardinalityLabels = parseInt(value, cfg.Observability.MaxCardinalityLabels)
+	}
+
+	// Agent 行为开关
+	if value := os.Getenv("AGENT_QUICK_MAX_ITERATIONS"); value != "" {
+		cfg.Agent.QuickAgentMaxIterations = parseInt(value, cfg.Agent.QuickAgentMaxIterations)
+	}
+	if value := os.Getenv("AGENT_MAX_ITERATIONS"); value != "" {
+		cfg.Agent.MaxIterations = parseInt(value, cfg.Agent.MaxIterations)
+	}
+	if value := os.Getenv("AGENT_SCORE_THRESHOLD"); value != "" {
+		cfg.Agent.ScoreThreshold = parseFloat(value, cfg.Agent.ScoreThreshold)
 	}
 }
 
