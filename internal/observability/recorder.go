@@ -425,6 +425,17 @@ func (r *defaultRecorder) FlushTrace(ctx context.Context, userID, sessionID, mes
 		}
 		ra.endAt = time.Now()
 		ra.mu.Unlock()
+	} else {
+		// ra 不存在时（例如没调 WithTraceRoot），造一个最小 ra，兜底填三个入参；
+		// beginAt/endAt 用当前时间（会在 publishTrace 里如果 IsZero 再兜底）
+		ra = &rootAttrs{
+			beginAt:   time.Now(),
+			endAt:     time.Now(),
+			userID:    userID,
+			sessionID: sessionID,
+			messageID: messageID,
+			endStatus: SpanStatusOK,
+		}
 	}
 	r.publishTrace(ctx, traceID, ra)
 	return traceID
@@ -476,6 +487,28 @@ func (r *defaultRecorder) publishTrace(ctx context.Context, traceID string, ra *
 			endStatus = SpanStatusOK
 		}
 	}
+	// 补齐根 span 的关键标识字段（原来只是 _ = searchMode，从未写入 Attrs）
+	if attrs == nil {
+		attrs = Attrs{}
+	}
+	if userID != "" {
+		attrs["user_id"] = userID
+	}
+	if sessionID != "" {
+		attrs["session_id"] = sessionID
+	}
+	if messageID != "" {
+		attrs["message_id"] = messageID
+	}
+	if requestID != "" {
+		attrs["request_id"] = requestID
+	}
+	if searchMode != "" {
+		attrs["search_mode"] = searchMode
+	}
+	if modelID != "" {
+		attrs["model_id"] = modelID
+	}
 	dur := endAt.Sub(beginAt)
 	root := &Span{
 		TraceID:    traceID,
@@ -519,15 +552,6 @@ func (r *defaultRecorder) publishTrace(ctx context.Context, traceID string, ra *
 				}
 			}
 		}
-	}
-	if messageID != "" {
-		_ = messageID
-	}
-	if searchMode != "" {
-		_ = searchMode
-	}
-	if modelID != "" {
-		_ = modelID
 	}
 	hasErr := endErr != nil || endStatus == SpanStatusError || endStatus == SpanStatusCanceled
 	hasFeedback := false

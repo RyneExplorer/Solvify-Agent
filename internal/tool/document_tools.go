@@ -35,12 +35,12 @@ func errorResponse(message string) string {
 // ================ GrepChunksTool ================
 
 type GrepChunksTool struct {
-	chunkRepo repository.ChunkRepository
+	chunkRepo repository.DocumentChunkRepository
 	userID    string
 	kbIDs     []string
 }
 
-func NewGrepChunksTool(chunkRepo repository.ChunkRepository) *GrepChunksTool {
+func NewGrepChunksTool(chunkRepo repository.DocumentChunkRepository) *GrepChunksTool {
 	return &GrepChunksTool{chunkRepo: chunkRepo}
 }
 

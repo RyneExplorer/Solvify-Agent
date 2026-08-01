@@ -218,10 +218,6 @@ func (h *agentCallbackHandler) onEnd(ctx context.Context, info *callbacks.RunInf
 					LatencyMs:         time.Since(pending.StartedAt).Milliseconds(),
 				}
 				h.obs.RecordAgentStep(step)
-				h.obs.Incr(ctx, "agent_tool_calls_total", map[string]string{
-					"tool":   toolName,
-					"status": "success",
-				}, 1)
 			}
 		}
 	}
@@ -271,12 +267,6 @@ func (h *agentCallbackHandler) onError(ctx context.Context, info *callbacks.RunI
 				LatencyMs:         time.Since(pending.StartedAt).Milliseconds(),
 			}
 			h.obs.RecordAgentStep(step)
-			if pending.ToolName != "" {
-				h.obs.Incr(ctx, "agent_tool_calls_total", map[string]string{
-					"tool":   pending.ToolName,
-					"status": "error",
-				}, 1)
-			}
 		}
 	}
 

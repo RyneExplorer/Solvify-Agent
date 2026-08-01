@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -216,10 +217,70 @@ func (e *Engine) processStream(ctx context.Context, stream *schema.StreamReader[
 			continue
 		}
 
-		if msg.Role == schema.Assistant && msg.Content != "" {
+		if msg.Role != schema.Assistant {
+			continue
+		}
+
+		if len(msg.ToolCalls) > 0 {
+			// ── 中间思考轮次（下一步还要调用工具）──
+			// 1) msg.Content 是 reasoning/推理思考，不能作为最终答案给用户看
+			// 2) 只发 EventThinking 通知前端进度，不发 EventAnswer，不拼进 fullAnswer
+			if strings.TrimSpace(msg.Content) != "" {
+				thinking := truncateStr(msg.Content, 200)
+				eventCh <- Event{
+					Type:   EventThinking,
+					Title:  "深度推理中",
+					Detail: thinking,
+					Status: "running",
+				}
+			}
+			continue
+		}
+
+		if msg.Content != "" {
+			// ── 最终答案轮次（没有下一步 ToolCalls，真正面向用户的正文）──
 			fullAnswer += msg.Content
 			eventCh <- Event{Type: EventAnswer, Content: msg.Content}
 		}
+	}
+
+	// ── 兜底：极端情况（每一轮都有 ToolCalls，MaxStep 到了还没出最终答案）
+	//    用知识库已命中的前 N 条来源拼一个总结，绝对不能把中间思考当答案发
+	if strings.TrimSpace(fullAnswer) == "" && len(ksTool.CollectedSources) > 0 {
+		var sb strings.Builder
+		sb.WriteString("## 知识库检索结果总结\n\n")
+		sb.WriteString("根据当前检索到的内容，为您整理以下要点：\n\n")
+		usedTitles := make(map[string]bool, len(ksTool.CollectedSources))
+		const maxTop = 5
+		for i, src := range ksTool.CollectedSources {
+			if i >= maxTop {
+				break
+			}
+			title := src.Title
+			if title == "" {
+				title = "未命名文档"
+			}
+			// 同一个文档只拼一次摘要，重复 chunk 跳过
+			if usedTitles[title] {
+				continue
+			}
+			usedTitles[title] = true
+			content := strings.TrimSpace(src.Content)
+			if len(content) > 160 {
+				content = content[:160] + "…"
+			}
+			chunkID := src.ID
+			if chunkID == "" {
+				chunkID = fmt.Sprintf("c%d", i)
+			}
+			sb.WriteString(fmt.Sprintf("- %s <kb doc=%q chunk_id=%q />\n", title, title, chunkID))
+			if content != "" {
+				sb.WriteString(fmt.Sprintf("  > %s\n\n", content))
+			}
+		}
+		sb.WriteString("\n如需进一步分析请补充问题细节，或切换到快速模式获取更直接的回答。")
+		fullAnswer = sb.String()
+		eventCh <- Event{Type: EventAnswer, Content: fullAnswer}
 	}
 
 	var sources []response.SourceInfo
@@ -251,7 +312,9 @@ func (e *Engine) processStream(ctx context.Context, stream *schema.StreamReader[
 		})
 	}
 
-	eventCh <- Event{Type: EventThinking, Title: "正在生成答案", Status: "success"}
+	if strings.TrimSpace(fullAnswer) != "" {
+		eventCh <- Event{Type: EventThinking, Title: "正在生成答案", Status: "success"}
+	}
 
 	if len(sources) > 0 {
 		eventCh <- Event{Type: EventSources, Sources: sources}
