@@ -9,6 +9,7 @@ import (
 	"solvify-agent/internal/api/v1/document"
 	"solvify-agent/internal/api/v1/knowledgebase"
 	"solvify-agent/internal/api/v1/model"
+	usermodelconfigapi "solvify-agent/internal/api/v1/user_model_config"
 	"solvify-agent/internal/api/v1/search"
 	"solvify-agent/internal/api/v1/storage"
 	syncapi "solvify-agent/internal/api/v1/sync"
@@ -29,7 +30,7 @@ type Router struct {
 	documentCtrl      *document.Controller
 	storageCtrl       *storage.Controller
 	modelCtrl         *model.Controller
-	userModelCtrl     *model.UserModelController
+	userModelCtrl     *usermodelconfigapi.Controller
 	chatCtrl          *chat.Controller
 	syncCtrl          *syncapi.Controller
 	dingtalkCtrl      *dingtalkapi.Controller
@@ -52,7 +53,7 @@ func NewRouter(
 	chatSvc service.ChatServiceInterface,
 	syncSvc service.SyncServiceInterface,
 	dingtalkSvc service.DingTalkServiceInterface,
-	chunkRepo repository.ChunkRepository,
+	chunkRepo repository.DocumentChunkRepository,
 	toolTypeService service.ToolTypeService,
 	toolProviderService service.ToolProviderService,
 	userToolConfigService service.UserToolConfigService,
@@ -63,7 +64,7 @@ func NewRouter(
 		authCtrl:          auth.NewController(authService, userService),
 		searchCtrl:        search.NewController(searchService),
 		modelCtrl:         model.NewController(modelService),
-		userModelCtrl:     model.NewUserModelController(userModelConfigService),
+		userModelCtrl:     usermodelconfigapi.NewController(userModelConfigService),
 		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseSvc),
 		documentCtrl:      document.NewController(documentSvc, chunkRepo),
 		storageCtrl:       storage.NewController(storageSvc),
