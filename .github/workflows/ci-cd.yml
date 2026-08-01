@@ -1,0 +1,269 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go-check:
+    name: Go 测试与静态检查
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 配置 Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: 运行测试
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: 运行静态检查
+        run: go vet ./...
+
+      - name: 编译后端
+        run: go build -buildvcs=false -o /tmp/solvify-agent ./cmd/server
+
+  frontend-check:
+    name: Vue 生产构建
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: design/vue
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: design/vue/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建前端
+        run: npm run build
+
+  deployment-check:
+    name: 部署配置检查
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 检查 Shell 语法
+        run: bash -n deploy/deploy.sh deploy/server-bootstrap.sh
+
+      - name: 准备 Compose 检查配置
+        env:
+          VALIDATION_ROOT: ${{ runner.temp }}/solvify-agent
+        run: |
+          mkdir -p "$VALIDATION_ROOT/shared"
+          cp deploy/.env.production.example "$VALIDATION_ROOT/shared/.env"
+          cp deploy/config.production.yaml.example "$VALIDATION_ROOT/shared/config.yaml"
+          sed -i 's/CHANGE_ME_POSTGRES_PASSWORD/ci-postgres-password/' "$VALIDATION_ROOT/shared/.env"
+          sed -i 's/CHANGE_ME_REDIS_PASSWORD/ci-redis-password/' "$VALIDATION_ROOT/shared/.env"
+          sed -i 's/CHANGE_ME_JWT_SECRET/ci-jwt-secret/' "$VALIDATION_ROOT/shared/config.yaml"
+          {
+            echo "BACKEND_IMAGE=ghcr.io/example/solvify-agent-backend:ci"
+            echo "FRONTEND_IMAGE=ghcr.io/example/solvify-agent-frontend:ci"
+            echo "RELEASE_SHA=0000000000000000000000000000000000000000"
+            echo "SOLVIFY_ROOT=$VALIDATION_ROOT"
+          } > "$VALIDATION_ROOT/shared/.release.env"
+
+      - name: 检查 Compose 配置
+        env:
+          VALIDATION_ROOT: ${{ runner.temp }}/solvify-agent
+        run: |
+          docker compose \
+            --env-file "$VALIDATION_ROOT/shared/.env" \
+            --env-file "$VALIDATION_ROOT/shared/.release.env" \
+            --file deploy/compose.prod.yaml \
+            config --quiet
+
+  images:
+    name: 构建并发布镜像
+    runs-on: ubuntu-latest
+    needs:
+      - go-check
+      - frontend-check
+      - deployment-check
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      backend-image: ${{ steps.image-names.outputs.backend }}
+      frontend-image: ${{ steps.image-names.outputs.frontend }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 生成镜像名称
+        id: image-names
+        shell: bash
+        run: |
+          repository="${GITHUB_REPOSITORY,,}"
+          echo "backend=ghcr.io/${repository}-backend" >> "$GITHUB_OUTPUT"
+          echo "frontend=ghcr.io/${repository}-frontend" >> "$GITHUB_OUTPUT"
+
+      - name: 登录 GHCR
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 配置 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 构建后端镜像
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+          tags: |
+            ${{ steps.image-names.outputs.backend }}:${{ github.sha }}
+            ${{ steps.image-names.outputs.backend }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+
+      - name: 构建前端镜像
+        uses: docker/build-push-action@v7
+        with:
+          context: design/vue
+          file: design/vue/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+          tags: |
+            ${{ steps.image-names.outputs.frontend }}:${{ github.sha }}
+            ${{ steps.image-names.outputs.frontend }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
+  deploy:
+    name: 部署生产环境
+    runs-on: ubuntu-latest
+    needs:
+      - images
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+    concurrency:
+      group: solvify-agent-production
+      cancel-in-progress: false
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 配置 SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_PORT"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/solvify_deploy"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/solvify_deploy" "$HOME/.ssh/known_hosts"
+
+          {
+            echo "Host solvify-production"
+            echo "  HostName $DEPLOY_HOST"
+            echo "  Port $DEPLOY_PORT"
+            echo "  User $DEPLOY_USER"
+            echo "  IdentityFile $HOME/.ssh/solvify_deploy"
+            echo "  IdentitiesOnly yes"
+            echo "  BatchMode yes"
+            echo "  StrictHostKeyChecking yes"
+            echo "  UserKnownHostsFile $HOME/.ssh/known_hosts"
+          } > "$HOME/.ssh/config"
+          chmod 0600 "$HOME/.ssh/config"
+
+          ssh solvify-production "printf 'SSH 连接成功\n'"
+
+      - name: 组装部署包
+        env:
+          PACKAGE_DIR: ${{ runner.temp }}/solvify-deploy-package
+        run: |
+          mkdir -p "$PACKAGE_DIR/postgres/init"
+          cp deploy/compose.prod.yaml "$PACKAGE_DIR/"
+          cp deploy/deploy.sh "$PACKAGE_DIR/"
+          cp deploy/server-bootstrap.sh "$PACKAGE_DIR/"
+          cp deploy/.env.production.example "$PACKAGE_DIR/"
+          cp deploy/config.production.yaml.example "$PACKAGE_DIR/"
+          cp scripts/init_knowledge_schema.sql "$PACKAGE_DIR/postgres/init/001-init-schema.sql"
+          tar -C "$PACKAGE_DIR" -czf "${{ runner.temp }}/solvify-deploy-package.tar.gz" .
+
+      - name: 上传部署包
+        env:
+          RELEASE_DIR: /opt/solvify-agent/releases/${{ github.sha }}
+        run: |
+          ssh solvify-production "mkdir -p '$RELEASE_DIR'"
+          scp "${{ runner.temp }}/solvify-deploy-package.tar.gz" \
+            "solvify-production:$RELEASE_DIR/package.tar.gz"
+          ssh solvify-production \
+            "tar -xzf '$RELEASE_DIR/package.tar.gz' -C '$RELEASE_DIR' \
+            && rm -f '$RELEASE_DIR/package.tar.gz' \
+            && chmod 0755 '$RELEASE_DIR/deploy.sh' '$RELEASE_DIR/server-bootstrap.sh'"
+
+      - name: 执行部署
+        env:
+          BACKEND_IMAGE: ${{ needs.images.outputs.backend-image }}:${{ github.sha }}
+          FRONTEND_IMAGE: ${{ needs.images.outputs.frontend-image }}:${{ github.sha }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          ssh solvify-production \
+            "SOLVIFY_ROOT=/opt/solvify-agent \
+            bash '/opt/solvify-agent/releases/$RELEASE_SHA/deploy.sh' \
+            '$BACKEND_IMAGE' '$FRONTEND_IMAGE' '$RELEASE_SHA'"
+
+      - name: 外部健康检查
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+        run: |
+          health_base_url="${PRODUCTION_URL:-http://${DEPLOY_HOST}:18888}"
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --show-error --max-time 10 \
+              "${health_base_url%/}/health" >/dev/null; then
+              echo "生产环境健康检查通过"
+              exit 0
+            fi
+            echo "等待生产环境健康检查，第 ${attempt} 次"
+            sleep 5
+          done
+          echo "生产环境外部健康检查失败" >&2
+          exit 1
+

@@ -1,0 +1,127 @@
+app:
+  name: solvify-agent
+  version: 0.1.0
+  env: production
+  mode: release
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  shutdown_timeout_seconds: 20
+
+jwt:
+  secret: "CHANGE_ME_JWT_SECRET"
+  expire_hours: 24
+
+log:
+  level: info
+  filename: /app/logs/solvify-agent.log
+  max_size: 100
+  max_backups: 7
+  max_age: 30
+  compress: true
+
+cors:
+  enabled: true
+  allow_origins:
+    - "*"
+  allow_methods:
+    - GET
+    - POST
+    - PUT
+    - DELETE
+    - OPTIONS
+  allow_headers:
+    - Origin
+    - Content-Type
+    - Authorization
+  expose_headers: []
+  allow_credentials: false
+  max_age: 0
+
+agent:
+  enable_demo: true
+  max_iterations: 10
+  score_threshold: 0.7
+
+llm:
+  provider: mock
+  api_format: ""
+  model: mock-knowledge-assistant
+  api_key: ""
+  base_url: ""
+  temperature: 0.7
+  max_tokens: 2000
+  timeout: 30
+
+embedding:
+  provider: openai
+  model: text-embedding-v4
+  api_key: ""
+  base_url: ""
+  dimension: 1024
+  batch_size: 10
+
+rag:
+  enabled: true
+  top_k: 3
+  recall_k: 20
+  score_threshold: 0.5
+  vector_weight: 0.7
+  keyword_weight: 0.3
+  rrf_k: 60.0
+  reranker:
+    enabled: false
+    endpoint: ""
+    model: ""
+    api_key: ""
+    top_n: 3
+    timeout: 10
+    score_threshold: 0.5
+  expander:
+    enabled: false
+    window_size: 1
+    max_chunk_tokens: 1000
+    dedup_threshold: 0.8
+
+tools:
+  enabled: true
+  web_search:
+    api_key: ""
+    base_url: ""
+
+dingtalk:
+  app_key: ""
+  app_secret: ""
+  oauth_redirect_uri: "http://127.0.0.1:18888/dingtalk/bind"
+
+document_parser:
+  python_path: python
+  script_path: /app/pkg/documentparser/python/parse_document.py
+  timeout_seconds: 30
+
+database:
+  postgres:
+    host: postgres
+    port: 5432
+    username: solvify
+    password: ""
+    database: solvify_agent
+    timezone: Asia/Shanghai
+    max_idle_conns: 5
+    max_open_conns: 20
+    conn_max_lifetime_minutes: 60
+    enable_pgvector: true
+  redis:
+    host: redis
+    port: 6379
+    password: ""
+    db: 0
+    pool_size: 10
+
+email:
+  host: ""
+  port: 465
+  username: ""
+  password: ""
+
