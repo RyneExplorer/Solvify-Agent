@@ -8,46 +8,18 @@ import (
 	"gorm.io/gorm"
 )
 
-// DocumentSearchRow 文档关键字搜索数据库行
-type DocumentSearchRow struct {
-	ID              string  `gorm:"column:id"`
-	KnowledgeBaseID string  `gorm:"column:knowledge_base_id"`
-	DocumentID      string  `gorm:"column:document_id"`
-	Title           string  `gorm:"column:title"`
-	Content         string  `gorm:"column:content"`
-	Score           float64 `gorm:"column:score"`
-}
-
-// ChunkDetail chunk 详情（含关联文档和知识库信息）
-type ChunkDetail struct {
-	ID                string `gorm:"column:id"`
-	DocumentID        string `gorm:"column:document_id"`
-	KnowledgeBaseID   string `gorm:"column:knowledge_base_id"`
-	Content           string `gorm:"column:content"`
-	SectionTitle      string `gorm:"column:section_title"`
-	DocumentTitle     string `gorm:"column:document_title"`
-	KnowledgeBaseName string `gorm:"column:knowledge_base_name"`
-}
-
-// ChunkRepository 定义 chunk 数据访问能力
-type ChunkRepository interface {
-	FindByID(ctx context.Context, userID, chunkID string) (ChunkDetail, bool, error)
-	// SearchByKeyword 按关键字搜索文档内容
-	SearchByKeyword(ctx context.Context, userID, query string, topK int) ([]DocumentSearchRow, error)
-}
-
-// chunkRepository 封装 chunk GORM 数据访问
-type chunkRepository struct {
+// documentChunkRepository 封装 chunk GORM 数据访问
+type documentChunkRepository struct {
 	db *gorm.DB
 }
 
-// NewChunkRepository 创建 chunk 数据仓储
-func NewChunkRepository(db *gorm.DB) ChunkRepository {
-	return &chunkRepository{db: db}
+// NewDocumentChunkRepository 创建 chunk 数据仓储
+func NewDocumentChunkRepository(db *gorm.DB) DocumentChunkRepository {
+	return &documentChunkRepository{db: db}
 }
 
 // FindByID 根据 ID 查询当前用户的 chunk（含文档标题和知识库名称）
-func (r *chunkRepository) FindByID(ctx context.Context, userID, chunkID string) (ChunkDetail, bool, error) {
+func (r *documentChunkRepository) FindByID(ctx context.Context, userID, chunkID string) (ChunkDetail, bool, error) {
 	var row ChunkDetail
 	err := r.db.WithContext(ctx).
 		Table("document_chunks dc").
@@ -63,7 +35,7 @@ func (r *chunkRepository) FindByID(ctx context.Context, userID, chunkID string) 
 }
 
 // SearchByKeyword 按关键字搜索文档内容
-func (r *chunkRepository) SearchByKeyword(ctx context.Context, userID, query string, topK int) ([]DocumentSearchRow, error) {
+func (r *documentChunkRepository) SearchByKeyword(ctx context.Context, userID, query string, topK int) ([]DocumentSearchRow, error) {
 	keyword := "%" + query + "%"
 	keywordArray := buildKeywordArray(query)
 
