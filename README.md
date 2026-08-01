@@ -118,7 +118,7 @@ createdb -U postgres solvify_agent
 psql -U postgres -d solvify_agent -f scripts/init_knowledge_schema.sql
 ```
 
-SQL 脚本会创建项目表，并检查 `pgcrypto` 与 `vector` 扩展。执行账号需要具有创建扩展的权限
+SQL 脚本用于初始化空数据库，会创建项目表以及 `pgcrypto`、`vector` 扩展。执行账号需要具有创建扩展的权限，已存在业务表的数据库不要重复执行
 
 ### 4. 创建配置
 

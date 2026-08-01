@@ -57,28 +57,6 @@ services:
     networks:
       - solvify
 
-  migrate:
-    image: pgvector/pgvector:pg16
-    profiles:
-      - migration
-    environment:
-      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未配置}
-    command:
-      - psql
-      - --set=ON_ERROR_STOP=1
-      - --host=postgres
-      - --username=${POSTGRES_USERNAME:?POSTGRES_USERNAME 未配置}
-      - --dbname=${POSTGRES_DATABASE:?POSTGRES_DATABASE 未配置}
-      - --file=/migrations/001-init-schema.sql
-    volumes:
-      - ./postgres/init/001-init-schema.sql:/migrations/001-init-schema.sql:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-    logging: *default-logging
-    networks:
-      - solvify
-
   backend:
     image: ${BACKEND_IMAGE:?BACKEND_IMAGE 未配置}
     restart: unless-stopped
@@ -120,4 +98,3 @@ networks:
 volumes:
   postgres_data:
   redis_data:
-

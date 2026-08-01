@@ -184,9 +184,6 @@ main() {
   wait_for_health postgres
   wait_for_health redis
 
-  log "执行数据库幂等初始化"
-  compose_command --profile migration run --rm migrate
-
   log "更新后端"
   compose_command up -d --no-deps backend
   wait_for_health backend
