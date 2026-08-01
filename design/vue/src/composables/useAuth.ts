@@ -142,8 +142,10 @@ export function useAuth() {
     if (!hasToken()) return
     try {
       const res = await authApi.getProfile()
-      if (res.code === 0 && res.data) {
-        currentUser.value = res.data
+      // 后端 /user/profile 返回 { user: UserInfo, preference: {...} }，只取 user 这层扁平结构
+      const userInfo = res.data?.user ?? res.data
+      if (res.code === 0 && userInfo) {
+        currentUser.value = userInfo
       }
     } catch {
       removeToken()

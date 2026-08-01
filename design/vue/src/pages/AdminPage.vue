@@ -238,36 +238,30 @@
           </div>
           <AppButton size="sm" @click="loadObsMetrics" :loading="obsMetricsLoading">刷新</AppButton>
         </div>
-        <div class="grid grid-cols-5 gap-4 mb-6">
+        <div class="grid grid-cols-4 gap-4 mb-6">
           <StatCard
-            title="采样率"
-            :value="obsMetrics ? `${(obsMetrics.sampling_rate * 100).toFixed(0)}%` : '-'"
-            hint="Traces 默认采样比例"
+            title="总请求数"
+            :value="metricsTotalRequestsText"
+            hint="累计请求计数（requests_total 等指标）"
             accent="blue"
           />
           <StatCard
-            title="缓冲区丢弃总数"
-            :value="obsMetrics?.buffer_dropped_total ?? '-'"
-            hint="Sink 队列满后丢弃的记录"
-            accent="amber"
-          />
-          <StatCard
-            title="PII 脱敏次数"
-            :value="obsMetrics?.pii_masked_total ?? '-'"
-            hint="命中 PII 规则的字段数量"
-            accent="emerald"
-          />
-          <StatCard
-            title="标签基数丢弃"
-            :value="obsMetrics?.label_cardinality_dropped_total ?? '-'"
-            hint="超出单 metric label 组合上限被丢弃的样本"
+            title="错误率"
+            :value="metricsErrorRateText"
+            hint="错误请求占总请求的比例"
             accent="rose"
           />
           <StatCard
-            title="单 Metric 标签上限"
-            :value="obsMetrics?.label_cardinality_limit ?? '-'"
-            hint="每个指标最多允许的维度组合数"
-            accent="slate"
+            title="P95 平均耗时"
+            :value="metricsP95Text + (metricsP95Text !== '-' ? ' ms' : '')"
+            hint="95% 请求的耗时上限估算"
+            accent="amber"
+          />
+          <StatCard
+            title="采样率"
+            :value="metricsSamplingRateText"
+            hint="Traces 默认采样比例"
+            accent="emerald"
           />
         </div>
         <div class="space-y-5">
@@ -280,9 +274,9 @@
               <table v-if="obsMetrics?.counters?.length" class="w-full text-sm border-collapse">
                 <thead>
                   <tr class="bg-slate-50 border-b border-slate-200">
-                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Name</th>
-                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Labels</th>
-                    <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Value</th>
+                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">指标名</th>
+                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">标签</th>
+                    <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">当前值</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -316,9 +310,9 @@
               <table v-if="obsMetrics?.gauges?.length" class="w-full text-sm border-collapse">
                 <thead>
                   <tr class="bg-slate-50 border-b border-slate-200">
-                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Name</th>
-                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Labels</th>
-                    <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Value</th>
+                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">指标名</th>
+                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">标签</th>
+                    <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">当前值</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -356,7 +350,7 @@
                     <div v-if="m.help" class="text-[11px] text-slate-400 mt-0.5">{{ m.help }}</div>
                   </div>
                   <div class="text-right">
-                    <div class="text-[11px] text-slate-400">Total Count</div>
+                    <div class="text-[11px] text-slate-400">样本总数</div>
                     <div class="font-mono text-slate-900 tabular-nums">{{ m.samples.reduce((a, b) => a + b.count, 0) }}</div>
                   </div>
                 </div>
@@ -367,8 +361,8 @@
                         <span v-for="(v, k) in s.labels" :key="k" class="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 font-mono text-[11px]">{{ k }}={{ v }}</span>
                       </div>
                       <div class="flex items-center gap-3 text-xs text-slate-500">
-                        <span>sum: <span class="font-mono text-slate-800 tabular-nums">{{ s.sum }}</span></span>
-                        <span>count: <span class="font-mono text-slate-800 tabular-nums">{{ s.count }}</span></span>
+                        <span>总和: <span class="font-mono text-slate-800 tabular-nums">{{ s.sum }}</span></span>
+                        <span>样本数: <span class="font-mono text-slate-800 tabular-nums">{{ s.count }}</span></span>
                       </div>
                     </div>
                     <div class="grid grid-cols-5 gap-1">
@@ -414,26 +408,32 @@
           <table v-if="obsTraces.length" class="w-full text-sm border-collapse">
             <thead>
               <tr class="bg-slate-50 border-b border-slate-200">
-                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Trace ID</th>
-                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Session</th>
-                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Status</th>
-                <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Duration</th>
-                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Sampled / Rate</th>
-                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">Created</th>
+                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">模式</th>
+                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">状态</th>
+                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">链路ID</th>
+                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">用户ID</th>
+                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">会话ID</th>
+                <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">总耗时(ms)</th>
+                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">采样率</th>
+                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">创建时间</th>
                 <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">操作</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="t in obsTraces" :key="t.id" class="border-b border-slate-100 last:border-b-0 hover:bg-slate-50/60">
-                <td class="px-4 py-3 font-mono text-xs text-slate-700">{{ t.id }}</td>
-                <td class="px-4 py-3 text-xs text-slate-500">{{ t.session_id || '-' }}</td>
+                <td class="px-4 py-3">
+                  <AppBadge :variant="searchModeBadgeVariant(getSearchMode(t))">{{ searchModeText(getSearchMode(t)) }}</AppBadge>
+                </td>
                 <td class="px-4 py-3">
                   <AppBadge :variant="traceStatusBadge(t.status)">{{ traceStatusText(t.status, t.error) }}</AppBadge>
                 </td>
-                <td class="px-4 py-3 text-right font-mono tabular-nums text-slate-800">{{ t.duration_ms }} ms</td>
+                <td class="px-4 py-3 font-mono text-xs text-slate-700">{{ t.id }}</td>
+                <td class="px-4 py-3 text-xs text-slate-500">{{ t.user_id || '-' }}</td>
+                <td class="px-4 py-3 text-xs text-slate-500">{{ t.session_id || '-' }}</td>
+                <td class="px-4 py-3 text-right font-mono tabular-nums text-slate-800">{{ t.duration_ms }}</td>
                 <td class="px-4 py-3 text-xs text-slate-600">
-                  <AppBadge :variant="t.sampled ? 'success' : 'neutral'">{{ t.sampled ? '✓ Sampled' : '✗ Drop' }}</AppBadge>
-                  <span class="ml-2 text-slate-400">{{ (t.sample_rate * 100).toFixed(0) }}%</span>
+                  <AppBadge :variant="t.sampled ? 'success' : 'neutral'">{{ t.sampled ? '✓ 采样' : '✗ 丢弃' }}</AppBadge>
+                  <span class="ml-2 text-slate-400">{{ formatSampleRate(t.sample_rate) }}</span>
                 </td>
                 <td class="px-4 py-3 text-xs text-slate-500">{{ formatDate(t.created_at) }}</td>
                 <td class="px-4 py-3 text-right"><AppButton size="sm" variant="ghost" @click="openTraceDetail(t.id)">查看详情</AppButton></td>
@@ -1475,30 +1475,121 @@ async function deleteToolProvider(id: string) {
 }
 
 // ── Observability methods ──
+/** 采样率统一格式化：NaN/非有限值/undefined → '-'，0~1 转百分比；同时接收 number（后端默认值 0/1=0%/100%）或 string */
+function formatSampleRate(sr?: number | string | null): string {
+  if (sr === null || sr === undefined || sr === '') return '-'
+  const n = typeof sr === 'number' ? sr : Number(sr)
+  if (!Number.isFinite(n)) return '-'
+  // 后端 sampling_rate 语义：0.0 ~ 1.0（比例）。如果 sr >= 1.5，说明后端已经是百分比（例如返回 100 表示 100%），直接用原值
+  const pct = n >= 1.5 ? n : n * 100
+  return `${pct.toFixed(0)}%`
+}
+/** 指标快照卡片上的采样率文案（兜底避免 NaN%） */
+const metricsSamplingRateText = computed(() => formatSampleRate(obsMetrics.value?.sampling_rate))
+
+const metricsTotalRequests = computed<number | null>(() => {
+  const m = obsMetrics.value
+  if (!m?.counters?.length) return null
+  const preferredNames = ['requests_total', 'http_requests_total', 'chat_requests_total', 'query_total']
+  let total = 0
+  let hit = false
+  for (const c of m.counters) {
+    if (preferredNames.includes(c.name) || /(request|query|chat).*total/i.test(c.name)) {
+      for (const s of c.samples) total += s.value || 0
+      hit = true
+    }
+  }
+  if (!hit) return null
+  return total
+})
+const metricsTotalRequestsText = computed(() => {
+  const v = metricsTotalRequests.value
+  return v === null ? '-' : String(v)
+})
+
+const metricsErrorRateText = computed(() => {
+  const m = obsMetrics.value
+  if (!m?.counters?.length) return '-'
+  let total = 0
+  let errors = 0
+  for (const c of m.counters) {
+    const isErr = /error|fail|5\d{2}/i.test(c.name)
+    const isTotal = /(request|query|chat).*total|requests_total/i.test(c.name)
+    if (isTotal) for (const s of c.samples) total += s.value || 0
+    if (isErr) for (const s of c.samples) errors += s.value || 0
+  }
+  if (!total) return '-'
+  const rate = (errors / total) * 100
+  return `${rate.toFixed(2)}%`
+})
+
+const metricsP95Text = computed(() => {
+  const m = obsMetrics.value
+  if (!m?.histograms?.length) return '-'
+  for (const h of m.histograms) {
+    if (/(duration|latency|time)/i.test(h.name) && h.samples?.length) {
+      const s = h.samples[0]
+      if (s.buckets?.length) {
+        const target = (s.count || 0) * 0.95
+        let acc = 0
+        for (const b of s.buckets) {
+          acc += b.count || 0
+          if (acc >= target) {
+            return `${Number(b.le).toFixed(0)}`
+          }
+        }
+        return `${Number(s.sum / (s.count || 1)).toFixed(0)}`
+      }
+    }
+  }
+  return '-'
+})
 function traceStatusBadge(status?: string): 'success' | 'danger' | 'warning' | 'neutral' {
   switch (status) {
     case 'ok': return 'success'
     case 'error': return 'danger'
+    case 'canceled':
+    case 'cancelled':
     case 'slow': return 'warning'
     default: return 'neutral'
   }
 }
 function traceStatusText(status?: string, error?: string): string {
-  if (status === 'error' && error) return `Error · ${error.split('\n')[0]?.slice(0, 40) || '请求失败'}`
+  if (status === 'error' && error) return `失败 · ${error.split('\n')[0]?.slice(0, 40) || '请求失败'}`
   switch (status) {
-    case 'ok': return 'Ok'
-    case 'error': return 'Error'
-    case 'slow': return 'Slow (尾延迟)'
-    case 'cancelled': return 'Cancelled'
-    default: return status || '-'
+    case 'ok': return '正常'
+    case 'error': return '失败'
+    case 'slow': return '慢请求'
+    case 'canceled':
+    case 'cancelled': return '已取消'
+    default: return '未知'
   }
+}
+function searchModeBadgeVariant(mode?: string): 'success' | 'default' | 'ghost' {
+  switch (mode) {
+    case 'quick': return 'success'
+    case 'deep': return 'default'
+    default: return 'ghost'
+  }
+}
+function searchModeText(mode?: string): string {
+  switch (mode) {
+    case 'quick': return '快速检索'
+    case 'deep': return '深度思考'
+    case 'unknown': return '未知'
+    default: return mode ? mode : '—'
+  }
+}
+function getSearchMode(t: TraceSummary): string | undefined {
+  return t.search_mode ?? (t.attrs?.search_mode as string | undefined)
 }
 
 async function loadObsMetrics() {
   obsMetricsLoading.value = true
   try {
     const res = await adminGetObservabilityMetrics()
-    obsMetrics.value = res
+    // request 返回 ApiResponse<MetricsSnapshot>，真实数据在 res.data
+    obsMetrics.value = res.data
   } catch (e: any) {
     ElMessage.error(e.message || '加载指标失败')
   } finally {
@@ -1514,8 +1605,9 @@ async function loadSessionTraces() {
       page: obsTracePage.value,
       pageSize: obsTracePageSize.value,
     })
-    obsTraces.value = res.traces || []
-    obsTracesTotal.value = res.total ?? 0
+    // request 返回 ApiResponse<{traces,total,page,page_size}>，真实 data 在 res.data
+    obsTraces.value = res.data?.traces || []
+    obsTracesTotal.value = res.data?.total ?? 0
   } catch (e: any) {
     ElMessage.error(e.message || '加载 Traces 失败')
   } finally {
@@ -1528,7 +1620,8 @@ async function openTraceDetail(traceId: string) {
   obsTraceDetailLoading.value = true
   obsTraceDetail.value = null
   try {
-    obsTraceDetail.value = await adminGetTrace(traceId)
+    const res = await adminGetTrace(traceId)
+    obsTraceDetail.value = res.data
   } catch (e: any) {
     ElMessage.error(e.message || '加载 Trace 详情失败')
   } finally {
