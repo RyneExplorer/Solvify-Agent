@@ -100,27 +100,67 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 		s.updateUserLastModel(ctx, userID, req.ModelID)
 	}
 
+	searchMode := req.SearchMode
+	if searchMode == "" {
+		searchMode = "quick"
+	}
+
+	var traceID string
 	if s.obs != nil {
 		ctx = s.obs.WithTraceRoot(ctx, observability.TraceRootAttrs{
 			UserID:     userID,
 			SessionID:  sessionID,
 			MessageID:  userMsgID,
 			RequestID:  requestIDFromCtx(ctx),
-			SearchMode: req.SearchMode,
+			SearchMode: searchMode,
 			ModelID:    req.ModelID,
+		})
+		traceID = observability.TraceIDFromContext(ctx)
+	}
+
+	// 如果启用了可观测性 DB：先创建一个 agent_tasks 行，
+	//   task_id = trace_id，trace_id/session_id/user_id/search_mode/model_id 全初始化
+	//   这样即使中间任何环节崩了，前端仍能在详情页看到 task 基本信息 + 已写入的 agent_task_steps
+	if s.obsRepo != nil && traceID != "" {
+		_ = s.obsRepo.CreateAgentTask(ctx, &entity.AgentTask{
+			ID:         traceID,
+			TraceID:    traceID,
+			SessionID:  sessionID,
+			UserID:     userID,
+			ModelID:    req.ModelID,
+			SearchMode: searchMode,
+			StartedAt:  time.Now(),
+			Status:     "running",
 		})
 	}
 
 	eventCh := make(chan dto.StreamEvent, 100)
 	go func() {
 		defer close(eventCh)
-		if req.SearchMode == "smart-reasoning" {
-			s.processDeepMode(ctx, userID, sessionID, userMsgID, req, eventCh)
-		} else {
-			s.processMessage(ctx, userID, sessionID, userMsgID, req, eventCh)
-		}
-		if s.obs != nil {
-			s.obs.FlushTrace(ctx, userID, sessionID, userMsgID)
+		status := "ok"
+		abortReason := ""
+		errorSummary := ""
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Errorf("SendMessage goroutine panic 已恢复: sessionID=%s, err=%v", sessionID, r)
+					status = "error"
+					errorSummary = fmt.Sprintf("panic: %v", r)
+					abortReason = "runtime_panic"
+				}
+			}()
+			if searchMode == "smart-reasoning" {
+				s.processDeepMode(ctx, userID, sessionID, userMsgID, req, eventCh)
+			} else {
+				s.processMessage(ctx, userID, sessionID, userMsgID, req, eventCh)
+			}
+			if s.obs != nil {
+				s.obs.FlushTrace(ctx, userID, sessionID, userMsgID)
+			}
+		}()
+		// 结束 agent_tasks 行（无论成功/失败）
+		if s.obsRepo != nil && traceID != "" {
+			_ = s.obsRepo.MarkEnded(context.Background(), traceID, status, abortReason, errorSummary, 0, 0, 0.0, nil)
 		}
 	}()
 
@@ -609,6 +649,49 @@ func (s *chatService) ListFeedbacks(ctx context.Context, userID string, offset, 
 	return FeedbackListResponse{Total: total, Feedbacks: items}, nil
 }
 
+func (s *chatService) buildTraceResponse(t *entity.ChatTrace, includeAgentDetail bool) TraceResponse {
+	if t == nil {
+		return TraceResponse{}
+	}
+	resp := TraceResponse{
+		ID:         t.ID,
+		RequestID:  t.RequestID,
+		UserID:     t.UserID,
+		SessionID:  t.SessionID,
+		SearchMode: extractSearchMode(t.Attrs),
+		SampleRate: t.SampleRate,
+		Sampled:    t.Sampled,
+		DurationMs: t.DurationMs,
+		Status:     t.Status,
+		Error:      t.Error,
+		Attrs:      t.Attrs,
+		SpanTree:   t.SpanTree,
+		CreatedAt:  t.CreatedAt.Format("2006-01-02 15:04:05"),
+	}
+	if !includeAgentDetail || s.obsRepo == nil {
+		return resp
+	}
+	task, steps, _ := s.obsRepo.FindByTraceID(context.Background(), t.ID)
+	resp.AgentTask = chatAgentTaskEntityToResponse(task)
+	resp.AgentSteps = chatAgentStepEntityToResponse(steps)
+	// 有 AgentStep 信息时，把 TotalSteps / ToolCalls 反填回 AgentTask（如果之前 MarkEnded 没填充好）
+	if resp.AgentTask != nil && len(resp.AgentSteps) > 0 {
+		toolCalls := 0
+		for _, st := range resp.AgentSteps {
+			if st.ToolName != "" && st.ToolName != "llm.reasoning" {
+				toolCalls++
+			}
+		}
+		if resp.AgentTask.TotalSteps <= 0 {
+			resp.AgentTask.TotalSteps = len(resp.AgentSteps)
+		}
+		if resp.AgentTask.ToolCalls <= 0 {
+			resp.AgentTask.ToolCalls = toolCalls
+		}
+	}
+	return resp
+}
+
 func (s *chatService) GetTrace(ctx context.Context, userID, traceID string, isAdmin bool) (*TraceResponse, error) {
 	if s.obsRepo == nil || traceID == "" {
 		return nil, fmt.Errorf("trace 存储未启用")
@@ -620,21 +703,8 @@ func (s *chatService) GetTrace(ctx context.Context, userID, traceID string, isAd
 	if !isAdmin && t.UserID != userID {
 		return nil, fmt.Errorf("无权限访问该 trace")
 	}
-	resp := &TraceResponse{
-		ID:         t.ID,
-		RequestID:  t.RequestID,
-		UserID:     t.UserID,
-		SessionID:  t.SessionID,
-		SampleRate: t.SampleRate,
-		Sampled:    t.Sampled,
-		DurationMs: t.DurationMs,
-		Status:     t.Status,
-		Error:      t.Error,
-		Attrs:      t.Attrs,
-		SpanTree:   t.SpanTree,
-		CreatedAt:  t.CreatedAt.Format("2006-01-02 15:04:05"),
-	}
-	return resp, nil
+	resp := s.buildTraceResponse(t, true)
+	return &resp, nil
 }
 
 func (s *chatService) ListSessionTraces(ctx context.Context, userID, sessionID string, isAdmin bool, offset, limit int) (TraceListResponse, error) {
@@ -663,20 +733,8 @@ func (s *chatService) ListSessionTraces(ctx context.Context, userID, sessionID s
 		return TraceListResponse{}, err
 	}
 	items := make([]any, 0, len(list))
-	for _, t := range list {
-		items = append(items, TraceResponse{
-			ID:         t.ID,
-			RequestID:  t.RequestID,
-			UserID:     t.UserID,
-			SessionID:  t.SessionID,
-			SampleRate: t.SampleRate,
-			Sampled:    t.Sampled,
-			DurationMs: t.DurationMs,
-			Status:     t.Status,
-			Error:      t.Error,
-			Attrs:      t.Attrs,
-			CreatedAt:  t.CreatedAt.Format("2006-01-02 15:04:05"),
-		})
+	for i := range list {
+		items = append(items, s.buildTraceResponse(&list[i], false))
 	}
 	return TraceListResponse{Total: total, Traces: items}, nil
 }
@@ -699,20 +757,8 @@ func (s *chatService) AdminListTraces(ctx context.Context, sessionID string, rat
 		return TraceListResponse{}, err
 	}
 	items := make([]any, 0, len(list))
-	for _, t := range list {
-		items = append(items, TraceResponse{
-			ID:         t.ID,
-			RequestID:  t.RequestID,
-			UserID:     t.UserID,
-			SessionID:  t.SessionID,
-			SampleRate: t.SampleRate,
-			Sampled:    t.Sampled,
-			DurationMs: t.DurationMs,
-			Status:     t.Status,
-			Error:      t.Error,
-			Attrs:      t.Attrs,
-			CreatedAt:  t.CreatedAt.Format("2006-01-02 15:04:05"),
-		})
+	for i := range list {
+		items = append(items, s.buildTraceResponse(&list[i], false))
 	}
 	return TraceListResponse{Total: total, Traces: items}, nil
 }
@@ -813,7 +859,11 @@ func (s *chatService) GetMetricsSnapshot() (map[string]any, error) {
 							continue
 						}
 						le := bm["le"]
-						if le == "+Inf" {
+						// JS Number.MAX_SAFE_INTEGER = 9007199254740991，+Inf 语义替换为该值，保证前端 TS number 类型一致
+						if s, _ := le.(string); s == "+Inf" {
+							le = float64(9007199254740991)
+						} else if le == "+inf" || le == "Inf" {
+							le = float64(9007199254740991)
 						}
 						cnt, _ := bm["delta_count"].(int64)
 						outB = append(outB, map[string]any{"le": le, "count": cnt})
@@ -903,4 +953,60 @@ func metadataAsMap(raw datatypes.JSON) map[string]any {
 		return nil
 	}
 	return m
+}
+
+// extractSearchMode 从 Attrs JSON / SpanTree JSON 里取 search_mode 作为 TraceResponse 顶层字段
+// 兼容 datatypes.JSON（GORM）、map[string]any（内存对象）、[]byte 三种来源；
+// 找不到时再回退硬解析 ChatTrace.SpanTree root 的 attrs.search_mode，避免新老数据过渡时为空
+func extractSearchMode(attrs any, spanTreeHint ...datatypes.JSON) string {
+	if s := extractSearchModeFromAny(attrs); s != "" {
+		return s
+	}
+	for _, st := range spanTreeHint {
+		if len(st) == 0 {
+			continue
+		}
+		var root struct {
+			Attrs map[string]any `json:"attrs"`
+		}
+		if err := json.Unmarshal(st, &root); err == nil {
+			if s, ok := root.Attrs["search_mode"].(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func extractSearchModeFromAny(attrs any) string {
+	if attrs == nil {
+		return ""
+	}
+	switch v := attrs.(type) {
+	case map[string]any:
+		if s, ok := v["search_mode"].(string); ok {
+			return s
+		}
+	case datatypes.JSON:
+		if len(v) == 0 {
+			return ""
+		}
+		var m map[string]any
+		if err := json.Unmarshal(v, &m); err == nil {
+			if s, ok := m["search_mode"].(string); ok {
+				return s
+			}
+		}
+	case []byte:
+		if len(v) == 0 {
+			return ""
+		}
+		var m map[string]any
+		if err := json.Unmarshal(v, &m); err == nil {
+			if s, ok := m["search_mode"].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
 }

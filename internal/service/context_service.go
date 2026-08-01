@@ -23,14 +23,14 @@ var tokenRegexp = regexp.MustCompile(`[\x{4e00}-\x{9fff}]+|[a-zA-Z0-9]+`)
 
 type contextService struct {
 	messageRepo repository.ChatMessageRepo
-	memoryRepo  repository.MemoryRepo
+	memoryRepo  repository.UserMemoryRepo
 	summaryRepo repository.SummaryRepo
 	obs         observability.Recorder
 }
 
 func NewContextService(
 	messageRepo repository.ChatMessageRepo,
-	memoryRepo repository.MemoryRepo,
+	memoryRepo repository.UserMemoryRepo,
 	summaryRepo repository.SummaryRepo,
 	obs ...observability.Recorder,
 ) ContextServiceInterface {
@@ -161,14 +161,40 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 	}, nil
 }
 
-func (s *contextService) SummarizeSession(ctx context.Context, sessionID string, chatModel model.BaseChatModel) (*entity.ChatSummary, error) {
+func (s *contextService) SummarizeSession(ctx context.Context, sessionID string, chatModel model.BaseChatModel) (summary *entity.ChatSummary, retErr error) {
+	if s == nil {
+		return nil, nil
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Errorf("SummarizeSession panic 已恢复: sessionID=%s, err=%v", sessionID, r)
+			retErr = fmt.Errorf("summarize panic: %v", r)
+			summary = nil
+		}
+	}()
+	if s.messageRepo == nil || s.summaryRepo == nil {
+		return nil, nil
+	}
+	if sessionID == "" || chatModel == nil {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	obsOk := s.obs != nil
 	var span *observability.Span
 	if obsOk {
 		_, span = s.obs.StartSpan(ctx, "ctx.summarize", observability.ComponentServiceContext, observability.Attrs{"session_id": sessionID})
 		defer func() {
 			if span != nil {
-				s.obs.EndSpan(ctx, span, observability.SpanStatusOK, nil, nil)
+				status := observability.SpanStatusOK
+				var errVal error
+				if retErr != nil {
+					status = observability.SpanStatusError
+					errVal = retErr
+				}
+				s.obs.EndSpan(ctx, span, status, errVal, nil)
 			}
 		}()
 	}
@@ -223,10 +249,14 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 	}
 
 	lastMsgID := summaryMessages[len(summaryMessages)-1].ID
+	coveredPrev := 0
+	if existing != nil {
+		coveredPrev = existing.CoveredCount
+	}
 	newSummary := &entity.ChatSummary{
 		SessionID:     sessionID,
 		Summary:       summaryText,
-		CoveredCount:  len(summaryMessages) + existing.CoveredCount,
+		CoveredCount:  len(summaryMessages) + coveredPrev,
 		LastMessageID: &lastMsgID,
 	}
 	if existing != nil {
@@ -243,7 +273,27 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 	return newSummary, nil
 }
 
-func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID string, messages []entity.ChatMessage, chatModel model.BaseChatModel) ([]entity.UserMemory, error) {
+func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID string, messages []entity.ChatMessage, chatModel model.BaseChatModel) (memories []entity.UserMemory, retErr error) {
+	if s == nil {
+		return nil, nil
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Errorf("ExtractMemories panic 已恢复: userID=%s, sessionID=%s, err=%v", userID, sessionID, r)
+			retErr = fmt.Errorf("extract memories panic: %v", r)
+			memories = nil
+		}
+	}()
+	if s.memoryRepo == nil {
+		return nil, nil
+	}
+	if userID == "" || chatModel == nil {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	obsOk := s.obs != nil
 	var span *observability.Span
 	if obsOk {
@@ -253,7 +303,13 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 		})
 		defer func() {
 			if span != nil {
-				s.obs.EndSpan(ctx, span, observability.SpanStatusOK, nil, nil)
+				status := observability.SpanStatusOK
+				var errVal error
+				if retErr != nil {
+					status = observability.SpanStatusError
+					errVal = retErr
+				}
+				s.obs.EndSpan(ctx, span, status, errVal, nil)
 			}
 		}()
 	}
@@ -262,7 +318,7 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 	}
 
 	dialogue := buildDialogueText(messages)
-	memories, err := s.generateMemories(ctx, chatModel, dialogue)
+	rawMemories, err := s.generateMemories(ctx, chatModel, dialogue)
 	if err != nil {
 		if obsOk {
 			s.obs.Incr(ctx, "ctx_memory_errors_total", nil, 1)
@@ -271,7 +327,7 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 	}
 
 	var result []entity.UserMemory
-	for _, m := range memories {
+	for _, m := range rawMemories {
 		m.UserID = userID
 		if m.SourceSession == nil || *m.SourceSession == "" {
 			m.SourceSession = &sessionID
