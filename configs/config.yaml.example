@@ -63,6 +63,7 @@ embedding:
   model: text-embedding-v4
   api_key: ""
   base_url: ""
+  batch_size: 10
   dimension: 1024
 
 # RAG 检索配置
