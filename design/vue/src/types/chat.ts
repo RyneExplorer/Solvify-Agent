@@ -168,6 +168,7 @@ export interface TraceSummary {
   error?: string
   attrs?: Record<string, unknown>
   created_at: string
+  search_mode?: 'quick' | 'deep' | 'unknown' | string
 }
 
 export interface ChatTraceDetail extends TraceSummary {
