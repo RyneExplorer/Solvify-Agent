@@ -32,9 +32,8 @@
 | `backend` | GHCR 公开后端镜像 | 运行 Go API，并提供 Python 文档解析能力 | 无 |
 | `postgres` | pgvector PostgreSQL 官方镜像 | 持久化业务数据和向量索引 | 无 |
 | `redis` | Redis 官方镜像 | 缓存、验证码和 Token 黑名单 | 无 |
-| `migrate` | pgvector PostgreSQL 官方镜像 | 部署时一次性执行幂等数据库脚本 | 无 |
 
-`migrate` 是一次性任务，不作为常驻服务计入运行实例。后端依赖 PostgreSQL 和 Redis 健康；前端依赖后端健康。
+后端依赖 PostgreSQL 和 Redis 健康；前端依赖后端健康。
 
 ## 5. 镜像设计
 
@@ -162,10 +161,9 @@ Compose 与脚本作业执行：
 
 - PostgreSQL、Redis 使用 Docker named volume 持久化
 - 后端上传文件和日志绑定到 `/opt/solvify-agent/shared/data` 与 `shared/logs`
-- PostgreSQL 首次创建数据卷时执行 `init_knowledge_schema.sql`
-- 每次部署在更新应用前运行 `migrate` 一次性服务，再次执行同一幂等脚本
+- PostgreSQL 仅在首次创建空数据卷时执行 `init_knowledge_schema.sql`
 - `seed_interface_data.sql` 只包含接口测试数据，不进入生产初始化流程
-- 后续数据库变更必须保持向前兼容，并显式使用 `ALTER ... IF NOT EXISTS` 等幂等语句
+- 后续数据库结构变更应使用独立的版本化迁移脚本，不直接修改已有生产数据库的初始化基线
 
 ## 9. 部署与回滚
 
@@ -177,10 +175,9 @@ Compose 与脚本作业执行：
 4. 写入本次提交对应的新 `.release.env`
 5. 拉取前后端 SHA 镜像
 6. 启动 PostgreSQL 和 Redis并等待健康
-7. 运行 `migrate` 服务
-8. 更新后端和前端
-9. 等待后端容器健康，并通过前端代理请求 `/health`
-10. 成功后更新 `current` 软链接并清理无引用的本地镜像
+7. 更新后端和前端
+8. 等待后端容器健康，并通过前端代理请求 `/health`
+9. 成功后更新 `current` 软链接并清理无引用的本地镜像
 
 任一步骤失败后：
 
