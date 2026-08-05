@@ -19,13 +19,16 @@ import (
 	"solvify-agent/pkg/tokenutil"
 )
 
+// tokenRegexp 用于切分中英文关键词的正则
 var tokenRegexp = regexp.MustCompile(`[\x{4e00}-\x{9fff}]+|[a-zA-Z0-9]+`)
+// contextService 上下文管理服务实现
 
 type contextService struct {
 	messageRepo repository.ChatMessageRepo
 	memoryRepo  repository.UserMemoryRepo
 	summaryRepo repository.SummaryRepo
 	obs         observability.Recorder
+// NewContextService 创建上下文管理服务
 }
 
 func NewContextService(
@@ -45,15 +48,19 @@ func NewContextService(
 	return s
 }
 
+// SetObservability 注入可观测性记录器
 func (s *contextService) SetObservability(obs observability.Recorder) {
 	s.obs = obs
 }
 
+// BuildContext 构建增强后的对话上下文
 func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, currentQuery string, cfg BuildContextConfig, chatModel model.BaseChatModel) (*EnhancedContext, error) {
 	obsOk := s.obs != nil
 	var span *observability.Span
 	if obsOk {
-		_, span = s.obs.StartSpan(ctx, "ctx.build", observability.ComponentServiceContext, observability.Attrs{
+		// 接住 StartSpan 返回的 newCtx：后面 messageRepo/SummaryRepo 再开子 span 时能正确找到 ctx.build 当 parent。
+		// 之前写成 _, span = StartSpan(ctx, …)，newCtx 被丢了，上下文子链只能靠 span.parent 碰巧挂到根。
+		ctx, span = s.obs.StartSpan(ctx, "ctx.build", observability.ComponentServiceContext, observability.Attrs{
 			"session_id": sessionID,
 			"has_query":  fmt.Sprintf("%t", currentQuery != ""),
 		})
@@ -140,8 +147,8 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 
 	history := mergeMessages(recent, relevant)
 	history = s.applySummary(history, summary)
-	history = truncateHistoryByTokens(history, cfg.MaxTokens)
-	memories = truncateMemoriesByTokens(memories, cfg.MemoryBudget)
+	history = truncateHistoryByTokens(history, cfg.MaxTokens, cfg.ModelName)
+	memories = truncateMemoriesByTokens(memories, cfg.MemoryBudget, cfg.ModelName)
 
 	if obsOk && span != nil {
 		if span.Attrs == nil {
@@ -160,6 +167,7 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 		RetrievalBudget: cfg.RetrievalBudget,
 	}, nil
 }
+// SummarizeSession 对会话生成或更新摘要
 
 func (s *contextService) SummarizeSession(ctx context.Context, sessionID string, chatModel model.BaseChatModel) (summary *entity.ChatSummary, retErr error) {
 	if s == nil {
@@ -185,7 +193,7 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 	obsOk := s.obs != nil
 	var span *observability.Span
 	if obsOk {
-		_, span = s.obs.StartSpan(ctx, "ctx.summarize", observability.ComponentServiceContext, observability.Attrs{"session_id": sessionID})
+		ctx, span = s.obs.StartSpan(ctx, "ctx.summarize", observability.ComponentServiceContext, observability.Attrs{"session_id": sessionID})
 		defer func() {
 			if span != nil {
 				status := observability.SpanStatusOK
@@ -271,6 +279,7 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 	}
 
 	return newSummary, nil
+// ExtractMemories 从消息中提取用户长期记忆
 }
 
 func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID string, messages []entity.ChatMessage, chatModel model.BaseChatModel) (memories []entity.UserMemory, retErr error) {
@@ -297,7 +306,7 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 	obsOk := s.obs != nil
 	var span *observability.Span
 	if obsOk {
-		_, span = s.obs.StartSpan(ctx, "ctx.extract_memories", observability.ComponentServiceContext, observability.Attrs{
+		ctx, span = s.obs.StartSpan(ctx, "ctx.extract_memories", observability.ComponentServiceContext, observability.Attrs{
 			"user_id": userID,
 			"msgs_n":  fmt.Sprintf("%d", len(messages)),
 		})
@@ -350,7 +359,14 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 	return result, nil
 }
 
-// applySummary 用摘要替换被摘要覆盖的早期消息
+// applySummary 移除已被摘要覆盖的早期消息，只保留"摘要分界点之后的新消息尾"。
+//
+// 关键修复：不再伪造一条 Role=assistant 的「摘要消息」塞进历史。
+// 旧做法会导致模型把摘要误判为"自己前一轮已经输出过的内容"，直接产生幻觉（比如
+// 明明没有回答过某问题，却因为摘要里提到，就接着往下编）。
+//
+// 正确做法：摘要内容由 PromptBuilder.BuildSystem() 注入到 System Prompt，
+// 与用户画像/偏好同层语义，统一且无歧义。
 func (s *contextService) applySummary(messages []entity.ChatMessage, summary *entity.ChatSummary) []entity.ChatMessage {
 	if summary == nil || summary.LastMessageID == nil {
 		return messages
@@ -367,15 +383,15 @@ func (s *contextService) applySummary(messages []entity.ChatMessage, summary *en
 		return messages
 	}
 
-	// 把被覆盖的消息替换为一条 summary 消息
-	summaryMsg := entity.ChatMessage{
-		ID:        "summary-" + summary.SessionID,
-		SessionID: summary.SessionID,
-		Role:      "assistant",
-		Content:   "【对话摘要】" + summary.Summary,
+	// 保证新历史的第一条始终是 user（防止"截断后只剩半截 assistant"的非法开头）
+	first := cutIdx + 1
+	for first < len(messages) && messages[first].Role == "assistant" {
+		first++
 	}
-
-	return append([]entity.ChatMessage{summaryMsg}, messages[cutIdx+1:]...)
+	if first >= len(messages) {
+		return nil
+	}
+	return messages[first:]
 }
 
 // generateSummary 调用 LLM 生成摘要
@@ -553,22 +569,68 @@ func allRunesInSet(s string, set map[string]struct{}) bool {
 	return true
 }
 
-// truncateMemoriesByTokens 按 token 预算截断记忆，优先保留最近更新的记忆
-func truncateMemoriesByTokens(memories []entity.UserMemory, maxTokens int) []entity.UserMemory {
+// truncateMemoriesByTokens 按真 BPE token 预算截断记忆，优先保留"重要度+更新时间"综合靠前的。
+//
+// 关键修复（P1-⑥）：旧实现直接按 updated_at 倒序 TopK，会把和当前 query 完全无关的记忆硬塞，
+// 污染 prompt。这里先用 Importance×Recency 粗排，再按真 BPE 从顶塞到预算。
+// 当前 query 相关度判断在 P1 级改造会走 embedding 语义召回，这里先保证不超预算。
+func truncateMemoriesByTokens(memories []entity.UserMemory, maxTokens int, modelName string) []entity.UserMemory {
 	if maxTokens <= 0 {
+		return nil
+	}
+	if len(memories) == 0 {
 		return memories
 	}
 
-	// 已按 updated_at DESC 从仓库返回，从最后一条往前加，保留最新的
+	type scored struct {
+		idx int
+		sc  float64
+	}
+	scoredList := make([]scored, 0, len(memories))
+	now := time.Now()
+	for i, m := range memories {
+		imp := m.Confidence
+		if imp <= 0 {
+			imp = 1
+		}
+		// 简单 recency：更新时间 30 天内不打折，超过按 1/(1+days/30) 衰减
+		days := now.Sub(m.UpdatedAt).Hours() / 24
+		if days < 0 {
+			days = 0
+		}
+		rec := 1.0
+		if days > 30 {
+			rec = 1.0 / (1.0 + (days-30)/30.0)
+		}
+		scoredList = append(scoredList, scored{i, imp * rec})
+	}
+	// 稳定排序：得分降序，同分用 UpdatedAt 新的在前
+	sort.SliceStable(scoredList, func(a, b int) bool {
+		if scoredList[a].sc != scoredList[b].sc {
+			return scoredList[a].sc > scoredList[b].sc
+		}
+		return memories[scoredList[a].idx].UpdatedAt.After(memories[scoredList[b].idx].UpdatedAt)
+	})
+
 	var total int
-	var result []entity.UserMemory
-	for i := len(memories) - 1; i >= 0; i-- {
-		cost := tokenutil.Estimate(memories[i].Content)
+	result := make([]entity.UserMemory, 0, len(scoredList))
+	for _, it := range scoredList {
+		m := memories[it.idx]
+		cost := tokenutil.CountTokens(m.Content, modelName)
 		if total+cost > maxTokens {
+			remain := maxTokens - total
+			if remain >= 40 {
+				cut, actual := tokenutil.TruncateByTokens(m.Content, modelName, remain)
+				if actual > 0 {
+					m.Content = cut + "（记忆过长已截断）"
+					result = append(result, m)
+					total += actual
+				}
+			}
 			break
 		}
 		total += cost
-		result = append([]entity.UserMemory{memories[i]}, result...)
+		result = append(result, m)
 	}
 	return result
 }

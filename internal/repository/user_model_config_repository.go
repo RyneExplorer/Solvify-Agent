@@ -2,9 +2,11 @@ package repository
 
 import (
 	"context"
+	"errors"
 
 	"gorm.io/gorm"
 
+	apperrors "solvify-agent/pkg/errors"
 	"solvify-agent/internal/model/entity"
 )
 
@@ -35,13 +37,16 @@ func (r *userModelConfigRepository) Delete(ctx context.Context, id string, userI
 		Delete(&entity.UserModelConfig{}).Error
 }
 
-// GetByID 根据 ID 和用户 ID 获取配置
+// GetByID 根据 ID 和用户 ID 获取配置；找不到返回业务错误 CodeModelConfigNotFound
 func (r *userModelConfigRepository) GetByID(ctx context.Context, id string, userID string) (*entity.UserModelConfig, error) {
 	var config entity.UserModelConfig
 	err := r.db.WithContext(ctx).
 		Where("id = ? AND user_id = ?", id, userID).
 		First(&config).Error
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperrors.NewDefault(apperrors.CodeModelConfigNotFound)
+		}
 		return nil, err
 	}
 	return &config, nil

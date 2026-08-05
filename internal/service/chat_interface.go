@@ -8,6 +8,7 @@ import (
 	"solvify-agent/internal/model/entity"
 )
 
+// FeedbackRequest 反馈提交请求
 type FeedbackRequest struct {
 	Rating    int      `json:"rating"`
 	Reasons   []string `json:"reasons"`
@@ -15,11 +16,13 @@ type FeedbackRequest struct {
 	IsQuick   bool     `json:"is_quick_reply"`
 }
 
+// FeedbackListResponse 反馈列表响应
 type FeedbackListResponse struct {
 	Total     int64 `json:"total"`
 	Feedbacks any   `json:"feedbacks"`
 }
 
+// TraceAgentTaskResponse Agent 任务追踪详情
 type TraceAgentTaskResponse struct {
 	ID                string  `json:"id"`
 	TraceID           string  `json:"trace_id,omitempty"`
@@ -39,6 +42,7 @@ type TraceAgentTaskResponse struct {
 	ErrorSummary      string  `json:"error_summary,omitempty"`
 }
 
+// TraceAgentStepResponse Agent 单步追踪详情
 type TraceAgentStepResponse struct {
 	StepIndex         int    `json:"step_index"`
 	StartedAt         string `json:"started_at"`
@@ -52,24 +56,27 @@ type TraceAgentStepResponse struct {
 	LatencyMs         int64  `json:"latency_ms,omitempty"`
 }
 
+// TraceResponse 单次追踪详情响应
 type TraceResponse struct {
-	ID         string  `json:"id"`
-	RequestID  string  `json:"request_id,omitempty"`
-	UserID     string  `json:"user_id,omitempty"`
-	SessionID  string  `json:"session_id,omitempty"`
-	SearchMode string  `json:"search_mode,omitempty"`
-	SampleRate float64 `json:"sample_rate,omitempty"`
-	Sampled    bool    `json:"sampled"`
-	DurationMs int64   `json:"duration_ms,omitempty"`
-	Status     string  `json:"status,omitempty"`
-	Error      string  `json:"error,omitempty"`
-	Attrs      any     `json:"attrs,omitempty"`
-	SpanTree   any     `json:"span_tree,omitempty"`
-	AgentTask  *TraceAgentTaskResponse  `json:"agent_task,omitempty"`
-	AgentSteps []TraceAgentStepResponse `json:"agent_steps,omitempty"`
-	CreatedAt  string  `json:"created_at"`
+	ID            string         `json:"id"`
+	RequestID     string         `json:"request_id,omitempty"`
+	UserID        string         `json:"user_id,omitempty"`
+	SessionID     string         `json:"session_id,omitempty"`
+	SearchMode    string         `json:"search_mode,omitempty"`
+	SampleRate    float64        `json:"sample_rate,omitempty"`
+	Sampled       bool           `json:"sampled"`
+	DurationMs    int64          `json:"duration_ms,omitempty"`
+	Status        string         `json:"status,omitempty"`
+	Error         string         `json:"error,omitempty"`
+	Attrs         any            `json:"attrs,omitempty"`
+	AttrsDisplay  any            `json:"attrs_display,omitempty"`
+	SpanTree      any            `json:"span_tree,omitempty"`
+	AgentTask     *TraceAgentTaskResponse  `json:"agent_task,omitempty"`
+	AgentSteps    []TraceAgentStepResponse `json:"agent_steps,omitempty"`
+	CreatedAt     string         `json:"created_at"`
 }
 
+// TraceListResponse 追踪列表响应
 type TraceListResponse struct {
 	Total  int64 `json:"total"`
 	Traces any   `json:"traces"`

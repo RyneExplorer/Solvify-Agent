@@ -5,6 +5,7 @@ import (
 	"solvify-agent/internal/model/entity"
 )
 
+// PromptUserContext 描述注入到系统提示词中的用户上下文信息
 type PromptUserContext struct {
 	ID                 string
 	Username           string
@@ -29,9 +30,10 @@ type Request struct {
 	KnowledgeBaseIDs []string             // 知识库 ID 列表
 	ModelID          string               // 模型 ID
 	ModelType        string               // 模型类型（user/system）
-	Summary          *entity.ChatSummary  // 会话摘要（长对话压缩内容）
-	Memories         []entity.UserMemory  // 用户长期记忆（偏好/事实/约束/决策）
-	UserCtx          PromptUserContext    // 用户基本信息 + 当前时间
+	Summary          *entity.ChatSummary  // 会话摘要（长对话压缩内容）— 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段
+	Memories         []entity.UserMemory  // 用户长期记忆 — 保留给调试/日志
+	UserCtx          PromptUserContext    // 用户基本信息 + 当前时间 — 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段
+	SystemPrompt     string               // 统一入口注入的完整 System Prompt。不为空时 runAgent 完全信任它，不再内部二次拼接摘要/记忆
 }
 
 // Event 描述 Agent SSE 事件

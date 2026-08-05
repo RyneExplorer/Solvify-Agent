@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,10 +18,12 @@ type userIDKey struct{}
 type sessionIDKey struct{}
 type requestIDKey struct{}
 
+// SetUserID 将 userID 写入 context。
 func SetUserID(ctx context.Context, userID string) context.Context {
 	return context.WithValue(ctx, userIDKey{}, userID)
 }
 
+// UserID 从 context 读取 userID，兼容 gin.Context。
 func UserID(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -43,10 +44,12 @@ func UserID(ctx context.Context) string {
 	return s
 }
 
+// SetSessionID 将 sessionID 写入 context。
 func SetSessionID(ctx context.Context, sessionID string) context.Context {
 	return context.WithValue(ctx, sessionIDKey{}, sessionID)
 }
 
+// SessionID 从 context 读取 sessionID，兼容 gin.Context。
 func SessionID(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -67,10 +70,12 @@ func SessionID(ctx context.Context) string {
 	return s
 }
 
+// SetRequestID 将 requestID 写入 context。
 func SetRequestID(ctx context.Context, requestID string) context.Context {
 	return context.WithValue(ctx, requestIDKey{}, requestID)
 }
 
+// RequestID 从 context 读取 requestID，兼容 gin.Context。
 func RequestID(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -123,24 +128,14 @@ func (w *responseRecorder) Size() int {
 	return w.size
 }
 
+// TraceMiddleware 给每个 HTTP 请求打 OTel 根 span + 记录 Prometheus HTTP 指标。
 type TraceMiddleware struct {
 	Recorder Recorder
-	store    *MetricStore
-	inflight map[string]*atomic.Int64
 }
 
+// NewTraceMiddleware 构造 TraceMiddleware。
 func NewTraceMiddleware(recorder Recorder) *TraceMiddleware {
-	return &TraceMiddleware{Recorder: recorder, store: GlobalMetricStore(500), inflight: map[string]*atomic.Int64{}}
-}
-
-func (m *TraceMiddleware) inflightFor(route string) *atomic.Int64 {
-	v, ok := m.inflight[route]
-	if ok {
-		return v
-	}
-	n := new(atomic.Int64)
-	m.inflight[route] = n
-	return n
+	return &TraceMiddleware{Recorder: recorder}
 }
 
 func (m *TraceMiddleware) Handler() gin.HandlerFunc {
@@ -172,12 +167,12 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 			route = route[:256]
 		}
 		method := c.Request.Method
-		labels := map[string]string{"method": method, "route": route}
-		inflight := m.inflightFor(method + ":" + route)
-		inflight.Add(1)
-		defer inflight.Add(-1)
-		if m.store != nil {
-			m.store.SetGauge("http_request_inflight", labels, inflight.Load())
+
+		// 在途请求 Gauge
+		metrics := GlobalMetrics()
+		if metrics != nil && metrics.HTTPRequestInflight != nil {
+			metrics.HTTPRequestInflight.WithLabelValues(method, route).Inc()
+			defer metrics.HTTPRequestInflight.WithLabelValues(method, route).Dec()
 		}
 
 		start := time.Now()
@@ -206,21 +201,21 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 				n := runtime.Stack(stack, false)
 				stackStr := string(stack[:n])
 				logger.Errorf("Panic recovered: %v\n%s", err, stackStr)
-				if span != nil {
+				if span != nil && m.Recorder != nil {
 					m.Recorder.AddEvent(ctx, span, "panic", Attrs{
 						"panic_type":  fmt.Sprintf("%T", err),
 						"panic_value": truncateForEvent(fmt.Sprintf("%v", err)),
 						"stack":       truncateForEvent(stackStr),
 					})
 				}
-				if m.store != nil {
-					m.store.Incr("http_panic_total", map[string]string{
+				if m.Recorder != nil {
+					m.Recorder.Incr(ctx, "http_panic_total", map[string]string{
 						"method": method,
 						"route":  route,
 						"type":   panicTypeName(err),
 					}, 1)
 				}
-				if span != nil {
+				if span != nil && m.Recorder != nil {
 					m.Recorder.EndSpan(ctx, span, SpanStatusError, fmt.Errorf("panic: %v", err), Attrs{
 						"status": 500,
 					})
@@ -238,14 +233,14 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 		dur := time.Since(start)
 		status := rec.Status()
 		c.Writer.Header().Set("X-Trace-ID", TraceIDFromContext(c.Request.Context()))
-		if span != nil {
+		statusGrp := statusGroup(status)
+		if span != nil && m.Recorder != nil {
 			attrs := Attrs{
-				"status":         status,
-				"bytes":          rec.Size(),
-				"errors":         len(c.Errors),
+				"status":       status,
+				"bytes":         rec.Size(),
+				"errors":        len(c.Errors),
+				"status_group":  statusGrp,
 			}
-			statusGrp := statusGroup(status)
-			attrs["status_group"] = statusGrp
 			if len(c.Errors) > 0 {
 				attrs["last_error"] = truncateForEvent(c.Errors.Last().Error())
 			}
@@ -262,22 +257,22 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 			}
 			m.Recorder.EndSpan(c.Request.Context(), span, endStatus, recErr, attrs)
 		}
-		if m.store != nil {
-			commonLabels := map[string]string{
+		// HTTP 业务指标
+		if m.Recorder != nil {
+			m.Recorder.Incr(c.Request.Context(), "http_request_total", map[string]string{
 				"method":       method,
 				"route":        route,
-				"status_group": statusGroup(status),
-			}
-			m.store.Incr("http_request_total", commonLabels, 1)
-			m.store.Observe("http_request_duration_seconds", map[string]string{
+				"status_group":  statusGrp,
+			}, 1)
+			m.Recorder.Observe(c.Request.Context(), "http_request_duration_seconds", map[string]string{
 				"method": method,
 				"route":  route,
-			}, dur.Seconds(), nil)
+			}, dur.Seconds())
 			if status >= 400 {
-				m.store.Incr("http_error_total", map[string]string{
+				m.Recorder.Incr(c.Request.Context(), "http_error_total", map[string]string{
 					"method":       method,
 					"route":        route,
-					"status_group": statusGroup(status),
+					"status_group": statusGrp,
 				}, 1)
 			}
 		}
@@ -319,6 +314,7 @@ func panicTypeName(err any) string {
 	return name
 }
 
+// StreamProgress 向事件通道非阻塞发送流式进度事件。
 func StreamProgress(ctx context.Context, eventCh chan<- any, event string, payload any) {
 	_ = ctx
 	select {
@@ -327,6 +323,7 @@ func StreamProgress(ctx context.Context, eventCh chan<- any, event string, paylo
 	}
 }
 
+// ToInt64 将任意类型安全转换为 int64。
 func ToInt64(v any) int64 {
 	switch val := v.(type) {
 	case int:

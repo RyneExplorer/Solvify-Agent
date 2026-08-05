@@ -10,12 +10,14 @@ import (
 
 // BuildContextConfig 构建上下文的配置
 type BuildContextConfig struct {
-	MaxTokens           int      // 历史消息最大 token 预算（0 表示按模型窗口自动计算）
-	MaxMemories         int
+	MaxTokens            int      // 历史消息最大 token 预算（0 表示按模型窗口自动计算）
+	MaxMemories          int
 	MaxRecentMessages   int
-	RetrievalBudget     int      // 知识库检索上下文最大 token 预算
-	MemoryBudget        int      // 用户记忆最大 token 预算
+	RetrievalBudget      int      // 知识库检索上下文最大 token 预算
+	MemoryBudget         int      // 用户记忆最大 token 预算
 	PreExtractedKeywords []string // 调用方预抽取的同义词归一化关键词（优先使用，为空时用 extractKeywords 纯正则兜底）
+	ModelName            string   // 本次要发送到的具体模型名（用于 tiktoken 选 BPE 编码；未知模型回退 cl100k_base）
+	ToolsTokens          int      // 深度模式/带工具调用时，预扣工具定义的 token，不参与历史预算
 }
 
 // EnhancedContext 增强后的对话上下文

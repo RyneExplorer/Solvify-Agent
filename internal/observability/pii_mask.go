@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 )
 
+// PIISanitizer 负责对文本和 attrs 做 PII 脱敏与截断。
 type PIISanitizer struct {
 	ContentMaxChars int
 	MaskSecret      bool
@@ -18,6 +19,7 @@ var (
 	skKeyRe           = regexp.MustCompile(`(?i)(sk-|pk-|token|apikey|api_key|secret)[^ \t\n\r]{0,4}[=: ]\s*[A-Za-z0-9_\-]{8,}`)
 )
 
+// NewPIISanitizer 构造 PIISanitizer。
 func NewPIISanitizer(contentMaxChars int, maskSecret bool) *PIISanitizer {
 	if contentMaxChars < 0 {
 		contentMaxChars = 0
@@ -25,6 +27,7 @@ func NewPIISanitizer(contentMaxChars int, maskSecret bool) *PIISanitizer {
 	return &PIISanitizer{ContentMaxChars: contentMaxChars, MaskSecret: maskSecret}
 }
 
+// SanitizeString 对字符串做 PII 脱敏并按字符数截断。
 func (s *PIISanitizer) SanitizeString(text string) string {
 	if s == nil {
 		return truncateRunes(text, 200)
@@ -40,6 +43,7 @@ func (s *PIISanitizer) SanitizeString(text string) string {
 	return out
 }
 
+// SanitizeAttrs 对 attrs 中所有值递归做 PII 脱敏。
 func (s *PIISanitizer) SanitizeAttrs(attrs Attrs) Attrs {
 	if len(attrs) == 0 || s == nil {
 		return attrs
@@ -150,4 +154,55 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TruncatePreview 对 attrs 的「预览字段」做两段式控制：
+//  1. 先统一做 PII mask（SanitizeString）
+//  2. 再按 maxRunes 截断，并在尾部加 "…(+X chars)"，
+//     既保证前端能看到关键片段，又防止 attrs 把 span_tree JSON 撑爆。
+//
+// 典型 maxRunes：query/args_preview = 300；response_preview/top doc snippet = 500；
+// short_preview（工具名列表/last_user_msg_preview）= 200。
+func (s *PIISanitizer) TruncatePreview(text string, maxRunes int) string {
+	if s == nil {
+		return truncateRunes(text, 300)
+	}
+	if maxRunes <= 0 {
+		maxRunes = 200
+	}
+	masked := s.SanitizeString(text)
+	if masked == "" {
+		return ""
+	}
+	total := utf8.RuneCountInString(masked)
+	if total <= maxRunes {
+		return masked
+	}
+	head := truncateRunes(masked, maxRunes)
+	// head 末尾自带 "…"，去掉再拼接统一尾标。
+	head = strings.TrimRight(head, "…")
+	return head + "…(+" + itoa(total-maxRunes) + " chars)"
+}
+
+// itoa 轻量实现，避免额外依赖 strconv。
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	buf := [16]byte{}
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
 }

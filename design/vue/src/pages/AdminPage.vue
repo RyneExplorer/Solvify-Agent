@@ -2,7 +2,7 @@
   <div class="py-8 px-10">
     <h1 class="text-[28px] font-bold text-slate-900 mb-6" style="font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.02em;">后台管理</h1>
 
-    <!-- Tabs -->
+    <!-- 标签页 -->
     <div class="flex border-b border-slate-200 mb-6 overflow-x-auto">
       <button
         v-for="tab in adminTabs" :key="tab.key"
@@ -102,7 +102,7 @@
       </div>
     </div>
 
-    <!-- Models tab -->
+    <!-- 模型管理 -->
     <div v-if="activeTab === 'models'">
       <div class="flex justify-between mb-4">
         <SearchInput v-model="modelSearch" placeholder="搜索模型..." wrapper-class="w-80" />
@@ -115,6 +115,7 @@
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">提供商</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">模型 ID</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">Base URL</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">最大上下文</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">状态</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">操作</th>
             </tr>
@@ -124,6 +125,7 @@
               <td class="px-4 py-3 font-medium text-slate-900">{{ m.provider }}</td>
               <td class="px-4 py-3 text-slate-900">{{ m.model_id }}</td>
               <td class="px-4 py-3 text-slate-900">{{ m.base_url || '-' }}</td>
+              <td class="px-4 py-3 text-slate-900 font-mono tabular-nums">{{ m.max_context_length ?? '-' }}</td>
               <td class="px-4 py-3"><AppBadge :variant="m.is_enabled ? 'success' : 'neutral'">{{ m.is_enabled ? '启用' : '停用' }}</AppBadge></td>
               <td class="px-4 py-3">
                 <div class="flex items-center gap-1">
@@ -229,7 +231,7 @@
         >{{ t.label }}</button>
       </div>
 
-      <!-- Metrics -->
+      <!-- 指标 -->
       <div v-if="activeObsTab === 'metrics'">
         <div class="flex justify-between items-center mb-4">
           <div>
@@ -490,7 +492,7 @@
       </div>
     </div>
 
-    <!-- Model Modal -->
+    <!-- 模型弹窗 -->
     <div v-if="modelModalVisible" class="fixed inset-0 z-50 flex items-center justify-center">
       <div class="absolute inset-0 bg-black/30" @click="modelModalVisible = false" />
       <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-[480px]">
@@ -512,6 +514,11 @@
             <label class="block text-[13px] font-medium text-slate-600 mb-1.5">API Key</label>
             <input v-model="modelForm.api_key" type="password" placeholder="sk-..." class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
           </div>
+          <div>
+            <label class="block text-[13px] font-medium text-slate-600 mb-1.5">最大上下文长度 <span class="text-red-500">*</span></label>
+            <input v-model.number="modelForm.max_context_length" type="number" min="1024" max="200000" step="1024" placeholder="8192" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
+            <p class="text-xs text-slate-400 mt-1">范围 1024~200000，可后续通过"测试连接"自动探测</p>
+          </div>
 
           <!-- 测试结果 -->
           <div v-if="modelTestResult" class="mt-2">
@@ -521,6 +528,7 @@
                 <span class="font-medium">{{ modelTestResult.message }}</span>
               </div>
               <div v-if="modelTestResult.response_time_ms" class="text-xs opacity-70">响应时间: {{ modelTestResult.response_time_ms }}ms</div>
+              <div v-if="modelTestResult.detected_max_context_length" class="text-xs mt-1 opacity-70">探测到的最大上下文: {{ modelTestResult.detected_max_context_length }}</div>
               <div v-if="modelTestResult.error" class="text-xs mt-1 opacity-70">错误: {{ modelTestResult.error }}</div>
               <div v-if="modelTestResult.details" class="text-xs mt-1 opacity-70">详情: {{ modelTestResult.details }}</div>
             </div>
@@ -560,7 +568,7 @@
       </div>
     </div>
 
-    <!-- Tool Provider Modal -->
+    <!-- 工具提供商弹窗 -->
     <div v-if="toolProviderModalVisible" class="fixed inset-0 z-50 flex items-center justify-center">
       <div class="absolute inset-0 bg-black/30" @click="toolProviderModalVisible = false" />
       <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-[520px]" style="max-height:90vh;overflow-y:auto;">
@@ -587,7 +595,7 @@
             <textarea v-model="toolProviderForm.description" rows="2" placeholder="供应商描述" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900 resize-none" />
           </div>
 
-          <!-- HTTP Config -->
+          <!-- HTTP 配置 -->
           <div v-if="toolProviderForm.provider_type === 'http'">
             <div class="flex items-center justify-between mb-1.5">
               <label class="block text-[13px] font-medium text-slate-600">HTTP 配置 <span class="text-red-500">*</span></label>
@@ -662,7 +670,7 @@
             </div>
           </div>
 
-          <!-- Admin Config Key-Value -->
+          <!-- 管理配置键值对 -->
           <div>
             <div class="flex items-center justify-between mb-1.5">
               <label class="block text-[13px] font-medium text-slate-600">管理员业务参数</label>
@@ -711,7 +719,7 @@
       </div>
     </div>
 
-    <!-- User Modal -->
+    <!-- 用户弹窗 -->
     <div v-if="userModalVisible" class="fixed inset-0 z-50 flex items-center justify-center">
       <div class="absolute inset-0 bg-black/30" @click="userModalVisible = false" />
       <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-[480px]">
@@ -783,7 +791,7 @@ import AppSelect from '../components/ui/AppSelect.vue'
 import SearchInput from '../components/ui/SearchInput.vue'
 import StatCard from '../components/StatCard.vue'
 import TraceRootProvider from '../components/TraceRootProvider.vue'
-import type { ModelInfo } from '@/types/model'
+import type { ModelInfo, ModelTestResult } from '@/types/model'
 import type { ToolTypeInfo, ToolProviderInfo } from '@/types/tool'
 import type { AdminSession, TraceSummary, ChatTraceDetail, MetricsSnapshot } from '@/types/chat'
 import {
@@ -871,23 +879,17 @@ const filteredModels = computed(() => {
 })
 const modelModalVisible = ref(false)
 const editingModel = ref<ModelInfo | null>(null)
-const modelForm = ref({ provider: '', model_id: '', base_url: '', api_key: '' })
-const modelFormValid = computed(() => modelForm.value.provider.trim() && modelForm.value.model_id.trim())
-const modelTestResult = ref<{
-  success: boolean
-  message: string
-  error?: string
-  response_time_ms: number
-  details?: string
-} | null>(null)
+const modelForm = ref({ provider: '', model_id: '', base_url: '', api_key: '', max_context_length: 8192 })
+const modelFormValid = computed(() => modelForm.value.provider.trim() && modelForm.value.model_id.trim() && modelForm.value.max_context_length >= 1024 && modelForm.value.max_context_length <= 200000)
+const modelTestResult = ref<ModelTestResult | null>(null)
 const modelTesting = ref(false)
 
 function openModelModal(model?: ModelInfo) {
   editingModel.value = model ?? null
   if (model) {
-    modelForm.value = { provider: model.provider, model_id: model.model_id, base_url: model.base_url || '', api_key: '' }
+    modelForm.value = { provider: model.provider, model_id: model.model_id, base_url: model.base_url || '', api_key: '', max_context_length: model.max_context_length || 8192 }
   } else {
-    modelForm.value = { provider: '', model_id: '', base_url: '', api_key: '' }
+    modelForm.value = { provider: '', model_id: '', base_url: '', api_key: '', max_context_length: 8192 }
   }
   modelModalVisible.value = true
 }
@@ -1643,6 +1645,13 @@ watch(activeTab, (tab) => {
   if (tab === 'observability' && !obsMetrics.value) loadObsMetrics()
 })
 
+// 切换「链路 Traces」子 tab 时自动拉取最新 traces（而不是等用户手动点按钮）
+watch(activeObsTab, (tab) => {
+  if (tab === 'traces' && obsTraces.value.length === 0) {
+    loadSessionTraces()
+  }
+})
+
 watch(userSearch, () => loadUsers())
 watch([sessionSearch, sessionStatus, sessionPage], () => loadSessions())
 watch(obsTracePage, () => loadSessionTraces())
@@ -1652,6 +1661,12 @@ onMounted(() => {
   if (activeTab.value === 'sessions') loadSessions()
   if (activeTab.value === 'models') loadModels()
   if (activeTab.value === 'tools') loadToolTypes()
-  if (activeTab.value === 'observability') loadObsMetrics()
+  if (activeTab.value === 'observability') {
+    loadObsMetrics()
+    // 如果用户默认打开就是链路 Traces tab，也自动拉一次
+    if (activeObsTab.value === 'traces' && obsTraces.value.length === 0) {
+      loadSessionTraces()
+    }
+  }
 })
 </script>

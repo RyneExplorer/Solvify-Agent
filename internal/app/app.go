@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -42,6 +43,10 @@ type App struct {
 	obsRecorder  observability.Recorder
 	router       *api.Router
 	server       *http.Server
+
+	// 阶段 1.4：OTel / Prometheus 资源，由 App 负责生命周期管理
+	tracerShutdown func(context.Context) error
+	promRegistry   *prometheus.Registry
 }
 
 // NewApp 创建应用实例
@@ -115,7 +120,7 @@ func (a *App) initLogger() error {
 
 // initDatabase 初始化 PostgresSQL 和 Redis 连接
 func (a *App) initDatabase() error {
-	// postgresql
+	// PostgreSQL 数据库连接
 	postgresqlDB, err := database.OpenPostgreSQL(&a.cfg.Database.Postgres)
 	if err != nil {
 		return fmt.Errorf("初始化 PostgreSQL 失败: %w", err)
@@ -141,7 +146,7 @@ func (a *App) initDatabase() error {
 	//	return fmt.Errorf("数据库自动迁移失败: %w", err)
 	//}
 
-	// redis
+	// Redis 缓存连接
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
 	if err != nil {
 		_ = database.ClosePostgreSQL(a.postgresqlDB)
@@ -296,14 +301,33 @@ func (a *App) initDependencies() {
 	userPreferenceRepo := repository.NewUserPreferenceRepository(a.postgresqlDB)
 	obsRepo := repository.NewObservabilityRepository(a.postgresqlDB)
 
-	// 阶段三：初始化可观测性 Recorder（DB Sink + 批量日志 Sink + 采样器 + PII）
+	// 阶段 1.4：可观测性初始化（OTel Tracer + Prometheus Registry + Recorder）
+	//
+	// 顺序很重要：必须先 InitTracerProvider / InitPrometheusRegistry，再 NewRecorder，
+	// 否则 NewRecorder 拿到的 GlobalMetrics() 是兜底空 metrics，/metrics 路由不会暴露真实指标。
 	obsCfg := a.cfg.Observability
+	ctx := context.Background()
+	tp, tracerShutdown, err := observability.InitTracerProvider(ctx, obsCfg)
+	if err != nil {
+		logger.Warnf("OTel TracerProvider 初始化失败，回退 noop: %v", err)
+	} else {
+		a.tracerShutdown = tracerShutdown
+		if tp != nil {
+			logger.Infof("OTel TracerProvider 已初始化: exporter=%s sample_rate=%.2f", obsCfg.OTelExporter, obsCfg.OTelSamplingRate)
+		}
+	}
+	promReg := observability.InitPrometheusRegistry(obsCfg)
+	a.promRegistry = promReg
+	logger.Infof("Prometheus Registry 已初始化")
+
+	// 阶段三：初始化可观测性 Recorder（DB Sink + 批量日志 Sink + 采样器 + PII）
+	// NewRecorder 内部调 GlobalMetrics() / GlobalTracer()，已经在上一步被赋值
 	if !obsCfg.Enabled {
 		a.obsRecorder = observability.NewRecorder(obsCfg)
 	} else {
 		a.obsRecorder = observability.NewRecorderWithDBSink(obsCfg, obsRepo)
 	}
-	logger.Infof("可观测性模块初始化: enabled=%v sample_rate=%.2f db_sink=%v", obsCfg.Enabled, obsCfg.SamplingRate, obsCfg.TraceTableEnabled)
+	logger.Infof("可观测性模块初始化: enabled=%v sample_rate=%.2f db_sink=%v otel_exporter=%s", obsCfg.Enabled, obsCfg.SamplingRate, obsCfg.TraceTableEnabled, obsCfg.OTelExporter)
 	// 注册 eino 全局 callback：所有走 eino 标准接口的组件（ChatModel / Retriever / Tool / Embedding / Agent / Graph）
 	// 会自动打 span 和通用指标，不用再在业务代码里手动成对 StartSpan/EndSpan。
 	observability.RegisterGlobalEinoCallback(a.obsRecorder)
@@ -346,7 +370,7 @@ func (a *App) initDependencies() {
 
 	// 初始化 Service
 	prefSvc := service.NewUserPreferenceService(userPreferenceRepo)
-	userSvc := service.NewUserService(userRepo, prefSvc)
+	userSvc := service.NewUserService(userRepo, prefSvc, userModelCache)
 	adminUserSvc := service.NewAdminUserService(userRepo)
 	adminSessionSvc := service.NewAdminSessionService(chatSessionRepo, chatMessageRepo)
 	authSvc := service.NewAuthService(userRepo, userSvc, a.redis)
@@ -374,6 +398,7 @@ func (a *App) initDependencies() {
 	searchSvc := service.NewSearchService(chatMessageRepo, chunkRepo)
 
 	// 路由
+	// 阶段 1.4：把 Prometheus Registry 注入 Router，/metrics 路由直接挂 promhttp.HandlerFor(promReg)
 	a.router = api.NewRouter(
 		userSvc,
 		adminUserSvc,
@@ -393,6 +418,7 @@ func (a *App) initDependencies() {
 		toolProviderService,
 		userToolConfigService,
 		prefSvc,
+		a.promRegistry, // 阶段 1.4：替换原 obsRecorder，/metrics 走 promhttp.Handler
 	)
 }
 
@@ -463,6 +489,14 @@ func (a *App) gracefulShutdown() {
 		defer shutdownCancel()
 		if err := a.obsRecorder.Shutdown(shutdownCtx); err != nil {
 			logger.Errorf("可观测性 recorder 关闭失败: %v", err)
+		}
+	}
+	// 阶段 1.4：优雅关闭 OTel TracerProvider（flush 还在 batcher 里的 span 到 exporter）
+	if a.tracerShutdown != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := a.tracerShutdown(shutdownCtx); err != nil {
+			logger.Errorf("OTel TracerProvider 关闭失败: %v", err)
 		}
 	}
 

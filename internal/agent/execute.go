@@ -23,6 +23,7 @@ import (
 	"solvify-agent/pkg/logger"
 )
 
+// Execute 启动 Agent 执行流程，通过事件通道异步返回推理结果
 func (e *Engine) Execute(ctx context.Context, req Request, chatModel model.ToolCallingChatModel) (<-chan Event, error) {
 	eventCh := make(chan Event, 100)
 
@@ -65,114 +66,146 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 		e.obs.Incr(ctx, "agent_engine_runs_total", nil, 1)
 	}
 
-	ksTool := e.knowledgeSearchFactory(req.UserID, req.KnowledgeBaseIDs)
-	grepTool := e.grepChunksFactory(req.UserID, req.KnowledgeBaseIDs)
-	docInfoTool := e.getDocumentInfoFactory(req.UserID)
-	listChunksTool := e.listKnowledgeChunksFactory(req.UserID, req.KnowledgeBaseIDs)
-	listBasesTool := e.listKnowledgeBasesFactory(req.UserID)
+	var allTools []einoTool.BaseTool
+	if pre, ok := prebuiltToolsFromContext(ctx); ok && len(pre.Tools) > 0 {
+		// 走深度模式入口预构建分支：工具集 + toolsTokens 已经提前扣好
+		allTools = pre.Tools
+	} else {
+		// 回退分支（如 Execute 被直接调用、预构建失败）：按原逻辑现场构建
+		ksTool := e.knowledgeSearchFactory(req.UserID, req.KnowledgeBaseIDs)
+		grepTool := e.grepChunksFactory(req.UserID, req.KnowledgeBaseIDs)
+		docInfoTool := e.getDocumentInfoFactory(req.UserID)
+		listChunksTool := e.listKnowledgeChunksFactory(req.UserID, req.KnowledgeBaseIDs)
+		listBasesTool := e.listKnowledgeBasesFactory(req.UserID)
+		userTools := e.toolFactory.CreateAgentTools(ctx, req.UserID)
 
-	userTools := e.toolFactory.CreateAgentTools(ctx, req.UserID)
+		allTools = make([]einoTool.BaseTool, 0, 5+len(userTools))
+		allTools = append(allTools, ksTool)
+		allTools = append(allTools, grepTool)
+		allTools = append(allTools, docInfoTool)
+		allTools = append(allTools, listChunksTool)
+		allTools = append(allTools, listBasesTool)
+		allTools = append(allTools, userTools...)
+	}
 
-	allTools := make([]einoTool.BaseTool, 0, 5+len(userTools))
-	allTools = append(allTools, ksTool)
-	allTools = append(allTools, grepTool)
-	allTools = append(allTools, docInfoTool)
-	allTools = append(allTools, listChunksTool)
-	allTools = append(allTools, listBasesTool)
-	allTools = append(allTools, userTools...)
+	userTools := e.toolFactory.CreateAgentTools(ctx, req.UserID) // 仅用于下面日志中"用户工具数"展示
+	_ = userTools
 
 	toolDescMap := make(map[string]string, len(allTools))
-	logger.Infof("[Agent] userID=%s, 工具总数=%d (内置5个 + %d 用户工具)", req.UserID, len(allTools), len(userTools))
-	if len(userTools) == 0 {
-		logger.Warnf("[Agent] 未加载到用户配置的工具（如联网搜索），请检查用户工具配置是否已启用")
-	}
+	userToolsN := 0
 	for _, t := range allTools {
 		info, err := t.Info(ctx)
 		if err != nil {
 			logger.Warnf("[Agent] 获取工具信息失败: %v", err)
 			continue
 		}
+		// heuristics: 内置 5 个工具名按前缀匹配，剩下的记作用户工具；日志只用于展示，不影响执行
+		switch info.Name {
+		case "knowledge_search", "grep_chunks", "get_document_info", "list_knowledge_chunks", "list_knowledge_bases":
+		default:
+			userToolsN++
+		}
 		toolDescMap[info.Name] = info.Desc
 		logger.Infof("[Agent]   工具: name=%s, desc=%s", info.Name, truncateStr(info.Desc, 80))
 	}
+	logger.Infof("[Agent] userID=%s, 工具总数=%d (内置5个 + %d 用户工具)", req.UserID, len(allTools), userToolsN)
+	if userToolsN < 0 {
+		userToolsN = 0
+	}
+	if userToolsN == 0 {
+		logger.Warnf("[Agent] 未加载到用户配置的工具（如联网搜索），请检查用户工具配置是否已启用")
+	}
 
 	baseSystemPrompt := buildReActSystemPrompt(ctx, userTools)
-	systemPrompt := buildEnhancedSystemPromptForAgent(baseSystemPrompt, req.Summary, req.Memories, req.UserCtx)
-	logger.Infof("[Agent] SystemPrompt (前400字符): %s", truncateStr(systemPrompt, 400))
-
+	var ksToolForStream *tool.KnowledgeSearchTool
+	for _, t := range allTools {
+		if k, ok := t.(*tool.KnowledgeSearchTool); ok {
+			ksToolForStream = k
+			break
+		}
+	}
+	var systemPromptFinal string
+	if req.SystemPrompt != "" {
+		systemPromptFinal = baseSystemPrompt + "\n\n" + req.SystemPrompt
+	} else {
+		systemPromptFinal = buildEnhancedSystemPromptForAgent(baseSystemPrompt, req.Summary, req.Memories, req.UserCtx)
+	}
+	logger.Infof("[Agent] SystemPrompt (前400字符): %s", truncateStr(systemPromptFinal, 400))
 	inputMessages := buildInputMessages(req.Query, req.History)
-
-	maxStep := e.cfg.MaxIterations
-	if maxStep <= 0 {
-		maxStep = 5
-	}
-
-	agent, err := react.NewAgent(ctx, &react.AgentConfig{
-		ToolCallingModel: chatModel,
-		ToolsConfig: compose.ToolsNodeConfig{
-			Tools: allTools,
-		},
-		MaxStep: maxStep,
-		MessageModifier: func(_ context.Context, msgs []*schema.Message) []*schema.Message {
-			return append([]*schema.Message{schema.SystemMessage(systemPrompt)}, msgs...)
-		},
-	})
-	if err != nil {
-		logger.Errorf("Agent 初始化失败: %v", err)
-		if obsOk {
-			e.obs.Incr(ctx, "agent_engine_errors_total", map[string]string{"stage": "init"}, 1)
+	// 运行 Agent 流程
+	{
+		maxStep := e.cfg.MaxIterations
+		if maxStep <= 0 {
+			maxStep = 5
 		}
-		eventCh <- Event{
-			Type:      EventError,
-			Title:     "深度模式启动失败",
-			Detail:    "请尝试切换到快速模式，或稍后重试",
-			Error:     err.Error(),
-			Status:    "error",
-			Retryable: true,
-			Done:      true,
-		}
-		return
-	}
 
-	callbackHandler := newAgentCallbackHandler(eventCh, req.KnowledgeBaseIDs, toolDescMap)
-	callbackHandler.taskID = taskID
-	callbackHandler.tracker = tracker
-	callbackHandler.obs = e.obs
-
-	stream, err := agent.Stream(ctx, inputMessages, einoAgent.WithComposeOptions(compose.WithCallbacks(callbackHandler.Handler())))
-	if err != nil {
-		logger.Errorf("Agent 调用失败: %v", err)
-		if obsOk {
-			e.obs.Incr(ctx, "agent_engine_errors_total", map[string]string{"stage": "stream"}, 1)
-		}
-		errMsg := err.Error()
-
-		if isToolChoiceUnsupportedError(errMsg) {
+		ag, err := react.NewAgent(ctx, &react.AgentConfig{
+			ToolCallingModel: chatModel,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools: allTools,
+			},
+			MaxStep: maxStep,
+			MessageModifier: func(_ context.Context, msgs []*schema.Message) []*schema.Message {
+				return append([]*schema.Message{schema.SystemMessage(systemPromptFinal)}, msgs...)
+			},
+		})
+		if err != nil {
+			logger.Errorf("Agent 初始化失败: %v", err)
+			if obsOk {
+				e.obs.Incr(ctx, "agent_engine_errors_total", map[string]string{"stage": "init"}, 1)
+			}
 			eventCh <- Event{
 				Type:      EventError,
-				Title:     "当前模型不支持工具调用",
-				Detail:    "该模型不支持工具调用功能，无法使用联网搜索、天气查询等工具。建议切换到支持工具调用的模型（如通义千问、智谱清言、DeepSeek 等），或使用快速模式。",
-				Error:     errMsg,
+				Title:     "深度模式启动失败",
+				Detail:    "请尝试切换到快速模式，或稍后重试",
+				Error:     err.Error(),
 				Status:    "error",
-				Retryable: false,
+				Retryable: true,
 				Done:      true,
 			}
 			return
 		}
 
-		eventCh <- Event{
-			Type:      EventError,
-			Title:     "深度推理失败",
-			Detail:    "深度思考模式执行异常，请重试或使用快速模式",
-			Error:     errMsg,
-			Status:    "error",
-			Retryable: true,
-			Done:      true,
-		}
-		return
-	}
+		callbackHandler := newAgentCallbackHandler(eventCh, req.KnowledgeBaseIDs, toolDescMap)
+		callbackHandler.taskID = taskID
+		callbackHandler.tracker = tracker
+		callbackHandler.obs = e.obs
 
-	e.processStream(ctx, stream, ksTool, eventCh)
+		stream, err := ag.Stream(ctx, inputMessages, einoAgent.WithComposeOptions(compose.WithCallbacks(callbackHandler.Handler())))
+		if err != nil {
+			logger.Errorf("Agent 调用失败: %v", err)
+			if obsOk {
+				e.obs.Incr(ctx, "agent_engine_errors_total", map[string]string{"stage": "stream"}, 1)
+			}
+			errMsg := err.Error()
+
+			if isToolChoiceUnsupportedError(errMsg) {
+				eventCh <- Event{
+					Type:      EventError,
+					Title:     "当前模型不支持工具调用",
+					Detail:    "该模型不支持工具调用功能，无法使用联网搜索、天气查询等工具。建议切换到支持工具调用的模型（如通义千问、智谱清言、DeepSeek 等），或使用快速模式。",
+					Error:     errMsg,
+					Status:    "error",
+					Retryable: false,
+					Done:      true,
+				}
+				return
+			}
+
+			eventCh <- Event{
+				Type:      EventError,
+				Title:     "深度推理失败",
+				Detail:    "深度思考模式执行异常，请重试或使用快速模式",
+				Error:     errMsg,
+				Status:    "error",
+				Retryable: true,
+				Done:      true,
+			}
+			return
+		}
+
+		e.processStream(ctx, stream, ksToolForStream, eventCh)
+	}
 }
 
 func randomStr16() string {

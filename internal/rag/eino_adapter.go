@@ -3,23 +3,35 @@ package rag
 import (
 	"context"
 	"fmt"
+	"strings"
 
-	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/schema"
+
+	"solvify-agent/internal/observability"
+	"solvify-agent/pkg/tokenutil"
 )
 
 // 业务 metadata 固定 key，避免散落成魔法字符串
 const (
-	metaKnowledgeBaseID = "knowledge_base_id"
-	metaDocumentID      = "document_id"
-	metaVersionID       = "version_id"
-	metaChunkIndex      = "chunk_index"
-	metaTitle           = "title"
-	metaUserID          = "user_id"
+	metaKnowledgeBaseID  = "knowledge_base_id"
+	metaDocumentID       = "document_id"
+	metaVersionID        = "version_id"
+	metaChunkIndex       = "chunk_index"
+	metaTitle            = "title"
+	metaUserID           = "user_id"
 	metaKnowledgeBaseIDs = "knowledge_base_ids"
 )
+
+// MetaTitle 返回 Eino Document metadata 中表示文档标题的 key（供上层格式化上下文块使用）
+func MetaTitle() string { return metaTitle }
+
+// MetaDocumentID 返回 Eino Document metadata 中表示文档 ID 的 key
+func MetaDocumentID() string { return metaDocumentID }
+
+// MetaKnowledgeBaseID 返回 Eino Document metadata 中表示知识库 ID 的 key
+func MetaKnowledgeBaseID() string { return metaKnowledgeBaseID }
 
 // implOptions 是适配器的实现特定选项，通过 retriever.GetImplSpecificOptions 解析
 type implOptions struct {
@@ -72,18 +84,19 @@ var _ retriever.Retriever = (*EinoRetrieverAdapter)(nil)
 var _ components.Typer = (*EinoRetrieverAdapter)(nil)
 
 // Retrieve 实现 retriever.Retriever。
-// 入参 opts 里，标准参数 (TopK/ScoreThreshold/DSLInfo) 与 impl 特定参数
-// (KnowledgeBaseIDs/UserID) 会分别解析，内部仍走自研 rag.Retriever 接口。
 //
-// 因为这是自定义实现，不走 eino 生成的带 callback 注入的 wrapper，所以这里
-// 手动调用 callbacks.EnsureRunInfo / OnStart / OnEnd / OnError，让全局
-// callback handler 能收到 Retriever 的 span 和指标。
-func (a *EinoRetrieverAdapter) Retrieve(ctx context.Context, query string, opts ...retriever.Option) (docs []*schema.Document, retErr error) {
+// 【观测性设计】：不自己开/关 span，完全复用 compose.AddRetrieverNode 自动调的
+// Graph 级 OnStart/OnEnd（它负责创建 span、挂 parent、记 duration）。
+// 之所以不再手动调 callbacks.OnStart/OnEnd，是因为同一 span 被 EndSpan 两次的话，
+// 第二次真实 attrs（hit_n/top_k）会因为 span 已经 Ended 被直接丢弃，
+// 导致前端看到 top_k=0 / hit_n=0 / 无 score 预览。
+//
+// 真实细粒度 attrs（top_k / kb_n / hit_n / avg_score / top_docs_preview）通过
+// observability.SetSpanAttrs 直接写 span.Attrs，绕开 Graph 包装的 CallbackInput。
+func (a *EinoRetrieverAdapter) Retrieve(ctx context.Context, query string, opts ...retriever.Option) ([]*schema.Document, error) {
 	if a == nil || a.inner == nil {
 		return nil, fmt.Errorf("eino retriever adapter: inner retriever is nil")
 	}
-	// 1) 把 RunInfo 挂到 context（让 callback handler 知道 Component=Retriever）
-	ctx = callbacks.EnsureRunInfo(ctx, a.GetType(), components.ComponentOfRetriever)
 
 	defaultTopK := a.defaultTopK
 	common := retriever.GetCommonOptions(&retriever.Options{
@@ -96,25 +109,24 @@ func (a *EinoRetrieverAdapter) Retrieve(ctx context.Context, query string, opts 
 		topK = *common.TopK
 	}
 
-	// 2) 组装 retriever.CallbackInput 并触发 OnStart
-	input := &retriever.CallbackInput{
-		Query:          query,
-		TopK:           topK,
-		ScoreThreshold: common.ScoreThreshold,
-		Extra: map[string]any{
-			metaKnowledgeBaseIDs: append([]string(nil), impl.KnowledgeBaseIDs...),
-			metaUserID:           impl.UserID,
-		},
+	// --- 观测：OnStart 之后、检索开始之前，先写输入侧 attrs ---
+	inAttrs := observability.Attrs{"top_k": topK}
+	if common.ScoreThreshold != nil {
+		inAttrs["score_threshold"] = *common.ScoreThreshold
 	}
-	ctx = callbacks.OnStart(ctx, input)
-	defer func() {
-		// 4) 出参路径：正常 → OnEnd(docs)；panic/err → OnError
-		if retErr != nil {
-			_ = callbacks.OnError(ctx, retErr)
-			return
+	if query != "" {
+		inAttrs["query"] = query
+	}
+	if len(impl.KnowledgeBaseIDs) > 0 {
+		inAttrs["kb_n"] = len(impl.KnowledgeBaseIDs)
+		if preview := joinIDsPreview(impl.KnowledgeBaseIDs, 5); preview != "" {
+			inAttrs["kb_ids_preview"] = preview
 		}
-		_ = callbacks.OnEnd(ctx, &retriever.CallbackOutput{Docs: docs})
-	}()
+	}
+	if impl.UserID != "" {
+		inAttrs["user_id_hash"] = shortHash(impl.UserID)
+	}
+	observability.SetSpanAttrs(ctx, inAttrs)
 
 	bizQuery := Query{
 		Question:         query,
@@ -128,7 +140,7 @@ func (a *EinoRetrieverAdapter) Retrieve(ctx context.Context, query string, opts 
 		return nil, fmt.Errorf("eino retriever adapter: inner retrieve failed: %w", err)
 	}
 
-	docs = make([]*schema.Document, 0, len(result.Documents))
+	docs := make([]*schema.Document, 0, len(result.Documents))
 	for _, d := range result.Documents {
 		if common.ScoreThreshold != nil && d.Score < *common.ScoreThreshold {
 			continue
@@ -155,7 +167,55 @@ func (a *EinoRetrieverAdapter) Retrieve(ctx context.Context, query string, opts 
 		docs = append(docs, sd)
 	}
 
+	// --- 观测：检索结束、OnEnd 之前，写输出侧 attrs（hit_n / score / top docs 预览）---
+	outAttrs := observability.Attrs{}
+	observability.FillDocScoreAttrs(outAttrs, docs)
+	if len(docs) > 0 {
+		if preview := observability.DocsPreview(docs, 3, observability.RecorderFromContext(ctx)); preview != "" {
+			outAttrs["top_docs_preview"] = preview
+		}
+	}
+	observability.SetSpanAttrs(ctx, outAttrs)
+
 	return docs, nil
+}
+
+// joinIDsPreview 把知识库 ID 列表拼成 "id1,id2 (+3 more)"，避免 attrs 里放太长数组
+func joinIDsPreview(ids []string, maxN int) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	if maxN <= 0 {
+		maxN = 5
+	}
+	n := maxN
+	if len(ids) < n {
+		n = len(ids)
+	}
+	head := strings.Join(ids[:n], ",")
+	if len(ids) > n {
+		head += fmt.Sprintf(" (+%d more)", len(ids)-n)
+	}
+	return head
+}
+
+// shortHash 把长 user_id 取后 8 位，方便在观测字段里区分不同用户，但不暴露原始 ID。
+// 不做加密（只是在观测展示上缩短 + 轻度脱敏）。
+func shortHash(s string) string {
+	if s == "" {
+		return ""
+	}
+	if len(s) <= 8 {
+		return s
+	}
+	return s[len(s)-8:]
+}
+
+// DocsPreviewByScore 同 observability.DocsPreview，保留给 RAG 包内部未来调用（别名）。
+// 实际统一走 observability.DocsPreview。
+func DocsPreviewByScore(docs []*schema.Document, topN int) string {
+	_ = tokenutil.CountTokens // 预占 import 占位，未来按 token 截断预览时启用
+	return observability.DocsPreview(docs, topN, nil)
 }
 
 // EinoDocToRagDoc 把 eino schema.Document 转回内部 rag.Document，

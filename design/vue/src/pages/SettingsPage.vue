@@ -15,9 +15,9 @@
     </div>
 
     <div class="grid grid-cols-3 gap-6">
-      <!-- Left column -->
+      <!-- 左侧列 -->
       <div class="col-span-2 space-y-5">
-        <!-- AI Model tab -->
+        <!-- AI 模型标签页 -->
         <template v-if="activeTab === 'model'">
           <section>
             <div class="flex items-center justify-between mb-3">
@@ -54,7 +54,7 @@
               >
                 <div class="min-w-0 flex-1 mr-3">
                   <div class="text-sm font-medium text-slate-900 truncate">{{ m.display_name || m.model_id }}</div>
-                  <div class="text-xs text-slate-400 mt-0.5 truncate">{{ m.api_format }} · {{ m.base_url }}</div>
+                  <div class="text-xs text-slate-400 mt-0.5 truncate">{{ m.api_format }} · {{ m.base_url }} · 最大上下文 {{ m.max_context_length }}</div>
                 </div>
                 <div class="flex items-center gap-1.5 shrink-0">
                   <button @click="openModelEdit(m)" class="text-xs px-2.5 py-1 rounded-md text-slate-600 hover:bg-slate-100 border border-slate-200">编辑</button>
@@ -66,7 +66,7 @@
         </template>
 
 
-        <!-- Search Tool tab -->
+        <!-- 搜索工具标签页 -->
         <template v-if="activeTab === 'search'">
           <section>
             <div class="flex items-center justify-between mb-3">
@@ -118,7 +118,7 @@
           </section>
         </template>
 
-        <!-- Sync config tab -->
+        <!-- 同步配置标签页 -->
         <template v-if="activeTab === 'sync'">
           <section>
             <div class="flex items-center justify-between mb-3">
@@ -169,7 +169,7 @@
 
       </div>
 
-      <!-- Right column: summary card -->
+      <!-- 右侧列：状态汇总卡片 -->
       <div class="col-span-1">
         <div class="sticky top-6 bg-slate-50 border border-slate-200 rounded-xl p-5">
           <h3 class="text-sm font-semibold text-slate-900 mb-4">当前状态</h3>
@@ -197,7 +197,7 @@
       </div>
     </div>
 
-    <!-- Modal -->
+    <!-- 弹窗 -->
     <Teleport to="body">
       <div v-if="showModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/30" @click.self="showModal = false">
         <div class="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md mx-4" style="max-height:90vh;overflow-y:auto;">
@@ -208,6 +208,11 @@
             <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">Base URL</label><input v-model="mForm.base_url" placeholder="https://api.openai.com/v1" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" /></div>
             <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">Model ID</label><input v-model="mForm.model_id" placeholder="gpt-4" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" /></div>
             <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">API Key</label><input v-model="mForm.api_key" type="password" placeholder="sk-..." class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" /></div>
+            <div class="mb-3">
+              <label class="block text-[13px] font-medium text-slate-600 mb-1.5">最大上下文长度 <span class="text-red-500">*</span></label>
+              <input v-model.number="mForm.max_context_length" type="number" min="1024" max="200000" step="1024" placeholder="8192" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" />
+              <p class="text-xs text-slate-400 mt-1">范围 1024~200000，可后续通过"测试连接"自动探测</p>
+            </div>
             <div class="mb-5"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">配置 (JSON 可选)</label><textarea v-model="cfgText" rows="3" placeholder='{"temperature": 0.7}' class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500 resize-none" /></div>
 
             <!-- 测试结果 -->
@@ -218,6 +223,7 @@
                   <span class="font-medium">{{ modelTestResult.message }}</span>
                 </div>
                 <div v-if="modelTestResult.response_time_ms" class="text-xs opacity-70">响应时间: {{ modelTestResult.response_time_ms }}ms</div>
+                <div v-if="modelTestResult.detected_max_context_length" class="text-xs mt-1 opacity-70">探测到的最大上下文: {{ modelTestResult.detected_max_context_length }}</div>
                 <div v-if="modelTestResult.error" class="text-xs mt-1 opacity-70">错误: {{ modelTestResult.error }}</div>
                 <div v-if="modelTestResult.details" class="text-xs mt-1 opacity-70">详情: {{ modelTestResult.details }}</div>
               </div>
@@ -344,13 +350,13 @@ import {
 import AppButton from '@/components/ui/AppButton.vue'
 import AppBadge from '@/components/ui/AppBadge.vue'
 import AppSelect from '@/components/ui/AppSelect.vue'
-import type { UserModelConfigInfo, CreateUserModelConfigRequest } from '@/types/model'
+import type { UserModelConfigInfo, CreateUserModelConfigRequest, ModelTestResult } from '@/types/model'
 import type { UserToolConfigInfo, CreateUserToolConfigRequest, ConfigSchema } from '@/types/tool'
 import { testUserModelConfig } from '@/api/model'
 import { testUserToolConfig } from '@/api/tool'
 import type { DingTalkBinding } from '@/types/dingtalk'
 
-// ── Tabs ──
+// ── 标签页 ──
 const activeTab = ref('model')
 const tabs = [
   { key: 'model', label: 'AI 模型' },
@@ -358,13 +364,14 @@ const tabs = [
   { key: 'sync', label: '同步配置' },
 ]
 
+// 当前标签页的提示文案
 const tabHint = computed(() => {
   if (activeTab.value === 'model') return '系统模型由管理员统一配置；自定义模型仅当前用户可用。请选择支持工具调用的模型，以配合快速检索和联网搜索功能。'
   if (activeTab.value === 'sync') return '钉钉账号绑定状态与知识库页面保持一致，解绑不会删除已创建的同步知识库。'
   return '配置需要在深度模式下使用的工具。启用后，AI 将根据对话内容自动调用相应工具获取信息。'
 })
 
-// ── Composables ──
+// ── 组合式函数 ──
 const { systemModels, userModels, loadAll: loadModels, createConfig: createModel, updateConfig: updateModel, deleteConfig: deleteModel } = useModelConfig()
 const { toolTemplates, userToolConfigs, loadAll: loadTools, createConfig: createTool, updateConfig: updateTool, deleteConfig: deleteTool } = useToolConfig()
 
@@ -376,22 +383,16 @@ const dingTalkQrLoading = ref(false)
 const dingTalkBindingSubmitting = ref(false)
 const exchangedDingTalkAuthCodes = new Set<string>()
 
-// ── Modal ──
+// ── 弹窗 ──
 const showModal = ref(false)
 const modalMode = ref<'model' | 'tool'>('model')
 const editId = ref<string | null>(null)
 const cfgText = ref('')
 const selToolType = ref('')
 
-const mForm = reactive<CreateUserModelConfigRequest>({ api_format: 'openai', base_url: '', model_id: '', api_key: '' })
+const mForm = reactive<CreateUserModelConfigRequest>({ api_format: 'openai', base_url: '', model_id: '', api_key: '', max_context_length: 8192 })
 const tForm = reactive<CreateUserToolConfigRequest>({ tool_type_id: '', provider_id: '', display_name: '', config: {} })
-const modelTestResult = ref<{
-  success: boolean
-  message: string
-  error?: string
-  response_time_ms: number
-  details?: string
-} | null>(null)
+const modelTestResult = ref<ModelTestResult | null>(null)
 const toolTestResult = ref<{
   success: boolean
   message: string
@@ -403,6 +404,7 @@ const modelTesting = ref(false)
 const toolTesting = ref(false)
 
 const modalTitle = computed(() => `${editId.value ? '编辑' : '添加'}${modalMode.value === 'model' ? '模型' : '工具'}`)
+// 当前工具类型下可选的供应商列表
 const selProviders = computed(() => {
   const t = toolTemplates.value.find(t => t.id === selToolType.value)
   return t?.providers ?? []
@@ -410,6 +412,7 @@ const selProviders = computed(() => {
 
 // 动态配置表单相关
 const toolConfigValues = ref<Record<string, unknown>>({})
+// 当前供应商的配置 schema
 const selectedProviderSchema = computed<ConfigSchema | null>(() => {
   if (!tForm.provider_id) return null
   const t = toolTemplates.value.find(t => t.id === selToolType.value)
@@ -419,6 +422,7 @@ const selectedProviderSchema = computed<ConfigSchema | null>(() => {
   return schema
 })
 
+// 工具类型变更处理
 function onToolTypeChange() {
   tForm.tool_type_id = selToolType.value
   tForm.provider_id = ''
@@ -427,24 +431,30 @@ function onToolTypeChange() {
   toolTesting.value = false
 }
 
+// 供应商变更处理
 function onProviderChange() {
   toolConfigValues.value = {}
   toolTestResult.value = null
   toolTesting.value = false
 }
 
+// 已存在的供应商配置（用于判断是否重复配置）
 const selectedExistingProviderConfig = computed(() => {
   if (editId.value || !tForm.provider_id) return null
   return userToolConfigs.value.find(c => c.provider_id === tForm.provider_id) ?? null
 })
 
-// ── Actions ──
-function openModelCreate() { modalMode.value = 'model'; editId.value = null; mForm.api_format = 'openai'; mForm.base_url = ''; mForm.model_id = ''; mForm.api_key = ''; cfgText.value = ''; modelTestResult.value = null; showModal.value = true }
+// ── 操作 ──
+// 打开添加模型弹窗
+function openModelCreate() { modalMode.value = 'model'; editId.value = null; mForm.api_format = 'openai'; mForm.base_url = ''; mForm.model_id = ''; mForm.api_key = ''; mForm.max_context_length = 8192; cfgText.value = ''; modelTestResult.value = null; showModal.value = true }
+// 打开编辑模型弹窗
 function openModelEdit(m: UserModelConfigInfo) {
   modalMode.value = 'model'; editId.value = m.id; mForm.api_format = m.api_format; mForm.base_url = m.base_url; mForm.model_id = m.model_id; mForm.api_key = m.api_key || ''
+  mForm.max_context_length = m.max_context_length || 8192
   cfgText.value = m.config ? JSON.stringify(m.config, null, 2) : ''; modelTestResult.value = null; showModal.value = true
 }
 
+// 测试模型连通性
 async function doTestModel() {
   try {
     modelTesting.value = true
@@ -469,6 +479,7 @@ async function doTestModel() {
     modelTesting.value = false
   }
 }
+// 删除模型
 async function handleModelDelete(id: string) {
   try {
     await ElMessageBox.confirm('确定要删除这个模型配置吗？', '提示', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
@@ -481,6 +492,7 @@ async function handleModelDelete(id: string) {
   }
 }
 
+// 测试工具连通性
 async function doTestTool() {
   const selectedProvider = selProviders.value.find(p => p.id === tForm.provider_id)
   if (!selectedProvider) {
@@ -509,12 +521,14 @@ async function doTestTool() {
   }
 }
 
+// 打开添加工具弹窗
 function openToolCreate() {
   modalMode.value = 'tool'; editId.value = null
   tForm.tool_type_id = ''; tForm.provider_id = ''; tForm.display_name = ''; tForm.config = {}
   cfgText.value = ''; selToolType.value = ''; toolConfigValues.value = {}; toolTestResult.value = null
   showModal.value = true
 }
+// 打开编辑工具弹窗
 function openToolEdit(c: UserToolConfigInfo) {
   modalMode.value = 'tool'; editId.value = c.id
   tForm.tool_type_id = c.tool_type_id; tForm.provider_id = c.provider_id; tForm.display_name = c.display_name || ''
@@ -525,6 +539,7 @@ function openToolEdit(c: UserToolConfigInfo) {
   toolTestResult.value = null
   showModal.value = true
 }
+// 启用工具
 async function handleToolEnable(c: UserToolConfigInfo) {
   if (c.is_enabled) return
   try {
@@ -535,6 +550,7 @@ async function handleToolEnable(c: UserToolConfigInfo) {
     ElMessage.error(e instanceof Error ? e.message : '启用失败')
   }
 }
+// 删除工具
 async function handleToolDelete(id: string) {
   try {
     await ElMessageBox.confirm('确定要删除这个工具配置吗？', '提示', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
@@ -547,6 +563,7 @@ async function handleToolDelete(id: string) {
   }
 }
 
+// 保存配置
 async function doSave() {
   try {
     if (modalMode.value === 'model') {

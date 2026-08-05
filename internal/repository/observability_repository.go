@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/observability"
@@ -19,10 +21,12 @@ type observabilityRepository struct {
 	db *gorm.DB
 }
 
+// NewObservabilityRepository 创建可观测性仓库
 func NewObservabilityRepository(db *gorm.DB) ObservabilityRepo {
 	return &observabilityRepository{db: db}
 }
 
+// CreateFeedback 创建消息反馈记录
 func (r *observabilityRepository) CreateFeedback(ctx context.Context, fb *entity.MessageFeedback) error {
 	if fb.ID == "" {
 		fb.ID = uuid.New().String()
@@ -33,6 +37,7 @@ func (r *observabilityRepository) CreateFeedback(ctx context.Context, fb *entity
 	return r.db.WithContext(ctx).Create(fb).Error
 }
 
+// ListByMessage 按消息 ID 和用户 ID 查询反馈列表
 func (r *observabilityRepository) ListByMessage(ctx context.Context, messageID, userID string) ([]entity.MessageFeedback, error) {
 	var rows []entity.MessageFeedback
 	err := r.db.WithContext(ctx).
@@ -42,6 +47,7 @@ func (r *observabilityRepository) ListByMessage(ctx context.Context, messageID, 
 	return rows, err
 }
 
+// ListByUser 分页查询指定用户的反馈列表
 func (r *observabilityRepository) ListByUser(ctx context.Context, userID string, offset, limit int) ([]entity.MessageFeedback, int64, error) {
 	var total int64
 	q := r.db.WithContext(ctx).Model(&entity.MessageFeedback{}).Where("user_id = ?", userID)
@@ -53,6 +59,7 @@ func (r *observabilityRepository) ListByUser(ctx context.Context, userID string,
 	return rows, total, err
 }
 
+// CreateChatTrace 创建对话追踪记录
 func (r *observabilityRepository) CreateChatTrace(ctx context.Context, trace *entity.ChatTrace) error {
 	if trace.ID == "" {
 		trace.ID = uuid.New().String()
@@ -63,6 +70,7 @@ func (r *observabilityRepository) CreateChatTrace(ctx context.Context, trace *en
 	return r.db.WithContext(ctx).Create(trace).Error
 }
 
+// FindByID 根据 ID 查询对话追踪记录
 func (r *observabilityRepository) FindByID(ctx context.Context, id string) (*entity.ChatTrace, error) {
 	var t entity.ChatTrace
 	err := r.db.WithContext(ctx).Where("id = ?", id).First(&t).Error
@@ -72,6 +80,7 @@ func (r *observabilityRepository) FindByID(ctx context.Context, id string) (*ent
 	return &t, nil
 }
 
+// ListBySession 按会话 ID 分页查询对话追踪记录
 func (r *observabilityRepository) ListBySession(ctx context.Context, sessionID, userID string, offset, limit int) ([]entity.ChatTrace, int64, error) {
 	var total int64
 	q := r.db.WithContext(ctx).Model(&entity.ChatTrace{}).
@@ -86,6 +95,7 @@ func (r *observabilityRepository) ListBySession(ctx context.Context, sessionID, 
 	return rows, total, err
 }
 
+// ListAll 分页查询全部对话追踪记录，支持按会话 ID 和状态过滤
 func (r *observabilityRepository) ListAll(ctx context.Context, sessionID string, status string, offset, limit int) ([]entity.ChatTrace, int64, error) {
 	var total int64
 	q := r.db.WithContext(ctx).Model(&entity.ChatTrace{})
@@ -105,11 +115,13 @@ func (r *observabilityRepository) ListAll(ctx context.Context, sessionID string,
 	return rows, total, err
 }
 
+// DeleteOlderThan 删除早于指定时间的对话追踪记录
 func (r *observabilityRepository) DeleteOlderThan(ctx context.Context, before time.Time) (int64, error) {
 	res := r.db.WithContext(ctx).Where("created_at < ?", before).Delete(&entity.ChatTrace{})
 	return res.RowsAffected, res.Error
 }
 
+// CreateAgentTask 创建 Agent 任务记录
 func (r *observabilityRepository) CreateAgentTask(ctx context.Context, task *entity.AgentTask) error {
 	if task.ID == "" {
 		task.ID = uuid.New().String()
@@ -117,6 +129,7 @@ func (r *observabilityRepository) CreateAgentTask(ctx context.Context, task *ent
 	return r.db.WithContext(ctx).Create(task).Error
 }
 
+// AppendStep 追加 Agent 任务步骤记录
 func (r *observabilityRepository) AppendStep(ctx context.Context, step *entity.AgentTaskStep) error {
 	if step.ID == "" {
 		step.ID = uuid.New().String()
@@ -124,6 +137,7 @@ func (r *observabilityRepository) AppendStep(ctx context.Context, step *entity.A
 	return r.db.WithContext(ctx).Create(step).Error
 }
 
+// MarkEnded 标记 Agent 任务结束，写入状态、token 用量和费用等信息
 func (r *observabilityRepository) MarkEnded(ctx context.Context, taskID string, status, abortReason, errorSummary string, tokensPrompt, tokensCompletion int, cost float64, rating *int) error {
 	now := time.Now()
 	updates := map[string]any{
@@ -146,6 +160,7 @@ func (r *observabilityRepository) MarkEnded(ctx context.Context, taskID string, 
 		Where("id = ?", taskID).Updates(updates).Error
 }
 
+// FindByTraceID 根据追踪 ID 查询 Agent 任务及其步骤列表
 func (r *observabilityRepository) FindByTraceID(ctx context.Context, traceID string) (*entity.AgentTask, []entity.AgentTaskStep, error) {
 	var task entity.AgentTask
 	err := r.db.WithContext(ctx).Where("trace_id = ?", traceID).First(&task).Error
@@ -162,6 +177,7 @@ func (r *observabilityRepository) FindByTraceID(ctx context.Context, traceID str
 	return &task, steps, nil
 }
 
+// WriteTraces 批量写入对话追踪记录（upsert 方式）
 func (r *observabilityRepository) WriteTraces(ctx context.Context, traces []*observability.Trace) error {
 	if len(traces) == 0 {
 		return nil
@@ -171,6 +187,8 @@ func (r *observabilityRepository) WriteTraces(ctx context.Context, traces []*obs
 		if t == nil || t.Root == nil {
 			continue
 		}
+		// 写库前清理内部 attrs，避免 __chat_intermediate_root 等内部标记进入 span_tree
+		stripInternalSpanAttrs(t.Root)
 		spanTree, err := json.Marshal(t.Root)
 		if err != nil {
 			logger.Warnf("trace span_tree marshal 失败: %v", err)
@@ -192,8 +210,10 @@ func (r *observabilityRepository) WriteTraces(ctx context.Context, traces []*obs
 			Error:      t.Root.Error,
 			Attrs:      datatypes.JSON(attrsJSON),
 			SpanTree:   datatypes.JSON(spanTree),
+			CreatedAt:  time.Now(),
 		}
-		if err := r.db.WithContext(ctx).Save(row).Error; err != nil {
+		// 用 upsert 代替 Save：Save 在主键有值时只走 UPDATE，行不存在时静默失败（rows:0）
+		if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(row).Error; err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -202,6 +222,7 @@ func (r *observabilityRepository) WriteTraces(ctx context.Context, traces []*obs
 	return firstErr
 }
 
+// WriteFeedbacks 批量写入消息反馈记录
 func (r *observabilityRepository) WriteFeedbacks(ctx context.Context, fs []*observability.Feedback) error {
 	if len(fs) == 0 {
 		return nil
@@ -230,6 +251,7 @@ func (r *observabilityRepository) WriteFeedbacks(ctx context.Context, fs []*obse
 	return firstErr
 }
 
+// WriteAgentSteps 批量写入 Agent 步骤记录
 func (r *observabilityRepository) WriteAgentSteps(ctx context.Context, steps []*observability.AgentStep) error {
 	if len(steps) == 0 {
 		return nil
@@ -265,6 +287,7 @@ func (r *observabilityRepository) WriteAgentSteps(ctx context.Context, steps []*
 	return firstErr
 }
 
+// Write 根据 SinkRecord 类型分发写入对应的可观测性数据
 func (r *observabilityRepository) Write(ctx context.Context, rec *observability.SinkRecord) error {
 	if rec == nil {
 		return nil
@@ -286,8 +309,10 @@ func (r *observabilityRepository) Write(ctx context.Context, rec *observability.
 	return nil
 }
 
+// Shutdown 关闭仓库，释放资源（当前无操作）
 func (r *observabilityRepository) Shutdown(_ context.Context) error { return nil }
 
+// AttrsFromRoot 从根 span 提取 attrs 并汇总子 span 计数
 func AttrsFromRoot(root *observability.Span) map[string]any {
 	if root == nil {
 		return nil
@@ -295,6 +320,10 @@ func AttrsFromRoot(root *observability.Span) map[string]any {
 	m := map[string]any{}
 	if root.Attrs != nil {
 		for k, v := range root.Attrs {
+			// 跳过内部标记（__chat_intermediate_root 等），不落到 DB attrs JSON
+			if strings.HasPrefix(k, "__") {
+				continue
+			}
 			m[k] = v
 		}
 	}
@@ -309,4 +338,31 @@ func AttrsFromRoot(root *observability.Span) map[string]any {
 		m["child_span_counts"] = components
 	}
 	return m
+}
+
+// stripInternalSpanAttrs 递归清理 span 树中 __ 开头的内部 attrs（写 span_tree JSON 前调用）。
+func stripInternalSpanAttrs(s *observability.Span) {
+	if s == nil {
+		return
+	}
+	if s.Attrs != nil {
+		for k := range s.Attrs {
+			if strings.HasPrefix(k, "__") {
+				delete(s.Attrs, k)
+			}
+		}
+	}
+	for i := range s.Children {
+		stripInternalSpanAttrs(s.Children[i])
+	}
+	for i := range s.Events {
+		if s.Events[i] == nil || s.Events[i].Attrs == nil {
+			continue
+		}
+		for k := range s.Events[i].Attrs {
+			if strings.HasPrefix(k, "__") {
+				delete(s.Events[i].Attrs, k)
+			}
+		}
+	}
 }

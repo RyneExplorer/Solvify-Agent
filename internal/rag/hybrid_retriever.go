@@ -487,7 +487,7 @@ func (r *HybridRetriever) keywordSourceFilter(kwDocs []scoredChunk) []scoredChun
 
 // minMaxNormalize Step 2: 同源内 Min-Max 归一化
 // 将原始分数映射到 [0,1]，消除向量/关键词量纲差异。
-// 单条时退化为 1.0；全相同分数时退化为 0（避免除零）。
+// 单条时退化为 1.0；全相同分数时退化为 1.0（分数一致说明质量等同，应全部保留）。
 // 返回 map[id]normalizedScore
 func minMaxNormalize(docs []scoredChunk) map[string]float64 {
 	result := make(map[string]float64, len(docs))
@@ -502,9 +502,10 @@ func minMaxNormalize(docs []scoredChunk) map[string]float64 {
 	minScore, maxScore := docs[len(docs)-1].Score, docs[0].Score
 	span := maxScore - minScore
 	if span == 0 {
-		// 所有分数相同，无法区分，全部给 0（后续交叉验证会丢弃）
+		// 所有分数相同 → 质量等同，全部给 1.0
+		// （之前给 0 会导致 crossSourceFilter 误删全部单源结果）
 		for _, doc := range docs {
-			result[doc.ID] = 0
+			result[doc.ID] = 1.0
 		}
 		return result
 	}

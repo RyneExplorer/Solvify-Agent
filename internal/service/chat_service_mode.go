@@ -23,9 +23,10 @@ import (
 // ─── 快速检索模式 ───────────────────────────────────────────
 
 // processMessage 处理消息的核心流程（快速检索模式）
-// 使用 eino ADK ChatModelAgent：MaxIter=2，仅 knowledge_search 工具
+// 通过 compose.Graph 显式编排：QueryRewrite → Retrieve → BuildPromptMessages → Generate
+// 四节点各自独立 Span + Metrics（eino 全局 callback 自动打点）。
 func (s *chatService) processMessage(ctx context.Context, userID, sessionID, userMsgID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	s.processMessageEinoQuick(ctx, userID, sessionID, userMsgID, req, eventCh)
+	s.processMessageGraphQuick(ctx, userID, sessionID, userMsgID, req, eventCh)
 }
 
 // ─── 深度思考模式 ───────────────────────────────────────────
@@ -47,6 +48,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 			if r := recover(); r != nil {
 				status = observability.SpanStatusError
 				errVal = fmt.Errorf("panic: %v", r)
+				s.obs.MarkTraceError(ctx, errVal)
 				eventCh <- dto.StreamEvent{Type: "error", Detail: "处理过程中发生未预期错误", Done: true}
 			}
 			s.obs.EndSpan(ctx, span, status, errVal, nil)
@@ -59,19 +61,51 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		s.obs.AddRootAttrs(ctx, observability.Attrs{"assistant_message_id": assistantMsgID})
 	}
 
+	// P0-④ 关键修复：在 initContext 之前，先把"将发送给模型的工具定义"预构建并按真 BPE 算总 token，
+	// 之后把 toolsTokens 传给 initContext，calculateContextBudgets 会先从 maxCtx 扣除，
+	// 避免工具定义悄悄吃掉历史/检索预算，导致最终请求超上下文长度。
 	sendProgressEvent(eventCh, "正在加载上下文...")
 	t0 := time.Now()
-	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content)
+	preToolsTokens := 0
+	deepCtx := ctx
+	if s.agentEngine != nil {
+		var tErr error
+		// 先用"仅创建客户端拿到 modelName"解析出 ModelName，再交给 PrebuildTools 估算工具 token。
+		client, cErr := s.resolveClient(ctx, userID, req.ModelID, req.ModelType)
+		if cErr == nil {
+			modelName := client.ModelName()
+			if obsOk {
+				s.obs.AddRootAttrs(ctx, observability.Attrs{"model_name": modelName})
+			}
+			preToolsTokens, deepCtx, tErr = s.agentEngine.EstimateToolsTokens(ctx, userID, req.KnowledgeBaseIDs, modelName)
+			if tErr != nil {
+				logger.Warnf("预估算工具定义 token 失败，按 0 处理: %v", tErr)
+				preToolsTokens = 0
+				deepCtx = ctx
+			}
+		}
+	}
+	_ = deepCtx
+
+	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content, preToolsTokens)
 	if err != nil {
 		if obsOk {
 			s.obs.Incr(ctx, "chat_deep_errors_total", map[string]string{"stage": "init_ctx"}, 1)
+			s.obs.MarkTraceError(ctx, err)
 		}
 		sendErrorEvent(eventCh, err, err.Error())
 		return
 	}
 	history := excludeByMessageID(enhancedCtx.History, userMsgID)
 	chatModel := client.ChatModel()
+	modelName := client.ModelName()
 	if obsOk {
+		s.obs.AddRootAttrs(ctx, observability.Attrs{
+			"model_name":         modelName,
+			"tools_tokens":       fmt.Sprintf("%d", preToolsTokens),
+			"history_budget":     fmt.Sprintf("%d", enhancedCtx.HistoryBudget),
+			"retrieval_budget":   fmt.Sprintf("%d", enhancedCtx.RetrievalBudget),
+		})
 		s.obs.Observe(ctx, "chat_deep_init_ctx_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t0).Seconds())
 	}
 
@@ -83,10 +117,11 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		WithPreference(enhancedCtx.Preference)
 	agentReq := agentPB.BuildAgentRequestFields(userID, req.Content, req.ModelID, req.ModelType, req.KnowledgeBaseIDs, history)
 	t1 := time.Now()
-	agentEventCh, err := s.agentEngine.Execute(ctx, agentReq, chatModel)
+	agentEventCh, err := s.agentEngine.Execute(deepCtx, agentReq, chatModel)
 	if err != nil {
 		if obsOk {
 			s.obs.Incr(ctx, "chat_deep_errors_total", map[string]string{"stage": "agent_execute"}, 1)
+			s.obs.MarkTraceError(ctx, err)
 		}
 		logger.Errorf("Agent 执行失败, sessionID=%s: %v", sessionID, err)
 		llm.ReduceContextBudgetOnError(req.ModelID, err)
@@ -156,12 +191,16 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	}
 
 	if agentErrorSeen {
+		if obsOk {
+			s.obs.MarkTraceError(ctx, fmt.Errorf("agent 执行过程中发生错误"))
+		}
 		return
 	}
 	if !toolEventSeen && looksLikeExecutionPlan(fullContent) {
 		logger.Warnf("深度模式未产生工具调用，仅返回执行计划，sessionID=%s, content=%q", sessionID, fullContent)
 		if obsOk {
 			s.obs.Incr(ctx, "agent_plan_without_tool_total", nil, 1)
+			s.obs.MarkTraceError(ctx, fmt.Errorf("深度模式未产生工具调用"))
 		}
 		eventCh <- dto.StreamEvent{
 			Type:      "error",
@@ -193,26 +232,99 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 }
 
 // refreshContextAsync 异步更新会话摘要和提取用户记忆
+//
+// 关键修复（P1-① 幂等+重试）：
+//   - 旧实现 fire-and-forget，数据库抖动就把摘要写丢，下次 BuildContext 拿 existing=nil
+//     → 历史越跑越长真的爆窗口。现在 SummarizeSession / ExtractMemories 各自独立 3 次指数退避。
+//   - 任何一步失败都记 Obs 指标（summary_refresh_errors_total / memory_extract_errors_total），
+//     后面上线可从 /metrics 直接看成功率。
 func (s *chatService) refreshContextAsync(ctx context.Context, userID, sessionID string, history []entity.ChatMessage, chatModel model.BaseChatModel) {
 	if s == nil || s.contextSvc == nil {
 		return
 	}
+	obsOk := s.obs != nil
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.Errorf("refreshContextAsync panic 已恢复: sessionID=%s, err=%v", sessionID, r)
+				if obsOk {
+					s.obs.Incr(context.Background(), "ctx_refresh_panic_total", nil, 1)
+				}
 			}
 		}()
-		refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
 
-		if _, err := s.contextSvc.SummarizeSession(refreshCtx, sessionID, chatModel); err != nil {
-			logger.Warnf("生成会话摘要失败: %v", err)
+		if obsOk {
+			s.obs.Incr(context.Background(), "ctx_refresh_requests_total", nil, 1)
 		}
-		if _, err := s.contextSvc.ExtractMemories(refreshCtx, userID, sessionID, history, chatModel); err != nil {
-			logger.Warnf("提取用户记忆失败: %v", err)
+
+		summaryOK := true
+		if err := runWithRetry(3, "ctx.summary", func(attempt int) error {
+			refreshCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second+time.Duration(attempt*15)*time.Second)
+			defer cancel()
+			_, err := s.contextSvc.SummarizeSession(refreshCtx, sessionID, chatModel)
+			return err
+		}); err != nil {
+			summaryOK = false
+			logger.Warnf("生成会话摘要失败（已重试 3 次）: sessionID=%s, err=%v", sessionID, err)
+			if obsOk {
+				s.obs.Incr(context.Background(), "ctx_summary_refresh_errors_total", nil, 1)
+			}
+		}
+
+		memoryOK := true
+		if err := runWithRetry(3, "ctx.memory", func(attempt int) error {
+			refreshCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second+time.Duration(attempt*15)*time.Second)
+			defer cancel()
+			_, err := s.contextSvc.ExtractMemories(refreshCtx, userID, sessionID, history, chatModel)
+			return err
+		}); err != nil {
+			memoryOK = false
+			logger.Warnf("提取用户记忆失败（已重试 3 次）: sessionID=%s, err=%v", sessionID, err)
+			if obsOk {
+				s.obs.Incr(context.Background(), "ctx_memory_extract_errors_total", nil, 1)
+			}
+		}
+
+		if obsOk {
+			labels := map[string]string{
+				"summary_ok": ctxBoolLabel(summaryOK),
+				"memory_ok":  ctxBoolLabel(memoryOK),
+			}
+			s.obs.Incr(context.Background(), "ctx_refresh_runs_total", labels, 1)
 		}
 	}()
+}
+
+// runWithRetry 做 1..maxAttempts 次指数退避重试。
+// fn 每次调用 attempt 从 1 开始，成功即返回。
+func runWithRetry(maxAttempts int, tag string, fn func(attempt int) error) error {
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := fn(attempt); err != nil {
+			lastErr = err
+			if attempt < maxAttempts {
+				backoff := time.Duration(1<<uint(attempt-1)) * 500 * time.Millisecond
+				if backoff > 4*time.Second {
+					backoff = 4 * time.Second
+				}
+				logger.Warnf("%s 第 %d 次失败，%v 后重试: err=%v", tag, attempt, backoff, err)
+				time.Sleep(backoff)
+			}
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
+func ctxBoolLabel(b bool) string {
+	if b {
+		return "ok"
+	}
+	return "fail"
 }
 
 // ─── 共享辅助方法 ───────────────────────────────────────────
@@ -249,6 +361,7 @@ func (s *chatService) emitDoneAndSave(eventCh chan<- dto.StreamEvent, sessionID,
 	}()
 }
 
+// providerLabel 返回 LLM 客户端的可观测性标签
 func providerLabel(client *llm.OpenAIClient) string {
 	if client == nil {
 		return "unknown"
@@ -298,6 +411,7 @@ func toStreamEvent(e agent.Event) dto.StreamEvent {
 	return se
 }
 
+// looksLikeExecutionPlan 判断内容是否只是执行计划而没有真正调用工具
 func looksLikeExecutionPlan(content string) bool {
 	text := strings.TrimSpace(content)
 	if text == "" {

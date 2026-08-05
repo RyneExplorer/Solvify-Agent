@@ -50,6 +50,7 @@ type LogConfig struct {
 	MaxAge     int    `mapstructure:"max_age"`
 	Compress   bool   `mapstructure:"compress"`
 }
+// CORSConfig 描述跨域资源共享配置
 type CORSConfig struct {
 	Enabled          bool     `mapstructure:"enabled"`
 	AllowOrigins     []string `mapstructure:"allow_origins"`
@@ -216,6 +217,14 @@ type ObservabilityConfig struct {
 	FeedbackEnabled      bool     `mapstructure:"feedback_enabled"`
 	WhiteListUserIDs     []string `mapstructure:"whitelist_user_ids"`
 	MaxCardinalityLabels int      `mapstructure:"max_cardinality_labels"`
+
+	// OTel 配置（阶段 1.1 新增）：Trace 走 OpenTelemetry SDK
+	// Exporter: stdout（开发期控制台打印）/ otlp（生产期 OTLP gRPC）/ noop（不导出）
+	OTelExporter  string  `mapstructure:"otel_exporter"`
+	OTelOTLPEndpoint string  `mapstructure:"otel_otlp_endpoint"`
+	OTelServiceName string  `mapstructure:"otel_service_name"`
+	// OTelSamplingRate 头采样概率 0~1，0 = 不采样，1 = 全采样
+	OTelSamplingRate float64 `mapstructure:"otel_sampling_rate"`
 }
 
 var globalConfig *Config
@@ -374,6 +383,11 @@ func Default() *Config {
 			PIIMaskSecret:        true,
 			FeedbackEnabled:      true,
 			MaxCardinalityLabels: 500,
+			// OTel 默认值：noop 不打印 span，开发期可改 stdout 调试，生产期改 otlp
+		OTelExporter:     "noop",
+			OTelOTLPEndpoint: "localhost:4317",
+			OTelServiceName:  "solvify-agent",
+			OTelSamplingRate: 1.0,
 		},
 	}
 }
@@ -454,6 +468,15 @@ func (c *Config) Validate() error {
 		case "json", "prometheus", "both", "none":
 		default:
 			return errors.New("observability.metrics_format 只支持 json/prometheus/both/none")
+		}
+		// OTel 校验
+		switch c.Observability.OTelExporter {
+		case "stdout", "otlp", "noop", "":
+		default:
+			return errors.New("observability.otel_exporter 只支持 stdout/otlp/noop")
+		}
+		if c.Observability.OTelSamplingRate < 0 || c.Observability.OTelSamplingRate > 1 {
+			return errors.New("observability.otel_sampling_rate 必须在 0 到 1 之间")
 		}
 	}
 	return nil
@@ -646,6 +669,14 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("OBSERVABILITY_MAX_CARDINALITY_LABELS"); value != "" {
 		cfg.Observability.MaxCardinalityLabels = parseInt(value, cfg.Observability.MaxCardinalityLabels)
+	}
+
+	// OTel 配置（阶段 1.1 新增）
+	cfg.Observability.OTelExporter = getEnv("OTEL_EXPORTER", cfg.Observability.OTelExporter)
+	cfg.Observability.OTelOTLPEndpoint = getEnv("OTEL_OTLP_ENDPOINT", cfg.Observability.OTelOTLPEndpoint)
+	cfg.Observability.OTelServiceName = getEnv("OTEL_SERVICE_NAME", cfg.Observability.OTelServiceName)
+	if value := os.Getenv("OTEL_SAMPLING_RATE"); value != "" {
+		cfg.Observability.OTelSamplingRate = parseFloat(value, cfg.Observability.OTelSamplingRate)
 	}
 
 	// Agent 行为开关

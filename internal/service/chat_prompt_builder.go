@@ -20,6 +20,23 @@ const (
 	PromptModeDeep
 )
 
+// quickModeAgentSystemPrompt 快速检索模式的 base system prompt。
+// 快速模式不走 ReAct 工具循环，而是一次性：QueryRewrite → Retrieve → BuildPrompt → Generate，
+// 所以这里只保留"身份/引用规则/回答原则"，不要写 Think/Act/Observe 相关指令。
+const quickModeAgentSystemPrompt = `你是 Solvify 知识助理，专业的 AI 知识助手。
+
+## 引用规则
+1. 如果"参考资料"块出现在本次对话中（在你的用户问题前面），回答时只引用参考资料中明确陈述的内容。
+2. 引用格式：在对应句末插入 <kb doc="文档名" chunk_id="chunk_id" />，chunk_id 必须和参考资料中 [chunk_id=xxx] 完全一致。
+3. 引用只允许标签内的 chunk_id/文档名，不要把整段原文复制粘贴出来。
+4. 若问题在参考资料中找不到依据，直接说"在当前知识库中没有找到相关信息"，禁止编造、禁止靠常识补全。
+
+## 回答原则
+- 先给结论，再展开依据；需要结构化表达时优先使用 Markdown 表格或编号列表。
+- 必须使用用户偏好的回答语言，语言不确定时使用简体中文。
+- 如果参考资料里有多份互斥或版本差异较大的信息，要在回答中显式标注"不同文档存在差异，请根据实际场景核实"。
+- 回答尾部不要自行添加"希望对你有帮助"等客套语。`
+
 // PromptBuilder 统一构建 LLM 消息和 System Prompt
 // 所有模式（快速检索 / 深度思考）必须通过 Builder 注入 System Prompt 和历史消息，
 // 避免两处各写各的导致摘要 / 记忆 / 用户上下文注入行为不一致。
@@ -86,8 +103,11 @@ func (b *PromptBuilder) WithPreference(p *entity.UserPreference) *PromptBuilder 
 	return b
 }
 
-// BuildSystem 构建统一的增强 System Prompt（基础 + 当前信息 + 摘要 + 记忆）
-// 快速 / 深度模式都走这里，双模式结构 100% 一致
+// BuildSystem 构建统一的增强 System Prompt（基础 + 当前信息 + 摘要 + 记忆 + 角色 + 偏好）
+// 快速 / 深度模式都走这里，双模式结构 100% 一致（P1-⑦ 统一 PromptBuilder 单入口）。
+//
+// 注意：摘要不再伪造一条 assistant 历史消息，改走这里的 System Prompt 注入（P0-① 修复配套），
+// 避免模型误把摘要当"自己前一轮说过的话"产生幻觉。
 func (b *PromptBuilder) BuildSystem() string {
 	var extras []string
 
@@ -95,17 +115,101 @@ func (b *PromptBuilder) BuildSystem() string {
 	if b.userCtx.TimeStr != "" {
 		userInfo += "- 当前时间：" + b.userCtx.TimeStr + "\n"
 	}
+	if b.userCtx.Timezone != "" {
+		userInfo += "- 用户时区：" + b.userCtx.Timezone + "\n"
+	}
 	if b.userCtx.Username != "" {
 		userInfo += "- 用户：" + b.userCtx.Username + "\n"
 	}
 	if b.userCtx.Role != "" {
-		userInfo += "- 角色：" + b.userCtx.Role + "\n"
+		userInfo += "- 系统角色：" + b.userCtx.Role + "\n"
 	}
-	// 至少有时间就加
-	if b.userCtx.TimeStr != "" {
+	if b.userCtx.Department != "" {
+		userInfo += "- 部门：" + b.userCtx.Department + "\n"
+	}
+	if b.userCtx.Position != "" {
+		userInfo += "- 职位：" + b.userCtx.Position + "\n"
+	}
+	if b.userCtx.Expertise != "" {
+		userInfo += "- 擅长/关注：" + b.userCtx.Expertise + "\n"
+	}
+	if b.userCtx.Language != "" {
+		userInfo += "- 偏好语言：" + b.userCtx.Language + "\n"
+	}
+	if userInfo != "## 当前信息\n" {
 		extras = append(extras, userInfo)
-	} else if b.userCtx.Username != "" || b.userCtx.Role != "" {
-		extras = append(extras, userInfo)
+	}
+
+	if b.userCtx.AnswerStyle != "" || b.userCtx.TableFirst || b.userCtx.CitationStyle != "" {
+		var p strings.Builder
+		p.WriteString("## 用户回答偏好\n")
+		switch b.userCtx.AnswerStyle {
+		case "concise":
+			p.WriteString("- 回答风格：简洁凝练，直击要点，3~5 句说完，不过度展开\n")
+		case "detailed":
+			p.WriteString("- 回答风格：详细展开，先结论再分点论述，必要时给例子和注意事项\n")
+		case "step_by_step":
+			p.WriteString("- 回答风格：分步讲解，用 1/2/3…编号或小标题组织步骤\n")
+		default:
+			p.WriteString("- 回答风格：平衡简洁与完整，先结论再展开\n")
+		}
+		if b.userCtx.TableFirst {
+			p.WriteString("- 结构化呈现：对比、列表、映射等数据优先用 Markdown 表格组织\n")
+		}
+		switch b.userCtx.CitationStyle {
+		case "none":
+			p.WriteString("- 引用格式：正文不标注引用，引用信息仅由消息底部来源区展示\n")
+		case "doc_title_only":
+			p.WriteString("- 引用格式：正文引用时只提「根据《文档名》」，不要章节\n")
+		default:
+			p.WriteString("- 引用格式：正文引用时以「根据《文档名》· 章节标题」形式说明来源\n")
+		}
+		extras = append(extras, p.String())
+	}
+
+	pref := b.preference
+	_ = pref
+	// 角色模板：优先取"用户画像 Expertise/Department/Position"拼接出角色设定，
+	// 因为 UserPreference 和 User 表里没有 RoleTemplatePrompt 字段（属于未实现的阶段3扩展）。
+	var rolePrompt string
+	if b.profile != nil {
+		parts := []string{}
+		if strings.TrimSpace(b.profile.Department) != "" {
+			parts = append(parts, "所在部门："+strings.TrimSpace(b.profile.Department))
+		}
+		if strings.TrimSpace(b.profile.Position) != "" {
+			parts = append(parts, "职位："+strings.TrimSpace(b.profile.Position))
+		}
+		if strings.TrimSpace(b.profile.Expertise) != "" {
+			parts = append(parts, "擅长领域："+strings.TrimSpace(b.profile.Expertise))
+		}
+		if len(parts) > 0 {
+			rolePrompt = "## 角色定位\n- " + strings.Join(parts, "\n- ")
+		}
+	}
+	if rolePrompt != "" {
+		extras = append(extras, rolePrompt)
+	}
+
+	if b.userCtx.Language != "" {
+		langHint := "## 回答语言\n"
+		switch b.userCtx.Language {
+		case "en-US":
+			langHint += "- 请使用英文回答（美式英语）。\n"
+		case "ja-JP":
+			langHint += "- 请使用日语回答。\n"
+		case "ko-KR":
+			langHint += "- 请使用韩语回答。\n"
+		case "fr-FR":
+			langHint += "- 请使用法语回答。\n"
+		case "de-DE":
+			langHint += "- 请使用德语回答。\n"
+		case "es-ES":
+			langHint += "- 请使用西班牙语回答。\n"
+		default:
+			langHint += "- 请使用简体中文回答。\n"
+		}
+		extras = append(extras, langHint)
 	}
 
 	if b.summary != nil && b.summary.Summary != "" {
@@ -150,10 +254,9 @@ func (b *PromptBuilder) BuildHistoryForAgent(history []entity.ChatMessage) []ent
 }
 
 // BuildAgentRequestFields 深度模式：把 builder 中的摘要 / 记忆 / 用户上下文填充到 agent.Request 对应字段
-// 与快速模式调用 BuildMessagesQuick 等价，保证信息一致
+// P1-⑦（PromptBuilder 单入口）：System Prompt 由 PromptBuilder.BuildSystem() 统一产出后直接塞到
+// agent.Request.SystemPrompt，agent.runAgent 不再二次拼接，保证快速/深度两模式的摘要/记忆/偏好注入完全一致。
 func (b *PromptBuilder) BuildAgentRequestFields(userID, query, modelID, modelType string, kbIDs []string, history []entity.ChatMessage) agentpkg.Request {
-	profile := b.profile
-	pref := b.preference
 	return agentpkg.Request{
 		UserID:           userID,
 		Query:            query,
@@ -164,19 +267,12 @@ func (b *PromptBuilder) BuildAgentRequestFields(userID, query, modelID, modelTyp
 		Summary:          b.summary,
 		Memories:         b.memories,
 		UserCtx: agentpkg.PromptUserContext{
-			ID:            b.userCtx.ID,
-			Username:      b.userCtx.Username,
-			Role:          b.userCtx.Role,
-			TimeStr:       b.userCtx.TimeStr,
-			Department:    takeStringOrProfile(profile, "Department"),
-			Position:      takeStringOrProfile(profile, "Position"),
-			Expertise:     takeStringOrProfile(profile, "Expertise"),
-			Language:      takeStringOrProfile(profile, "PreferredLanguage"),
-			Timezone:      takeStringOrProfile(profile, "Timezone"),
-			AnswerStyle:   takeAnswerStyle(pref),
-			TableFirst:    takeTableFirst(pref),
-			CitationStyle: takeCitationStyle(pref),
+			ID:       b.userCtx.ID,
+			Username: b.userCtx.Username,
+			Role:     b.userCtx.Role,
+			TimeStr:  b.userCtx.TimeStr,
 		},
+		SystemPrompt: b.BuildSystem(),
 	}
 }
 
@@ -248,18 +344,23 @@ func (u UserContext) WithPreference(p *entity.UserPreference) UserContext {
 	return u
 }
 
+// takeAnswerStyle 取用户回答风格，空对象返回空串
 func takeAnswerStyle(p *entity.UserPreference) string {
 	if p == nil {
 		return ""
 	}
 	return p.AnswerStyle
 }
+
+// takeTableFirst 取是否优先表格呈现，空对象默认 true
 func takeTableFirst(p *entity.UserPreference) bool {
 	if p == nil {
 		return true
 	}
 	return p.UseMarkdownTable
 }
+
+// takeCitationStyle 取引用格式，空对象默认 section_title
 func takeCitationStyle(p *entity.UserPreference) string {
 	if p == nil {
 		return "section_title"

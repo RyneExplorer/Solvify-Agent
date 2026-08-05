@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"gorm.io/datatypes"
-	"gorm.io/gorm"
 
 	"solvify-agent/internal/llm"
 	requestdto "solvify-agent/internal/model/dto/request"
@@ -17,6 +16,28 @@ import (
 	"solvify-agent/internal/repository"
 	apperrors "solvify-agent/pkg/errors"
 )
+
+// isNotFound 判断 Repo 返回的是否为"资源不存在"业务错误（通过错误码匹配，避免 Service 依赖 GORM）
+func isNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var biz *apperrors.BizError
+	if errors.As(err, &biz) {
+		switch biz.Code {
+		case apperrors.CodeModelConfigNotFound,
+			apperrors.CodeUserNotFound,
+			apperrors.CodeKnowledgeBaseNotFound,
+			apperrors.CodeDocumentNotFound,
+			apperrors.CodeSessionNotFound,
+			apperrors.CodeToolTypeNotFound,
+			apperrors.CodeToolProviderNotFound,
+			apperrors.CodeNotFound:
+			return true
+		}
+	}
+	return false
+}
 
 // userModelConfigService 封装用户模型配置业务用例实现
 type userModelConfigService struct {
@@ -61,7 +82,7 @@ func (s *userModelConfigService) Create(ctx context.Context, userID string, req 
 func (s *userModelConfigService) Update(ctx context.Context, userID string, configID string, req requestdto.UpdateUserModelConfigRequest) (responsedto.UserModelConfigInfo, error) {
 	config, err := s.repo.GetByID(ctx, configID, userID)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if isNotFound(err) {
 			return responsedto.UserModelConfigInfo{}, apperrors.New(apperrors.CodeModelConfigNotFound, "模型配置不存在")
 		}
 		return responsedto.UserModelConfigInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
@@ -115,7 +136,7 @@ func (s *userModelConfigService) Update(ctx context.Context, userID string, conf
 func (s *userModelConfigService) Delete(ctx context.Context, userID string, configID string) error {
 	_, err := s.repo.GetByID(ctx, configID, userID)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if isNotFound(err) {
 			return apperrors.New(apperrors.CodeModelConfigNotFound, "模型配置不存在")
 		}
 		return apperrors.WrapDefault(apperrors.CodeInternalError, err)
@@ -128,7 +149,7 @@ func (s *userModelConfigService) Delete(ctx context.Context, userID string, conf
 func (s *userModelConfigService) Get(ctx context.Context, userID string, configID string) (responsedto.UserModelConfigInfo, error) {
 	config, err := s.repo.GetByID(ctx, configID, userID)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if isNotFound(err) {
 			return responsedto.UserModelConfigInfo{}, apperrors.New(apperrors.CodeModelConfigNotFound, "模型配置不存在")
 		}
 		return responsedto.UserModelConfigInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
@@ -160,7 +181,7 @@ func (s *userModelConfigService) ResolveModelConfig(ctx context.Context, userID 
 
 	config, err := s.repo.GetByID(ctx, configID, userID)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if isNotFound(err) {
 			return nil, nil
 		}
 		return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
@@ -222,6 +243,7 @@ func (s *userModelConfigService) Test(ctx context.Context, req requestdto.TestMo
 	}, nil
 }
 
+// toModelConfigInfo 把实体转为响应 DTO
 func toModelConfigInfo(config *entity.UserModelConfig) responsedto.UserModelConfigInfo {
 	info := responsedto.UserModelConfigInfo{
 		ID:               config.ID,
@@ -245,6 +267,7 @@ func toModelConfigInfo(config *entity.UserModelConfig) responsedto.UserModelConf
 	return info
 }
 
+// toJSONB 把 map 序列化为 datatypes.JSON
 func toJSONB(v map[string]interface{}) datatypes.JSON {
 	if v == nil {
 		return nil
