@@ -1,7 +1,11 @@
 package api
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"solvify-agent/internal/api/v1/auth"
 	"solvify-agent/internal/api/v1/chat"
@@ -14,6 +18,7 @@ import (
 	syncapi "solvify-agent/internal/api/v1/sync"
 	"solvify-agent/internal/api/v1/tool"
 	"solvify-agent/internal/api/v1/user"
+	usermodelconfigapi "solvify-agent/internal/api/v1/user_model_config"
 	"solvify-agent/internal/middleware"
 	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
@@ -29,12 +34,13 @@ type Router struct {
 	documentCtrl      *document.Controller
 	storageCtrl       *storage.Controller
 	modelCtrl         *model.Controller
-	userModelCtrl     *model.UserModelController
+	userModelCtrl     *usermodelconfigapi.Controller
 	chatCtrl          *chat.Controller
 	syncCtrl          *syncapi.Controller
 	dingtalkCtrl      *dingtalkapi.Controller
 	toolCtrl          *tool.Controller
 	authService       service.AuthServiceInterface
+	promRegistry      *prometheus.Registry
 }
 
 // NewRouter 创建 API 路由聚合器
@@ -52,18 +58,19 @@ func NewRouter(
 	chatSvc service.ChatServiceInterface,
 	syncSvc service.SyncServiceInterface,
 	dingtalkSvc service.DingTalkServiceInterface,
-	chunkRepo repository.ChunkRepository,
+	chunkRepo repository.DocumentChunkRepository,
 	toolTypeService service.ToolTypeService,
 	toolProviderService service.ToolProviderService,
 	userToolConfigService service.UserToolConfigService,
 	prefService service.UserPreferenceService,
+	extra ...interface{},
 ) *Router {
-	return &Router{
+	r := &Router{
 		userCtrl:          user.NewController(userService, adminUserService, prefService),
 		authCtrl:          auth.NewController(authService, userService),
 		searchCtrl:        search.NewController(searchService),
 		modelCtrl:         model.NewController(modelService),
-		userModelCtrl:     model.NewUserModelController(userModelConfigService),
+		userModelCtrl:     usermodelconfigapi.NewController(userModelConfigService),
 		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseSvc),
 		documentCtrl:      document.NewController(documentSvc, chunkRepo),
 		storageCtrl:       storage.NewController(storageSvc),
@@ -73,6 +80,13 @@ func NewRouter(
 		toolCtrl:          tool.NewController(toolTypeService, toolProviderService, userToolConfigService),
 		authService:       authService,
 	}
+	// /metrics 路由直接挂 promhttp.HandlerFor(promReg) 输出标准 Prometheus 文本格式
+	for _, it := range extra {
+		if reg, ok := it.(*prometheus.Registry); ok {
+			r.promRegistry = reg
+		}
+	}
+	return r
 }
 
 // Setup 注册项目 HTTP 路由
@@ -81,6 +95,18 @@ func (r *Router) Setup(engine *gin.Engine) {
 	engine.Use(middleware.CORS())
 
 	engine.GET("/health", r.health)
+
+	// GET /metrics：Prometheus 标准抓取端点（公开不登录即可访问，方便 Prometheus server 抓取）。
+	// 内容里不含任何敏感字段，只是指标名/计数/分桶，所有标签值在写入前已通过 PII sanitizer 清理。
+	if r.promRegistry != nil {
+		engine.GET("/metrics", gin.WrapH(promhttp.HandlerFor(r.promRegistry, promhttp.HandlerOpts{})))
+	} else {
+		// 兜底：Registry 未注入时返回占位文本，避免 Prometheus 抓取 404
+		engine.GET("/metrics", func(c *gin.Context) {
+			c.Header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			c.String(http.StatusOK, "# solvify prometheus registry not initialized\n")
+		})
+	}
 
 	v1 := engine.Group("/api/v1")
 

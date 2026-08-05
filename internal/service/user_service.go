@@ -3,27 +3,33 @@ package service
 import (
 	"context"
 	"strings"
+	"time"
 
 	"solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/repository"
+	"solvify-agent/pkg/cache"
 	apperrors "solvify-agent/pkg/errors"
+	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/response"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
+// userService 用户业务服务实现
 type userService struct {
-	userRepo repository.UserRepository
-	prefSvc  UserPreferenceService
+	userRepo  repository.UserRepository
+	prefSvc   UserPreferenceService
+	userCache *cache.RedisCache
 }
 
 // NewUserService 创建用户服务
-func NewUserService(userRepo repository.UserRepository, prefSvc UserPreferenceService) UserServiceInterface {
+func NewUserService(userRepo repository.UserRepository, prefSvc UserPreferenceService, userCache *cache.RedisCache) UserServiceInterface {
 	return &userService{
-		userRepo: userRepo,
-		prefSvc:  prefSvc,
+		userRepo:  userRepo,
+		prefSvc:   prefSvc,
+		userCache: userCache,
 	}
 }
 
@@ -65,6 +71,8 @@ func (s *userService) Register(req *request.RegisterRequest) error {
 }
 
 // GetUserByID 根据 ID 获取用户
+// last_model 字段走 cache-aside：先读缓存，命中则用缓存值覆盖 DB 读到的值；
+// 未命中则用 DB 值回填缓存（24h TTL，与 chat_service.updateUserLastModel 一致）
 func (s *userService) GetUserByID(id string) (*entity.User, error) {
 	user, err := s.userRepo.FindByID(id)
 	if err != nil {
@@ -73,6 +81,25 @@ func (s *userService) GetUserByID(id string) (*entity.User, error) {
 	if user == nil {
 		return nil, apperrors.New(apperrors.CodeUserNotFound, "用户不存在")
 	}
+
+	// cache-aside：last_model 优先走缓存，避免 DB 写入延迟导致读到旧值
+	if s.userCache != nil {
+		cacheKey := "user:model:" + id
+		var cachedModelID string
+		found, cacheErr := s.userCache.Get(context.Background(), cacheKey, &cachedModelID)
+		if cacheErr != nil {
+			logger.Errorf("读取用户模型缓存失败: userID=%s, err=%v", id, cacheErr)
+		}
+		if found && cachedModelID != "" {
+			user.LastModel = cachedModelID
+		} else if user.LastModel != "" {
+			// DB 有值但缓存未命中，回填缓存
+			if cacheErr := s.userCache.Set(context.Background(), cacheKey, user.LastModel, 24*time.Hour); cacheErr != nil {
+				logger.Errorf("回填用户模型缓存失败: userID=%s, err=%v", id, cacheErr)
+			}
+		}
+	}
+
 	return user, nil
 }
 
@@ -129,6 +156,7 @@ func (s *userService) UpdateProfile(id string, req *request.UpdateProfileRequest
 	return s.userRepo.UpdateProfile(id, upd)
 }
 
+// nonEmptyPtrOrNil 非空且与当前值不同则取地址，否则返回 nil
 func nonEmptyPtrOrNil(s string, cur *string) *string {
 	if s == "" {
 		return nil

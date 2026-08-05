@@ -1,7 +1,7 @@
 <template>
-  <div class="py-10 px-10 max-w-3xl mx-auto">
+  <div class="py-6 px-4 md:px-6 max-w-xl mx-auto">
     <!-- Header avatar -->
-    <div class="flex flex-col items-center mb-10">
+    <div class="flex flex-col items-center mb-6">
       <div class="relative">
         <div class="w-20 h-20 rounded-full bg-accent-600 text-white flex items-center justify-center text-2xl font-medium ring-4 ring-white shadow-lg">
           {{ userInitial }}
@@ -195,10 +195,12 @@ function formatDate(dateStr: string) {
 async function loadProfile() {
   try {
     const res = await getProfile()
-    if (res.code === 0 && res.data) {
-      profile.value = res.data
-      email.value = res.data.email || ''
-      currentUser.value = res.data
+    // 后端 /user/profile 返回 { user: UserInfo, preference: {...} }，只取 user 这层扁平结构
+    const userInfo = res.data?.user ?? res.data
+    if (res.code === 0 && userInfo) {
+      profile.value = userInfo
+      email.value = userInfo.email || ''
+      currentUser.value = userInfo
     }
   } catch (e: any) {
     ElMessage.error(e.message || '加载个人资料失败')

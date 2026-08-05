@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	toolComp "github.com/cloudwego/eino/components/tool"
 
+	"solvify-agent/internal/observability"
 	"solvify-agent/pkg/logger"
 )
 
@@ -19,17 +21,24 @@ type agentCallbackHandler struct {
 	pendingThinkingTitle string
 	kbIDs                []string
 	toolDescMap          map[string]string
-	// 去重：记录已发送的工具事件，避免重复
-	sentToolEvents map[string]bool
+	sentToolEvents       map[string]bool
+
+	taskID  string
+	tracker *agentStepTracker
+	obs     observability.Recorder
 }
 
-func newAgentCallbackHandler(eventCh chan<- Event, kbIDs []string, toolDescMap map[string]string) callbacks.Handler {
+func newAgentCallbackHandler(eventCh chan<- Event, kbIDs []string, toolDescMap map[string]string) *agentCallbackHandler {
 	h := &agentCallbackHandler{
 		eventCh:        eventCh,
 		kbIDs:          kbIDs,
 		toolDescMap:    toolDescMap,
 		sentToolEvents: make(map[string]bool),
 	}
+	return h
+}
+
+func (h *agentCallbackHandler) Handler() callbacks.Handler {
 	return callbacks.NewHandlerBuilder().
 		OnStartFn(h.onStart).
 		OnEndFn(h.onEnd).
@@ -41,6 +50,7 @@ func (h *agentCallbackHandler) onStart(ctx context.Context, info *callbacks.RunI
 	if info == nil {
 		return ctx
 	}
+	obsOk := h.obs != nil && h.tracker != nil
 
 	switch info.Component {
 	case "ChatModel":
@@ -64,17 +74,31 @@ func (h *agentCallbackHandler) onStart(ctx context.Context, info *callbacks.RunI
 				Status: "running",
 			})
 		}
+		if obsOk {
+			h.tracker.mu.Lock()
+			h.tracker.stepIdx++
+			idx := h.tracker.stepIdx
+			pending := &agentStepPending{
+				StepIndex:       idx,
+				TaskID:          h.taskID,
+				ThinkingSummary: h.pendingThinkingTitle,
+				StartedAt:       time.Now(),
+			}
+			h.tracker.pendingByID[fmt.Sprintf("llm:%d", h.callCount)] = pending
+			h.tracker.mu.Unlock()
+		}
 
 	case "Tool":
 		toolInput := toolComp.ConvCallbackInput(input)
 		toolName := info.Name
 		query := ""
+		inputJSON := ""
 		if toolInput != nil {
-			query = extractQueryFromArgs(toolInput.ArgumentsInJSON)
+			inputJSON = toolInput.ArgumentsInJSON
+			query = extractQueryFromArgs(inputJSON)
 		}
 		title, detail := formatToolStart(toolName, query, h.kbIDs, h.toolDescMap)
 
-		// 去重：检查是否已发送过相同的工具调用事件
 		eventKey := fmt.Sprintf("call:%s:%s", toolName, title)
 		if h.sentToolEvents[eventKey] {
 			logger.Warnf("[Callback] 跳过重复的工具调用事件: %s", eventKey)
@@ -88,6 +112,21 @@ func (h *agentCallbackHandler) onStart(ctx context.Context, info *callbacks.RunI
 			Detail: detail,
 			Status: "running",
 		})
+
+		if obsOk {
+			h.tracker.mu.Lock()
+			h.tracker.stepIdx++
+			idx := h.tracker.stepIdx
+			pending := &agentStepPending{
+				StepIndex:       idx,
+				TaskID:          h.taskID,
+				ToolName:        toolName,
+				ToolInputMasked: truncateStr(maskJsonSecrets(inputJSON), 256),
+				StartedAt:       time.Now(),
+			}
+			h.tracker.pendingByID[fmt.Sprintf("tool:%s:%s", toolName, title)] = pending
+			h.tracker.mu.Unlock()
+		}
 	}
 
 	return ctx
@@ -97,6 +136,7 @@ func (h *agentCallbackHandler) onEnd(ctx context.Context, info *callbacks.RunInf
 	if info == nil {
 		return ctx
 	}
+	obsOk := h.obs != nil && h.tracker != nil
 
 	switch info.Component {
 	case "ChatModel":
@@ -118,13 +158,32 @@ func (h *agentCallbackHandler) onEnd(ctx context.Context, info *callbacks.RunInf
 				})
 			}
 		}
+		if obsOk {
+			h.tracker.mu.Lock()
+			key := fmt.Sprintf("llm:%d", h.callCount)
+			pending := h.tracker.pendingByID[key]
+			delete(h.tracker.pendingByID, key)
+			h.tracker.mu.Unlock()
+			if pending != nil {
+				step := &observability.AgentStep{
+					TaskID:          pending.TaskID,
+					StepIndex:       pending.StepIndex,
+					StartedAt:       pending.StartedAt,
+					EndedAt:         time.Now(),
+					ThinkingSummary: pending.ThinkingSummary,
+					LatencyMs:       time.Since(pending.StartedAt).Milliseconds(),
+					ToolName:        "llm.reasoning",
+					ToolStatus:      "success",
+				}
+				h.obs.RecordAgentStep(step)
+			}
+		}
 
 	case "Tool":
 		toolOutput := toolComp.ConvCallbackOutput(output)
 		toolName := info.Name
 		title, detail, toolResult := formatToolEnd(toolName, toolOutput, h.toolDescMap)
 
-		// 去重：检查是否已发送过相同的工具完成事件
 		eventKey := fmt.Sprintf("result:%s:%s", toolName, title)
 		if h.sentToolEvents[eventKey] {
 			logger.Warnf("[Callback] 跳过重复的工具完成事件: %s", eventKey)
@@ -139,6 +198,28 @@ func (h *agentCallbackHandler) onEnd(ctx context.Context, info *callbacks.RunInf
 			Status:     "success",
 			ToolResult: toolResult,
 		})
+
+		if obsOk {
+			h.tracker.mu.Lock()
+			key := fmt.Sprintf("tool:%s:%s", toolName, title)
+			pending := h.tracker.pendingByID[key]
+			delete(h.tracker.pendingByID, key)
+			h.tracker.mu.Unlock()
+			if pending != nil {
+				step := &observability.AgentStep{
+					TaskID:            pending.TaskID,
+					StepIndex:         pending.StepIndex,
+					StartedAt:         pending.StartedAt,
+					EndedAt:           time.Now(),
+					ToolName:          pending.ToolName,
+					ToolInputMasked:   pending.ToolInputMasked,
+					ToolResultSummary: truncateStr(toolResult, 256),
+					ToolStatus:        "success",
+					LatencyMs:         time.Since(pending.StartedAt).Milliseconds(),
+				}
+				h.obs.RecordAgentStep(step)
+			}
+		}
 	}
 
 	return ctx
@@ -161,7 +242,81 @@ func (h *agentCallbackHandler) onError(ctx context.Context, info *callbacks.RunI
 		Retryable: retryable,
 		Done:      true,
 	})
+
+	if h.obs != nil && h.tracker != nil {
+		h.tracker.mu.Lock()
+		var pending *agentStepPending
+		for k, v := range h.tracker.pendingByID {
+			pending = v
+			delete(h.tracker.pendingByID, k)
+			break
+		}
+		h.tracker.mu.Unlock()
+		if pending != nil {
+			step := &observability.AgentStep{
+				TaskID:            pending.TaskID,
+				StepIndex:         pending.StepIndex,
+				StartedAt:         pending.StartedAt,
+				EndedAt:           time.Now(),
+				ThinkingSummary:   pending.ThinkingSummary,
+				ToolName:          pending.ToolName,
+				ToolInputMasked:   pending.ToolInputMasked,
+				ToolResultSummary: "",
+				ToolStatus:        "error",
+				ToolError:         truncateStr(err.Error(), 256),
+				LatencyMs:         time.Since(pending.StartedAt).Milliseconds(),
+			}
+			h.obs.RecordAgentStep(step)
+		}
+	}
+
 	return ctx
+}
+
+func maskJsonSecrets(s string) string {
+	if s == "" {
+		return ""
+	}
+	var obj any
+	if err := json.Unmarshal([]byte(s), &obj); err != nil {
+		return s
+	}
+	masked, _ := json.Marshal(maskAny(obj))
+	return string(masked)
+}
+
+func maskAny(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			lk := strings.ToLower(k)
+			if strings.Contains(lk, "key") || strings.Contains(lk, "token") ||
+				strings.Contains(lk, "password") || strings.Contains(lk, "secret") {
+				if s, ok := val.(string); ok {
+					out[k] = maskSecret(s)
+					continue
+				}
+			}
+			out[k] = maskAny(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = maskAny(val)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func maskSecret(s string) string {
+	if len(s) <= 8 {
+		return "***"
+	}
+	return s[:2] + "***" + s[len(s)-2:]
 }
 
 func formatToolStart(toolName, query string, kbIDs []string, toolDescMap map[string]string) (title, detail string) {

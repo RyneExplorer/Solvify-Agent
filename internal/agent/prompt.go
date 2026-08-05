@@ -47,6 +47,8 @@ func buildReActSystemPrompt(ctx context.Context, userTools []einoTool.BaseTool) 
 	sb.WriteString("2. 根据检索结果决定是否需要补充：知识库信息不足时，再调用其他工具\n")
 	sb.WriteString("3. 不重复调用同一工具，检索结果已足够时直接回答\n")
 	sb.WriteString("4. 工具调用总计不超过 3 次\n")
+	sb.WriteString("5. **强制收敛（非常重要）**：当达到最大推理轮次或已用完工具调用次数时，必须立即输出最终结论，禁止再规划工具调用、禁止写'我还需要查一下/让我补充一下/下一步应该'等思考内容，直接总结已有信息 + 知识库引用给出答案\n")
+	sb.WriteString("6. **答案分层**：存在 ToolCalls 时，这一轮 Message.Content 只写 1-2 句简短推理（不会展示给用户，也不会进入最终答案），只有 ToolCalls 为空的那一轮 Message.Content 才是完整、可读、面向最终用户的答案正文（含引用标签、Markdown 排版）\n")
 
 	if len(toolDescs) > 0 {
 		names := make([]string, len(toolDescs))

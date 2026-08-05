@@ -6,17 +6,19 @@ import * as chatApi from '@/api/chat'
 import * as modelApi from '@/api/model'
 import * as authApi from '@/api/auth'
 import { request } from '@/api/client'
-import type { ChatSession } from '@/types/chat'
+import type { ChatSession, FeedbackRequest } from '@/types/chat'
 import type { StreamEvent } from '@/types/chat'
 
-// ── Local types for UI display ──
+// ── UI 展示用的本地类型 ──
 
+// 推理时间线步骤
 interface TimelineStep {
   title: string
   detail?: string
   status: string
 }
 
+// 聊天消息展示结构
 interface DisplayMessage {
   id: string
   role: 'user' | 'assistant' | 'error'
@@ -25,51 +27,62 @@ interface DisplayMessage {
   retryable?: boolean
   sources?: StreamEvent['sources']
   timeline?: TimelineStep[]
+  trace_id?: string
+  feedback_rating?: 1 | -1
+  feedback_reasons?: string[]
+  feedback_comment?: string
 }
 
+// 模型选项
 interface ModelOption {
   id: string
   name: string
   modelType: 'system' | 'user'
 }
 
+// 知识库选项
 interface KnowledgeBaseOption {
   id: string
   name: string
   document_count?: number
 }
 
-// ── Tooltip content store (avoids HTML attribute escaping issues) ──
+// ── Tooltip 内容存储（避免 HTML 属性转义问题） ──
 
 const tooltipStore = new Map<string, string>()
 
+// 获取指定 key 的 tooltip 内容
 export function getTooltipContent(key: string): string {
   return tooltipStore.get(key) ?? ''
 }
 
 let _tooltipSeq = 0
+// 生成下一个 tooltip key
 export function nextTipKey(): string {
   return `tip_${_tooltipSeq++}`
 }
 
+// 设置 tooltip 内容
 export function setTooltip(key: string, value: string): void {
   tooltipStore.set(key, value)
 }
 
+// 清理标题中的换行
 export function cleanTitle(text: string): string {
   if (!text) return ''
   return text.replace(/[\r\n]+/g, ' ').trim()
 }
 
+// 聊天组合式函数
 export function useChat() {
   const router = useRouter()
   const refreshHistory = inject<() => Promise<void>>('refreshHistory')
 
-  // ── Session ──
+  // ── 会话状态 ──
   const sessions = ref<ChatSession[]>([])
   const activeSessionId = ref<string | null>(null)
 
-  // ── Messages ──
+  // ── 消息状态 ──
   const messages = ref<DisplayMessage[]>([])
   const collapsedTimelines = ref<Set<number>>(new Set())
   const isLoading = ref(false)
@@ -78,21 +91,21 @@ export function useChat() {
   const streamTimeline = ref<TimelineStep[]>([])
   const progressText = ref('')
 
-  // ── Selectors ──
+  // ── 选择器 ──
   const modelOptions = ref<ModelOption[]>([])
   const knowledgeBases = ref<KnowledgeBaseOption[]>([])
   const connected = ref(false)
 
-  // ── Input ──
+  // ── 输入状态 ──
   const input = ref('')
   const selectedModel = ref('')
   const selectedKBs = ref<string[]>([])
   const searchMode = ref<'quick' | 'smart-reasoning'>('quick')
 
-  // ── Abort control ──
+  // ── 中断控制 ──
   let abortController: AbortController | null = null
 
-  // ── Computed ──
+  // ── 计算属性 ──
   const activeSession = computed(() =>
     sessions.value.find((s) => s.id === activeSessionId.value),
   )
@@ -104,7 +117,7 @@ export function useChat() {
       .join(', ')
   })
 
-  // ── Init ──
+  // ── 初始化 ──
   async function init() {
     try {
       const [modelsRes, userModelsRes, kbRes, profileRes] = await Promise.all([
@@ -131,9 +144,9 @@ export function useChat() {
       }
       modelOptions.value = opts
 
-      // 使用用户上次选择的模型
-      if (profileRes?.code === 0 && profileRes.data?.lastModel) {
-        selectedModel.value = profileRes.data.lastModel
+      // 使用用户上次选择的模型（lastModel 嵌套在 user 对象里）
+      if (profileRes?.code === 0 && profileRes.data?.user?.lastModel) {
+        selectedModel.value = profileRes.data.user.lastModel
       } else if (opts.length > 0) {
         selectedModel.value = opts[0].id
       }
@@ -154,7 +167,8 @@ export function useChat() {
     }
   }
 
-  // ── Sessions ──
+  // ── 会话操作 ──
+  // 加载会话列表
   async function loadSessions() {
     try {
       const res = await chatApi.listSessions()
@@ -162,6 +176,7 @@ export function useChat() {
     } catch { /* silent */ }
   }
 
+  // 创建新会话
   async function createSession(title: string): Promise<string | null> {
     try {
       const res = await chatApi.createSession({
@@ -177,6 +192,7 @@ export function useChat() {
     return null
   }
 
+  // 加载指定会话的消息列表
   async function loadMessages(sessionId: string) {
     try {
       const res = await chatApi.getMessages(sessionId)
@@ -219,12 +235,13 @@ export function useChat() {
     }
   }
 
+  // 选中指定会话并加载消息
   function selectSession(sessionId: string) {
     activeSessionId.value = sessionId
     loadMessages(sessionId)
   }
 
-  // ── Send Message (SSE streaming) ──
+  // ── 发送消息（SSE 流式） ──
   async function sendMessage() {
     const content = input.value.trim()
     if (!content || isLoading.value) return
@@ -248,7 +265,7 @@ export function useChat() {
     streamContent.value = ''
     streamTimeline.value = []
 
-    // Auto-create session
+    // 自动创建会话
     if (isNewSession) {
       const id = await createSession(content)
       if (!id) {
@@ -291,15 +308,17 @@ export function useChat() {
 
     try {
       const reader = await chatApi.sendMessage(activeSessionId.value, {
-        content,
-        model_id: selectedModel.value,
-        model_type: modelOpt?.modelType ?? 'system',
-        search_mode: searchMode.value,
-        knowledge_base_ids: selectedKBs.value.length ? selectedKBs.value : knowledgeBases.value.map(k => k.id),
-      }, abortController.signal)
+      content,
+      model_id: selectedModel.value,
+      model_type: modelOpt?.modelType ?? 'system',
+      search_mode: searchMode.value,
+      knowledge_base_ids: selectedKBs.value.length ? selectedKBs.value : knowledgeBases.value.map(k => k.id),
+    }, abortController.signal)
 
-      const decoder = new TextDecoder()
-      let buffer = ''
+    const traceId = reader._meta?.trace_id
+
+    const decoder = new TextDecoder()
+    let buffer = ''
 
       while (true) {
         const { done, value } = await reader.read()
@@ -329,7 +348,7 @@ export function useChat() {
               case 'tool_call':
               case 'tool_result':
               case 'warning':
-                // Mark all running steps as success before adding new one
+                // 添加新步骤前，将所有运行中的步骤标记为成功
                 streamTimeline.value.forEach(
                   (s) => s.status === 'running' && (s.status = 'success'),
                 )
@@ -413,6 +432,7 @@ export function useChat() {
                     streamTimeline.value.length > 0
                       ? [...streamTimeline.value]
                       : undefined,
+                  trace_id: traceId,
                 })
                 if (streamTimeline.value.length > 0) {
                   collapsedTimelines.value.add(messages.value.length - 1)
@@ -424,13 +444,13 @@ export function useChat() {
                 progressText.value = ''
                 return
             }
-          } catch { /* skip bad JSON */ }
+          } catch { /* 跳过非法 JSON */ }
         }
       }
     } catch (e: unknown) {
       const isAbort = e instanceof DOMException && e.name === 'AbortError'
       if (isAbort) {
-        // User aborted — save partial content / reasoning steps / sources if any
+        // 用户中断——保存已有的部分内容 / 推理步骤 / 来源
         if (finalContent || streamContent.value || streamTimeline.value.length || streamSources.value?.length) {
           messages.value.push({
             id: assistantId || 'a-' + Date.now(),
@@ -438,6 +458,7 @@ export function useChat() {
             content: streamContent.value || finalContent,
             sources: finalSources.length ? finalSources : (streamSources.value?.length ? [...streamSources.value] : undefined),
             timeline: streamTimeline.value.length ? [...streamTimeline.value] : undefined,
+            trace_id: traceId,
           })
         }
       } else {
@@ -460,25 +481,29 @@ export function useChat() {
     }
   }
 
-  // ── Helpers ──
+  // ── 辅助方法 ──
+  // 滚动到底部
   function scrollToBottom(el: HTMLElement | null) {
     nextTick(() => {
       if (el) el.scrollTop = el.scrollHeight
     })
   }
 
+  // 切换知识库选中状态
   function toggleKB(id: string) {
     const idx = selectedKBs.value.indexOf(id)
     if (idx >= 0) selectedKBs.value.splice(idx, 1)
     else selectedKBs.value.push(id)
   }
 
+  // 复制文本到剪贴板
   function copyText(text: string) {
     navigator.clipboard.writeText(text)
       .then(() => ElMessage.success('已复制'))
       .catch(() => ElMessage.error('复制失败'))
   }
 
+  // 重新生成最后一条回复
   function regenerate() {
     const lastIdx = messages.value.length - 1
     if (lastIdx >= 0 && messages.value[lastIdx].role === 'assistant') {
@@ -498,6 +523,7 @@ export function useChat() {
     }
   }
 
+  // 重试最后一条错误消息
   function retryLastMessage() {
     // 找到最后一条错误消息
     const lastErrorIdx = [...messages.value]
@@ -528,13 +554,40 @@ export function useChat() {
     }
   }
 
+  // 中止当前生成
   function stopGeneration() {
     if (abortController) {
       abortController.abort()
     }
   }
 
-  // ── Content formatting ──
+  // ── 反馈 ──
+  // 提交消息反馈
+  async function submitFeedback(
+    messageId: string,
+    req: FeedbackRequest,
+  ): Promise<void> {
+    const idx = messages.value.findIndex((m) => m.id === messageId)
+    if (idx < 0) return
+    const target = messages.value[idx]
+    try {
+      await chatApi.submitFeedback(messageId, req)
+      const next = [...messages.value]
+      next[idx] = {
+        ...target,
+        feedback_rating: req.rating,
+        feedback_reasons: req.reasons ?? [],
+        feedback_comment: req.comment,
+      }
+      messages.value = next
+      ElMessage.success(req.rating === 1 ? '感谢您的反馈' : '感谢反馈，我们会持续优化')
+    } catch (e: unknown) {
+      ElMessage.error(e instanceof Error ? e.message : '提交反馈失败')
+    }
+  }
+
+  // ── 内容格式化 ──
+  // 格式化消息内容，处理引用标签
   function formatContent(content: string, _sources?: unknown[]): string {
     if (!content) return ''
 
@@ -599,10 +652,11 @@ export function useChat() {
     return html
   }
 
+  // 清理 tooltip 文本中的元数据标签
   function cleanTooltipText(text: string): string {
     if (!text) return ''
-    // Only remove actual metadata tags; do NOT globally strip `title=` / `doc=`
-    // because normal article text may legitimately contain those substrings.
+    // 仅移除实际的元数据标签，不要全局清除 `title=` / `doc=`
+    // 因为正常文章文本中可能合法包含这些子串
     return text
       .replace(/<kb(?:\s[^>]*)?\s*\/?>\s*/gi, '')
       .replace(/<web(?:\s[^>]*)?\s*\/?>\s*/gi, '')
@@ -613,7 +667,7 @@ export function useChat() {
       .trim()
   }
 
-  // Get comma-separated chunk IDs for a source document tooltip
+  // 获取来源文档 tooltip 所需的逗号分隔 chunk ID
   function getSourceChunkIds(source: any): string {
     if (!source) return ''
     const chunks = source.chunks
@@ -624,7 +678,7 @@ export function useChat() {
       .join(',')
   }
 
-  // Extract web sources from content (for displaying web search links)
+  // 从内容中提取网页来源（用于展示联网搜索链接）
   function extractWebSources(content: string): { url: string; title: string }[] {
     const result: { url: string; title: string }[] = []
     const seen = new Set<string>()
@@ -639,6 +693,7 @@ export function useChat() {
     return result
   }
 
+  // 重置聊天状态，开始新会话
   function newChat() {
     activeSessionId.value = null
     messages.value = []
@@ -682,19 +737,22 @@ export function useChat() {
     regenerate,
     retryLastMessage,
     stopGeneration,
+    submitFeedback,
     newChat,
     cleanTooltipText,
   }
 }
 
-// ── Utilities ──
+// ── 工具函数 ──
 
+// HTML 转义
 function escapeHtml(s: string): string {
   const d = document.createElement('div')
   d.textContent = s
   return d.innerHTML
 }
 
+// HTML 属性转义
 function escapeAttr(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -704,7 +762,8 @@ function escapeAttr(s: string): string {
     .replace(/\n/g, '&#10;')
 }
 
+// 数字转圆圈数字符号
 function toCircleNum(n: number): string {
-  const c = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'
+  const c = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑯⑰⑱⑲⑳'
   return n >= 1 && n <= 20 ? c[n - 1] : `[${n}]`
 }

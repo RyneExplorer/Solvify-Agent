@@ -1,4 +1,4 @@
-package model
+package user_model_config
 
 import (
 	"github.com/gin-gonic/gin"
@@ -9,18 +9,18 @@ import (
 	"solvify-agent/pkg/response"
 )
 
-// UserModelController 处理用户模型配置请求
-type UserModelController struct {
+// Controller 处理用户模型配置请求
+type Controller struct {
 	userModelConfigService service.UserModelConfigServiceInterface
 }
 
-// NewUserModelController 创建用户模型配置控制器
-func NewUserModelController(svc service.UserModelConfigServiceInterface) *UserModelController {
-	return &UserModelController{userModelConfigService: svc}
+// NewController 创建用户模型配置控制器
+func NewController(svc service.UserModelConfigServiceInterface) *Controller {
+	return &Controller{userModelConfigService: svc}
 }
 
 // List 获取用户模型配置列表
-func (ctrl *UserModelController) List(ctx *gin.Context) {
+func (ctrl *Controller) List(ctx *gin.Context) {
 	userID, ok := middleware.CurrentUserID(ctx)
 	if !ok {
 		return
@@ -36,7 +36,7 @@ func (ctrl *UserModelController) List(ctx *gin.Context) {
 }
 
 // Create 创建用户模型配置
-func (ctrl *UserModelController) Create(ctx *gin.Context) {
+func (ctrl *Controller) Create(ctx *gin.Context) {
 	userID, ok := middleware.CurrentUserID(ctx)
 	if !ok {
 		return
@@ -58,7 +58,7 @@ func (ctrl *UserModelController) Create(ctx *gin.Context) {
 }
 
 // Get 获取单个用户模型配置
-func (ctrl *UserModelController) Get(ctx *gin.Context) {
+func (ctrl *Controller) Get(ctx *gin.Context) {
 	userID, ok := middleware.CurrentUserID(ctx)
 	if !ok {
 		return
@@ -75,7 +75,7 @@ func (ctrl *UserModelController) Get(ctx *gin.Context) {
 }
 
 // Update 更新用户模型配置
-func (ctrl *UserModelController) Update(ctx *gin.Context) {
+func (ctrl *Controller) Update(ctx *gin.Context) {
 	userID, ok := middleware.CurrentUserID(ctx)
 	if !ok {
 		return
@@ -98,7 +98,7 @@ func (ctrl *UserModelController) Update(ctx *gin.Context) {
 }
 
 // Delete 删除用户模型配置
-func (ctrl *UserModelController) Delete(ctx *gin.Context) {
+func (ctrl *Controller) Delete(ctx *gin.Context) {
 	userID, ok := middleware.CurrentUserID(ctx)
 	if !ok {
 		return
@@ -114,7 +114,7 @@ func (ctrl *UserModelController) Delete(ctx *gin.Context) {
 }
 
 // Test 测试用户模型配置连接
-func (ctrl *UserModelController) Test(ctx *gin.Context) {
+func (ctrl *Controller) Test(ctx *gin.Context) {
 	var req requestdto.TestModelRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(ctx, "请求参数错误")

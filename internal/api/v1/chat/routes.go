@@ -6,9 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// RegisterRoutes 注册聊天模块路由
 func (ctrl *Controller) RegisterRoutes(router *gin.RouterGroup) {
-	// 普通用户：聊天会话管理
 	chatGroup := router.Group("/chat")
 	{
 		chatGroup.POST("/sessions", ctrl.CreateSession)
@@ -18,14 +16,25 @@ func (ctrl *Controller) RegisterRoutes(router *gin.RouterGroup) {
 		chatGroup.DELETE("/sessions/:id", ctrl.DeleteSession)
 		chatGroup.POST("/sessions/:id/messages", ctrl.SendMessage)
 		chatGroup.GET("/sessions/:id/messages", ctrl.GetMessages)
+		chatGroup.GET("/sessions/:id/traces", ctrl.ListSessionTraces)
+		chatGroup.POST("/messages/:message_id/feedback", ctrl.SubmitFeedback)
+		chatGroup.GET("/feedbacks", ctrl.ListFeedbacks)
+		chatGroup.GET("/traces/:trace_id", ctrl.GetTrace)
 	}
 
-	// 管理员：会话管理
 	adminGroup := router.Group("/admin/sessions")
 	adminGroup.Use(middleware.RequireAdmin())
 	{
 		adminGroup.GET("", ctrl.AdminListSessions)
 		adminGroup.DELETE("/:id", ctrl.AdminDeleteSession)
 		adminGroup.POST("/cleanup", ctrl.AdminCleanupSessions)
+	}
+
+	obsAdmin := router.Group("/admin/observability")
+	obsAdmin.Use(middleware.RequireAdmin())
+	{
+		obsAdmin.GET("/metrics", ctrl.MetricsSnapshot)
+		obsAdmin.GET("/traces", ctrl.AdminListTraces)
+		obsAdmin.GET("/traces/:trace_id", ctrl.AdminGetTrace)
 	}
 }

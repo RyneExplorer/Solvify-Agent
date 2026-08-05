@@ -1,6 +1,6 @@
 <template>
   <div class="flex flex-col h-full bg-white">
-    <!-- Header -->
+    <!-- 顶部栏 -->
     <div class="h-14 flex items-center justify-between px-6 border-b border-gray-100 flex-shrink-0">
       <h2 class="text-sm font-semibold text-gray-800">{{ displayTitle }}</h2>
       <div class="flex items-center gap-1.5">
@@ -9,7 +9,7 @@
       </div>
     </div>
 
-    <!-- Messages area -->
+    <!-- 消息区域 -->
     <div ref="chatContainer" class="flex-1 overflow-y-auto px-6 py-6">
       <div class="max-w-[800px] mx-auto space-y-6">
         <div v-for="(msg, i) in messages" :key="msg.id || i"
@@ -17,7 +17,7 @@
           :class="msg.role === 'user' ? 'justify-end' : 'justify-start'"
         >
           <div class="max-w-[80%]">
-            <!-- Message bubble -->
+            <!-- 消息气泡 -->
             <div
               :class="[
                 'px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap',
@@ -26,7 +26,7 @@
                   : 'bg-white text-gray-800'
               ]"
             >
-              <!-- Timeline (deep mode - streaming/history) -->
+              <!-- 推理时间线（深度模式 - 流式/历史） -->
               <div v-if="msg.role === 'assistant' && msg.timeline?.length" class="mb-3">
                 <button
                   @click="collapsedTimelines.has(i) ? collapsedTimelines.delete(i) : collapsedTimelines.add(i)"
@@ -48,12 +48,12 @@
                 </div>
               </div>
 
-              <!-- Content -->
+              <!-- 内容 -->
               <div v-if="msg.role === 'assistant'" v-html="formatContent(msg.content, msg.sources)"></div>
               <template v-else>{{ msg.content }}</template>
             </div>
 
-            <!-- Action buttons for AI message -->
+            <!-- AI 消息操作按钮 -->
             <div v-if="msg.role === 'assistant'" class="flex items-center gap-1 mt-2">
               <button class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="复制" @click="copyText(msg.content)">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -67,7 +67,7 @@
               </button>
             </div>
 
-            <!-- Sources -->
+            <!-- 来源 -->
             <div v-if="msg.role === 'assistant' && (msg.sources?.length || extractWebCount(msg.content))" class="mt-2 flex flex-wrap items-center gap-1.5">
               <template v-if="msg.sources?.filter((s: any) => s?.title).length">
                 <span class="text-[11px] text-gray-400">知识库:</span>
@@ -87,7 +87,7 @@
               </template>
             </div>
 
-            <!-- Error -->
+            <!-- 错误 -->
             <div v-if="msg.role === 'error'" class="mt-2 p-3 bg-red-50 border border-red-200 rounded-lg">
               <div class="flex items-start gap-2">
                 <svg class="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -109,11 +109,11 @@
           </div>
         </div>
 
-        <!-- Loading -->
+        <!-- 加载中 -->
         <div v-if="isLoading" class="flex justify-start">
           <div class="max-w-[80%]">
             <div class="px-4 py-3 rounded-2xl bg-white text-sm">
-              <!-- Timeline -->
+              <!-- 时间线 -->
               <div v-if="streamTimeline.length" class="mb-3 space-y-1">
                 <div v-for="(step, si) in streamTimeline" :key="si" class="flex items-start gap-2 py-0.5 text-xs">
                   <span v-if="step.status === 'running'" class="w-3 h-3 mt-0.5 border-2 border-gray-200 border-t-emerald-500 rounded-full animate-spin flex-shrink-0"></span>
@@ -121,18 +121,18 @@
                   <span :class="step.status === 'running' ? 'text-gray-500' : 'text-emerald-600'">{{ step.title || step.content }}</span>
                 </div>
               </div>
-              <!-- Progress -->
+              <!-- 进度 -->
               <div v-if="progressText" class="flex items-center gap-2 mb-2 text-xs text-gray-400">
                 <span class="w-3 h-3 border-2 border-gray-200 border-t-emerald-500 rounded-full animate-spin"></span>
                 {{ progressText }}
               </div>
-              <!-- Dots -->
+              <!-- 等待动画 -->
               <div v-if="!streamContent" class="flex gap-1 py-1">
                 <span class="w-1 h-1 rounded-full bg-gray-300 animate-bounce" style="animation-delay:0s"></span>
                 <span class="w-1 h-1 rounded-full bg-gray-300 animate-bounce" style="animation-delay:0.15s"></span>
                 <span class="w-1 h-1 rounded-full bg-gray-300 animate-bounce" style="animation-delay:0.3s"></span>
               </div>
-              <!-- Streaming content -->
+              <!-- 流式内容 -->
               <div v-if="streamContent" class="leading-relaxed whitespace-pre-wrap" v-html="formatContent(streamContent, streamSources)"></div>
             </div>
           </div>
@@ -140,11 +140,11 @@
       </div>
     </div>
 
-    <!-- Input area -->
+    <!-- 输入区域 -->
     <div class="px-6 py-4 flex-shrink-0">
       <div class="max-w-[800px] mx-auto">
         <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-          <!-- Textarea -->
+          <!-- 文本框 -->
           <div class="relative">
             <textarea
               v-model="input"
@@ -156,11 +156,11 @@
             />
           </div>
 
-          <!-- Toolbar -->
+          <!-- 工具栏 -->
           <div class="flex items-center justify-between px-4 py-3 border-t border-gray-50">
-            <!-- Left tools -->
+            <!-- 左侧工具 -->
             <div class="flex items-center gap-2">
-              <!-- KB selector -->
+              <!-- 知识库选择器 -->
               <div class="relative" ref="kbWrapperRef">
                 <button @click="showKbDropdown = !showKbDropdown"
                   class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-gray-500 hover:bg-gray-50 transition-colors border border-gray-200">
@@ -186,7 +186,7 @@
                 </div>
               </div>
 
-              <!-- Search mode -->
+              <!-- 搜索模式 -->
               <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-gray-500 hover:bg-gray-50 transition-colors border border-gray-200 cursor-pointer">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
@@ -200,7 +200,7 @@
                 </svg>
               </div>
 
-              <!-- Model selector -->
+              <!-- 模型选择器 -->
               <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-gray-500 hover:bg-gray-50 transition-colors border border-gray-200 cursor-pointer">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
@@ -220,7 +220,7 @@
               </div>
             </div>
 
-            <!-- Right send/stop button -->
+            <!-- 右侧发送/停止按钮 -->
             <button
               v-if="isLoading"
               @click="stopGeneration"
@@ -251,7 +251,7 @@
       </div>
     </div>
 
-    <!-- Footer disclaimer -->
+    <!-- 底部声明 -->
     <div class="text-center pb-3">
       <span class="text-xs text-gray-300">内容由 AI 生成，仅供参考</span>
     </div>
@@ -269,10 +269,10 @@ import { getToken } from '@/api/client'
 // ── Props ──
 const props = defineProps<{ title: string }>()
 
-// ── Config (defaults, could be made configurable) ──
+// ── 配置（默认值，可后续做成可配置） ──
 const API_URL = 'http://localhost:8080'
 
-// ── UI state ──
+// ── UI 状态 ──
 const input = ref('')
 const selectedModel = ref('')
 const selectedKBs = ref<string[]>([])
@@ -281,13 +281,14 @@ const showKbDropdown = ref(false)
 const kbWrapperRef = ref<HTMLDivElement>()
 const chatContainer = ref<HTMLDivElement>()
 
-// ── Data state ──
+// ── 数据状态 ──
 const systemModels = ref<{ id: string; provider: string; model_id: string }[]>([])
 const userModels = ref<{ id: string; display_name?: string; model_id?: string }[]>([])
 const knowledgeBases = ref<{ id: string; name: string }[]>([])
 const connected = ref(false)
 
-// ── Chat state ──
+// ── 聊天状态 ──
+// 聊天消息结构
 interface Message {
   id?: string
   role: 'user' | 'assistant' | 'error'
@@ -307,14 +308,15 @@ const streamSources = ref<any[]>([])
 const collapsedTimelines = ref<Set<number>>(new Set())
 let abortController: AbortController | null = null
 
-// ── Computed ──
+// ── 计算属性 ──
 const displayTitle = computed(() => props.title || '智能问答')
 const kbTriggerText = computed(() => {
   if (!selectedKBs.value.length) return '全部知识库'
   return selectedKBs.value.map(id => knowledgeBases.value.find(k => k.id === id)?.name || id).join(', ')
 })
 
-// ── API ──
+// ── API 请求 ──
+// 通用 API 请求封装
 async function api(path: string, method = 'GET', body: any = null): Promise<any> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const token = getToken()
@@ -334,17 +336,34 @@ async function api(path: string, method = 'GET', body: any = null): Promise<any>
   return res.json()
 }
 
-// ── Init ──
+// ── 初始化 ──
+// 初始化模型和知识库
 async function init() {
   try {
-    const [modelsRes, userModelsRes, kbRes] = await Promise.all([
+    const [modelsRes, userModelsRes, kbRes, profileRes] = await Promise.all([
       api('/api/v1/models').catch(() => null),
       api('/api/v1/user/model-configs').catch(() => null),
       api('/api/v1/knowledge-bases').catch(() => null),
+      api('/api/v1/user/profile').catch(() => null),
     ])
     if (modelsRes?.code === 0) systemModels.value = modelsRes.data?.models || []
     if (userModelsRes?.code === 0) userModels.value = userModelsRes.data?.models || []
     if (kbRes?.code === 0) knowledgeBases.value = Array.isArray(kbRes.data) ? kbRes.data : (kbRes.data?.list || [])
+
+    // 恢复上次选择的模型，优先使用用户保存的 lastModel，必须在可选模型列表内
+    const availableIds = new Set([
+      ...systemModels.value.map((m) => m.id),
+      ...userModels.value.map((m) => m.id),
+    ])
+    const lastModel = profileRes?.data?.user?.lastModel
+    if (lastModel && availableIds.has(lastModel)) {
+      selectedModel.value = lastModel
+    } else if (systemModels.value[0]?.id) {
+      selectedModel.value = systemModels.value[0].id
+    } else if (userModels.value[0]?.id) {
+      selectedModel.value = userModels.value[0].id
+    }
+
     connected.value = true
   } catch {
     connected.value = false
@@ -360,20 +379,23 @@ onUnmounted(() => {
   document.removeEventListener('click', onDocClick)
 })
 
+// 文档点击事件处理（关闭知识库下拉）
 function onDocClick(e: MouseEvent) {
   if (kbWrapperRef.value && !kbWrapperRef.value.contains(e.target as Node)) {
     showKbDropdown.value = false
   }
 }
 
-// ── KB ──
+// ── 知识库 ──
+// 切换知识库选中状态
 function toggleKB(id: string) {
   const idx = selectedKBs.value.indexOf(id)
   if (idx >= 0) selectedKBs.value.splice(idx, 1)
   else selectedKBs.value.push(id)
 }
 
-// ── Send ──
+// ── 发送消息 ──
+// 发送消息（SSE 流式）
 async function sendMessage() {
   const content = input.value.trim()
   if (!content || isLoading.value) return
@@ -402,7 +424,7 @@ async function sendMessage() {
   let finalSources: any[] = []
   let finalTimeline: any[] = []
 
-  // Auto-create session
+  // 自动创建会话
   if (!activeSessionId.value) {
     try {
       const res = await api('/api/v1/chat/sessions', 'POST', {
@@ -459,7 +481,7 @@ async function sendMessage() {
           } else if (data.type === 'progress') {
             progressText.value = data.content || ''
           } else if (['plan', 'thinking', 'tool_call', 'tool_result', 'warning'].includes(data.type)) {
-            // Mark prev complete
+            // 标记前一步完成
             for (const item of streamTimeline.value) { if (item.status === 'running') item.status = 'success' }
             if (data.type !== 'thinking' || data.status !== 'success') {
               streamTimeline.value.push({ title: data.title || data.content || '', detail: data.detail || '', status: data.status || 'running' })
@@ -505,7 +527,7 @@ async function sendMessage() {
             progressText.value = ''
             return
           }
-        } catch { /* skip bad JSON */ }
+        } catch { /* 跳过非法 JSON */ }
       }
     }
   } catch (e: any) {
@@ -531,36 +553,41 @@ async function sendMessage() {
   scrollToBottom()
 }
 
-// ── Helpers ──
+// ── 辅助方法 ──
+// 滚动到底部
 function scrollToBottom() {
   nextTick(() => {
     if (chatContainer.value) chatContainer.value.scrollTop = chatContainer.value.scrollHeight
   })
 }
 
+// 文本框自适应高度
 function autoResize(e: Event) {
   const el = e.target as HTMLTextAreaElement
   el.style.height = 'auto'
   el.style.height = Math.min(el.scrollHeight, 200) + 'px'
 }
 
+// 键盘事件处理（回车发送）
 function handleKeyDown(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
 }
 
+// 复制文本
 function copyText(text: string) {
   navigator.clipboard.writeText(text)
     .then(() => ElMessage.success('已复制'))
     .catch(() => ElMessage.error('复制失败'))
 }
 
+// 重新生成
 function regenerate() {
-  // Remove last assistant message and resend
+  // 删除最后一条 AI 回复并重新发送
   const lastIdx = messages.value.length - 1
   if (lastIdx >= 0 && messages.value[lastIdx].role === 'assistant') {
     messages.value.splice(lastIdx, 1)
   }
-  // Find last user message content
+  // 查找最后一条用户消息内容
   const lastUser = [...messages.value].reverse().find(m => m.role === 'user')
   if (lastUser) {
     // 删除原用户消息，避免 sendMessage 重复添加
@@ -573,6 +600,7 @@ function regenerate() {
   }
 }
 
+// 重试错误消息
 function retryMessage(errorMsg: Message) {
   // 找到错误消息的索引
   const errorIdx = messages.value.indexOf(errorMsg)
@@ -594,13 +622,15 @@ function retryMessage(errorMsg: Message) {
   }
 }
 
+// 中止生成
 function stopGeneration() {
   if (abortController) {
     abortController.abort()
   }
 }
 
-// ── Content formatting ──
+// ── 内容格式化 ──
+// 从内容中提取网页来源
 function extractWebSources(content: string): { url: string; title: string }[] {
   const result: { url: string; title: string }[] = []
   const seen = new Set<string>()
@@ -615,16 +645,18 @@ function extractWebSources(content: string): { url: string; title: string }[] {
   return result
 }
 
+// 获取网页来源数量
 function extractWebCount(content: string): number {
   return extractWebSources(content).length
 }
 
 useMarkdownTooltip()
 
+// 格式化消息内容
 function formatContent(content: string, _sources?: unknown[]): string {
   if (!content) return ''
 
-  // Extract and replace <kb>/<web> tags with citations
+  // 提取并替换 <kb>/<web> 标签为引用
   const cites: { type: string; doc?: string; chunkId?: string; url?: string; title?: string }[] = []
   let processed = String(content)
 
@@ -673,13 +705,17 @@ function formatContent(content: string, _sources?: unknown[]): string {
   return html
 }
 
+// HTML 转义
 function escapeHtml(s: string) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML }
+// HTML 属性转义
 function escapeAttr(s: string) { return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'&#10;') }
-function toCircleNum(n: number) { const c = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'; return n >= 1 && n <= 20 ? c[n-1] : `[${n}]` }
+// 数字转圆圈数字
+function toCircleNum(n: number) { const c = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑯⑰⑱⑲⑳'; return n >= 1 && n <= 20 ? c[n-1] : `[${n}]` }
+// 清理 tooltip 文本
 function cleanTooltipText(text: string): string {
   if (!text) return ''
-  // Only remove actual metadata tags; do NOT globally strip `title=` / `doc=`
-  // because normal article text may legitimately contain those substrings.
+  // 仅移除实际的元数据标签，不要全局清除 `title=` / `doc=`
+  // 因为正常文章文本中可能合法包含这些子串
   return text
     .replace(/<kb(?:\s[^>]*)?\s*\/?>\s*/gi, '')
     .replace(/<web(?:\s[^>]*)?\s*\/?>\s*/gi, '')
@@ -690,6 +726,7 @@ function cleanTooltipText(text: string): string {
     .trim()
 }
 
+// 清理标题换行
 function cleanTitle(text: string): string {
   if (!text) return ''
   return text.replace(/[\r\n]+/g, ' ').trim()
@@ -697,7 +734,7 @@ function cleanTitle(text: string): string {
 </script>
 
 <style>
-/* Markdown content */
+/* Markdown 内容样式 */
 .md-content h1, .md-content h2, .md-content h3 { color: #1e293b; font-weight: 600; margin: 16px 0 8px; }
 .md-content h1:first-child, .md-content h2:first-child, .md-content h3:first-child { margin-top: 0; }
 .md-content p { margin: 0 0 8px; line-height: 1.7; }
@@ -713,7 +750,7 @@ function cleanTitle(text: string): string {
 .md-content th, .md-content td { border: 1px solid #e2e8f0; padding: 6px 10px; text-align: left; }
 .md-content th { background: #f8fafc; font-weight: 500; }
 
-/* Inline citations */
+/* 行内引用样式 */
 .inline-cite-kb {
   display: inline-flex; align-items: center; gap: 3px; padding: 0 5px;
   background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.2); border-radius: 4px;

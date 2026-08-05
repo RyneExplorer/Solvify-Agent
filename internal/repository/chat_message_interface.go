@@ -20,6 +20,7 @@ type ChatMessageSearchRow struct {
 // ChatMessageRepo 定义聊天消息数据访问接口
 type ChatMessageRepo interface {
 	Create(ctx context.Context, message *entity.ChatMessage) error
+	FindByID(ctx context.Context, id string) (*entity.ChatMessage, error)
 	FindBySessionID(ctx context.Context, sessionID string) ([]entity.ChatMessage, error)
 	// FindBySessionIDForContext 摘要/记忆抽取场景专用：全量消息但只取 5 个必要字段，sources/metadata 不传
 	FindBySessionIDForContext(ctx context.Context, sessionID string) ([]entity.ChatMessage, error)

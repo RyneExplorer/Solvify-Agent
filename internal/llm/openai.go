@@ -119,6 +119,16 @@ func (c *OpenAIClient) ChatModel() model.ToolCallingChatModel {
 	return c.chatModel
 }
 
+// ModelName 返回具体模型名（用于编码解析 / tiktoken / 指标分桶），
+// 对用户配置的自定义模型别名不做猜测。已知模型名（gpt-4o / qwen-* / deepseek-chat ...）可通过
+// tiktoken.EncodingForModel 拿到真 BPE；未知模型回退 cl100k_base。
+func (c *OpenAIClient) ModelName() string {
+	if c == nil {
+		return ""
+	}
+	return c.model
+}
+
 // MaxContextLength 返回模型最大上下文 token 长度
 func (c *OpenAIClient) MaxContextLength() int {
 	return c.maxContextLength

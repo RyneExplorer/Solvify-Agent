@@ -30,6 +30,7 @@ type Config struct {
 	Database       DatabaseConfig       `mapstructure:"database"`
 	JWT            JWTConfig            `mapstructure:"jwt"`
 	Email          EmailConfig          `mapstructure:"email"`
+	Observability  ObservabilityConfig  `mapstructure:"observability"`
 }
 
 // AppConfig 描述应用基础信息
@@ -49,6 +50,7 @@ type LogConfig struct {
 	MaxAge     int    `mapstructure:"max_age"`
 	Compress   bool   `mapstructure:"compress"`
 }
+// CORSConfig 描述跨域资源共享配置
 type CORSConfig struct {
 	Enabled          bool     `mapstructure:"enabled"`
 	AllowOrigins     []string `mapstructure:"allow_origins"`
@@ -61,9 +63,12 @@ type CORSConfig struct {
 
 // AgentConfig 描述 Agent 行为开关
 type AgentConfig struct {
-	EnableDemo     bool    `mapstructure:"enable_demo"`
-	MaxIterations  int     `mapstructure:"max_iterations"`
-	ScoreThreshold float64 `mapstructure:"score_threshold"`
+	EnableDemo              bool    `mapstructure:"enable_demo"`
+	MaxIterations           int     `mapstructure:"max_iterations"`
+	ScoreThreshold          float64 `mapstructure:"score_threshold"`
+	// QuickAgentMaxIterations 指定快速模式（eino ChatModelAgent）最多执行几个
+	// ReAct 循环，默认 2（最多 1 次工具调用+出答案）。
+	QuickAgentMaxIterations int `mapstructure:"quick_agent_max_iterations"`
 }
 
 // LLMConfig 描述模型调用配置
@@ -194,6 +199,34 @@ type EmailConfig struct {
 	Password string `mapstructure:"password"`
 }
 
+// ObservabilityConfig 描述可观测配置
+type ObservabilityConfig struct {
+	Enabled              bool     `mapstructure:"enabled"`
+	SamplingRate         float64  `mapstructure:"sampling_rate"`
+	ErrorAlwaysSample    bool     `mapstructure:"error_always_sample"`
+	SlowThresholdMs      int      `mapstructure:"slow_threshold_ms"`
+	FeedbackAlwaysSample bool     `mapstructure:"feedback_always_sample"`
+	TraceTableEnabled    bool     `mapstructure:"trace_table_enabled"`
+	ExportLogEnabled     bool     `mapstructure:"export_log_enabled"`
+	MetricsFormat        string   `mapstructure:"metrics_format"`
+	SinkBufferSize       int      `mapstructure:"sink_buffer_size"`
+	SinkBatchSize        int      `mapstructure:"sink_batch_size"`
+	SinkFlushIntervalMs  int      `mapstructure:"sink_flush_interval_ms"`
+	PIIContentMaxChars   int      `mapstructure:"pii_content_max_chars"`
+	PIIMaskSecret        bool     `mapstructure:"pii_mask_secret"`
+	FeedbackEnabled      bool     `mapstructure:"feedback_enabled"`
+	WhiteListUserIDs     []string `mapstructure:"whitelist_user_ids"`
+	MaxCardinalityLabels int      `mapstructure:"max_cardinality_labels"`
+
+	// OTel 配置（阶段 1.1 新增）：Trace 走 OpenTelemetry SDK
+	// Exporter: stdout（开发期控制台打印）/ otlp（生产期 OTLP gRPC）/ noop（不导出）
+	OTelExporter  string  `mapstructure:"otel_exporter"`
+	OTelOTLPEndpoint string  `mapstructure:"otel_otlp_endpoint"`
+	OTelServiceName string  `mapstructure:"otel_service_name"`
+	// OTelSamplingRate 头采样概率 0~1，0 = 不采样，1 = 全采样
+	OTelSamplingRate float64 `mapstructure:"otel_sampling_rate"`
+}
+
 var globalConfig *Config
 
 // Load 读取配置文件并应用环境变量覆盖
@@ -263,9 +296,10 @@ func Default() *Config {
 			Compress:   true,
 		},
 		Agent: AgentConfig{
-			EnableDemo:     true,
-			MaxIterations:  4,
-			ScoreThreshold: 0.7,
+			EnableDemo:              true,
+			MaxIterations:           4,
+			ScoreThreshold:          0.7,
+			QuickAgentMaxIterations: 2,
 		},
 		LLM: LLMConfig{
 			Provider:    "mock",
@@ -333,6 +367,28 @@ func Default() *Config {
 				PoolSize: 10,
 			},
 		},
+		Observability: ObservabilityConfig{
+			Enabled:              true,
+			SamplingRate:         0.2,
+			ErrorAlwaysSample:    true,
+			SlowThresholdMs:      5000,
+			FeedbackAlwaysSample: true,
+			TraceTableEnabled:    true,
+			ExportLogEnabled:     true,
+			MetricsFormat:        "json",
+			SinkBufferSize:       1024,
+			SinkBatchSize:        50,
+			SinkFlushIntervalMs:  200,
+			PIIContentMaxChars:   200,
+			PIIMaskSecret:        true,
+			FeedbackEnabled:      true,
+			MaxCardinalityLabels: 500,
+			// OTel 默认值：noop 不打印 span，开发期可改 stdout 调试，生产期改 otlp
+		OTelExporter:     "noop",
+			OTelOTLPEndpoint: "localhost:4317",
+			OTelServiceName:  "solvify-agent",
+			OTelSamplingRate: 1.0,
+		},
 	}
 }
 
@@ -382,6 +438,46 @@ func (c *Config) Validate() error {
 	}
 	if c.DocumentParser.TimeoutSeconds <= 0 {
 		return errors.New("document_parser.timeout_seconds 必须大于 0")
+	}
+	if c.Agent.QuickAgentMaxIterations <= 0 {
+		return errors.New("agent.quick_agent_max_iterations 必须大于 0")
+	}
+	if c.Agent.MaxIterations <= 0 {
+		return errors.New("agent.max_iterations 必须大于 0")
+	}
+	if c.Observability.Enabled {
+		if c.Observability.SamplingRate < 0 || c.Observability.SamplingRate > 1 {
+			return errors.New("observability.sampling_rate 必须在 0 到 1 之间")
+		}
+		if c.Observability.SinkBufferSize <= 0 {
+			return errors.New("observability.sink_buffer_size 必须大于 0")
+		}
+		if c.Observability.SinkBatchSize <= 0 {
+			return errors.New("observability.sink_batch_size 必须大于 0")
+		}
+		if c.Observability.SinkFlushIntervalMs <= 0 {
+			return errors.New("observability.sink_flush_interval_ms 必须大于 0")
+		}
+		if c.Observability.PIIContentMaxChars < 0 {
+			return errors.New("observability.pii_content_max_chars 不能小于 0")
+		}
+		if c.Observability.MaxCardinalityLabels <= 0 {
+			return errors.New("observability.max_cardinality_labels 必须大于 0")
+		}
+		switch c.Observability.MetricsFormat {
+		case "json", "prometheus", "both", "none":
+		default:
+			return errors.New("observability.metrics_format 只支持 json/prometheus/both/none")
+		}
+		// OTel 校验
+		switch c.Observability.OTelExporter {
+		case "stdout", "otlp", "noop", "":
+		default:
+			return errors.New("observability.otel_exporter 只支持 stdout/otlp/noop")
+		}
+		if c.Observability.OTelSamplingRate < 0 || c.Observability.OTelSamplingRate > 1 {
+			return errors.New("observability.otel_sampling_rate 必须在 0 到 1 之间")
+		}
 	}
 	return nil
 }
@@ -526,6 +622,72 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("LOG_COMPRESS"); value != "" {
 		cfg.Log.Compress = parseBool(value, cfg.Log.Compress)
+	}
+
+	// Observability 配置
+	if value := os.Getenv("OBSERVABILITY_ENABLED"); value != "" {
+		cfg.Observability.Enabled = parseBool(value, cfg.Observability.Enabled)
+	}
+	if value := os.Getenv("OBSERVABILITY_SAMPLING_RATE"); value != "" {
+		cfg.Observability.SamplingRate = parseFloat(value, cfg.Observability.SamplingRate)
+	}
+	if value := os.Getenv("OBSERVABILITY_ERROR_ALWAYS_SAMPLE"); value != "" {
+		cfg.Observability.ErrorAlwaysSample = parseBool(value, cfg.Observability.ErrorAlwaysSample)
+	}
+	if value := os.Getenv("OBSERVABILITY_SLOW_THRESHOLD_MS"); value != "" {
+		cfg.Observability.SlowThresholdMs = parseInt(value, cfg.Observability.SlowThresholdMs)
+	}
+	if value := os.Getenv("OBSERVABILITY_FEEDBACK_ALWAYS_SAMPLE"); value != "" {
+		cfg.Observability.FeedbackAlwaysSample = parseBool(value, cfg.Observability.FeedbackAlwaysSample)
+	}
+	if value := os.Getenv("OBSERVABILITY_TRACE_TABLE_ENABLED"); value != "" {
+		cfg.Observability.TraceTableEnabled = parseBool(value, cfg.Observability.TraceTableEnabled)
+	}
+	if value := os.Getenv("OBSERVABILITY_EXPORT_LOG_ENABLED"); value != "" {
+		cfg.Observability.ExportLogEnabled = parseBool(value, cfg.Observability.ExportLogEnabled)
+	}
+	if v := os.Getenv("OBSERVABILITY_METRICS_FORMAT"); v != "" {
+		cfg.Observability.MetricsFormat = v
+	}
+	if value := os.Getenv("OBSERVABILITY_SINK_BUFFER_SIZE"); value != "" {
+		cfg.Observability.SinkBufferSize = parseInt(value, cfg.Observability.SinkBufferSize)
+	}
+	if value := os.Getenv("OBSERVABILITY_SINK_BATCH_SIZE"); value != "" {
+		cfg.Observability.SinkBatchSize = parseInt(value, cfg.Observability.SinkBatchSize)
+	}
+	if value := os.Getenv("OBSERVABILITY_SINK_FLUSH_INTERVAL_MS"); value != "" {
+		cfg.Observability.SinkFlushIntervalMs = parseInt(value, cfg.Observability.SinkFlushIntervalMs)
+	}
+	if value := os.Getenv("OBSERVABILITY_PII_CONTENT_MAX_CHARS"); value != "" {
+		cfg.Observability.PIIContentMaxChars = parseInt(value, cfg.Observability.PIIContentMaxChars)
+	}
+	if value := os.Getenv("OBSERVABILITY_PII_MASK_SECRET"); value != "" {
+		cfg.Observability.PIIMaskSecret = parseBool(value, cfg.Observability.PIIMaskSecret)
+	}
+	if value := os.Getenv("OBSERVABILITY_FEEDBACK_ENABLED"); value != "" {
+		cfg.Observability.FeedbackEnabled = parseBool(value, cfg.Observability.FeedbackEnabled)
+	}
+	if value := os.Getenv("OBSERVABILITY_MAX_CARDINALITY_LABELS"); value != "" {
+		cfg.Observability.MaxCardinalityLabels = parseInt(value, cfg.Observability.MaxCardinalityLabels)
+	}
+
+	// OTel 配置（阶段 1.1 新增）
+	cfg.Observability.OTelExporter = getEnv("OTEL_EXPORTER", cfg.Observability.OTelExporter)
+	cfg.Observability.OTelOTLPEndpoint = getEnv("OTEL_OTLP_ENDPOINT", cfg.Observability.OTelOTLPEndpoint)
+	cfg.Observability.OTelServiceName = getEnv("OTEL_SERVICE_NAME", cfg.Observability.OTelServiceName)
+	if value := os.Getenv("OTEL_SAMPLING_RATE"); value != "" {
+		cfg.Observability.OTelSamplingRate = parseFloat(value, cfg.Observability.OTelSamplingRate)
+	}
+
+	// Agent 行为开关
+	if value := os.Getenv("AGENT_QUICK_MAX_ITERATIONS"); value != "" {
+		cfg.Agent.QuickAgentMaxIterations = parseInt(value, cfg.Agent.QuickAgentMaxIterations)
+	}
+	if value := os.Getenv("AGENT_MAX_ITERATIONS"); value != "" {
+		cfg.Agent.MaxIterations = parseInt(value, cfg.Agent.MaxIterations)
+	}
+	if value := os.Getenv("AGENT_SCORE_THRESHOLD"); value != "" {
+		cfg.Agent.ScoreThreshold = parseFloat(value, cfg.Agent.ScoreThreshold)
 	}
 }
 

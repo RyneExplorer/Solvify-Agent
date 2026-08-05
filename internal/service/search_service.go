@@ -14,11 +14,11 @@ import (
 // searchService 统一搜索服务实现
 type searchService struct {
 	messageRepo repository.ChatMessageRepo
-	chunkRepo   repository.ChunkRepository
+	chunkRepo   repository.DocumentChunkRepository
 }
 
 // NewSearchService 创建统一搜索服务
-func NewSearchService(messageRepo repository.ChatMessageRepo, chunkRepo repository.ChunkRepository) SearchServiceInterface {
+func NewSearchService(messageRepo repository.ChatMessageRepo, chunkRepo repository.DocumentChunkRepository) SearchServiceInterface {
 	return &searchService{
 		messageRepo: messageRepo,
 		chunkRepo:   chunkRepo,

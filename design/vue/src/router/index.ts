@@ -97,8 +97,10 @@ router.beforeEach(async (to, _from, next) => {
     if (authenticated && currentUser.value === null) {
       try {
         const res = await getProfile()
-        if (res.code === 0 && res.data) {
-          currentUser.value = res.data
+        // 后端 /user/profile 返回 { user: UserInfo, preference: {...} }，只取 user 这层扁平结构
+        const userInfo = res.data?.user ?? res.data
+        if (res.code === 0 && userInfo) {
+          currentUser.value = userInfo
         }
       } catch {
         removeToken()

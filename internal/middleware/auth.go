@@ -6,9 +6,8 @@ import (
 	"strings"
 
 	"solvify-agent/pkg/jwt"
+	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/response"
-
-	"fmt"
 
 	"github.com/gin-gonic/gin"
 )
@@ -37,9 +36,9 @@ func Auth(revoker TokenRevoker) gin.HandlerFunc {
 		token := ExtractToken(c)
 
 		if token == "" {
-			// 如果是 WebSocket 连接，尝试打印一些调试信息
+			// 如果是 WebSocket 连接，打一条简要的警告日志（不打印整个 Header，避免泄露 Token）
 			if c.Request.Header.Get("Upgrade") == "websocket" {
-				fmt.Printf("WS Auth Failed. Headers: %v\n", c.Request.Header)
+				logger.Warnf("WS 请求未携带认证令牌，RemoteAddr=%v", c.Request.RemoteAddr)
 			}
 			response.Unauthorized(c, "请提供认证令牌")
 			c.Abort()
@@ -208,4 +207,9 @@ func GetUserRole(c *gin.Context) int {
 // RequireAdmin 要求当前登录用户是管理员
 func RequireAdmin() gin.HandlerFunc {
 	return RequireRole(2)
+}
+
+// IsCurrentUserAdmin 判断当前登录用户是否管理员（不自动拦截）
+func IsCurrentUserAdmin(c *gin.Context) bool {
+	return GetUserRole(c) == 2
 }

@@ -94,6 +94,120 @@ export interface ListMessagesResponse {
   messages: ChatMessage[]
 }
 
+// ── Message Feedback ──
+
+export type FeedbackRating = 1 | -1
+
+export interface FeedbackRequest {
+  rating: FeedbackRating
+  reasons?: string[]
+  comment?: string
+  is_quick_reply?: boolean
+}
+
+export interface FeedbackInfo {
+  id: string
+  message_id: string
+  session_id: string
+  user_id: string
+  rating: FeedbackRating
+  reasons: string[]
+  comment?: string
+  is_quick_reply: boolean
+  created_at: string
+}
+
+// ── Traces & Spans (Observability) ──
+
+export type SpanStatus = 'ok' | 'error' | 'canceled' | 'unknown'
+export type Component =
+  | 'http'
+  | 'service_chat'
+  | 'service_context'
+  | 'service_rag'
+  | 'service_agent'
+  | 'llm'
+  | 'rag_retriever'
+  | 'rag_reranker'
+  | 'agent_engine'
+  | 'tool'
+  | 'db'
+  | 'other'
+
+export interface SpanEvent {
+  name: string
+  time: string
+  attrs?: Record<string, unknown>
+}
+
+export interface ChatSpan {
+  trace_id: string
+  span_id: string
+  parent_id?: string
+  name: string
+  component: Component | string
+  start_at: string
+  end_at?: string
+  duration_ms?: number
+  status: SpanStatus | string
+  error?: string
+  attrs?: Record<string, unknown>
+  events?: SpanEvent[]
+  children?: ChatSpan[]
+}
+
+export interface TraceSummary {
+  id: string
+  request_id?: string
+  user_id?: string
+  session_id?: string
+  sample_rate: number
+  sampled: boolean
+  duration_ms: number
+  status: SpanStatus | string
+  error?: string
+  attrs?: Record<string, unknown>
+  created_at: string
+  search_mode?: 'quick' | 'deep' | 'unknown' | string
+}
+
+export interface ChatTraceDetail extends TraceSummary {
+  span_tree?: ChatSpan
+}
+
+// ── Metrics Snapshot ──
+
+export interface MetricCounterSample {
+  labels?: Record<string, string>
+  value: number
+}
+export interface MetricGaugeSample {
+  labels?: Record<string, string>
+  value: number
+}
+export interface HistogramBucket {
+  le: number
+  count: number
+}
+export interface MetricHistogramSample {
+  labels?: Record<string, string>
+  count: number
+  sum: number
+  buckets: HistogramBucket[]
+}
+
+export interface MetricsSnapshot {
+  ts: string
+  counters: Array<{ name: string; help?: string; samples: MetricCounterSample[] }>
+  gauges: Array<{ name: string; help?: string; samples: MetricGaugeSample[] }>
+  histograms: Array<{ name: string; help?: string; samples: MetricHistogramSample[] }>
+  sampling_rate: number
+  label_cardinality_limit: number
+  buffer_dropped_total: number
+  pii_masked_total: number
+  label_cardinality_dropped_total: number
+}
+
 // ── Admin Session ──
 
 export interface AdminSession {

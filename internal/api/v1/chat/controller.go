@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -14,13 +15,11 @@ import (
 	"solvify-agent/pkg/response"
 )
 
-// Controller 处理聊天模块请求
 type Controller struct {
 	chatSvc             service.ChatServiceInterface
 	adminSessionService service.AdminSessionServiceInterface
 }
 
-// NewController 创建聊天控制器
 func NewController(chatSvc service.ChatServiceInterface, adminSessionService service.AdminSessionServiceInterface) *Controller {
 	return &Controller{
 		chatSvc:             chatSvc,
@@ -28,7 +27,6 @@ func NewController(chatSvc service.ChatServiceInterface, adminSessionService ser
 	}
 }
 
-// CreateSession 创建聊天会话
 func (ctrl *Controller) CreateSession(c *gin.Context) {
 	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
@@ -49,7 +47,6 @@ func (ctrl *Controller) CreateSession(c *gin.Context) {
 	response.Success(c, output)
 }
 
-// GetSession 获取会话详情
 func (ctrl *Controller) GetSession(c *gin.Context) {
 	userID, sessionID, ok := ctrl.userAndSessionID(c)
 	if !ok {
@@ -63,7 +60,6 @@ func (ctrl *Controller) GetSession(c *gin.Context) {
 	response.Success(c, output)
 }
 
-// ListSessions 获取会话列表
 func (ctrl *Controller) ListSessions(c *gin.Context) {
 	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
@@ -78,7 +74,6 @@ func (ctrl *Controller) ListSessions(c *gin.Context) {
 	response.Success(c, gin.H{"sessions": output})
 }
 
-// UpdateSession 更新会话标题
 func (ctrl *Controller) UpdateSession(c *gin.Context) {
 	userID, sessionID, ok := ctrl.userAndSessionID(c)
 	if !ok {
@@ -98,7 +93,6 @@ func (ctrl *Controller) UpdateSession(c *gin.Context) {
 	response.Success(c, nil)
 }
 
-// DeleteSession 删除会话
 func (ctrl *Controller) DeleteSession(c *gin.Context) {
 	userID, sessionID, ok := ctrl.userAndSessionID(c)
 	if !ok {
@@ -112,7 +106,6 @@ func (ctrl *Controller) DeleteSession(c *gin.Context) {
 	response.Success(c, nil)
 }
 
-// SendMessage 发送消息（SSE 流式响应）
 func (ctrl *Controller) SendMessage(c *gin.Context) {
 	userID, sessionID, ok := ctrl.userAndSessionID(c)
 	if !ok {
@@ -131,13 +124,11 @@ func (ctrl *Controller) SendMessage(c *gin.Context) {
 		return
 	}
 
-	// 设置 SSE 响应头
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 	c.Header("X-Accel-Buffering", "no")
 
-	// 流式写入事件
 	c.Stream(func(w io.Writer) bool {
 		event, ok := <-eventCh
 		if !ok {
@@ -159,7 +150,6 @@ func (ctrl *Controller) SendMessage(c *gin.Context) {
 	})
 }
 
-// GetMessages 获取会话消息列表
 func (ctrl *Controller) GetMessages(c *gin.Context) {
 	userID, sessionID, ok := ctrl.userAndSessionID(c)
 	if !ok {
@@ -173,7 +163,114 @@ func (ctrl *Controller) GetMessages(c *gin.Context) {
 	response.Success(c, gin.H{"messages": output})
 }
 
-// AdminListSessions 管理员查询会话列表
+func (ctrl *Controller) SubmitFeedback(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		return
+	}
+	messageID := c.Param("message_id")
+	if messageID == "" {
+		response.BadRequest(c, "message_id 不能为空")
+		return
+	}
+	var req service.FeedbackRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "请求体格式错误")
+		return
+	}
+	if err := ctrl.chatSvc.SubmitFeedback(c.Request.Context(), userID, messageID, req); err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, gin.H{"ok": true})
+}
+
+func (ctrl *Controller) ListFeedbacks(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		return
+	}
+	offset, limit := listParams(c, 0, 20)
+	out, err := ctrl.chatSvc.ListFeedbacks(c.Request.Context(), userID, offset, limit)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, out)
+}
+
+func (ctrl *Controller) GetTrace(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		return
+	}
+	isAdmin := middleware.IsCurrentUserAdmin(c)
+	traceID := c.Param("trace_id")
+	if traceID == "" {
+		response.BadRequest(c, "trace_id 不能为空")
+		return
+	}
+	trace, err := ctrl.chatSvc.GetTrace(c.Request.Context(), userID, traceID, isAdmin)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, trace)
+}
+
+func (ctrl *Controller) ListSessionTraces(c *gin.Context) {
+	userID, sessionID, ok := ctrl.userAndSessionID(c)
+	if !ok {
+		return
+	}
+	isAdmin := middleware.IsCurrentUserAdmin(c)
+	offset, limit := listParams(c, 0, 50)
+	out, err := ctrl.chatSvc.ListSessionTraces(c.Request.Context(), userID, sessionID, isAdmin, offset, limit)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, out)
+}
+
+func (ctrl *Controller) AdminListTraces(c *gin.Context) {
+	var (
+		sessionID = c.Query("session_id")
+		status    = c.Query("status")
+	)
+	rating, _ := strconv.Atoi(c.Query("rating"))
+	offset, limit := listParams(c, 0, 50)
+	out, err := ctrl.chatSvc.AdminListTraces(c.Request.Context(), sessionID, rating, status, offset, limit)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, out)
+}
+
+func (ctrl *Controller) AdminGetTrace(c *gin.Context) {
+	traceID := c.Param("trace_id")
+	if traceID == "" {
+		response.BadRequest(c, "trace_id 不能为空")
+		return
+	}
+	trace, err := ctrl.chatSvc.GetTrace(c.Request.Context(), "", traceID, true)
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, trace)
+}
+
+func (ctrl *Controller) MetricsSnapshot(c *gin.Context) {
+	snap, err := ctrl.chatSvc.GetMetricsSnapshot()
+	if err != nil {
+		response.BizError(c, err)
+		return
+	}
+	response.Success(c, snap)
+}
+
 func (ctrl *Controller) AdminListSessions(c *gin.Context) {
 	var req requestdto.AdminSessionListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
@@ -190,7 +287,6 @@ func (ctrl *Controller) AdminListSessions(c *gin.Context) {
 	response.Success(c, result)
 }
 
-// AdminDeleteSession 管理员删除会话
 func (ctrl *Controller) AdminDeleteSession(c *gin.Context) {
 	sessionID := c.Param("id")
 	if !middleware.IsUUID(sessionID) {
@@ -206,7 +302,6 @@ func (ctrl *Controller) AdminDeleteSession(c *gin.Context) {
 	response.Success(c, nil)
 }
 
-// AdminCleanupSessions 管理员清理过期会话
 func (ctrl *Controller) AdminCleanupSessions(c *gin.Context) {
 	var req struct {
 		RetentionDays int `json:"retention_days"`
@@ -224,7 +319,6 @@ func (ctrl *Controller) AdminCleanupSessions(c *gin.Context) {
 	response.Success(c, gin.H{"deleted": deleted})
 }
 
-// userAndSessionID 读取当前用户和会话 ID
 func (ctrl *Controller) userAndSessionID(c *gin.Context) (string, string, bool) {
 	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
@@ -236,4 +330,20 @@ func (ctrl *Controller) userAndSessionID(c *gin.Context) (string, string, bool) 
 		return "", "", false
 	}
 	return userID, sessionID, true
+}
+
+func listParams(c *gin.Context, defaultOffset, defaultLimit int) (int, int) {
+	offset := defaultOffset
+	limit := defaultLimit
+	if raw := c.Query("offset"); raw != "" {
+		if v, e := strconv.Atoi(raw); e == nil && v >= 0 {
+			offset = v
+		}
+	}
+	if raw := c.Query("limit"); raw != "" {
+		if v, e := strconv.Atoi(raw); e == nil && v > 0 {
+			limit = v
+		}
+	}
+	return offset, limit
 }
