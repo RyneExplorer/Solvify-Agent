@@ -76,6 +76,37 @@ wait_for_health() {
   return 1
 }
 
+# 等待指定服务进入运行状态
+wait_for_running() {
+  local service_name="$1"
+  local deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
+  local container_id
+  local container_status
+
+  while (( SECONDS < deadline )); do
+    container_id="$(compose_command ps -q "$service_name" 2>/dev/null || true)"
+    if [[ -n "$container_id" ]]; then
+      container_status="$(docker inspect \
+        --format '{{.State.Status}}' \
+        "$container_id" 2>/dev/null || true)"
+      case "$container_status" in
+        running)
+          log "${service_name} 已进入运行状态"
+          return 0
+          ;;
+        exited|dead)
+          log "${service_name} 状态异常：${container_status}"
+          return 1
+          ;;
+      esac
+    fi
+    sleep 3
+  done
+
+  log "${service_name} 启动等待超时"
+  return 1
+}
+
 # 输出有限诊断信息且不读取配置文件
 print_diagnostics() {
   compose_command ps || true
@@ -98,7 +129,7 @@ rollback() {
   compose_command up -d --no-deps backend || return 1
   wait_for_health backend || return 1
   compose_command up -d --no-deps frontend || return 1
-  wait_for_health frontend || return 1
+  wait_for_running frontend || return 1
 
   log "上一版本恢复完成"
 }
@@ -190,7 +221,7 @@ main() {
 
   log "更新前端"
   compose_command up -d --no-deps frontend
-  wait_for_health frontend
+  wait_for_running frontend
 
   ln -sfn "$SCRIPT_DIR" "$SOLVIFY_ROOT/current"
   docker image prune -f >/dev/null

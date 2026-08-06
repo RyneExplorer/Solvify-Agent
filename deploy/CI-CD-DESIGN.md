@@ -199,7 +199,7 @@ Compose 与脚本作业执行：
 
 ```text
 .github/workflows/ci-cd.yml
-Dockerfile
+deploy/Dockerfile
 .dockerignore
 design/vue/Dockerfile
 design/vue/.dockerignore
