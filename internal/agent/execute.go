@@ -126,9 +126,13 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	}
 	var systemPromptFinal string
 	if req.SystemPrompt != "" {
-		systemPromptFinal = baseSystemPrompt + "\n\n" + req.SystemPrompt
+		// BuildSystem() 以空 baseSystem 构建时，结果会前导 "\n\n"，去掉避免多余空行
+		enhanced := strings.TrimLeft(req.SystemPrompt, "\n")
+		systemPromptFinal = baseSystemPrompt + "\n\n" + enhanced
 	} else {
-		systemPromptFinal = buildEnhancedSystemPromptForAgent(baseSystemPrompt, req.Summary, req.Memories, req.UserCtx)
+		// 兜底：req.SystemPrompt 为空时只用 ReAct 规则（正常流程不会走到这里，
+		// PromptBuilder.BuildSystem() 总会产出摘要/记忆/用户信息之一）
+		systemPromptFinal = baseSystemPrompt
 	}
 	logger.Infof("[Agent] SystemPrompt (前400字符): %s", truncateStr(systemPromptFinal, 400))
 	inputMessages := buildInputMessages(req.Query, req.History)
@@ -413,112 +417,4 @@ func isToolChoiceUnsupportedError(errMsg string) bool {
 		}
 	}
 	return false
-}
-
-// buildEnhancedSystemPromptForAgent 在 ReAct 系统提示词上注入：时间/用户信息 + 对话摘要 + 用户记忆
-// 与快速模式的 buildEnhancedSystemPrompt 逻辑保持一致，确保双模式行为统一
-func buildEnhancedSystemPromptForAgent(base string, summary *entity.ChatSummary, memories []entity.UserMemory, userCtx PromptUserContext) string {
-	var extras []string
-
-	userInfo := "## 当前信息\n"
-	if userCtx.TimeStr != "" {
-		userInfo += "- 当前时间：" + userCtx.TimeStr + "\n"
-	}
-	if userCtx.Timezone != "" {
-		userInfo += "- 用户时区：" + userCtx.Timezone + "\n"
-	}
-	if userCtx.Username != "" {
-		userInfo += "- 用户：" + userCtx.Username + "\n"
-	}
-	if userCtx.Role != "" {
-		userInfo += "- 系统角色：" + userCtx.Role + "\n"
-	}
-	if userCtx.Department != "" {
-		userInfo += "- 部门：" + userCtx.Department + "\n"
-	}
-	if userCtx.Position != "" {
-		userInfo += "- 职位：" + userCtx.Position + "\n"
-	}
-	if userCtx.Expertise != "" {
-		userInfo += "- 擅长/关注：" + userCtx.Expertise + "\n"
-	}
-	if userCtx.Language != "" {
-		userInfo += "- 偏好语言：" + userCtx.Language + "\n"
-	}
-	if userInfo != "## 当前信息\n" {
-		extras = append(extras, userInfo)
-	}
-
-	if userCtx.AnswerStyle != "" || userCtx.TableFirst || userCtx.CitationStyle != "" {
-		var p strings.Builder
-		p.WriteString("## 用户回答偏好\n")
-		switch userCtx.AnswerStyle {
-		case "concise":
-			p.WriteString("- 回答风格：简洁凝练，直击要点，3~5 句说完，不过度展开\n")
-		case "detailed":
-			p.WriteString("- 回答风格：详细展开，先结论再分点论述，必要时给例子和注意事项\n")
-		case "step_by_step":
-			p.WriteString("- 回答风格：分步讲解，用 1/2/3…编号或小标题组织步骤\n")
-		default:
-			p.WriteString("- 回答风格：平衡简洁与完整，先结论再展开\n")
-		}
-		if userCtx.TableFirst {
-			p.WriteString("- 结构化呈现：对比、列表、映射等数据优先用 Markdown 表格组织\n")
-		}
-		switch userCtx.CitationStyle {
-		case "none":
-			p.WriteString("- 引用格式：正文不标注引用，引用信息仅由消息底部来源区展示\n")
-		case "doc_title_only":
-			p.WriteString("- 引用格式：正文引用时只提「根据《文档名》」，不要章节\n")
-		default:
-			p.WriteString("- 引用格式：正文引用时以「根据《文档名》· 章节标题」形式说明来源\n")
-		}
-		extras = append(extras, p.String())
-	}
-
-	if strings.TrimSpace(userCtx.RoleTemplatePrompt) != "" {
-		extras = append(extras, "## 角色模板设定\n"+strings.TrimSpace(userCtx.RoleTemplatePrompt))
-	}
-
-	if userCtx.Language != "" {
-		langHint := "## 回答语言\n"
-		switch userCtx.Language {
-		case "en-US":
-			langHint += "- 请使用英文回答（美式英语）。\n"
-		case "ja-JP":
-			langHint += "- 请使用日语回答。\n"
-		case "ko-KR":
-			langHint += "- 请使用韩语回答。\n"
-		case "fr-FR":
-			langHint += "- 请使用法语回答。\n"
-		case "de-DE":
-			langHint += "- 请使用德语回答。\n"
-		case "es-ES":
-			langHint += "- 请使用西班牙语回答。\n"
-		default:
-			langHint += "- 请使用简体中文回答。\n"
-		}
-		extras = append(extras, langHint)
-	}
-
-	if summary != nil && summary.Summary != "" {
-		extras = append(extras, "## 本次对话摘要\n"+summary.Summary)
-	}
-
-	if len(memories) > 0 {
-		var memoryText strings.Builder
-		memoryText.WriteString("## 关于用户的已知信息\n")
-		for _, m := range memories {
-			memoryText.WriteString("- ")
-			memoryText.WriteString(m.Content)
-			memoryText.WriteString("\n")
-		}
-		extras = append(extras, memoryText.String())
-	}
-
-	if len(extras) == 0 {
-		return base
-	}
-
-	return base + "\n\n" + strings.Join(extras, "\n\n")
 }
