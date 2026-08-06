@@ -97,6 +97,9 @@ func (a *EinoRetrieverAdapter) Retrieve(ctx context.Context, query string, opts 
 	if a == nil || a.inner == nil {
 		return nil, fmt.Errorf("eino retriever adapter: inner retriever is nil")
 	}
+	if strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
 
 	defaultTopK := a.defaultTopK
 	common := retriever.GetCommonOptions(&retriever.Options{

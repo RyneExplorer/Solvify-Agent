@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -47,9 +48,51 @@ type quickGraphInput struct {
 // quickGraphState Graph Local State，通过 ProcessState 读写。
 type quickGraphState struct {
 	Input          *quickGraphInput
-	RewrittenQuery string
+	RewrittenQuery string   // 改写后的查询，供 Retrieve / BuildMsgs 使用
+	Intent         string   // greeting / chitchat / question / identity / meta
+	SkipRetrieve   bool     // Greeting/Chitchat 跳过知识库检索
+	Keywords       []string // 改写时提取的关键词，可用于日志/调试
 	RetrievedDocs  []*schema.Document
 }
+
+// 查询改写意图类型
+const (
+	intentGreeting = "greeting" // 问候语
+	intentChitchat = "chitchat" // 闲聊
+	intentQuestion = "question" // 知识查询（默认，最常见）
+	intentIdentity = "identity" // 身份确认（你是谁、你能做什么）
+	intentMeta     = "meta"     // 元问题（我的历史记录、你刚才说了什么）
+)
+
+// rewriteResult LLM 返回的 JSON 解析结果
+type rewriteResult struct {
+	Rewritten string   `json:"rewritten"`
+	Intent    string   `json:"intent"`
+	Keywords  []string `json:"keywords"`
+}
+
+// rewriteMaxHistoryRounds 改写时拼入历史的最大轮数（每轮=user+assistant）
+const rewriteMaxHistoryRounds = 3
+
+// rewriteSystemPrompt 改写专用的 System Prompt
+const rewriteSystemPrompt = `你是一个查询改写助手。根据用户的原始问题和对话历史，对问题进行改写并识别意图。
+
+## 改写规则
+1. 消解指代：把"这个"、"那个方案"、"它"、"之前说的"等代词替换为对话历史中的具体名词
+2. 扩展关键词：补充与问题相关的同义词、上下位词，方便知识库检索
+3. 拆分复合问题：如果原问题包含多个子问题，改写为一个完整句子即可（不要拆成多行）
+4. 保持原意：改写后的问题必须和原问题核心意图一致，不要引入新主题
+
+## 意图识别
+- greeting: 问候语（你好、hi、在吗、早上好）
+- chitchat: 闲聊（今天天气怎么样、讲个笑话、随便聊聊）
+- question: 知识查询（业务问题、技术问题、需要从知识库找答案）
+- identity: 身份确认（你是谁、你能做什么、介绍一下你自己）
+- meta: 元问题（我的历史记录、你刚才说了什么、回顾对话）
+
+## 输出格式
+严格使用 JSON，不要输出任何多余文字或 Markdown 代码块：
+{"rewritten": "改写后的完整问题", "intent": "question", "keywords": ["关键词1", "关键词2"]}`
 
 const (
 	graphQuickNodeRewrite   = "query_rewrite"
@@ -94,7 +137,7 @@ func wrapGraphErr(stage string, err error) error {
 	return apperrors.WrapDefault(apperrors.CodeInternalError, fmt.Errorf("%s: %w", stage, err))
 }
 
-// addQuickRewriteNode 节点 1：QueryRewrite（占位，返回原文）。
+// addQuickRewriteNode 节点 1：QueryRewrite，调 LLM 做查询改写 + 意图识别。
 func addQuickRewriteNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamReader[*schema.Message]]) error {
 	return g.AddLambdaNode(graphQuickNodeRewrite,
 		einoCompose.InvokableLambda(quickRewriteFn),
@@ -102,7 +145,9 @@ func addQuickRewriteNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamRe
 	)
 }
 
-// quickRewriteFn 节点 1 实现：暂存输入到 State 并原样返回查询
+// quickRewriteFn 节点 1 实现：调 LLM 对用户问题做改写 + 意图识别。
+// 降级策略：LLM 改写失败 → fallback 原始 query，不阻塞主流程。
+// SkipRetrieve=true 时返回空串，Retriever 收到空串会快速返回空 docs。
 func quickRewriteFn(ctx context.Context, input *quickGraphInput) (string, error) {
 	if input == nil {
 		return "", apperrors.NewDefault(apperrors.CodeInvalidParam)
@@ -113,20 +158,133 @@ func quickRewriteFn(ctx context.Context, input *quickGraphInput) (string, error)
 	}); err != nil {
 		return "", err
 	}
+
 	startAt := time.Now()
-	rewritten := input.OriginalQuery
+	rewritten, intent, keywords, skipRetrieve := doRewriteWithLLM(ctx, input)
+
 	_ = einoCompose.ProcessState(ctx, func(_ context.Context, state *quickGraphState) error {
 		state.RewrittenQuery = rewritten
+		state.Intent = intent
+		state.Keywords = keywords
+		state.SkipRetrieve = skipRetrieve
 		return nil
 	})
+
 	durMs := time.Since(startAt).Milliseconds()
 	observability.SetSpanAttrs(ctx, observability.Attrs{
-		"original_query":  input.OriginalQuery,
-		"rewritten_query": rewritten,
-		"rewrite_ms":      durMs,
-		"model_id":        input.ModelName,
+		"original_query":   input.OriginalQuery,
+		"rewritten_query":  rewritten,
+		"intent":           intent,
+		"skip_retrieve":    fmt.Sprintf("%v", skipRetrieve),
+		"rewrite_ms":       durMs,
+		"model_id":         input.ModelName,
 	})
 	return rewritten, nil
+}
+
+// doRewriteWithLLM 调 LLM 做改写，失败时 fallback 原始 query。
+// 返回 (rewritten, intent, keywords, skipRetrieve)
+func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) (string, string, []string, bool) {
+	// 1. 从 context 拿 ChatModel
+	cm, ok := graphChatModelFromContext(ctx)
+	if !ok || cm == nil {
+		logger.Warnf("quickRewriteFn: context 中没有 ChatModel，跳过改写")
+		return input.OriginalQuery, intentQuestion, nil, false
+	}
+
+	// 2. 从 InputMsgs 提取最近几轮用户-助手历史（排除 system 和当前问题）
+	historyStr := buildRewriteHistory(input.InputMsgs, input.UserQuestionIndex, rewriteMaxHistoryRounds)
+
+	// 3. 构造改写请求消息
+	var userContent strings.Builder
+	userContent.WriteString("原始问题：")
+	userContent.WriteString(input.OriginalQuery)
+	if historyStr != "" {
+		userContent.WriteString("\n\n对话历史：\n")
+		userContent.WriteString(historyStr)
+	}
+
+	msgs := []*schema.Message{
+		schema.SystemMessage(rewriteSystemPrompt),
+		schema.UserMessage(userContent.String()),
+	}
+
+	// 4. 同步调 Generate（改写不需要流式）
+	msg, err := cm.Generate(ctx, msgs)
+	if err != nil || msg == nil || msg.Content == "" {
+		logger.Warnf("quickRewriteFn: LLM 改写失败，fallback 原始 query: err=%v", err)
+		return input.OriginalQuery, intentQuestion, nil, false
+	}
+
+	// 5. 解析 JSON 返回
+	var result rewriteResult
+	content := strings.TrimSpace(msg.Content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		logger.Warnf("quickRewriteFn: LLM 改写返回 JSON 解析失败，fallback 原始 query: err=%v, content=%s", err, content)
+		return input.OriginalQuery, intentQuestion, nil, false
+	}
+
+	// 6. 清洗 + 验证
+	if strings.TrimSpace(result.Rewritten) == "" {
+		result.Rewritten = input.OriginalQuery
+	}
+	if !isValidIntent(result.Intent) {
+		result.Intent = intentQuestion
+	}
+
+	// 7. 判定是否跳过检索（greeting/chitchat 不需要知识库）
+	skipRetrieve := result.Intent == intentGreeting || result.Intent == intentChitchat
+
+	return result.Rewritten, result.Intent, result.Keywords, skipRetrieve
+}
+
+// isValidIntent 检查 LLM 返回的意图是否在合法枚举内
+func isValidIntent(intent string) bool {
+	switch intent {
+	case intentGreeting, intentChitchat, intentQuestion, intentIdentity, intentMeta:
+		return true
+	}
+	return false
+}
+
+// buildRewriteHistory 从 InputMsgs 提取最近 N 轮 user-assistant 对话（排除 system 和当前问题）。
+// maxRounds 控制最大轮数，避免改写 prompt 太长。
+func buildRewriteHistory(msgs []*schema.Message, currentUserMsgIdx, maxRounds int) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	// 从 currentUserMsgIdx 往前找，跳过 system，收集 user+assistant 对
+	// 简化实现：找最近 maxRounds*2 条非 system 消息，倒序输出
+	var pairs []string
+	for i := currentUserMsgIdx - 1; i >= 0 && len(pairs) < maxRounds*2; i-- {
+		m := msgs[i]
+		if m == nil || m.Content == "" {
+			continue
+		}
+		role := string(m.Role)
+		if role == "system" {
+			continue
+		}
+		// user 和 assistant 交替收集，用最近的优先
+		roleLabel := "用户"
+		if role == "assistant" {
+			roleLabel = "助手"
+		}
+		pairs = append([]string{fmt.Sprintf("%s：%s", roleLabel, m.Content)}, pairs...)
+	}
+	if len(pairs) == 0 {
+		return ""
+	}
+	// 只取 maxRounds*2 条（即 maxRounds 轮）
+	if len(pairs) > maxRounds*2 {
+		pairs = pairs[len(pairs)-maxRounds*2:]
+	}
+	return strings.Join(pairs, "\n")
 }
 
 // addQuickRetrieveNode 节点 2：Retrieve，PostHandler 把结果写回 State。
@@ -151,13 +309,24 @@ func addQuickBuildMsgsNode(g *einoCompose.Graph[*quickGraphInput, *schema.Stream
 // quickBuildMsgsFn 节点 3 实现：在用户问题前插入检索上下文块
 
 func quickBuildMsgsFn(ctx context.Context, docs []*schema.Document) ([]*schema.Message, error) {
-	var input *quickGraphInput
+	var (
+		input          *quickGraphInput
+		rewrittenQuery string
+	)
 	if err := einoCompose.ProcessState(ctx, func(_ context.Context, state *quickGraphState) error {
 		input = state.Input
+		rewrittenQuery = state.RewrittenQuery
 		return nil
 	}); err != nil || input == nil {
 		return nil, apperrors.NewDefault(apperrors.CodeInternalError)
 	}
+
+	// 用 RewrittenQuery 替换用户问题（如果有改写结果）
+	questionContent := input.OriginalQuery
+	if rewrittenQuery != "" && rewrittenQuery != input.OriginalQuery {
+		questionContent = rewrittenQuery
+	}
+
 	msgs := make([]*schema.Message, 0, len(input.InputMsgs)+2)
 	injected := false
 	for i, m := range input.InputMsgs {
@@ -166,7 +335,12 @@ func quickBuildMsgsFn(ctx context.Context, docs []*schema.Document) ([]*schema.M
 			msgs = append(msgs, schema.UserMessage(block))
 			injected = true
 		}
-		msgs = append(msgs, m)
+		// 替换 UserQuestion 位置的内容为改写后的 query
+		if i == input.UserQuestionIndex {
+			msgs = append(msgs, schema.UserMessage(questionContent))
+		} else {
+			msgs = append(msgs, m)
+		}
 	}
 	if len(docs) > 0 && !injected {
 		last := msgs[len(msgs)-1]
