@@ -223,8 +223,35 @@ func (s *authService) SendEmailCode(emailStr string) error {
 	}
 
 	// 3. 调用邮件组件把验证码发送给目标邮箱
-	subject := "Ryne 博客验证码"
-	body := fmt.Sprintf("<h1>您的验证码是: %s</h1><p>有效期 5 分钟，请勿泄露给他人。</p>", code)
+	subject := "Solvify 邮箱验证码"
+	body := fmt.Sprintf(`
+<table width="100%%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f1f5f9;padding:32px 16px;font-family:Arial,'Microsoft YaHei',sans-serif;color:#0f172a;">
+  <tr>
+    <td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" border="0" style="width:100%%;max-width:560px;background-color:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
+        <tr>
+          <td style="background-color:#0f172a;padding:22px 30px;color:#ffffff;font-size:20px;font-weight:600;">
+            Solvify
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:32px 30px 26px;">
+            <h1 style="margin:0 0 14px;font-size:22px;line-height:1.4;font-weight:600;color:#0f172a;">验证您的邮箱</h1>
+            <p style="margin:0;font-size:14px;line-height:1.8;color:#475569;">您好，您正在进行 Solvify 邮箱验证，请使用以下验证码完成操作：</p>
+            <div style="margin:24px 0;padding:20px 12px;text-align:center;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:30px;line-height:1.2;font-weight:600;letter-spacing:8px;color:#0f172a;">%s</div>
+            <p style="margin:0;font-size:14px;line-height:1.8;color:#475569;">验证码将在 5 分钟后失效。</p>
+            <div style="margin-top:22px;padding:10px 14px;background-color:#f8fafc;border-left:3px solid #64748b;font-size:13px;line-height:1.7;color:#64748b;">如果这不是您本人的操作，请忽略此邮件。请勿向任何人泄露验证码。</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:18px 30px;border-top:1px solid #e2e8f0;font-size:12px;line-height:1.6;color:#94a3b8;">
+            此邮件由 Solvify 系统自动发送，请勿直接回复。
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>`, code)
 	if err := email.SendEmail(emailStr, subject, body); err != nil {
 		return apperrors.NewWithErr(apperrors.CodeInternalError, "发送邮件失败", err)
 	}

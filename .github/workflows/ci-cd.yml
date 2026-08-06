@@ -135,7 +135,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: Dockerfile
+          file: deploy/Dockerfile
           platforms: linux/amd64
           push: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
           tags: |
@@ -266,4 +266,3 @@ jobs:
           done
           echo "生产环境外部健康检查失败" >&2
           exit 1
-
