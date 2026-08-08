@@ -11,7 +11,7 @@ import (
 
 // sessionResponse 转换会话响应 DTO
 func sessionResponse(session entity.ChatSession) response.SessionResponse {
-	return response.SessionResponse{
+	resp := response.SessionResponse{
 		ID:        session.ID,
 		Title:     session.Title,
 		ModelID:   session.ModelID,
@@ -19,6 +19,16 @@ func sessionResponse(session entity.ChatSession) response.SessionResponse {
 		CreatedAt: session.CreatedAt,
 		UpdatedAt: session.UpdatedAt,
 	}
+	if pc, err := session.GetPendingCheckpoint(); err == nil && pc != nil {
+		resp.PendingCheckpoint = &response.PendingCheckpointInfo{
+			CheckpointID: pc.CheckpointID,
+			InterruptID:  pc.InterruptID,
+			Question:     pc.Question,
+			ToolName:     pc.ToolName,
+			SetAt:        pc.SetAt,
+		}
+	}
+	return resp
 }
 
 // messageResponse 转换消息响应 DTO

@@ -159,6 +159,25 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 					abortReason = "runtime_panic"
 				}
 			}()
+			
+			// 澄清追问恢复：检查 session 是否有待处理的澄清
+			// 未超时 → 清掉 pending，历史自然串成 [user→assistant追问→user回答]，正常跑流程
+			// 超时 → 清掉 pending，正常跑（用户已遗忘之前的追问，新消息按新问题处理）
+			session, findErr := s.sessionRepo.FindByID(ctx, sessionID)
+			if findErr == nil && session != nil && session.HasPendingClarify() {
+				pc, _ := session.GetPendingClarify()
+				if pc != nil {
+					if pc.IsExpired(entity.ClarifyDefaultTimeout) {
+						logger.Warnf("澄清追问已超时(>%v)，忽略 pending 状态: sessionID=%s", entity.ClarifyDefaultTimeout, sessionID)
+					} else {
+						logger.Warnf("用户回复澄清追问，恢复正常流程: sessionID=%s, question=%q", sessionID, pc.Question)
+					}
+					if cErr := s.sessionRepo.ClearPendingClarify(ctx, sessionID); cErr != nil {
+						logger.Warnf("清除澄清状态失败: %v", cErr)
+					}
+				}
+			}
+			
 			if searchMode == "smart-reasoning" {
 				s.processDeepMode(ctx, userID, sessionID, userMsgID, req, eventCh)
 			} else {
