@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
+	"solvify-agent/internal/llm"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/observability"
 	"solvify-agent/internal/repository"
@@ -28,6 +29,7 @@ type contextService struct {
 	memoryRepo  repository.UserMemoryRepo
 	summaryRepo repository.SummaryRepo
 	obs         observability.Recorder
+	embedClient *llm.EmbeddingClient
 // NewContextService 创建上下文管理服务
 }
 
@@ -51,6 +53,10 @@ func NewContextService(
 // SetObservability 注入可观测性记录器
 func (s *contextService) SetObservability(obs observability.Recorder) {
 	s.obs = obs
+}
+// SetEmbedClient 注入向量客户端，用于语义相关历史检索
+func (s *contextService) SetEmbedClient(client *llm.EmbeddingClient) {
+	s.embedClient = client
 }
 
 // BuildContext 构建增强后的对话上下文

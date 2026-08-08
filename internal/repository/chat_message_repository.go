@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"gorm.io/gorm"
 
@@ -151,3 +153,65 @@ func (r *chatMessageRepository) SearchByKeyword(ctx context.Context, userID, que
 
 	return results, err
 }
+
+// SearchRecentByVector 在指定会话中按向量语义检索最近消息（pgvector 余弦距离）。
+// 仅返回有 embedding 的消息（embedding IS NOT NULL），距离阈值用于过滤不相关结果。
+func (r *chatMessageRepository) SearchRecentByVector(ctx context.Context, sessionID string, queryEmbedding []float32, limit int, distanceThreshold float64) ([]entity.ChatMessage, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	if len(queryEmbedding) == 0 {
+		return nil, nil
+	}
+	if distanceThreshold <= 0 {
+		distanceThreshold = 0.8
+	}
+
+	embeddingStr := formatFloatVector(queryEmbedding)
+
+	var messages []entity.ChatMessage
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT id, session_id, role, content, model_id, search_mode, knowledge_base_ids, sources, metadata, embedding, created_at
+		FROM chat_messages
+		WHERE session_id = ?
+		  AND embedding IS NOT NULL
+		  AND embedding <-> ? <= ?
+		ORDER BY embedding <-> ?
+		LIMIT ?
+	`, sessionID, embeddingStr, distanceThreshold, embeddingStr, limit).Scan(&messages).Error
+
+	if err != nil {
+		return nil, err
+	}
+
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
+
+	return messages, nil
+}
+
+// formatFloatVector 把 []float32 格式化为 pgvector 字面量 '[1.0,2.0,...]'
+func formatFloatVector(v []float32) string {
+	if len(v) == 0 {
+		return "[]"
+	}
+	var sb strings.Builder
+	sb.WriteByte('[')
+	for i, f := range v {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(fmt.Sprintf("%.6f", f))
+	}
+	sb.WriteByte(']')
+	return sb.String()
+}
+
+// UpdateEmbedding 更新指定消息的向量表示
+func (r *chatMessageRepository) UpdateEmbedding(ctx context.Context, messageID string, embedding entity.FloatVector) error {
+	return r.db.WithContext(ctx).Model(&entity.ChatMessage{}).
+		Where("id = ?", messageID).
+		Update("embedding", embedding).Error
+}
+

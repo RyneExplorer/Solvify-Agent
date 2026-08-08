@@ -45,6 +45,7 @@ type chatService struct {
 	prefSvc             UserPreferenceService
 	obs                 observability.Recorder
 	obsRepo             repository.ObservabilityRepo
+	embedClient         *llm.EmbeddingClient
 }
 
 // NewChatService 创建聊天业务服务
@@ -628,9 +629,35 @@ func (s *chatService) saveAssistantMessage(ctx context.Context, sessionID, msgID
 		Sources:          datatypes.JSON(mustMarshal(sources)),
 		Metadata:         metadata,
 	}
-	return s.messageRepo.Create(ctx, &assistantMsg)
+	if err := s.messageRepo.Create(ctx, &assistantMsg); err != nil {
+		return err
+	}
+	s.bgComputeEmbedding(ctx, assistantMsg.ID, assistantMsg.Content)
+	return nil
 }
 
+// bgComputeEmbedding 后台为消息计算向量表示，失败不阻塞主流程。
+func (s *chatService) bgComputeEmbedding(ctx context.Context, messageID, content string) {
+	if s.embedClient == nil || strings.TrimSpace(content) == "" {
+		return
+	}
+	go func() {
+		embedCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		vec, err := s.embedClient.Embed(embedCtx, content)
+		if err != nil {
+			logger.Warnf("消息向量计算失败: messageID=%s, err=%v", messageID, err)
+			return
+		}
+		f32 := make(entity.FloatVector, len(vec))
+		for i, v := range vec {
+			f32[i] = float32(v)
+		}
+		if err := s.messageRepo.UpdateEmbedding(embedCtx, messageID, f32); err != nil {
+			logger.Warnf("消息向量更新失败: messageID=%s, err=%v", messageID, err)
+		}
+	}()
+}
 // truncateHistoryByTokens 按真 BPE token 预算从尾部向前保留"完整轮对"。
 //
 // 关键修复（P0-②）：旧代码"从尾部逐个 append 头插"实际是按时间正序塞，但因为

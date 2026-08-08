@@ -17,7 +17,9 @@ type ChatMessage struct {
 	KnowledgeBaseIDs datatypes.JSON `gorm:"column:knowledge_base_ids;type:jsonb;not null;default:'[]'::jsonb"`
 	Sources          datatypes.JSON `gorm:"column:sources;type:jsonb"`
 	Metadata         datatypes.JSON `gorm:"column:metadata;type:jsonb;not null;default:'{}'::jsonb"`
-	CreatedAt        time.Time      `gorm:"column:created_at;autoCreateTime"`
+	// Embedding 消息内容的向量表示，用于语义相关历史检索
+	Embedding  FloatVector `gorm:"column:embedding;type:vector(1024)"`
+	CreatedAt  time.Time   `gorm:"column:created_at;autoCreateTime"`
 }
 
 // TableName 返回聊天消息表名
