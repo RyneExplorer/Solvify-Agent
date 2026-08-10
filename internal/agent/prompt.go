@@ -76,9 +76,25 @@ func buildReActSystemPrompt(ctx context.Context, allTools []einoTool.BaseTool, i
 	}
 	if hasDangerous {
 		sb.WriteString("7. **危险工具审批**：delete_document 等危险工具会在执行前暂停并等待用户审批，调用后流程中断，用户确认后自动继续\n")
-		sb.WriteString("   - ⚠️ **目标不明确先反问**：当用户说'删除那个文档'、'清理一下'、'把上面的删了'这类模糊指令，且从对话历史无法唯一确定目标时，**绝对不能编造参数调用工具**。先反问用户明确目标（例如：'你要删除的是《压力 - 07/13 16:03》那个文档吗？还是另一个？'）\n")
+		sb.WriteString("   - ⚠️ **目标不明确先反问**：当用户说'删除那个文档'、'清理一下'、'把上面的删了'这类模糊指令，且从对话历史无法唯一确定目标时，**绝对不能编造参数调用工具**。先调用 ask_clarify 反问用户明确目标（例如：'你要删除的是《压力 - 07/13 16:03》那个文档吗？还是另一个？'）\n")
 		sb.WriteString("   - ⚠️ **禁止猜测参数**：document_id 等关键参数必须来自可靠来源（用户明确提供、get_document_info 工具查询结果、历史对话中已确认的 ID）。严禁从模糊描述或'看起来像是'的文本中猜测或编造\n")
 		sb.WriteString("   - 调用危险工具时务必在参数里写清楚目标和原因，便于用户决策\n")
+	}
+
+	// 澄清追问说明
+	hasClarify := false
+	for _, entry := range internalSorted {
+		if entry.Name == "ask_clarify" {
+			hasClarify = true
+			break
+		}
+	}
+	if hasClarify {
+		sb.WriteString("9. **澄清追问（ask_clarify）**：当用户的指令/问题存在歧义、历史对话信息不足以唯一确定目标、或你不确定下一步该怎么做时，调用 ask_clarify 暂停执行并向用户提问\n")
+		sb.WriteString("   - 🎯 **触发场景**：用户说了'那个文档'、'再看一下'、'它'等指代但缺少明确上下文；或问题本身有多种理解方式；或缺少执行所需的关键信息\n")
+		sb.WriteString("   - 🎯 **参数格式**：question 必填（一句话，不超过 100 字）；options 可选（最多 4 个选项，用户可点选也可自由输入）；context 可选（为什么需要澄清）\n")
+		sb.WriteString("   - ⚠️ **不要滥用**：只有在无法从对话历史推断意图时才调用。明显的指令直接执行，不确定的先用检索工具找线索，真不行再澄清\n")
+		sb.WriteString("   - ⚠️ **澄清后恢复**：用户回答后流程自动恢复，你会收到用户的回答作为工具结果，基于回答继续完成任务\n")
 	}
 
 	// 外部联网工具

@@ -96,34 +96,60 @@ func (e *Engine) runWithRunner(
 		}
 
 		// ── Interrupt 处理 ──
-		if agentEvent.Action != nil && agentEvent.Action.Interrupted != nil {
-			if !interruptSent {
-				interruptSent = true
-				ii := agentEvent.Action.Interrupted
-				interruptCtx := ii.InterruptContexts
-				var interruptID string
-				var interruptInfo any
-				if len(interruptCtx) > 0 {
-					interruptID = interruptCtx[0].ID
-					interruptInfo = interruptCtx[0].Info
+			if agentEvent.Action != nil && agentEvent.Action.Interrupted != nil {
+				if !interruptSent {
+					interruptSent = true
+					ii := agentEvent.Action.Interrupted
+					interruptCtx := ii.InterruptContexts
+					var interruptID string
+					var infoStr string
+					if len(interruptCtx) > 0 {
+						interruptID = interruptCtx[0].ID
+						if s, ok := interruptCtx[0].Info.(string); ok {
+							infoStr = s
+						}
+					}
+					logger.Infof("[Agent] 执行中断: checkpointID=%s, interruptID=%s, info=%s", checkpointID, interruptID, truncateStr(infoStr, 200))
+
+					infoType, infoData := parseInterruptInfo(infoStr)
+
+					if infoType == "clarify" {
+						eventCh <- Event{
+							Type:           EventInterrupt,
+							Title:          "需要澄清",
+							Detail:         getString(infoData, "question"),
+							Status:         "clarify",
+							Error:          interruptID,
+							CheckpointID:   checkpointID,
+							InterruptID:    interruptID,
+							IsClarify:      true,
+							ClarifyQuestion: getString(infoData, "question"),
+							ClarifyOptions:  getStringSlice(infoData, "options"),
+							ClarifyContext:  getString(infoData, "context"),
+							Done:           true,
+						}
+					} else {
+						// danger 或未知类型 → 按审批处理
+						message := getString(infoData, "message")
+						if message == "" {
+							message = formatInterruptInfo(infoStr)
+						}
+						eventCh <- Event{
+							Type:          EventInterrupt,
+							Title:         "需要人工确认",
+							Detail:        truncateStr(message, 256),
+							Status:        "interrupt",
+							Error:         interruptID,
+							CheckpointID:  checkpointID,
+							InterruptID:   interruptID,
+							InterruptInfo: infoData,
+							Done:          true,
+						}
+					}
+					return
 				}
-				logger.Infof("[Agent] 执行中断，等待用户审批: checkpointID=%s, interruptID=%s, info=%v", checkpointID, interruptID, interruptInfo)
-				infoMap, _ := interruptInfo.(map[string]any)
-				eventCh <- Event{
-					Type:          EventInterrupt,
-					Title:         "需要人工确认",
-					Detail:        truncateStr(formatInterruptInfo(interruptInfo), 256),
-					Status:        "interrupt",
-					Error:         interruptID,
-					CheckpointID:  checkpointID,
-					InterruptID:   interruptID,
-					InterruptInfo: infoMap,
-					Done:          true,
-				}
-				return
+				continue
 			}
-			continue
-		}
 
 		if agentEvent.Output == nil || agentEvent.Output.MessageOutput == nil {
 			continue
@@ -424,3 +450,32 @@ func buildFallbackAnswer(sources []tool.SourceDocument) string {
 }
 
 
+
+func getString(m map[string]any, key string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func getStringSlice(m map[string]any, key string) []string {
+	v, ok := m[key]
+	if !ok {
+		return nil
+	}
+	switch raw := v.(type) {
+	case []string:
+		return raw
+	case []any:
+		out := make([]string, 0, len(raw))
+		for _, item := range raw {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}

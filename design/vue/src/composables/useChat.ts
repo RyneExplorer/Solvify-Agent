@@ -105,7 +105,7 @@ export function useChat() {
   // ── 中断控制 ──
   let abortController: AbortController | null = null
 
-  // ── 审批状态（危险工具中断） ──
+  // ── 审批/澄清状态（统一处理 interrupt） ──
   const pendingApproval = ref<PendingApproval | null>(null)
   // interrupt 事件所在的 assistant 消息块 ID，恢复流程复用同一个
   let interruptedAssistantId = ''
@@ -246,7 +246,7 @@ export function useChat() {
     loadMessages(sessionId)
   }
 
-  // 切换会话时恢复/清除审批卡状态
+  // 切换会话时恢复/清除审批卡或澄清追问卡状态
   watch(
     () => activeSession.value,
     (sess) => {
@@ -255,9 +255,11 @@ export function useChat() {
         pendingApproval.value = {
           checkpoint_id: pc.checkpoint_id,
           interrupt_id: pc.interrupt_id,
-          title: '需要人工确认',
-          detail: pc.question ?? '执行被中断，等待用户审批',
+          title: pc.is_clarify ? '需要澄清' : '需要人工确认',
+          detail: pc.question ?? '执行被中断',
           tool_name: pc.tool_name,
+          options: pc.options,
+          is_clarify: pc.is_clarify ?? false,
         }
       } else {
         pendingApproval.value = null
@@ -459,34 +461,38 @@ export function useChat() {
                 progressText.value = ''
                 streamContent.value = ''
                 streamSources.value = []
-                // streamTimeline 不清空，interrupt 前的步骤保留，恢复后继续累加
-                const info = evt.interrupt_info ?? {}
-                const approval: PendingApproval = {
-                  checkpoint_id: evt.checkpoint_id ?? '',
-                  interrupt_id: evt.interrupt_id ?? '',
-                  title: '需要人工确认',
-                  detail: evt.detail ?? (info?.message as string) ?? '执行被中断，等待用户处理',
-                  tool_name: (info?.tool_name as string) ?? '',
-                  target_ref: (info?.target_ref as string) ?? '',
-                  reason: (info?.reason as string) ?? '',
-                }
-                pendingApproval.value = approval
-                // 记录 assistant 块 ID，恢复时 done 事件复用同一块
                 interruptedAssistantId = assistantId || 'a-' + Date.now()
-                return
-              }
 
-              case 'clarify': {
-                isLoading.value = false
-                progressText.value = ''
-                const q = evt.clarify?.question ?? evt.detail ?? ''
-                const opts = evt.clarify?.options ?? []
-                messages.value.push({
-                  id: 'c-' + Date.now(),
-                  role: 'assistant',
-                  content: q,
-                })
-                break
+                if (evt.status === 'clarify' || evt.clarify) {
+                  // 澄清追问
+                  const approval: PendingApproval = {
+                    checkpoint_id: evt.checkpoint_id ?? '',
+                    interrupt_id: evt.interrupt_id ?? '',
+                    title: '需要澄清',
+                    detail: evt.clarify?.question ?? evt.detail ?? '',
+                    tool_name: '',
+                    target_ref: '',
+                    reason: evt.clarify?.context ?? '',
+                    options: evt.clarify?.options ?? [],
+                    is_clarify: true,
+                  }
+                  pendingApproval.value = approval
+                } else {
+                  // 危险工具审批
+                  const info = evt.interrupt_info ?? {}
+                  const approval: PendingApproval = {
+                    checkpoint_id: evt.checkpoint_id ?? '',
+                    interrupt_id: evt.interrupt_id ?? '',
+                    title: '需要人工确认',
+                    detail: evt.detail ?? (info?.message as string) ?? '执行被中断，等待用户处理',
+                    tool_name: (info?.tool_name as string) ?? '',
+                    target_ref: (info?.target_ref as string) ?? '',
+                    reason: (info?.reason as string) ?? '',
+                    is_clarify: false,
+                  }
+                  pendingApproval.value = approval
+                }
+                return
               }
 
               case 'done':
@@ -647,12 +653,12 @@ export function useChat() {
     }
   }
 
-  // ── 危险工具审批 ──
-  function approvePending(resolution: 'approve' | 'reject') {
+  // ── 审批 / 澄清追问统一入口 ──
+  function approvePending(resolution: string) {
     if (!pendingApproval.value) return
-    input.value = resolution // 请求内容
+    input.value = resolution
     pendingApproval.value = null
-    void sendMessage(undefined, true) // isResume=true: 不 push 用户气泡
+    void sendMessage(undefined, true)
   }
 
   function cancelApproval() {

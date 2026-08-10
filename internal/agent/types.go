@@ -62,6 +62,11 @@ type Event struct {
 	CheckpointID string         `json:"checkpoint_id,omitempty"`
 	InterruptID  string         `json:"interrupt_id,omitempty"`
 	InterruptInfo map[string]any `json:"interrupt_info,omitempty"`
+	// clarify 事件字段（ask_clarify 触发的中断）
+	IsClarify      bool     `json:"is_clarify,omitempty"`
+	ClarifyQuestion string  `json:"clarify_question,omitempty"`
+	ClarifyOptions  []string `json:"clarify_options,omitempty"`
+	ClarifyContext  string   `json:"clarify_context,omitempty"`
 }
 
 // 事件类型常量

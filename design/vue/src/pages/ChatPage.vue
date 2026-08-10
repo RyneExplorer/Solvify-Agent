@@ -171,9 +171,53 @@
             </div>
           </div>
 
-          <!-- Pending Approval Card -->
+          <!-- Pending Interrupt Card: clarify 或 danger approval -->
           <div v-if="pendingApproval" class="flex justify-start">
-            <div class="max-w-[80%]">
+            <!-- 澄清追问卡 -->
+            <div v-if="pendingApproval.is_clarify" class="max-w-[80%]">
+              <div class="rounded-xl border border-sky-200 bg-sky-50 shadow-sm overflow-hidden">
+                <div class="flex items-center gap-2 px-4 py-2.5 border-b border-sky-200 bg-sky-100/50">
+                  <svg class="w-4 h-4 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                  </svg>
+                  <span class="text-xs font-semibold text-sky-800">需要澄清</span>
+                </div>
+                <div class="px-4 py-3">
+                  <p class="text-sm text-sky-900 leading-relaxed">{{ pendingApproval.detail }}</p>
+                  <!-- 选项按钮 -->
+                  <div v-if="pendingApproval.options?.length" class="mt-3 flex flex-wrap gap-2">
+                    <button
+                      v-for="(opt, idx) in pendingApproval.options"
+                      :key="idx"
+                      @click="approvePending(opt)"
+                      class="px-3 py-1.5 text-xs font-medium rounded-lg bg-white hover:bg-sky-50 text-sky-700 border border-sky-200 transition-colors"
+                    >{{ opt }}</button>
+                  </div>
+                  <!-- 自由输入 -->
+                  <div class="mt-3">
+                    <div class="flex gap-2">
+                      <input
+                        v-model="clarifyInput"
+                        @keyup.enter="submitClarify"
+                        placeholder="也可以直接输入你的回答..."
+                        class="flex-1 px-3 py-1.5 text-xs rounded-lg border border-sky-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-300"
+                      />
+                      <button
+                        @click="submitClarify"
+                        :disabled="!clarifyInput.trim()"
+                        class="px-3 py-1.5 text-xs font-medium rounded-lg bg-sky-600 hover:bg-sky-700 disabled:bg-sky-300 text-white transition-colors"
+                      >提交</button>
+                    </div>
+                  </div>
+                  <button
+                    @click="cancelApproval"
+                    class="mt-2 px-3 py-1 text-xs text-slate-400 hover:text-slate-600"
+                  >暂不处理</button>
+                </div>
+              </div>
+            </div>
+            <!-- 危险工具审批卡 -->
+            <div v-else class="max-w-[80%]">
               <div class="rounded-xl border border-amber-200 bg-amber-50 shadow-sm overflow-hidden">
                 <div class="flex items-center gap-2 px-4 py-2.5 border-b border-amber-200 bg-amber-100/50">
                   <svg class="w-4 h-4 text-amber-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -365,6 +409,15 @@ const {
 
 const chatEl = ref<HTMLDivElement>()
 const hasMessages = computed(() => messages.value.length > 0)
+
+// ── 澄清追问自由输入 ──
+const clarifyInput = ref('')
+function submitClarify() {
+  const v = clarifyInput.value.trim()
+  if (!v) return
+  approvePending(v)
+  clarifyInput.value = ''
+}
 
 useMarkdownTooltip()
 

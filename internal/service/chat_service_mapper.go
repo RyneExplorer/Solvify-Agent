@@ -25,6 +25,8 @@ func sessionResponse(session entity.ChatSession) response.SessionResponse {
 			InterruptID:  pc.InterruptID,
 			Question:     pc.Question,
 			ToolName:     pc.ToolName,
+			IsClarify:    pc.IsClarify,
+			Options:      pc.Options,
 			SetAt:        pc.SetAt,
 		}
 	}

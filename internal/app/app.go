@@ -1,4 +1,4 @@
-﻿package app
+package app
 
 import (
 	"context"
@@ -269,6 +269,10 @@ func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo rep
 	agentEngine.RegisterInternal("delete_document", 10, true,
 		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
 			return tool.NewDeleteDocumentTool(documentRepo)(userID, kbIDs)
+		})
+	agentEngine.RegisterInternal("ask_clarify", 20, false,
+		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
+			return tool.NewAskClarifyTool()(userID, kbIDs)
 		})
 
 	return &AgentComponents{

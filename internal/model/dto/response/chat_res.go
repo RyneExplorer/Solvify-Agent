@@ -2,12 +2,14 @@ package response
 
 import "time"
 
-// PendingCheckpointInfo 前端恢复审批状态用
+// PendingCheckpointInfo 前端恢复审批/澄清状态用
 type PendingCheckpointInfo struct {
 	CheckpointID string    `json:"checkpoint_id"`
 	InterruptID  string    `json:"interrupt_id"`
 	Question     string    `json:"question,omitempty"`
 	ToolName     string    `json:"tool_name,omitempty"`
+	IsClarify    bool      `json:"is_clarify,omitempty"`
+	Options      []string  `json:"options,omitempty"`
 	SetAt        time.Time `json:"set_at"`
 }
 
