@@ -6,6 +6,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"gorm.io/datatypes"
 	"solvify-agent/internal/model/entity"
 )
 
@@ -98,4 +99,27 @@ func (r *chatSessionRepository) ListExpired(ctx context.Context, before time.Tim
 		Where("updated_at < ?", before).
 		Pluck("id", &ids).Error
 	return ids, err
+}
+func (r *chatSessionRepository) SetPendingClarify(ctx context.Context, id string, data []byte) error {
+	return r.db.WithContext(ctx).Model(&entity.ChatSession{}).
+		Where("id = ?", id).
+		Update("pending_clarify", datatypes.JSON(data)).Error
+}
+
+func (r *chatSessionRepository) ClearPendingClarify(ctx context.Context, id string) error {
+	return r.db.WithContext(ctx).Model(&entity.ChatSession{}).
+		Where("id = ?", id).
+		Update("pending_clarify", datatypes.JSON("{}")).Error
+}
+
+func (r *chatSessionRepository) SetPendingCheckpoint(ctx context.Context, id string, data []byte) error {
+	return r.db.WithContext(ctx).Model(&entity.ChatSession{}).
+		Where("id = ?", id).
+		Update("pending_checkpoint", datatypes.JSON(data)).Error
+}
+
+func (r *chatSessionRepository) ClearPendingCheckpoint(ctx context.Context, id string) error {
+	return r.db.WithContext(ctx).Model(&entity.ChatSession{}).
+		Where("id = ?", id).
+		Update("pending_checkpoint", datatypes.JSON("{}")).Error
 }

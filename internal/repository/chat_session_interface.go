@@ -25,4 +25,12 @@ type ChatSessionRepo interface {
 	AdminList(ctx context.Context, offset, limit int, keyword, status string) ([]AdminSessionRow, int64, error)
 	// ListExpired 返回指定时间之前未更新的会话 ID 列表
 	ListExpired(ctx context.Context, before time.Time) ([]string, error)
+	// SetPendingClarify 存储待澄清追问状态（JSONB）
+	SetPendingClarify(ctx context.Context, id string, data []byte) error
+	// ClearPendingClarify 清除待澄清追问状态（恢复为空对象）
+	ClearPendingClarify(ctx context.Context, id string) error
+	// SetPendingCheckpoint 存储待恢复的 checkpoint 状态（JSONB）
+	SetPendingCheckpoint(ctx context.Context, id string, data []byte) error
+	// ClearPendingCheckpoint 清除待恢复的 checkpoint 状态
+	ClearPendingCheckpoint(ctx context.Context, id string) error
 }

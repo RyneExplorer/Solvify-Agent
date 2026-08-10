@@ -1,324 +1,64 @@
 package agent
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
-	"github.com/cloudwego/eino/callbacks"
-	"github.com/cloudwego/eino/components/model"
 	toolComp "github.com/cloudwego/eino/components/tool"
-
-	"solvify-agent/internal/observability"
-	"solvify-agent/pkg/logger"
 )
 
-type agentCallbackHandler struct {
-	eventCh              chan<- Event
-	callCount            int
-	pendingThinkingTitle string
-	kbIDs                []string
-	toolDescMap          map[string]string
-	sentToolEvents       map[string]bool
-
-	taskID  string
-	tracker *agentStepTracker
-	obs     observability.Recorder
+// ToolResponseData 描述工具返回的 JSON 结构
+type ToolResponseData struct {
+	Success bool        `json:"success"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data"`
 }
 
-func newAgentCallbackHandler(eventCh chan<- Event, kbIDs []string, toolDescMap map[string]string) *agentCallbackHandler {
-	h := &agentCallbackHandler{
-		eventCh:        eventCh,
-		kbIDs:          kbIDs,
-		toolDescMap:    toolDescMap,
-		sentToolEvents: make(map[string]bool),
+func parseToolResponse(response string) ToolResponseData {
+	var result ToolResponseData
+	if err := json.Unmarshal([]byte(response), &result); err != nil {
+		return ToolResponseData{Success: false, Message: response}
 	}
-	return h
+	return result
 }
 
-func (h *agentCallbackHandler) Handler() callbacks.Handler {
-	return callbacks.NewHandlerBuilder().
-		OnStartFn(h.onStart).
-		OnEndFn(h.onEnd).
-		OnErrorFn(h.onError).
-		Build()
+func parseGrepResponse(response string) ToolResponseData {
+	return parseToolResponse(response)
 }
 
-func (h *agentCallbackHandler) onStart(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
-	if info == nil {
-		return ctx
+func parseKnowledgeSearchResult(response string) (titles []string, count int) {
+	var result struct {
+		Sources []struct {
+			Title string `json:"title"`
+		} `json:"sources"`
 	}
-	obsOk := h.obs != nil && h.tracker != nil
-
-	switch info.Component {
-	case "ChatModel":
-		h.callCount++
-		h.completeThinking()
-
-		if h.callCount == 1 {
-			h.pendingThinkingTitle = "分析问题"
-			h.emit(Event{
-				Type:   EventThinking,
-				Title:  "分析问题",
-				Detail: "理解用户意图，确定检索方向",
-				Status: "running",
-			})
-		} else {
-			h.pendingThinkingTitle = "分析检索结果"
-			h.emit(Event{
-				Type:   EventThinking,
-				Title:  "分析检索结果",
-				Detail: "评估检索内容，决定下一步行动",
-				Status: "running",
-			})
-		}
-		if obsOk {
-			h.tracker.mu.Lock()
-			h.tracker.stepIdx++
-			idx := h.tracker.stepIdx
-			pending := &agentStepPending{
-				StepIndex:       idx,
-				TaskID:          h.taskID,
-				ThinkingSummary: h.pendingThinkingTitle,
-				StartedAt:       time.Now(),
-			}
-			h.tracker.pendingByID[fmt.Sprintf("llm:%d", h.callCount)] = pending
-			h.tracker.mu.Unlock()
-		}
-
-	case "Tool":
-		toolInput := toolComp.ConvCallbackInput(input)
-		toolName := info.Name
-		query := ""
-		inputJSON := ""
-		if toolInput != nil {
-			inputJSON = toolInput.ArgumentsInJSON
-			query = extractQueryFromArgs(inputJSON)
-		}
-		title, detail := formatToolStart(toolName, query, h.kbIDs, h.toolDescMap)
-
-		eventKey := fmt.Sprintf("call:%s:%s", toolName, title)
-		if h.sentToolEvents[eventKey] {
-			logger.Warnf("[Callback] 跳过重复的工具调用事件: %s", eventKey)
-			return ctx
-		}
-		h.sentToolEvents[eventKey] = true
-
-		h.emit(Event{
-			Type:   EventToolCall,
-			Title:  title,
-			Detail: detail,
-			Status: "running",
-		})
-
-		if obsOk {
-			h.tracker.mu.Lock()
-			h.tracker.stepIdx++
-			idx := h.tracker.stepIdx
-			pending := &agentStepPending{
-				StepIndex:       idx,
-				TaskID:          h.taskID,
-				ToolName:        toolName,
-				ToolInputMasked: truncateStr(maskJsonSecrets(inputJSON), 256),
-				StartedAt:       time.Now(),
-			}
-			h.tracker.pendingByID[fmt.Sprintf("tool:%s:%s", toolName, title)] = pending
-			h.tracker.mu.Unlock()
-		}
+	if err := json.Unmarshal([]byte(response), &result); err != nil {
+		return nil, 0
 	}
 
-	return ctx
+	count = len(result.Sources)
+	seen := make(map[string]bool, count)
+	for _, s := range result.Sources {
+		if s.Title != "" && !seen[s.Title] {
+			seen[s.Title] = true
+			titles = append(titles, s.Title)
+		}
+	}
+	return titles, count
 }
 
-func (h *agentCallbackHandler) onEnd(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
-	if info == nil {
-		return ctx
-	}
-	obsOk := h.obs != nil && h.tracker != nil
-
-	switch info.Component {
-	case "ChatModel":
-		modelOutput := model.ConvCallbackOutput(output)
-		if modelOutput != nil && modelOutput.Message != nil {
-			if len(modelOutput.Message.ToolCalls) > 0 {
-				for _, tc := range modelOutput.Message.ToolCalls {
-					query := extractQueryFromArgs(tc.Function.Arguments)
-					logger.Infof("[Callback] LLM 决定调用: %s(%q)", tc.Function.Name, query)
-				}
-				h.completeThinking()
-			} else {
-				h.completeThinking()
-				h.pendingThinkingTitle = "正在生成答案"
-				h.emit(Event{
-					Type:   EventThinking,
-					Title:  "正在生成答案",
-					Status: "running",
-				})
-			}
-		}
-		if obsOk {
-			h.tracker.mu.Lock()
-			key := fmt.Sprintf("llm:%d", h.callCount)
-			pending := h.tracker.pendingByID[key]
-			delete(h.tracker.pendingByID, key)
-			h.tracker.mu.Unlock()
-			if pending != nil {
-				step := &observability.AgentStep{
-					TaskID:          pending.TaskID,
-					StepIndex:       pending.StepIndex,
-					StartedAt:       pending.StartedAt,
-					EndedAt:         time.Now(),
-					ThinkingSummary: pending.ThinkingSummary,
-					LatencyMs:       time.Since(pending.StartedAt).Milliseconds(),
-					ToolName:        "llm.reasoning",
-					ToolStatus:      "success",
-				}
-				h.obs.RecordAgentStep(step)
-			}
-		}
-
-	case "Tool":
-		toolOutput := toolComp.ConvCallbackOutput(output)
-		toolName := info.Name
-		title, detail, toolResult := formatToolEnd(toolName, toolOutput, h.toolDescMap)
-
-		eventKey := fmt.Sprintf("result:%s:%s", toolName, title)
-		if h.sentToolEvents[eventKey] {
-			logger.Warnf("[Callback] 跳过重复的工具完成事件: %s", eventKey)
-			return ctx
-		}
-		h.sentToolEvents[eventKey] = true
-
-		h.emit(Event{
-			Type:       EventToolResult,
-			Title:      title,
-			Detail:     detail,
-			Status:     "success",
-			ToolResult: toolResult,
-		})
-
-		if obsOk {
-			h.tracker.mu.Lock()
-			key := fmt.Sprintf("tool:%s:%s", toolName, title)
-			pending := h.tracker.pendingByID[key]
-			delete(h.tracker.pendingByID, key)
-			h.tracker.mu.Unlock()
-			if pending != nil {
-				step := &observability.AgentStep{
-					TaskID:            pending.TaskID,
-					StepIndex:         pending.StepIndex,
-					StartedAt:         pending.StartedAt,
-					EndedAt:           time.Now(),
-					ToolName:          pending.ToolName,
-					ToolInputMasked:   pending.ToolInputMasked,
-					ToolResultSummary: truncateStr(toolResult, 256),
-					ToolStatus:        "success",
-					LatencyMs:         time.Since(pending.StartedAt).Milliseconds(),
-				}
-				h.obs.RecordAgentStep(step)
-			}
+func isWebSearchTool(name, desc string) bool {
+	combined := strings.ToLower(name + " " + desc)
+	for _, kw := range []string{"web", "search", "搜索", "联网", "tavily", "serp", "bocha", "sogou", "bing"} {
+		if strings.Contains(combined, kw) {
+			return true
 		}
 	}
-
-	return ctx
+	return false
 }
 
-func (h *agentCallbackHandler) onError(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
-	if info == nil {
-		return ctx
-	}
-	logger.Errorf("[Callback] 组件出错: node=%s, component=%s, err=%v", info.Name, info.Component, err)
-
-	title, detail, retryable := formatToolError(string(info.Component), info.Name, err)
-
-	h.emit(Event{
-		Type:      EventError,
-		Title:     title,
-		Detail:    detail,
-		Error:     err.Error(),
-		Status:    "error",
-		Retryable: retryable,
-		Done:      true,
-	})
-
-	if h.obs != nil && h.tracker != nil {
-		h.tracker.mu.Lock()
-		var pending *agentStepPending
-		for k, v := range h.tracker.pendingByID {
-			pending = v
-			delete(h.tracker.pendingByID, k)
-			break
-		}
-		h.tracker.mu.Unlock()
-		if pending != nil {
-			step := &observability.AgentStep{
-				TaskID:            pending.TaskID,
-				StepIndex:         pending.StepIndex,
-				StartedAt:         pending.StartedAt,
-				EndedAt:           time.Now(),
-				ThinkingSummary:   pending.ThinkingSummary,
-				ToolName:          pending.ToolName,
-				ToolInputMasked:   pending.ToolInputMasked,
-				ToolResultSummary: "",
-				ToolStatus:        "error",
-				ToolError:         truncateStr(err.Error(), 256),
-				LatencyMs:         time.Since(pending.StartedAt).Milliseconds(),
-			}
-			h.obs.RecordAgentStep(step)
-		}
-	}
-
-	return ctx
-}
-
-func maskJsonSecrets(s string) string {
-	if s == "" {
-		return ""
-	}
-	var obj any
-	if err := json.Unmarshal([]byte(s), &obj); err != nil {
-		return s
-	}
-	masked, _ := json.Marshal(maskAny(obj))
-	return string(masked)
-}
-
-func maskAny(v any) any {
-	switch x := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, val := range x {
-			lk := strings.ToLower(k)
-			if strings.Contains(lk, "key") || strings.Contains(lk, "token") ||
-				strings.Contains(lk, "password") || strings.Contains(lk, "secret") {
-				if s, ok := val.(string); ok {
-					out[k] = maskSecret(s)
-					continue
-				}
-			}
-			out[k] = maskAny(val)
-		}
-		return out
-	case []any:
-		out := make([]any, len(x))
-		for i, val := range x {
-			out[i] = maskAny(val)
-		}
-		return out
-	default:
-		return v
-	}
-}
-
-func maskSecret(s string) string {
-	if len(s) <= 8 {
-		return "***"
-	}
-	return s[:2] + "***" + s[len(s)-2:]
-}
-
+// formatToolStart 根据工具名和查询内容生成 EventToolCall 的 title 和 detail
 func formatToolStart(toolName, query string, kbIDs []string, toolDescMap map[string]string) (title, detail string) {
 	switch toolName {
 	case "knowledge_search":
@@ -365,16 +105,7 @@ func formatToolStart(toolName, query string, kbIDs []string, toolDescMap map[str
 	return fmt.Sprintf("正在执行 %s", label), ""
 }
 
-func isWebSearchTool(name, desc string) bool {
-	combined := strings.ToLower(name + " " + desc)
-	for _, kw := range []string{"web", "search", "搜索", "联网", "tavily", "serp", "bocha", "sogou", "bing"} {
-		if strings.Contains(combined, kw) {
-			return true
-		}
-	}
-	return false
-}
-
+// formatToolEnd 根据工具名和输出生成 EventToolResult 的 title、detail、toolResult
 func formatToolEnd(toolName string, output *toolComp.CallbackOutput, toolDescMap map[string]string) (title, detail, toolResult string) {
 	response := ""
 	if output != nil {
@@ -398,7 +129,7 @@ func formatToolEnd(toolName string, output *toolComp.CallbackOutput, toolDescMap
 		}
 		return "知识库检索完成", "未找到相关内容", toolResult
 	case "grep_chunks":
-		result := parseGrepResult(response)
+		result := parseGrepResponse(response)
 		if result.Success && result.Data != nil {
 			if dataList, ok := result.Data.([]interface{}); ok && len(dataList) > 0 {
 				return "关键词搜索完成", fmt.Sprintf("找到 %d 条匹配结果", len(dataList)), toolResult
@@ -442,57 +173,7 @@ func formatToolEnd(toolName string, output *toolComp.CallbackOutput, toolDescMap
 	return fmt.Sprintf("%s 执行完成", toolName), "", toolResult
 }
 
-type ToolResponseData struct {
-	Success bool        `json:"success"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data"`
-}
-
-func parseToolResponse(response string) ToolResponseData {
-	var result ToolResponseData
-	if err := json.Unmarshal([]byte(response), &result); err != nil {
-		return ToolResponseData{Success: false, Message: response}
-	}
-	return result
-}
-
-func parseGrepResult(response string) ToolResponseData {
-	return parseToolResponse(response)
-}
-
-func parseKnowledgeSearchResult(response string) (titles []string, count int) {
-	var result struct {
-		Sources []struct {
-			Title string `json:"title"`
-		} `json:"sources"`
-	}
-	if err := json.Unmarshal([]byte(response), &result); err != nil {
-		return nil, 0
-	}
-
-	count = len(result.Sources)
-	seen := make(map[string]bool, count)
-	for _, s := range result.Sources {
-		if s.Title != "" && !seen[s.Title] {
-			seen[s.Title] = true
-			titles = append(titles, s.Title)
-		}
-	}
-	return titles, count
-}
-
-func (h *agentCallbackHandler) completeThinking() {
-	if h.pendingThinkingTitle == "" {
-		return
-	}
-	h.emit(Event{
-		Type:   EventThinking,
-		Title:  h.pendingThinkingTitle,
-		Status: "success",
-	})
-	h.pendingThinkingTitle = ""
-}
-
+// formatToolError 根据组件类型和错误生成 EventError 的 title、detail、retryable
 func formatToolError(component, name string, err error) (title, detail string, retryable bool) {
 	errMsg := err.Error()
 
@@ -552,15 +233,5 @@ func formatToolError(component, name string, err error) (title, detail string, r
 
 	default:
 		return fmt.Sprintf("%s 执行出错", component), "服务执行异常，请稍后重试", true
-	}
-}
-
-func (h *agentCallbackHandler) emit(e Event) {
-	logger.Infof("[Callback] 发送事件: type=%s, title=%s, status=%s, detail=%s",
-		e.Type, e.Title, e.Status, truncateStr(e.Detail, 60))
-	select {
-	case h.eventCh <- e:
-	default:
-		logger.Warnf("[Callback] ⚠️ 事件通道已满，丢弃事件: type=%s, title=%s", e.Type, e.Title)
 	}
 }

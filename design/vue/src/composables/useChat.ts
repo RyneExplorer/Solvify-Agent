@@ -1,4 +1,4 @@
-import { ref, computed, nextTick, inject } from 'vue'
+import { ref, computed, nextTick, inject, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
@@ -6,7 +6,7 @@ import * as chatApi from '@/api/chat'
 import * as modelApi from '@/api/model'
 import * as authApi from '@/api/auth'
 import { request } from '@/api/client'
-import type { ChatSession, FeedbackRequest } from '@/types/chat'
+import type { ChatSession, FeedbackRequest, PendingApproval } from '@/types/chat'
 import type { StreamEvent } from '@/types/chat'
 
 // ── UI 展示用的本地类型 ──
@@ -104,6 +104,11 @@ export function useChat() {
 
   // ── 中断控制 ──
   let abortController: AbortController | null = null
+
+  // ── 审批状态（危险工具中断） ──
+  const pendingApproval = ref<PendingApproval | null>(null)
+  // interrupt 事件所在的 assistant 消息块 ID，恢复流程复用同一个
+  let interruptedAssistantId = ''
 
   // ── 计算属性 ──
   const activeSession = computed(() =>
@@ -241,8 +246,28 @@ export function useChat() {
     loadMessages(sessionId)
   }
 
+  // 切换会话时恢复/清除审批卡状态
+  watch(
+    () => activeSession.value,
+    (sess) => {
+      const pc = sess?.pending_checkpoint
+      if (pc && pc.checkpoint_id) {
+        pendingApproval.value = {
+          checkpoint_id: pc.checkpoint_id,
+          interrupt_id: pc.interrupt_id,
+          title: '需要人工确认',
+          detail: pc.question ?? '执行被中断，等待用户审批',
+          tool_name: pc.tool_name,
+        }
+      } else {
+        pendingApproval.value = null
+      }
+    },
+    { immediate: true },
+  )
+
   // ── 发送消息（SSE 流式） ──
-  async function sendMessage() {
+  async function sendMessage(displayText?: string, isResume = false) {
     const content = input.value.trim()
     if (!content || isLoading.value) return
 
@@ -251,15 +276,23 @@ export function useChat() {
       return
     }
 
-    // 延迟清空输入框，避免跳转后问题丢失
-    // 如果是新会话，等会话创建成功后再清空
     const isNewSession = !activeSessionId.value
-    if (!isNewSession) {
-      // 已有会话，立即清空
+
+    if (isResume) {
+      // 恢复流程：不 push 用户气泡，审批内容不是新的提问
       input.value = ''
+    } else {
+      const display = displayText ?? content
+
+      // 延迟清空输入框，避免跳转后问题丢失
+      if (!isNewSession) {
+        // 已有会话，立即清空
+        input.value = ''
+      }
+
+      messages.value.push({ id: 'u-' + Date.now(), role: 'user', content: display })
     }
 
-    messages.value.push({ id: 'u-' + Date.now(), role: 'user', content })
     isLoading.value = true
     progressText.value = ''
     streamContent.value = ''
@@ -336,7 +369,13 @@ export function useChat() {
 
             switch (evt.type) {
               case 'start':
-                if (evt.message_id) assistantId = evt.message_id
+                // 恢复流程：复用 interrupt 时的 assistant 块 ID，保持在同一块里
+                if (interruptedAssistantId) {
+                  assistantId = interruptedAssistantId
+                  interruptedAssistantId = ''
+                } else if (evt.message_id) {
+                  assistantId = evt.message_id
+                }
                 if (evt.sources) finalSources = evt.sources
                 break
 
@@ -415,6 +454,41 @@ export function useChat() {
                 })
                 return
 
+              case 'interrupt': {
+                isLoading.value = false
+                progressText.value = ''
+                streamContent.value = ''
+                streamSources.value = []
+                // streamTimeline 不清空，interrupt 前的步骤保留，恢复后继续累加
+                const info = evt.interrupt_info ?? {}
+                const approval: PendingApproval = {
+                  checkpoint_id: evt.checkpoint_id ?? '',
+                  interrupt_id: evt.interrupt_id ?? '',
+                  title: '需要人工确认',
+                  detail: evt.detail ?? (info?.message as string) ?? '执行被中断，等待用户处理',
+                  tool_name: (info?.tool_name as string) ?? '',
+                  target_ref: (info?.target_ref as string) ?? '',
+                  reason: (info?.reason as string) ?? '',
+                }
+                pendingApproval.value = approval
+                // 记录 assistant 块 ID，恢复时 done 事件复用同一块
+                interruptedAssistantId = assistantId || 'a-' + Date.now()
+                return
+              }
+
+              case 'clarify': {
+                isLoading.value = false
+                progressText.value = ''
+                const q = evt.clarify?.question ?? evt.detail ?? ''
+                const opts = evt.clarify?.options ?? []
+                messages.value.push({
+                  id: 'c-' + Date.now(),
+                  role: 'assistant',
+                  content: q,
+                })
+                break
+              }
+
               case 'done':
                 streamTimeline.value.forEach(
                   (s) => s.status === 'running' && (s.status = 'success'),
@@ -423,19 +497,31 @@ export function useChat() {
                   finalSources = evt.sources
                   streamSources.value = evt.sources
                 }
-                messages.value.push({
-                  id: assistantId || 'a-' + Date.now(),
-                  role: 'assistant',
-                  content: finalContent,
-                  sources: finalSources,
-                  timeline:
-                    streamTimeline.value.length > 0
-                      ? [...streamTimeline.value]
-                      : undefined,
-                  trace_id: traceId,
-                })
-                if (streamTimeline.value.length > 0) {
-                  collapsedTimelines.value.add(messages.value.length - 1)
+                const doneTimeline = streamTimeline.value.length > 0 ? [...streamTimeline.value] : undefined
+                const finalAssistantId = assistantId || 'a-' + Date.now()
+                // 恢复流程：assistantId 已存在（interrupt 时 push 过），更新那条而不是新建
+                const existingIdx = messages.value.findIndex((m) => m.id === finalAssistantId)
+                if (existingIdx >= 0) {
+                  const updated = [...messages.value]
+                  updated[existingIdx] = {
+                    ...updated[existingIdx],
+                    content: finalContent,
+                    sources: finalSources.length > 0 ? finalSources : updated[existingIdx].sources,
+                    timeline: doneTimeline ?? updated[existingIdx].timeline,
+                    trace_id: traceId,
+                  }
+                  messages.value = updated
+                  if (doneTimeline) collapsedTimelines.value.add(existingIdx)
+                } else {
+                  messages.value.push({
+                    id: finalAssistantId,
+                    role: 'assistant',
+                    content: finalContent,
+                    sources: finalSources,
+                    timeline: doneTimeline,
+                    trace_id: traceId,
+                  })
+                  if (doneTimeline) collapsedTimelines.value.add(messages.value.length - 1)
                 }
                 isLoading.value = false
                 streamContent.value = ''
@@ -559,6 +645,19 @@ export function useChat() {
     if (abortController) {
       abortController.abort()
     }
+  }
+
+  // ── 危险工具审批 ──
+  function approvePending(resolution: 'approve' | 'reject') {
+    if (!pendingApproval.value) return
+    input.value = resolution // 请求内容
+    pendingApproval.value = null
+    void sendMessage(undefined, true) // isResume=true: 不 push 用户气泡
+  }
+
+  function cancelApproval() {
+    pendingApproval.value = null
+    interruptedAssistantId = ''
   }
 
   // ── 反馈 ──
@@ -740,6 +839,9 @@ export function useChat() {
     submitFeedback,
     newChat,
     cleanTooltipText,
+    pendingApproval,
+    approvePending,
+    cancelApproval,
   }
 }
 

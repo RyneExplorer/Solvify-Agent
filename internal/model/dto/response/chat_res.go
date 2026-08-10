@@ -2,14 +2,24 @@ package response
 
 import "time"
 
+// PendingCheckpointInfo 前端恢复审批状态用
+type PendingCheckpointInfo struct {
+	CheckpointID string    `json:"checkpoint_id"`
+	InterruptID  string    `json:"interrupt_id"`
+	Question     string    `json:"question,omitempty"`
+	ToolName     string    `json:"tool_name,omitempty"`
+	SetAt        time.Time `json:"set_at"`
+}
+
 // SessionResponse 描述聊天会话响应
 type SessionResponse struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	ModelID   string    `json:"model_id"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID               string                `json:"id"`
+	Title            string                `json:"title"`
+	ModelID          string                `json:"model_id"`
+	Status           string                `json:"status"`
+	PendingCheckpoint *PendingCheckpointInfo `json:"pending_checkpoint,omitempty"`
+	CreatedAt        time.Time             `json:"created_at"`
+	UpdatedAt        time.Time             `json:"updated_at"`
 }
 
 // MessageResponse 描述聊天消息响应
@@ -60,6 +70,18 @@ type StreamEvent struct {
 	Done             bool   `json:"done"`
 	Error            string `json:"error,omitempty"`
 	Retryable        bool   `json:"retryable,omitempty"` // 是否可重试
+	// clarify 事件字段：追问
+	Clarify *ClarifyPayload `json:"clarify,omitempty"`
+	// interrupt 事件字段：中断等待用户审批
+	CheckpointID  string         `json:"checkpoint_id,omitempty"`
+	InterruptID   string         `json:"interrupt_id,omitempty"`
+	InterruptInfo map[string]any `json:"interrupt_info,omitempty"`
+}
+
+// ClarifyPayload 追问事件载体（need 用户补充后才能继续回答）
+type ClarifyPayload struct {
+	Question string   `json:"question"`
+	Options  []string `json:"options,omitempty"`
 }
 
 // CitationInfo 描述引用信息（前端 hover 用）

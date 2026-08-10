@@ -170,6 +170,38 @@
               </div>
             </div>
           </div>
+
+          <!-- Pending Approval Card -->
+          <div v-if="pendingApproval" class="flex justify-start">
+            <div class="max-w-[80%]">
+              <div class="rounded-xl border border-amber-200 bg-amber-50 shadow-sm overflow-hidden">
+                <div class="flex items-center gap-2 px-4 py-2.5 border-b border-amber-200 bg-amber-100/50">
+                  <svg class="w-4 h-4 text-amber-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                  </svg>
+                  <span class="text-xs font-semibold text-amber-800">需要人工确认</span>
+                  <span v-if="pendingApproval.tool_name" class="ml-auto text-[11px] text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full font-mono">{{ pendingApproval.tool_name }}</span>
+                </div>
+                <div class="px-4 py-3">
+                  <p class="text-sm text-amber-900 leading-relaxed">{{ pendingApproval.detail }}</p>
+                  <div class="mt-3 flex items-center gap-2">
+                    <button
+                      @click="approvePending('approve')"
+                      class="px-4 py-1.5 text-xs font-medium rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white transition-colors shadow-sm"
+                    >同意执行</button>
+                    <button
+                      @click="approvePending('reject')"
+                      class="px-4 py-1.5 text-xs font-medium rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 transition-colors"
+                    >拒绝</button>
+                    <button
+                      @click="cancelApproval"
+                      class="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-600 ml-auto"
+                    >暂不处理</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -328,6 +360,7 @@ const {
   modelOptions, knowledgeBases, connected, input, selectedModel, selectedKBs, searchMode, kbTriggerText,
   init, sendMessage, scrollToBottom, toggleKB, formatContent, getSourceChunkIds, copyText, regenerate, retryLastMessage, stopGeneration,
   selectSession, loadSessions, newChat, cleanTooltipText, submitFeedback,
+  pendingApproval, approvePending, cancelApproval,
 } = chat
 
 const chatEl = ref<HTMLDivElement>()

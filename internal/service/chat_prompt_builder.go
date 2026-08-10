@@ -254,8 +254,10 @@ func (b *PromptBuilder) BuildHistoryForAgent(history []entity.ChatMessage) []ent
 }
 
 // BuildAgentRequestFields 深度模式：把 builder 中的摘要 / 记忆 / 用户上下文填充到 agent.Request 对应字段
-// P1-⑦（PromptBuilder 单入口）：System Prompt 由 PromptBuilder.BuildSystem() 统一产出后直接塞到
-// agent.Request.SystemPrompt，agent.runAgent 不再二次拼接，保证快速/深度两模式的摘要/记忆/偏好注入完全一致。
+// System Prompt 由 PromptBuilder.BuildSystem() 统一产出后塞到 agent.Request.SystemPrompt，
+// agent.runAgent 只负责在前面拼接 ReAct 规则，保证快速/深度两模式的摘要/记忆/偏好注入完全一致。
+// 同时完整填充 UserCtx 作为兜底：如果将来 runAgent 因某种原因拿到空的 SystemPrompt，
+// 还能从 UserCtx + Summary + Memories 重建增强提示词。
 func (b *PromptBuilder) BuildAgentRequestFields(userID, query, modelID, modelType string, kbIDs []string, history []entity.ChatMessage) agentpkg.Request {
 	return agentpkg.Request{
 		UserID:           userID,
@@ -266,13 +268,26 @@ func (b *PromptBuilder) BuildAgentRequestFields(userID, query, modelID, modelTyp
 		ModelType:        modelType,
 		Summary:          b.summary,
 		Memories:         b.memories,
-		UserCtx: agentpkg.PromptUserContext{
-			ID:       b.userCtx.ID,
-			Username: b.userCtx.Username,
-			Role:     b.userCtx.Role,
-			TimeStr:  b.userCtx.TimeStr,
-		},
-		SystemPrompt: b.BuildSystem(),
+		UserCtx:          b.toAgentPromptUserContext(),
+		SystemPrompt:     b.BuildSystem(),
+	}
+}
+
+// toAgentPromptUserContext 把内部 UserContext 完整转换为 agent.PromptUserContext
+func (b *PromptBuilder) toAgentPromptUserContext() agentpkg.PromptUserContext {
+	return agentpkg.PromptUserContext{
+		ID:            b.userCtx.ID,
+		Username:      b.userCtx.Username,
+		Role:          b.userCtx.Role,
+		TimeStr:       b.userCtx.TimeStr,
+		Department:    b.userCtx.Department,
+		Position:      b.userCtx.Position,
+		Expertise:     b.userCtx.Expertise,
+		Language:      b.userCtx.Language,
+		Timezone:      b.userCtx.Timezone,
+		AnswerStyle:   b.userCtx.AnswerStyle,
+		TableFirst:    b.userCtx.TableFirst,
+		CitationStyle: b.userCtx.CitationStyle,
 	}
 }
 

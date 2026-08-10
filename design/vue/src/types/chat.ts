@@ -1,10 +1,19 @@
 // ── Session ──
 
+export interface PendingCheckpointInfo {
+  checkpoint_id: string
+  interrupt_id: string
+  question?: string
+  tool_name?: string
+  set_at: string
+}
+
 export interface ChatSession {
   id: string
   title: string
   model_id: string
   status: string
+  pending_checkpoint?: PendingCheckpointInfo | null
   created_at: string
   updated_at: string
 }
@@ -67,6 +76,11 @@ export interface SendMessageRequest {
 
 // ── SSE Stream Event ──
 
+export interface ClarifyPayload {
+  question: string
+  options?: string[]
+}
+
 export interface StreamEvent {
   type: string
   title?: string
@@ -82,6 +96,24 @@ export interface StreamEvent {
   done?: boolean
   error?: string
   retryable?: boolean
+  // clarify 事件字段：追问
+  clarify?: ClarifyPayload
+  // interrupt 事件字段：中断等待用户审批
+  checkpoint_id?: string
+  interrupt_id?: string
+  interrupt_info?: Record<string, unknown>
+}
+
+// ── 审批请求状态（前端本地） ──
+
+export interface PendingApproval {
+  checkpoint_id: string
+  interrupt_id: string
+  title: string
+  detail: string
+  tool_name?: string
+  target_ref?: string
+  reason?: string
 }
 
 // ── List Responses ──

@@ -1,134 +1,45 @@
+// Command migrate 执行数据库 schema 迁移（用 GORM AutoMigrate）。
+// 用法: go run ./cmd/migrate
 package main
 
 import (
-	"context"
-	"database/sql"
-	"flag"
 	"fmt"
-	"os"
-	"strings"
-	"time"
+	"log"
 
+	"solvify-agent/internal/model/entity"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/database"
 	"solvify-agent/pkg/logger"
 )
 
 func main() {
-	var (
-		configPath = flag.String("config", "configs/config.yaml", "配置文件路径")
-		dryRun     = flag.Bool("dry-run", false, "仅打印要执行的 SQL，不真正运行")
-	)
-	flag.Parse()
+	_ = logger.InitDefault()
 
-	files := flag.Args()
-	if len(files) == 0 {
-		fmt.Println("用法: go run cmd/migrate/main.go [-config=...] [-dry-run] <sql 文件1> [sql 文件2] ...")
-		os.Exit(1)
-	}
-
-	// 加载配置
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.Load("configs/config.yaml")
 	if err != nil {
-		fmt.Printf("加载配置失败: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("加载配置失败: %v", err)
 	}
 
-	// 初始化日志
-	logger.Init(&cfg.Log)
-
-	// 连接 PostgreSQL
 	db, err := database.OpenPostgreSQL(&cfg.Database.Postgres)
 	if err != nil {
-		fmt.Printf("连接数据库失败: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("连接 PostgreSQL 失败: %v", err)
 	}
-	defer func() { _ = database.ClosePostgreSQL(db) }()
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
 
-	sqlDB, err := db.DB()
-	if err != nil {
-		fmt.Printf("获取连接池失败: %v\n", err)
-		os.Exit(1)
+	fmt.Println("开始迁移...")
+
+	// 迁移 ChatSession（自动补 pending_clarify / pending_checkpoint 列）
+	if err := db.AutoMigrate(&entity.ChatSession{}); err != nil {
+		log.Fatalf("迁移 ChatSession 失败: %v", err)
 	}
+	fmt.Println("✓ chat_sessions 已就绪")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	for _, file := range files {
-		sql, err := os.ReadFile(file)
-		if err != nil {
-			fmt.Printf("读取 SQL 文件失败 %s: %v\n", file, err)
-			os.Exit(1)
-		}
-
-		if *dryRun {
-			fmt.Printf("\n--- %s (dry-run) ---\n%s\n", file, string(sql))
-			continue
-		}
-
-		fmt.Printf("正在执行: %s\n", file)
-		if isSelectQuery(string(sql)) {
-			if err := queryAndPrint(ctx, sqlDB, string(sql)); err != nil {
-				fmt.Printf("查询失败 %s: %v\n", file, err)
-				os.Exit(1)
-			}
-		} else {
-			if _, err := sqlDB.ExecContext(ctx, string(sql)); err != nil {
-				fmt.Printf("执行 SQL 失败 %s: %v\n", file, err)
-				os.Exit(1)
-			}
-		}
-		fmt.Printf("完成: %s\n", file)
+	// 创建 agent_checkpoints 表
+	if err := db.AutoMigrate(&entity.AgentCheckpoint{}); err != nil {
+		log.Fatalf("迁移 AgentCheckpoint 失败: %v", err)
 	}
+	fmt.Println("✓ agent_checkpoints 已就绪")
 
-	fmt.Println("\n所有 SQL 脚本执行完成")
-}
-
-func isSelectQuery(sql string) bool {
-	trimmed := strings.TrimSpace(sql)
-	// 跳过单行注释，找到第一个有效 token
-	for strings.HasPrefix(trimmed, "--") {
-		idx := strings.Index(trimmed, "\n")
-		if idx < 0 {
-			return false
-		}
-		trimmed = strings.TrimSpace(trimmed[idx+1:])
-	}
-	return strings.HasPrefix(strings.ToUpper(trimmed), "SELECT")
-}
-
-func queryAndPrint(ctx context.Context, db *sql.DB, query string) error {
-	rows, err := db.QueryContext(ctx, query)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	columns, err := rows.Columns()
-	if err != nil {
-		return err
-	}
-
-	fmt.Println(strings.Join(columns, " | "))
-	fmt.Println(strings.Repeat("-", 60))
-
-	values := make([]interface{}, len(columns))
-	valuePtrs := make([]interface{}, len(columns))
-	for i := range values {
-		valuePtrs[i] = &values[i]
-	}
-
-	for rows.Next() {
-		if err := rows.Scan(valuePtrs...); err != nil {
-			return err
-		}
-		for i, v := range values {
-			if i > 0 {
-				fmt.Print(" | ")
-			}
-			fmt.Printf("%v", v)
-		}
-		fmt.Println()
-	}
-	return rows.Err()
+	fmt.Println("迁移完成 ✅")
 }

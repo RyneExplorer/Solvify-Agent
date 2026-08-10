@@ -4,19 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/bytedance/sonic"
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
-	einoAgent "github.com/cloudwego/eino/flow/agent"
-	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 
-	"solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/observability"
 	"solvify-agent/internal/tool"
@@ -51,6 +50,17 @@ type agentStepPending struct {
 	StartedAt       time.Time
 }
 
+// isInternalToolName 判断工具名是否为内置工具
+// registry 里注册过的就是内置，否则是用户配置的
+func (e *Engine) isInternalToolName(name string) bool {
+	for _, entry := range e.internalTools {
+		if entry.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.ToolCallingChatModel, eventCh chan<- Event) {
 	obsOk := e.obs != nil
 	var tracker *agentStepTracker
@@ -66,31 +76,22 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 		e.obs.Incr(ctx, "agent_engine_runs_total", nil, 1)
 	}
 
+	// ── 构建工具列表：内置 registry + 用户配置 ──
 	var allTools []einoTool.BaseTool
-	if pre, ok := prebuiltToolsFromContext(ctx); ok && len(pre.Tools) > 0 {
-		// 走深度模式入口预构建分支：工具集 + toolsTokens 已经提前扣好
-		allTools = pre.Tools
-	} else {
-		// 回退分支（如 Execute 被直接调用、预构建失败）：按原逻辑现场构建
-		ksTool := e.knowledgeSearchFactory(req.UserID, req.KnowledgeBaseIDs)
-		grepTool := e.grepChunksFactory(req.UserID, req.KnowledgeBaseIDs)
-		docInfoTool := e.getDocumentInfoFactory(req.UserID)
-		listChunksTool := e.listKnowledgeChunksFactory(req.UserID, req.KnowledgeBaseIDs)
-		listBasesTool := e.listKnowledgeBasesFactory(req.UserID)
-		userTools := e.toolFactory.CreateAgentTools(ctx, req.UserID)
 
-		allTools = make([]einoTool.BaseTool, 0, 5+len(userTools))
-		allTools = append(allTools, ksTool)
-		allTools = append(allTools, grepTool)
-		allTools = append(allTools, docInfoTool)
-		allTools = append(allTools, listChunksTool)
-		allTools = append(allTools, listBasesTool)
-		allTools = append(allTools, userTools...)
+	// 内置工具按 Order 排序后逐个 Build
+	sorted := make([]internalToolRegistryEntry, len(e.internalTools))
+	copy(sorted, e.internalTools)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Order < sorted[j].Order })
+	for _, entry := range sorted {
+		allTools = append(allTools, entry.Build(ctx, req.UserID, req.KnowledgeBaseIDs))
 	}
 
-	userTools := e.toolFactory.CreateAgentTools(ctx, req.UserID) // 仅用于下面日志中"用户工具数"展示
-	_ = userTools
+	// 用户配置的工具
+	userTools := e.toolFactory.CreateAgentTools(ctx, req.UserID)
+	allTools = append(allTools, userTools...)
 
+	// ── 工具统计 + 日志 ──
 	toolDescMap := make(map[string]string, len(allTools))
 	userToolsN := 0
 	for _, t := range allTools {
@@ -99,24 +100,20 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 			logger.Warnf("[Agent] 获取工具信息失败: %v", err)
 			continue
 		}
-		// heuristics: 内置 5 个工具名按前缀匹配，剩下的记作用户工具；日志只用于展示，不影响执行
-		switch info.Name {
-		case "knowledge_search", "grep_chunks", "get_document_info", "list_knowledge_chunks", "list_knowledge_bases":
-		default:
+		if !e.isInternalToolName(info.Name) {
 			userToolsN++
 		}
 		toolDescMap[info.Name] = info.Desc
 		logger.Infof("[Agent]   工具: name=%s, desc=%s", info.Name, truncateStr(info.Desc, 80))
 	}
-	logger.Infof("[Agent] userID=%s, 工具总数=%d (内置5个 + %d 用户工具)", req.UserID, len(allTools), userToolsN)
-	if userToolsN < 0 {
-		userToolsN = 0
-	}
+	logger.Infof("[Agent] userID=%s, 工具总数=%d (内置=%d + 用户工具=%d)",
+		req.UserID, len(allTools), len(e.internalTools), userToolsN)
 	if userToolsN == 0 {
 		logger.Warnf("[Agent] 未加载到用户配置的工具（如联网搜索），请检查用户工具配置是否已启用")
 	}
 
-	baseSystemPrompt := buildReActSystemPrompt(ctx, userTools)
+	// ── 系统提示词 ──
+	baseSystemPrompt := buildReActSystemPrompt(ctx, allTools, sorted)
 	var ksToolForStream *tool.KnowledgeSearchTool
 	for _, t := range allTools {
 		if k, ok := t.(*tool.KnowledgeSearchTool); ok {
@@ -126,239 +123,112 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	}
 	var systemPromptFinal string
 	if req.SystemPrompt != "" {
-		systemPromptFinal = baseSystemPrompt + "\n\n" + req.SystemPrompt
+		enhanced := strings.TrimLeft(req.SystemPrompt, "\n")
+		systemPromptFinal = baseSystemPrompt + "\n\n" + enhanced
 	} else {
-		systemPromptFinal = buildEnhancedSystemPromptForAgent(baseSystemPrompt, req.Summary, req.Memories, req.UserCtx)
+		systemPromptFinal = baseSystemPrompt
 	}
 	logger.Infof("[Agent] SystemPrompt (前400字符): %s", truncateStr(systemPromptFinal, 400))
+
 	inputMessages := buildInputMessages(req.Query, req.History)
-	// 运行 Agent 流程
-	{
-		maxStep := e.cfg.MaxIterations
-		if maxStep <= 0 {
-			maxStep = 5
-		}
 
-		ag, err := react.NewAgent(ctx, &react.AgentConfig{
-			ToolCallingModel: chatModel,
-			ToolsConfig: compose.ToolsNodeConfig{
-				Tools: allTools,
-			},
-			MaxStep: maxStep,
-			MessageModifier: func(_ context.Context, msgs []*schema.Message) []*schema.Message {
-				return append([]*schema.Message{schema.SystemMessage(systemPromptFinal)}, msgs...)
-			},
-		})
-		if err != nil {
-			logger.Errorf("Agent 初始化失败: %v", err)
-			if obsOk {
-				e.obs.Incr(ctx, "agent_engine_errors_total", map[string]string{"stage": "init"}, 1)
-			}
-			eventCh <- Event{
-				Type:      EventError,
-				Title:     "深度模式启动失败",
-				Detail:    "请尝试切换到快速模式，或稍后重试",
-				Error:     err.Error(),
-				Status:    "error",
-				Retryable: true,
-				Done:      true,
-			}
-			return
-		}
-
-		callbackHandler := newAgentCallbackHandler(eventCh, req.KnowledgeBaseIDs, toolDescMap)
-		callbackHandler.taskID = taskID
-		callbackHandler.tracker = tracker
-		callbackHandler.obs = e.obs
-
-		stream, err := ag.Stream(ctx, inputMessages, einoAgent.WithComposeOptions(compose.WithCallbacks(callbackHandler.Handler())))
-		if err != nil {
-			logger.Errorf("Agent 调用失败: %v", err)
-			if obsOk {
-				e.obs.Incr(ctx, "agent_engine_errors_total", map[string]string{"stage": "stream"}, 1)
-			}
-			errMsg := err.Error()
-
-			if isToolChoiceUnsupportedError(errMsg) {
-				eventCh <- Event{
-					Type:      EventError,
-					Title:     "当前模型不支持工具调用",
-					Detail:    "该模型不支持工具调用功能，无法使用联网搜索、天气查询等工具。建议切换到支持工具调用的模型（如通义千问、智谱清言、DeepSeek 等），或使用快速模式。",
-					Error:     errMsg,
-					Status:    "error",
-					Retryable: false,
-					Done:      true,
-				}
-				return
-			}
-
-			eventCh <- Event{
-				Type:      EventError,
-				Title:     "深度推理失败",
-				Detail:    "深度思考模式执行异常，请重试或使用快速模式",
-				Error:     errMsg,
-				Status:    "error",
-				Retryable: true,
-				Done:      true,
-			}
-			return
-		}
-
-		e.processStream(ctx, stream, ksToolForStream, eventCh)
+	maxStep := e.cfg.MaxIterations
+	if maxStep <= 0 {
+		maxStep = 5
 	}
+
+	// ── 创建 adk.ChatModelAgent ──
+	toolsNodeConfig := compose.ToolsNodeConfig{
+		Tools: allTools,
+
+		// 兜底：LLM 传了无效 JSON 时，返回 {} 让 InferTool 给业务函数零值 struct，
+		// 业务函数里会检查必填字段并返回 ToolResponse{Success:false}，
+		// LLM 看到错误信息后可以自行修正参数重试。
+		// 不加这个的话 InferTool 内部 sonic.Unmarshal 失败会直接 return error → 整个 Agent 崩。
+		ToolArgumentsHandler: func(ctx context.Context, toolName, arguments string) (string, error) {
+			if arguments == "" {
+				return "{}", nil
+			}
+			var tmp map[string]any
+			if err := sonic.UnmarshalString(arguments, &tmp); err != nil {
+				logger.Warnf("[Agent] ToolArgumentsHandler: %s 参数 JSON 解析失败，已降级为空对象: raw=%q, err=%v",
+					toolName, truncateStr(arguments, 200), err)
+				return "{}", nil
+			}
+			return arguments, nil
+		},
+
+		UnknownToolsHandler: func(ctx context.Context, name, input string) (string, error) {
+			logger.Warnf("[Agent] UnknownToolsHandler: LLM 调用了不存在的工具 %q，参数=%s", name, truncateStr(input, 200))
+			return fmt.Sprintf("⚠️ 工具 %q 不存在，可用工具请查看系统提示。请检查工具名拼写后重试。", name), nil
+		},
+	}
+	// 有危险工具时注入审批中间件
+	if dangerousNames := e.dangerousToolNames(); len(dangerousNames) > 0 {
+		toolsNodeConfig.ToolCallMiddlewares = []compose.ToolMiddleware{
+			{Invokable: buildDangerousToolMiddleware(dangerousNames)},
+		}
+		logger.Infof("[Agent] 已注入危险工具审批中间件，工具列表=%v", dangerousNames)
+	}
+
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "SolvifyDeepAgent",
+		Description: "深度模式 Agent，能够调用知识库和外部工具进行多步推理",
+		Instruction: systemPromptFinal,
+		Model:       chatModel,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: toolsNodeConfig,
+		},
+		MaxIterations: maxStep,
+	})
+	if err != nil {
+		logger.Errorf("[Agent] ChatModelAgent 初始化失败: %v", err)
+		if obsOk {
+			e.obs.Incr(ctx, "agent_engine_errors_total", map[string]string{"stage": "init"}, 1)
+		}
+		eventCh <- Event{
+			Type:      EventError,
+			Title:     "深度模式启动失败",
+			Detail:    "请尝试切换到快速模式，或稍后重试",
+			Error:     err.Error(),
+			Status:    "error",
+			Retryable: true,
+			Done:      true,
+		}
+		return
+	}
+
+	// ── 创建 Runner ──
+	checkpointID := req.CheckpointID
+	if checkpointID == "" {
+		checkpointID = fmt.Sprintf("agent-%s-%s-%s-%d", req.SessionID, req.UserID, randomStr8(), time.Now().UnixNano())
+	} else {
+		logger.Infof("[Agent] 恢复执行：复用 checkpointID=%s", checkpointID)
+	}
+	store := e.buildCheckpointStore(req.SessionID)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:           agent,
+		EnableStreaming:  true,
+		CheckPointStore: store,
+	})
+
+	// ── 执行：首次 Run 或带 ResumeData 的 Resume ──
+	e.runWithRunner(ctx, runner, checkpointID, inputMessages, req, ksToolForStream, toolDescMap, eventCh, tracker, taskID)
 }
 
-func randomStr16() string {
+func randomStr(n int) string {
 	const alpha = "0123456789abcdef"
-	out := make([]byte, 16)
+	buf := make([]byte, n)
 	seed := time.Now().UnixNano()
-	for i := range out {
+	for i := 0; i < n; i++ {
 		seed = seed*1103515245 + 12345
-		out[i] = alpha[int(seed>>16)&15]
+		buf[i] = alpha[int(seed>>16)&15]
 	}
-	return string(out)
+	return string(buf)
 }
 
-func (e *Engine) processStream(ctx context.Context, stream *schema.StreamReader[*schema.Message], ksTool *tool.KnowledgeSearchTool, eventCh chan<- Event) {
-	defer stream.Close()
-
-	var fullAnswer string
-
-	for {
-		msg, err := stream.Recv()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			if ctx.Err() != nil {
-				logger.Infof("Agent 流被用户中断，已收集 %d 字符", len(fullAnswer))
-				break
-			}
-			logger.Errorf("Agent 流读取失败: %v", err)
-			eventCh <- Event{
-				Type:      EventError,
-				Title:     "推理过程中断",
-				Detail:    "深度推理过程中断，请重试",
-				Error:     err.Error(),
-				Status:    "error",
-				Retryable: true,
-				Done:      true,
-			}
-			return
-		}
-		if msg == nil {
-			continue
-		}
-
-		if msg.Role != schema.Assistant {
-			continue
-		}
-
-		if len(msg.ToolCalls) > 0 {
-			// ── 中间思考轮次（下一步还要调用工具）──
-			// 1) msg.Content 是 reasoning/推理思考，不能作为最终答案给用户看
-			// 2) 只发 EventThinking 通知前端进度，不发 EventAnswer，不拼进 fullAnswer
-			if strings.TrimSpace(msg.Content) != "" {
-				thinking := truncateStr(msg.Content, 200)
-				eventCh <- Event{
-					Type:   EventThinking,
-					Title:  "深度推理中",
-					Detail: thinking,
-					Status: "running",
-				}
-			}
-			continue
-		}
-
-		if msg.Content != "" {
-			// ── 最终答案轮次（没有下一步 ToolCalls，真正面向用户的正文）──
-			fullAnswer += msg.Content
-			eventCh <- Event{Type: EventAnswer, Content: msg.Content}
-		}
-	}
-
-	// ── 兜底：极端情况（每一轮都有 ToolCalls，MaxStep 到了还没出最终答案）
-	//    用知识库已命中的前 N 条来源拼一个总结，绝对不能把中间思考当答案发
-	if strings.TrimSpace(fullAnswer) == "" && len(ksTool.CollectedSources) > 0 {
-		var sb strings.Builder
-		sb.WriteString("## 知识库检索结果总结\n\n")
-		sb.WriteString("根据当前检索到的内容，为您整理以下要点：\n\n")
-		usedTitles := make(map[string]bool, len(ksTool.CollectedSources))
-		const maxTop = 5
-		for i, src := range ksTool.CollectedSources {
-			if i >= maxTop {
-				break
-			}
-			title := src.Title
-			if title == "" {
-				title = "未命名文档"
-			}
-			// 同一个文档只拼一次摘要，重复 chunk 跳过
-			if usedTitles[title] {
-				continue
-			}
-			usedTitles[title] = true
-			content := strings.TrimSpace(src.Content)
-			if len(content) > 160 {
-				content = content[:160] + "…"
-			}
-			chunkID := src.ID
-			if chunkID == "" {
-				chunkID = fmt.Sprintf("c%d", i)
-			}
-			sb.WriteString(fmt.Sprintf("- %s <kb doc=%q chunk_id=%q />\n", title, title, chunkID))
-			if content != "" {
-				sb.WriteString(fmt.Sprintf("  > %s\n\n", content))
-			}
-		}
-		sb.WriteString("\n如需进一步分析请补充问题细节，或切换到快速模式获取更直接的回答。")
-		fullAnswer = sb.String()
-		eventCh <- Event{Type: EventAnswer, Content: fullAnswer}
-	}
-
-	var sources []response.SourceInfo
-	type docInfo struct {
-		documentID      string
-		knowledgeBaseID string
-		chunks          []response.ChunkSource
-	}
-	docMap := make(map[string]*docInfo)
-	for _, doc := range ksTool.CollectedSources {
-		if _, exists := docMap[doc.Title]; !exists {
-			docMap[doc.Title] = &docInfo{
-				documentID:      doc.DocumentID,
-				knowledgeBaseID: doc.KnowledgeBaseID,
-			}
-		}
-		docMap[doc.Title].chunks = append(docMap[doc.Title].chunks, response.ChunkSource{
-			ID:      doc.ID,
-			Content: doc.Content,
-			Score:   doc.Score,
-		})
-	}
-	for title, info := range docMap {
-		sources = append(sources, response.SourceInfo{
-			DocumentID:      info.documentID,
-			KnowledgeBaseID: info.knowledgeBaseID,
-			Title:           title,
-			Chunks:          info.chunks,
-		})
-	}
-
-	if strings.TrimSpace(fullAnswer) != "" {
-		eventCh <- Event{Type: EventThinking, Title: "正在生成答案", Status: "success"}
-	}
-
-	if len(sources) > 0 {
-		eventCh <- Event{Type: EventSources, Sources: sources}
-	}
-
-	eventCh <- Event{
-		Type:    EventDone,
-		Content: fullAnswer,
-		Sources: sources,
-	}
-}
+func randomStr16() string { return randomStr(16) }
+func randomStr8() string  { return randomStr(8) }
 
 func buildInputMessages(query string, history []entity.ChatMessage) []*schema.Message {
 	msgs := make([]*schema.Message, 0, len(history)+1)
@@ -376,6 +246,13 @@ func buildInputMessages(query string, history []entity.ChatMessage) []*schema.Me
 	return msgs
 }
 
+func truncateStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 func extractQueryFromArgs(args string) string {
 	var params struct {
 		Query string `json:"query"`
@@ -384,13 +261,6 @@ func extractQueryFromArgs(args string) string {
 		return params.Query
 	}
 	return args
-}
-
-func truncateStr(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }
 
 func isToolChoiceUnsupportedError(errMsg string) bool {
@@ -413,112 +283,4 @@ func isToolChoiceUnsupportedError(errMsg string) bool {
 		}
 	}
 	return false
-}
-
-// buildEnhancedSystemPromptForAgent 在 ReAct 系统提示词上注入：时间/用户信息 + 对话摘要 + 用户记忆
-// 与快速模式的 buildEnhancedSystemPrompt 逻辑保持一致，确保双模式行为统一
-func buildEnhancedSystemPromptForAgent(base string, summary *entity.ChatSummary, memories []entity.UserMemory, userCtx PromptUserContext) string {
-	var extras []string
-
-	userInfo := "## 当前信息\n"
-	if userCtx.TimeStr != "" {
-		userInfo += "- 当前时间：" + userCtx.TimeStr + "\n"
-	}
-	if userCtx.Timezone != "" {
-		userInfo += "- 用户时区：" + userCtx.Timezone + "\n"
-	}
-	if userCtx.Username != "" {
-		userInfo += "- 用户：" + userCtx.Username + "\n"
-	}
-	if userCtx.Role != "" {
-		userInfo += "- 系统角色：" + userCtx.Role + "\n"
-	}
-	if userCtx.Department != "" {
-		userInfo += "- 部门：" + userCtx.Department + "\n"
-	}
-	if userCtx.Position != "" {
-		userInfo += "- 职位：" + userCtx.Position + "\n"
-	}
-	if userCtx.Expertise != "" {
-		userInfo += "- 擅长/关注：" + userCtx.Expertise + "\n"
-	}
-	if userCtx.Language != "" {
-		userInfo += "- 偏好语言：" + userCtx.Language + "\n"
-	}
-	if userInfo != "## 当前信息\n" {
-		extras = append(extras, userInfo)
-	}
-
-	if userCtx.AnswerStyle != "" || userCtx.TableFirst || userCtx.CitationStyle != "" {
-		var p strings.Builder
-		p.WriteString("## 用户回答偏好\n")
-		switch userCtx.AnswerStyle {
-		case "concise":
-			p.WriteString("- 回答风格：简洁凝练，直击要点，3~5 句说完，不过度展开\n")
-		case "detailed":
-			p.WriteString("- 回答风格：详细展开，先结论再分点论述，必要时给例子和注意事项\n")
-		case "step_by_step":
-			p.WriteString("- 回答风格：分步讲解，用 1/2/3…编号或小标题组织步骤\n")
-		default:
-			p.WriteString("- 回答风格：平衡简洁与完整，先结论再展开\n")
-		}
-		if userCtx.TableFirst {
-			p.WriteString("- 结构化呈现：对比、列表、映射等数据优先用 Markdown 表格组织\n")
-		}
-		switch userCtx.CitationStyle {
-		case "none":
-			p.WriteString("- 引用格式：正文不标注引用，引用信息仅由消息底部来源区展示\n")
-		case "doc_title_only":
-			p.WriteString("- 引用格式：正文引用时只提「根据《文档名》」，不要章节\n")
-		default:
-			p.WriteString("- 引用格式：正文引用时以「根据《文档名》· 章节标题」形式说明来源\n")
-		}
-		extras = append(extras, p.String())
-	}
-
-	if strings.TrimSpace(userCtx.RoleTemplatePrompt) != "" {
-		extras = append(extras, "## 角色模板设定\n"+strings.TrimSpace(userCtx.RoleTemplatePrompt))
-	}
-
-	if userCtx.Language != "" {
-		langHint := "## 回答语言\n"
-		switch userCtx.Language {
-		case "en-US":
-			langHint += "- 请使用英文回答（美式英语）。\n"
-		case "ja-JP":
-			langHint += "- 请使用日语回答。\n"
-		case "ko-KR":
-			langHint += "- 请使用韩语回答。\n"
-		case "fr-FR":
-			langHint += "- 请使用法语回答。\n"
-		case "de-DE":
-			langHint += "- 请使用德语回答。\n"
-		case "es-ES":
-			langHint += "- 请使用西班牙语回答。\n"
-		default:
-			langHint += "- 请使用简体中文回答。\n"
-		}
-		extras = append(extras, langHint)
-	}
-
-	if summary != nil && summary.Summary != "" {
-		extras = append(extras, "## 本次对话摘要\n"+summary.Summary)
-	}
-
-	if len(memories) > 0 {
-		var memoryText strings.Builder
-		memoryText.WriteString("## 关于用户的已知信息\n")
-		for _, m := range memories {
-			memoryText.WriteString("- ")
-			memoryText.WriteString(m.Content)
-			memoryText.WriteString("\n")
-		}
-		extras = append(extras, memoryText.String())
-	}
-
-	if len(extras) == 0 {
-		return base
-	}
-
-	return base + "\n\n" + strings.Join(extras, "\n\n")
 }

@@ -1,4 +1,4 @@
-package app
+﻿package app
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
@@ -232,51 +233,43 @@ type AgentComponents struct {
 	AgentEngine *agent.Engine
 }
 
-// initAgentComponents 初始化 Agent 相关组件（Embedding、RAG、工具、Agent 引擎）
+// initAgentComponents 初始化 Agent 相关组件（Embedding、RAG、工具注册、Agent 引擎）
+// 内置工具全部通过 RegisterInternal 注册，Engine 不感知具体工具类型，新增内置工具只需要在这里多调一行
 func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo repository.DocumentRepository, chunkRepo repository.DocumentChunkRepository, kbRepo repository.KnowledgeBaseRepository) *AgentComponents {
 	embeddingFunc := a.initEmbedding()
 	vectorRetriever := a.initRetriever(embeddingFunc)
 
-	// knowledge_search 工厂：每次 Agent 请求创建带用户上下文的工具实例
-	ksFactory := agent.KnowledgeSearchFactory(func(userID string, kbIDs []string) *tool.KnowledgeSearchTool {
-		return tool.NewKnowledgeSearchTool(vectorRetriever).WithContext(userID, kbIDs)
-	})
-
-	// grep_chunks 工厂：关键词精确匹配
-	grepFactory := agent.GrepChunksFactory(func(userID string, kbIDs []string) *tool.GrepChunksTool {
-		return tool.NewGrepChunksTool(chunkRepo).WithContext(userID, kbIDs)
-	})
-
-	// get_document_info 工厂：文档元数据
-	docInfoFactory := agent.GetDocumentInfoFactory(func(userID string) *tool.GetDocumentInfoTool {
-		return tool.NewGetDocumentInfoTool(documentRepo).WithContext(userID)
-	})
-
-	// list_knowledge_chunks 工厂：文档列表
-	listChunksFactory := agent.ListKnowledgeChunksFactory(func(userID string, kbIDs []string) *tool.ListKnowledgeChunksTool {
-		return tool.NewListKnowledgeChunksTool(documentRepo).WithContext(userID, kbIDs)
-	})
-
-	// list_knowledge_bases 工厂：知识库列表
-	listBasesFactory := agent.ListKnowledgeBasesFactory(func(userID string) *tool.ListKnowledgeBasesTool {
-		return tool.NewListKnowledgeBasesTool(kbRepo).WithContext(userID)
-	})
-
-	// 初始化 Agent Engine（eino ReAct Agent）
-	// 用户配置的工具（web_search 等）通过 ToolFactory 从 DB/Redis 动态加载
-	agentEngine := agent.NewEngine(
-		ksFactory,
-		grepFactory,
-		docInfoFactory,
-		listChunksFactory,
-		listBasesFactory,
-		toolFactory,
-		a.cfg.Agent,
-	)
-	// 阶段三：绑定可观测性 recorder
+	// ── 初始化 Agent Engine ──
+	agentEngine := agent.NewEngine(toolFactory, a.cfg.Agent)
 	if a.obsRecorder != nil {
 		agentEngine.WithObservability(a.obsRecorder)
 	}
+
+	// ── 注册内置工具（按 Order 升序出现在 prompt "可用工具" 段） ──
+	agentEngine.RegisterInternal("knowledge_search", 1, false,
+		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
+			return tool.NewKnowledgeSearchTool(vectorRetriever).WithContext(userID, kbIDs)
+		})
+	agentEngine.RegisterInternal("grep_chunks", 2, false,
+		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
+			return tool.NewGrepChunksTool(chunkRepo)(userID, kbIDs)
+		})
+	agentEngine.RegisterInternal("get_document_info", 3, false,
+		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
+			return tool.NewGetDocumentInfoTool(documentRepo)(userID, kbIDs)
+		})
+	agentEngine.RegisterInternal("list_knowledge_chunks", 4, false,
+		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
+			return tool.NewListKnowledgeChunksTool(documentRepo)(userID, kbIDs)
+		})
+	agentEngine.RegisterInternal("list_knowledge_bases", 5, false,
+		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
+			return tool.NewListKnowledgeBasesTool(kbRepo)(userID, kbIDs)
+		})
+	agentEngine.RegisterInternal("delete_document", 10, true,
+		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
+			return tool.NewDeleteDocumentTool(documentRepo)(userID, kbIDs)
+		})
 
 	return &AgentComponents{
 		Retriever:   vectorRetriever,
@@ -300,6 +293,7 @@ func (a *App) initDependencies() {
 	userRepo := repository.NewUserRepository(a.postgresqlDB)
 	userPreferenceRepo := repository.NewUserPreferenceRepository(a.postgresqlDB)
 	obsRepo := repository.NewObservabilityRepository(a.postgresqlDB)
+	agentCheckpointRepo := repository.NewAgentCheckpointRepository(a.postgresqlDB)
 
 	// 阶段 1.4：可观测性初始化（OTel Tracer + Prometheus Registry + Recorder）
 	//
@@ -367,6 +361,9 @@ func (a *App) initDependencies() {
 
 	// 初始化 Agent 组件（传入 ToolFactory + DocumentRepo + ChunkRepo + KnowledgeBaseRepo）
 	ai := a.initAgentComponents(toolFactory, documentRepo, chunkRepo, knowledgeBaseRepo)
+
+	// 注入 DB 版 CheckPointStore 所需的 AgentCheckpointRepo
+	ai.AgentEngine.WithCheckpointRepo(agentCheckpointRepo)
 
 	// 初始化 Service
 	prefSvc := service.NewUserPreferenceService(userPreferenceRepo)
