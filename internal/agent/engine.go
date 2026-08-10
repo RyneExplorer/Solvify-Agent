@@ -87,3 +87,13 @@ func (e *Engine) dangerousToolNames() map[string]bool {
 	}
 	return m
 }
+
+func (e *Engine) clarifyToolNames() map[string]bool {
+	m := make(map[string]bool)
+	for _, entry := range e.internalTools {
+		if entry.Name == "ask_clarify" {
+			m[entry.Name] = true
+		}
+	}
+	return m
+}

@@ -5,6 +5,8 @@ export interface PendingCheckpointInfo {
   interrupt_id: string
   question?: string
   tool_name?: string
+  is_clarify?: boolean
+  options?: string[]
   set_at: string
 }
 
@@ -114,6 +116,8 @@ export interface PendingApproval {
   tool_name?: string
   target_ref?: string
   reason?: string
+  options?: string[]
+  is_clarify?: boolean
 }
 
 // ── List Responses ──

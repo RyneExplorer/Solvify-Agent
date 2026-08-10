@@ -163,12 +163,18 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 			return fmt.Sprintf("⚠️ 工具 %q 不存在，可用工具请查看系统提示。请检查工具名拼写后重试。", name), nil
 		},
 	}
-	// 有危险工具时注入审批中间件
+	// ── 注入中间件：危险工具审批 + 澄清追问 ──
+	var middlewares []compose.ToolMiddleware
 	if dangerousNames := e.dangerousToolNames(); len(dangerousNames) > 0 {
-		toolsNodeConfig.ToolCallMiddlewares = []compose.ToolMiddleware{
-			{Invokable: buildDangerousToolMiddleware(dangerousNames)},
-		}
-		logger.Infof("[Agent] 已注入危险工具审批中间件，工具列表=%v", dangerousNames)
+		middlewares = append(middlewares, compose.ToolMiddleware{Invokable: buildDangerousToolMiddleware(dangerousNames)})
+		logger.Infof("[Agent] 已注入危险工具审批中间件: %v", dangerousNames)
+	}
+	if clarifyNames := e.clarifyToolNames(); len(clarifyNames) > 0 {
+		middlewares = append(middlewares, compose.ToolMiddleware{Invokable: buildClarifyMiddleware(clarifyNames)})
+		logger.Infof("[Agent] 已注入澄清追问中间件: %v", clarifyNames)
+	}
+	if len(middlewares) > 0 {
+		toolsNodeConfig.ToolCallMiddlewares = middlewares
 	}
 
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{

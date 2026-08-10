@@ -123,18 +123,19 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	if session2 != nil && session2.HasPendingCheckpoint() {
 		pc, _ := session2.GetPendingCheckpoint()
 		if pc != nil {
-			logger.Infof("[ChatService] 检测到 pending checkpoint: checkpointID=%s, interruptID=%s", pc.CheckpointID, pc.InterruptID)
-			if req.Content != "" {
-				agentReq.CheckpointID = pc.CheckpointID
-				agentReq.ResumeData = map[string]any{
-					pc.InterruptID: req.Content,
+				logger.Infof("[ChatService] 检测到 pending checkpoint: checkpointID=%s, interruptID=%s", pc.CheckpointID, pc.InterruptID)
+				if req.Content != "" {
+					agentReq.CheckpointID = pc.CheckpointID
+					agentReq.ResumeData = map[string]any{
+						pc.InterruptID: req.Content,
+					}
+					logger.Infof("[ChatService] 设置恢复参数: checkpointID=%s, resumeKeys=%v", pc.CheckpointID, []string{pc.InterruptID})
+				} else {
+					logger.Warnf("[ChatService] 有 pending checkpoint 但用户未提供审批内容，走首次执行")
+					_ = s.sessionRepo.ClearPendingCheckpoint(ctx, sessionID)
+					_ = s.sessionRepo.ClearPendingClarify(ctx, sessionID)
 				}
-				logger.Infof("[ChatService] 设置恢复参数: checkpointID=%s, resumeKeys=%v", pc.CheckpointID, []string{pc.InterruptID})
-			} else {
-				logger.Warnf("[ChatService] 有 pending checkpoint 但用户未提供审批内容，走首次执行")
-				_ = s.sessionRepo.ClearPendingCheckpoint(ctx, sessionID)
 			}
-		}
 	}
 	t1 := time.Now()
 	agentEventCh, err := s.agentEngine.Execute(deepCtx, agentReq, chatModel)
@@ -169,27 +170,40 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		}
 
 		// ── interrupt 事件：存 checkpoint 到 session，返回中断事件给前端 ──
-		if agentEvent.Type == agent.EventInterrupt {
-			logger.Infof("[ChatService] Agent 中断: checkpointID=%s, interruptID=%s", agentEvent.CheckpointID, agentEvent.InterruptID)
-			if agentEvent.CheckpointID != "" {
-				pcData := &entity.PendingCheckpointData{
-					CheckpointID: agentEvent.CheckpointID,
-					InterruptID:  agentEvent.InterruptID,
-					Question:     agentEvent.Detail,
-					ToolName:     "",
-					SetAt:        time.Now(),
+			if agentEvent.Type == agent.EventInterrupt {
+				logger.Infof("[ChatService] Agent 中断: checkpointID=%s, interruptID=%s, isClarify=%v", agentEvent.CheckpointID, agentEvent.InterruptID, agentEvent.IsClarify)
+				if agentEvent.CheckpointID != "" {
+					pcData := &entity.PendingCheckpointData{
+						CheckpointID: agentEvent.CheckpointID,
+						InterruptID:  agentEvent.InterruptID,
+						Question:     agentEvent.Detail,
+						IsClarify:    agentEvent.IsClarify,
+						Options:      agentEvent.ClarifyOptions,
+						SetAt:        time.Now(),
+					}
+					raw, _ := json.Marshal(pcData)
+					if sErr := s.sessionRepo.SetPendingCheckpoint(ctx, sessionID, raw); sErr != nil {
+						logger.Errorf("存储 pending checkpoint 失败: %v", sErr)
+					} else {
+						logger.Infof("[ChatService] 已存储 pending checkpoint: sessionID=%s", sessionID)
+					}
+
+					// clarify 中断额外存到 pending_clarify（兼容旧恢复流程）
+					if agentEvent.IsClarify {
+						clarifyData := &entity.PendingClarifyData{
+							Question: agentEvent.ClarifyQuestion,
+							Options:  agentEvent.ClarifyOptions,
+							SetAt:    time.Now(),
+						}
+						clarifyRaw, _ := json.Marshal(clarifyData)
+						if sErr := s.sessionRepo.SetPendingClarify(ctx, sessionID, clarifyRaw); sErr != nil {
+							logger.Errorf("存储 pending clarify 失败: %v", sErr)
+						}
+					}
 				}
-				raw, _ := json.Marshal(pcData)
-				if sErr := s.sessionRepo.SetPendingCheckpoint(ctx, sessionID, raw); sErr != nil {
-					logger.Errorf("存储 pending checkpoint 失败: %v", sErr)
-				} else {
-					logger.Infof("[ChatService] 已存储 pending checkpoint: sessionID=%s", sessionID)
-				}
+				eventCh <- toStreamEvent(agentEvent)
+				return
 			}
-			eventCh <- toStreamEvent(agentEvent)
-			// 中断后不保存 assistant message（因为还没执行完）
-			return
-		}
 
 		if agentEvent.Type == agent.EventAnswer {
 			fullContent += agentEvent.Content
@@ -217,13 +231,14 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		applyReasoningStep(&reasoningSteps, agentEvent)
 	}
 
-	// ── 执行成功后清除 pending checkpoint（如果有的话） ──
+	// ── 执行成功后清除 pending 状态 ──
 	if agentReq.CheckpointID != "" {
 		if cErr := s.sessionRepo.ClearPendingCheckpoint(ctx, sessionID); cErr != nil {
 			logger.Warnf("清除 pending checkpoint 失败: %v", cErr)
 		} else {
 			logger.Infof("[ChatService] 恢复执行完成，已清除 pending checkpoint: sessionID=%s", sessionID)
 		}
+		_ = s.sessionRepo.ClearPendingClarify(ctx, sessionID)
 	}
 	if obsOk {
 		s.obs.Observe(ctx, "chat_deep_agent_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t1).Seconds())
@@ -465,6 +480,12 @@ func toStreamEvent(e agent.Event) dto.StreamEvent {
 		se.CheckpointID = e.CheckpointID
 		se.InterruptID = e.InterruptID
 		se.InterruptInfo = e.InterruptInfo
+		if e.IsClarify {
+			se.Clarify = &dto.ClarifyPayload{
+				Question: e.ClarifyQuestion,
+				Options:  e.ClarifyOptions,
+			}
+		}
 	}
 	return se
 }

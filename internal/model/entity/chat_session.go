@@ -75,6 +75,8 @@ type PendingCheckpointData struct {
 	InterruptID  string    `json:"interrupt_id"`
 	Question     string    `json:"question,omitempty"`
 	ToolName     string    `json:"tool_name,omitempty"`
+	IsClarify    bool      `json:"is_clarify,omitempty"`
+	Options      []string  `json:"options,omitempty"`
 	SetAt        time.Time `json:"set_at"`
 }
 
