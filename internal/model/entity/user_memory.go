@@ -10,12 +10,12 @@ import (
 // UserMemory 用户长期记忆：保存跨会话的事实、偏好、约束和决策结论
 type UserMemory struct {
 	ID            string  `gorm:"type:uuid;primaryKey"`
-	UserID        string  `gorm:"type:uuid;not null"`
-	MemoryType    string  `gorm:"type:varchar(30);not null"` // fact / preference / constraint / decision
+	UserID        string  `gorm:"type:uuid;not null;index:idx_user_memories_user_active,priority:1"`
+	MemoryType    string  `gorm:"type:varchar(30);not null"`
 	Content       string  `gorm:"type:text;not null"`
 	SourceSession *string `gorm:"type:uuid"`
 	Confidence    float64 `gorm:"type:float;default:1.0"`
-	IsActive      bool    `gorm:"default:true"`
+	IsActive      bool    `gorm:"default:true;index:idx_user_memories_user_active,priority:2"`
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }

@@ -10,10 +10,10 @@ import (
 // ChatSession 映射聊天会话表
 type ChatSession struct {
 	ID                string         `gorm:"column:id;type:uuid;default:gen_random_uuid();primaryKey"`
-	UserID            string         `gorm:"column:user_id;type:uuid;not null"`
+	UserID            string         `gorm:"column:user_id;type:uuid;not null;index:idx_chat_sessions_user_status,priority:1"`
 	Title             string         `gorm:"column:title;size:200;not null;default:''"`
 	ModelID           string         `gorm:"column:model_id;type:varchar(36);not null"`
-	Status            string         `gorm:"column:status;type:varchar(20);not null;default:'active'"`
+	Status            string         `gorm:"column:status;type:varchar(20);not null;default:'active';index:idx_chat_sessions_user_status,priority:2"`
 	PendingClarify    datatypes.JSON `gorm:"column:pending_clarify;type:jsonb;not null;default:'{}'::jsonb"`
 	PendingCheckpoint datatypes.JSON `gorm:"column:pending_checkpoint;type:jsonb;not null;default:'{}'::jsonb"`
 	CreatedAt         time.Time      `gorm:"column:created_at;autoCreateTime"`

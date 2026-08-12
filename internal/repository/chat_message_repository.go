@@ -108,15 +108,24 @@ func (r *chatMessageRepository) SearchRecentByKeywords(ctx context.Context, sess
 		return r.FindRecent(ctx, sessionID, limit)
 	}
 
-	query := r.db.WithContext(ctx).
-		Where("session_id = ?", sessionID)
+	// 关键：session_id 是硬过滤，多个关键词之间用 OR 连接，但必须整体包在 AND 里。
+	// 错误写法：Where(session_id).Or(ILIKE)... → 实际 SQL 是 WHERE session_id = ? OR content ILIKE ?
+	//          会匹配到全库所有包含关键词的消息，再 ORDER BY + LIMIT，数据量上来必炸。
+	// 正确 SQL：WHERE session_id = ? AND (content ILIKE ? OR content ILIKE ? ...)
+	query := r.db.WithContext(ctx).Where("session_id = ?", sessionID)
 
-	// 多个关键词用 OR 连接，任意匹配即可
-	for _, kw := range keywords {
-		if kw == "" {
-			continue
+	if len(keywords) == 1 {
+		query = query.Where("content ILIKE ?", "%"+keywords[0]+"%")
+	} else {
+		sub := r.db.Session(&gorm.Session{NewDB: true})
+		for i, kw := range keywords {
+			if i == 0 {
+				sub = sub.Where("content ILIKE ?", "%"+kw+"%")
+			} else {
+				sub = sub.Or("content ILIKE ?", "%"+kw+"%")
+			}
 		}
-		query = query.Or("content ILIKE ?", "%"+kw+"%")
+		query = query.Where(sub)
 	}
 
 	var messages []entity.ChatMessage
