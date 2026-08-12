@@ -234,6 +234,9 @@ func einoOnEnd(rec Recorder) func(ctx context.Context, info *callbacks.RunInfo, 
 			rec.Incr(ctx, "eino_retriever_requests_total", rl, 1)
 			rec.Observe(ctx, "eino_retriever_duration_seconds", rl, dur.Seconds())
 			rec.Observe(ctx, "eino_retriever_hit_count", rl, float64(hitN))
+			if hitN == 0 {
+				rec.Incr(ctx, "eino_retriever_empty_results_total", rl, 1)
+			}
 		case components.ComponentOfTool:
 			tl := mergeToolEndAttrs(attrs, output, info, rec, baseLabels)
 			rec.Incr(ctx, "eino_tool_calls_total", tl, 1)
