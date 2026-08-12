@@ -147,6 +147,11 @@ func (a *App) initDatabase() error {
 		logger.Warnf("上下文索引检查异常（不阻塞启动）: %v", err)
 	}
 
+	// message_feedback 表 schema 补齐（早期 AutoMigrate 建表后 entity 新增列，AutoMigrate 不会 ADD COLUMN）
+	if err := database.EnsureMessageFeedbackSchema(postgresqlDB); err != nil {
+		logger.Warnf("message_feedback schema 补齐异常（不阻塞启动）: %v", err)
+	}
+
 	// Redis 缓存连接
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
 	if err != nil {

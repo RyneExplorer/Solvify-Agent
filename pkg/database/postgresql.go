@@ -261,6 +261,57 @@ func EnsureContextIndexes(db *gorm.DB) error {
 	return nil
 }
 
+// EnsureMessageFeedbackSchema 补齐 message_feedback 表缺失的列。
+// 这张表是早期 AutoMigrate 创建的，后来 entity 加了 reasons / is_quick / trace_id 等列，
+// 但 AutoMigrate 不会给已存在的表 ADD COLUMN，导致 INSERT 时报 column "xxx" does not exist。
+func EnsureMessageFeedbackSchema(db *gorm.DB) error {
+	var tableExists bool
+	if err := db.Raw(
+		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'message_feedback')`,
+	).Scan(&tableExists).Error; err != nil {
+		return fmt.Errorf("检查 message_feedback 表存在性失败: %w", err)
+	}
+	if !tableExists {
+		return nil
+	}
+
+	type colDef struct {
+		name string
+		ddl  string // ALTER TABLE ... ADD COLUMN ... 的列定义（不含列名）
+	}
+	missingCols := []colDef{
+		{name: "reasons", ddl: "jsonb"},
+		{name: "is_quick", ddl: "boolean NOT NULL DEFAULT false"},
+		{name: "trace_id", ddl: "varchar(128)"},
+		{name: "reason_tag", ddl: "varchar(64)"},
+	}
+
+	for _, mc := range missingCols {
+		var exists bool
+		if err := db.Raw(
+			`SELECT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_name = 'message_feedback' AND column_name = ?
+			)`, mc.name,
+		).Scan(&exists).Error; err != nil {
+			logger.Warnf("[feedback] 检查列 %s 失败: %v", mc.name, err)
+			continue
+		}
+		if exists {
+			continue
+		}
+		logger.Infof("[feedback] 列 %s 不存在，正在 ALTER TABLE ADD COLUMN", mc.name)
+		if err := db.Exec(
+			fmt.Sprintf("ALTER TABLE message_feedback ADD COLUMN IF NOT EXISTS %s %s", mc.name, mc.ddl),
+		).Error; err != nil {
+			logger.Warnf("[feedback] 自动补列 %s 失败: %v", mc.name, err)
+		} else {
+			logger.Infof("[feedback] 列 %s 已补齐", mc.name)
+		}
+	}
+	return nil
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchSubstring(s, substr)
 }
