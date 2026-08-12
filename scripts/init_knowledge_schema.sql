@@ -422,3 +422,8 @@ CREATE INDEX IF NOT EXISTS idx_document_chunks_embedding
     USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100)
     WHERE embedding IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_document_chunks_keywords
+    ON document_chunks
+    USING gin (keywords)
+    WHERE keywords IS NOT NULL;
