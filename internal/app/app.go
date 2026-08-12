@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 
 	"solvify-agent/internal/agent"
@@ -127,25 +129,23 @@ func (a *App) initDatabase() error {
 		return fmt.Errorf("初始化 PostgreSQL 失败: %w", err)
 	}
 	a.postgresqlDB = postgresqlDB
-	//自动迁移数据库表结构
-	//if err := postgresqlDB.AutoMigrate(
-	//	&entity.User{},
-	//	&entity.Model{},
-	//	&entity.UserModelConfig{},
-	//	&entity.KnowledgeBase{},
-	//	&entity.StorageQuota{},
-	//	&entity.Document{},
-	//	&entity.DocumentProcessingJob{},
-	//	&entity.DocumentVersion{},
-	//	&entity.DocumentChunk{},
-	//	&entity.ChatSession{},
-	//	&entity.ChatMessage{},
-	//	&entity.ToolType{},
-	//	&entity.ToolProvider{},
-	//	&entity.UserToolConfig{},
-	//); err != nil {
-	//	return fmt.Errorf("数据库自动迁移失败: %w", err)
-	//}
+
+	// pgvector 索引健康检查（仅在 enable_pgvector 时执行）
+	if a.cfg.Database.Postgres.EnablePGVector {
+		if err := database.EnsurePGVectorIndex(postgresqlDB); err != nil {
+			logger.Warnf("pgvector 索引检查异常（不阻塞启动）: %v", err)
+		}
+	}
+
+	// keywords GIN 索引健康检查（关键词检索核心加速，不依赖 pgvector 开关）
+	if err := database.EnsureKeywordsGINIndex(postgresqlDB); err != nil {
+		logger.Warnf("keywords GIN 索引检查异常（不阻塞启动）: %v", err)
+	}
+
+	// 上下文加载链路高频索引（chat_messages / chat_sessions / user_memories）
+	if err := database.EnsureContextIndexes(postgresqlDB); err != nil {
+		logger.Warnf("上下文索引检查异常（不阻塞启动）: %v", err)
+	}
 
 	// Redis 缓存连接
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
@@ -165,7 +165,19 @@ func (a *App) ensureStorageQuotaUniqueIndex(db *gorm.DB) error {
 	return nil
 }
 
-// initEmbedding 初始化 Embedding 客户端，返回带缓存的向量化函数
+const (
+	embeddingInMemCacheSize = 2048
+	embeddingRedisTTL       = 24 * time.Hour
+)
+
+// initEmbedding 初始化 Embedding 客户端，返回带两级缓存 + singleflight 去重的向量化函数
+//
+// 缓存层级：
+//  1. 进程内 sync.Map fast-path（零网络 IO，容量 embeddingInMemCacheSize，LRU 清理）
+//  2. Redis 共享缓存（跨进程，24h TTL）
+//  3. Embedding API 调用
+//
+// singleflight 防止并发击穿：同一 key 的并发请求只打一次 API。
 func (a *App) initEmbedding() rag.EmbeddingFunc {
 
 	embeddingClient, err := llm.NewEmbeddingClientFromConfig(context.Background(), &a.cfg.Embedding)
@@ -173,30 +185,84 @@ func (a *App) initEmbedding() rag.EmbeddingFunc {
 		logger.Fatal("初始化 Embedding 客户端失败", zap.Error(err))
 	}
 
-	// Embedding 缓存（相同文本 → 相同向量，缓存 24 小时）
-	embeddingCache := cache.New(a.redis, "emb:", 24*time.Hour)
+	redisCache := cache.New(a.redis, "emb:", embeddingRedisTTL)
+	var inMem sync.Map // map[string][]float64
+	var sf singleflight.Group
+	var inMemMu sync.Mutex
+	inMemCount := 0
 
 	return func(ctx context.Context, text string) ([]float64, error) {
 		cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
-		var vec []float64
-		if found, _ := embeddingCache.Get(ctx, cacheKey, &vec); found {
-			logger.Infof("[Embedding] 缓存命中: key=%s text=%q dim=%d", cacheKey[:8], text, len(vec))
+
+		// 层级 1：进程内 fast-path
+		if v, ok := inMem.Load(cacheKey); ok {
+			logger.Debugf("[Embedding] 内存缓存命中: key=%s", cacheKey[:8])
+			return v.([]float64), nil
+		}
+
+		// singleflight 包裹：并发只调一次
+		ch := sf.DoChan(cacheKey, func() (interface{}, error) {
+			// 层级 2：Redis
+			var vec []float64
+			if found, _ := redisCache.Get(ctx, cacheKey, &vec); found {
+				logger.Infof("[Embedding] Redis 缓存命中: key=%s dim=%d", cacheKey[:8], len(vec))
+				inMem.Store(cacheKey, vec)
+				return vec, nil
+			}
+
+			// 层级 3：调 API
+			logger.Infof("[Embedding] 全缓存未命中: key=%s text=%q, 调用 API...", cacheKey[:8], truncateText(text, 60))
+			vec, err := embeddingClient.Embed(ctx, text)
+			if err != nil {
+				logger.Errorf("[Embedding] API 调用失败: %v", err)
+				return nil, err
+			}
+
+			if err := redisCache.Set(ctx, cacheKey, vec, 0); err != nil {
+				logger.Warnf("[Embedding] Redis 缓存写入失败: %v", err)
+			}
+			inMem.Store(cacheKey, vec)
+
+			// 简单容量管控：超阈值时删除约 20% 条目
+			inMemMu.Lock()
+			inMemCount++
+			if inMemCount > embeddingInMemCacheSize {
+				cleaned := 0
+				inMem.Range(func(key, _ any) bool {
+					if cleaned >= embeddingInMemCacheSize/5 {
+						return false
+					}
+					inMem.Delete(key)
+					cleaned++
+					return true
+				})
+				inMemCount -= cleaned
+				logger.Infof("[Embedding] 内存缓存清理: 删除 %d 条, 剩余约 %d", cleaned, inMemCount)
+			}
+			inMemMu.Unlock()
+
+			logger.Infof("[Embedding] API 返回: dim=%d, 已写两级缓存", len(vec))
 			return vec, nil
+		})
+
+		select {
+		case res := <-ch:
+			if res.Err != nil {
+				return nil, res.Err
+			}
+			return res.Val.([]float64), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		logger.Infof("[Embedding] 缓存未命中: key=%s text=%q, 调用 API...", cacheKey[:8], text)
-		vec, err := embeddingClient.Embed(ctx, text)
-		if err != nil {
-			logger.Errorf("[Embedding] API 调用失败: %v", err)
-			return nil, err
-		}
-		logger.Infof("[Embedding] API 返回: dim=%d", len(vec))
-		if err := embeddingCache.Set(ctx, cacheKey, vec, 0); err != nil {
-			logger.Warnf("[Embedding] 缓存写入失败: %v", err)
-		} else {
-			logger.Infof("[Embedding] 已写入缓存: key=%s", cacheKey[:8])
-		}
-		return vec, nil
 	}
+}
+
+func truncateText(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
 }
 
 // initRetriever 初始化 RAG 检索器（混合检索 + 可选装饰器链）

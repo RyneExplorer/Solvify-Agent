@@ -17,6 +17,7 @@ import (
 	"solvify-agent/internal/observability"
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/stopwords"
 	"solvify-agent/pkg/tokenutil"
 )
 
@@ -96,10 +97,20 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 		summary  *entity.ChatSummary
 		memories []entity.UserMemory
 		recent   []entity.ChatMessage
+		relevant []entity.ChatMessage
 		err      error
 	}
 
-	resultCh := make(chan loadResult, 3)
+	// 提前算好关键词——纯计算，直接在主线程做
+	var keywords []string
+	if currentQuery != "" {
+		keywords = cfg.PreExtractedKeywords
+		if len(keywords) == 0 {
+			keywords = extractKeywords(currentQuery)
+		}
+	}
+
+	resultCh := make(chan loadResult, 4)
 
 	go func() {
 		summary, err := s.summaryRepo.GetBySessionID(ctx, sessionID)
@@ -116,10 +127,25 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 		resultCh <- loadResult{recent: recent, err: err}
 	}()
 
-	var summary *entity.ChatSummary
-	var memories []entity.UserMemory
-	var recent []entity.ChatMessage
-	for i := 0; i < 3; i++ {
+	go func() {
+		var relevant []entity.ChatMessage
+		if len(keywords) > 0 {
+			var err error
+			relevant, err = s.messageRepo.SearchRecentByKeywords(ctx, sessionID, keywords, 5)
+			if err != nil {
+				logger.Warnf("检索相关历史失败: %v", err)
+			}
+		}
+		resultCh <- loadResult{relevant: relevant}
+	}()
+
+	var (
+		summary  *entity.ChatSummary
+		memories []entity.UserMemory
+		recent   []entity.ChatMessage
+		relevant []entity.ChatMessage
+	)
+	for i := 0; i < 4; i++ {
 		r := <-resultCh
 		if r.err != nil {
 			logger.Warnf("加载上下文组件失败: %v", r.err)
@@ -134,20 +160,8 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 		if r.recent != nil {
 			recent = r.recent
 		}
-	}
-
-	var relevant []entity.ChatMessage
-	if currentQuery != "" {
-		keywords := cfg.PreExtractedKeywords
-		if len(keywords) == 0 {
-			keywords = extractKeywords(currentQuery)
-		}
-		if len(keywords) > 0 {
-			var err error
-			relevant, err = s.messageRepo.SearchRecentByKeywords(ctx, sessionID, keywords, 5)
-			if err != nil {
-				logger.Warnf("检索相关历史失败: %v", err)
-			}
+		if r.relevant != nil {
+			relevant = r.relevant
 		}
 	}
 
@@ -504,24 +518,8 @@ func buildDialogueText(messages []entity.ChatMessage) string {
 	return sb.String()
 }
 
-// extractKeywords 从查询中提取关键词
+// extractKeywords 从查询中提取关键词，过滤停用词
 func extractKeywords(query string) []string {
-	// 简单停用词表
-	stopWords := map[string]struct{}{
-		"的": {}, "了": {}, "是": {}, "我": {}, "你": {}, "他": {}, "她": {}, "它": {},
-		"我们": {}, "你们": {}, "他们": {}, "这个": {}, "那个": {}, "什么": {}, "怎么": {},
-		"为什么": {}, "如何": {}, "多少": {}, "哪些": {}, "谁": {}, "哪里": {}, "何时": {},
-		"可以": {}, "能够": {}, "需要": {}, "想要": {}, "请": {}, "谢谢": {}, "你好": {},
-		"这": {}, "那": {}, "什": {}, "么": {}, "怎": {}, "样": {},
-		"a": {}, "an": {}, "the": {}, "is": {}, "are": {}, "was": {}, "were": {},
-		"i": {}, "you": {}, "he": {}, "she": {}, "it": {}, "we": {}, "they": {},
-		"this": {}, "that": {}, "these": {}, "those": {}, "what": {}, "how": {}, "why": {},
-		"where": {}, "when": {}, "who": {}, "which": {}, "can": {}, "could": {}, "do": {},
-		"does": {}, "did": {}, "will": {}, "would": {}, "should": {}, "may": {}, "might": {},
-		"in": {}, "on": {}, "at": {}, "of": {}, "to": {}, "for": {}, "with": {},
-	}
-
-	// 按中文连续序列 或 英文/数字连续序列切分（复用包级已编译正则，避免每次重复编译）
 	parts := tokenRegexp.FindAllString(query, -1)
 
 	seen := make(map[string]struct{})
@@ -531,14 +529,13 @@ func extractKeywords(query string) []string {
 		if p == "" {
 			continue
 		}
-		if _, ok := stopWords[p]; ok {
+		if stopwords.IsStopWord(p) {
 			continue
 		}
 		if len([]rune(p)) < 2 {
 			continue
 		}
-		// 纯中文且每个字都是停用词，则跳过
-		if isChineseString(p) && allRunesInSet(p, stopWords) {
+		if isChineseString(p) && allRunesAreStopWord(p) {
 			continue
 		}
 		if _, ok := seen[p]; ok {
@@ -565,10 +562,10 @@ func isChineseString(s string) bool {
 	return true
 }
 
-// allRunesInSet 判断字符串中每个 rune 是否都在集合中
-func allRunesInSet(s string, set map[string]struct{}) bool {
+// allRunesAreStopWord 判断字符串中每个 rune（单字）是否都是停用词
+func allRunesAreStopWord(s string) bool {
 	for _, r := range s {
-		if _, ok := set[string(r)]; !ok {
+		if !stopwords.IsStopWord(string(r)) {
 			return false
 		}
 	}
