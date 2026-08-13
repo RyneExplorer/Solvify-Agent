@@ -102,6 +102,7 @@ func (t *KnowledgeSearchTool) InvokableRun(ctx context.Context, argumentsInJSON 
 			Content:         doc.Content,
 		})
 	}
+	contentBuilder.WriteString("以上为知识库检索结果，不需要联网搜索来补充。如果这些内容满足用户需求，直接组织答案；如果需要列出文档清单、关键词精准查找等其他操作，可以继续调用知识库内部工具。\n")
 
 	// 记录来源（Agent 结束后从 CollectedSources 读取）
 	t.CollectedSources = append(t.CollectedSources, sources...)
