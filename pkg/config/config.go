@@ -91,6 +91,7 @@ type EmbeddingConfig struct {
 	BaseURL   string `mapstructure:"base_url"`
 	Dimension int    `mapstructure:"dimension"`
 	BatchSize int    `mapstructure:"batch_size"`
+	Timeout   int    `mapstructure:"timeout"`
 }
 
 // RAGConfig 描述检索增强配置
@@ -313,6 +314,7 @@ func Default() *Config {
 			Model:     "text-embedding-v4",
 			Dimension: 1024,
 			BatchSize: 10,
+			Timeout:   15,
 		},
 		RAG: RAGConfig{
 			Enabled:        true,
@@ -529,6 +531,9 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("EMBEDDING_BATCH_SIZE"); value != "" {
 		cfg.Embedding.BatchSize = parseInt(value, cfg.Embedding.BatchSize)
+	}
+	if value := os.Getenv("EMBEDDING_TIMEOUT"); value != "" {
+		cfg.Embedding.Timeout = parseInt(value, cfg.Embedding.Timeout)
 	}
 
 	// 数据库配置

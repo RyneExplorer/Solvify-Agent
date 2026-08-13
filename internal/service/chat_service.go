@@ -351,29 +351,76 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 	}
 	historyBudget, retrievalBudget, memoryBudget := calculateContextBudgets(maxCtx, toolsTokens)
 
-	// 3. 加载用户基本信息
-	userCtx := s.loadUserContext(ctx, userID)
-
-	// 4. 使用 ContextService 构建增强上下文
-	var enhancedCtx *EnhancedContext
-	if s.contextSvc != nil {
-		t1 = time.Now()
-		enhancedCtx, err = s.contextSvc.BuildContext(ctx, userID, sessionID, currentQuery, BuildContextConfig{
-			MaxTokens:         historyBudget,
-			MaxMemories:       10,
-			MaxRecentMessages: 20,
-			RetrievalBudget:   retrievalBudget,
-			MemoryBudget:      memoryBudget,
-			ModelName:         modelName,
-			ToolsTokens:       toolsTokens,
-		}, client.ChatModel())
-		if err != nil {
-			logger.Warnf("构建增强上下文失败，降级为传统方式: %v", err)
-		}
+	// 3. 并行加载：BuildContext / 用户信息 / 用户偏好 —— 三者无依赖，全部 goroutine
+	type userLoadResult struct {
+		entity *entity.User
+		err    error
+	}
+	type prefLoadResult struct {
+		pref *entity.UserPreference
+		err  error
+	}
+	type ctxLoadResult struct {
+		ctx *EnhancedContext
+		err error
 	}
 
-	// 兜底：传统截断
+	userCh := make(chan userLoadResult, 1)
+	prefCh := make(chan prefLoadResult, 1)
+	ctxCh := make(chan ctxLoadResult, 1)
+
+	// goroutine A: 用户信息（只查一次，UserCtx 和 Profile 共用结果）
+	go func() {
+		var r userLoadResult
+		if s.userRepo != nil && userID != "" {
+			u, err := s.userRepo.FindByID(userID)
+			r = userLoadResult{entity: u, err: err}
+		}
+		userCh <- r
+	}()
+
+	// goroutine B: 用户偏好
+	go func() {
+		var r prefLoadResult
+		if s.prefSvc != nil && userID != "" {
+			p, err := s.prefSvc.GetByUserID(ctx, userID)
+			r = prefLoadResult{pref: p, err: err}
+		}
+		prefCh <- r
+	}()
+
+	// goroutine C: BuildContext（内部自己已经是 4 路并行：summary/memories/recent/relevant）
+	go func() {
+		var r ctxLoadResult
+		if s.contextSvc != nil {
+			enhancedCtx, bErr := s.contextSvc.BuildContext(ctx, userID, sessionID, currentQuery, BuildContextConfig{
+				MaxTokens:         historyBudget,
+				MaxMemories:       10,
+				MaxRecentMessages: 20,
+				RetrievalBudget:   retrievalBudget,
+				MemoryBudget:      memoryBudget,
+				ModelName:         modelName,
+				ToolsTokens:       toolsTokens,
+			}, client.ChatModel())
+			if bErr != nil {
+				logger.Warnf("构建增强上下文失败，降级为传统方式: %v", bErr)
+			}
+			r = ctxLoadResult{ctx: enhancedCtx, err: bErr}
+		}
+		ctxCh <- r
+	}()
+
+	userRes := <-userCh
+	prefRes := <-prefCh
+	ctxRes := <-ctxCh
+
+	// 填 enhancedCtx
+	var enhancedCtx *EnhancedContext
+	if ctxRes.err == nil && ctxRes.ctx != nil {
+		enhancedCtx = ctxRes.ctx
+	}
 	if enhancedCtx == nil {
+		// 兜底：传统截断
 		msg, _ := s.messageRepo.FindRecentForContext(ctx, sessionID, 20)
 		enhancedCtx = &EnhancedContext{
 			History:         truncateHistoryByTokens(msg, historyBudget, modelName),
@@ -381,22 +428,29 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 			RetrievalBudget: retrievalBudget,
 		}
 	}
-	enhancedCtx.UserCtx = userCtx
 
-	// 填充阶段二用户画像、偏好（任何失败不阻断主流程）
-	if userEntity, err := s.userRepo.FindByID(userID); err == nil && userEntity != nil {
-		enhancedCtx.Profile = userEntity
-		if s.prefSvc != nil {
-			if p, e := s.prefSvc.GetByUserID(ctx, userID); e == nil {
-				enhancedCtx.Preference = p
-			}
-		}
+	// 用 goroutine A 的结果同时填 UserCtx 和 Profile（之前 loadUserContext + 后面 FindByID 查了两次，现在一次搞定）
+	if userRes.err != nil {
+		logger.Warnf("加载用户信息失败, userID=%s: %v", userID, userRes.err)
+	}
+	if userRes.entity != nil {
+		enhancedCtx.UserCtx = NewUserContext(*userRes.entity)
+		enhancedCtx.Profile = userRes.entity
+	} else {
+		enhancedCtx.UserCtx = NewUserContext(entity.User{})
+	}
+
+	if prefRes.err != nil {
+		logger.Warnf("加载用户偏好失败, userID=%s: %v", userID, prefRes.err)
+	}
+	if prefRes.pref != nil {
+		enhancedCtx.Preference = prefRes.pref
 	}
 
 	logger.Infof("增强上下文: 历史 %d 条(预算 %d), 记忆 %d 条(预算 %d), 检索预算 %d, 工具预留 %d, 摘要存在=%v, 模型窗口=%d, 用户=%s, 偏好=%v",
 		len(enhancedCtx.History), enhancedCtx.HistoryBudget,
 		len(enhancedCtx.Memories), memoryBudget,
-		enhancedCtx.RetrievalBudget, toolsTokens, enhancedCtx.Summary != nil, maxCtx, userCtx.Username,
+		enhancedCtx.RetrievalBudget, toolsTokens, enhancedCtx.Summary != nil, maxCtx, enhancedCtx.UserCtx.Username,
 		enhancedCtx.Preference != nil)
 
 	// P1-⑨：分块 token 指标（Prometheus /metrics 直接聚合可看"到底是哪一块把窗口撑爆了"）

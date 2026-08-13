@@ -341,28 +341,40 @@ func AttrsFromRoot(root *observability.Span) map[string]any {
 }
 
 // stripInternalSpanAttrs 递归清理 span 树中 __ 开头的内部 attrs（写 span_tree JSON 前调用）。
+//
+// 并发安全说明：
+//   - 此函数可能在 FlushTrace 的后台 goroutine 执行时，与主请求 goroutine 里尚未结束的
+//     SetSpanAttrs 并发读写同一份 span.Attrs。Go 的原生 map 不支持并发读写，任何一边的
+//     delete/写都会触发 fatal error: concurrent map iteration and map write。
+//   - 修复方式：不原地 delete，而是先拷贝一份 attrs，在副本上过滤，再赋回 s.Attrs。
+//     这样迭代读的是独立副本，就算主 goroutine 同时在写，最坏情况是 strip 拿到的是
+//     旧快照，不会 crash——FlushTrace 完后 span 对象就丢了，不影响业务。
 func stripInternalSpanAttrs(s *observability.Span) {
 	if s == nil {
 		return
 	}
-	if s.Attrs != nil {
-		for k := range s.Attrs {
-			if strings.HasPrefix(k, "__") {
-				delete(s.Attrs, k)
+	if len(s.Attrs) > 0 {
+		clean := make(observability.Attrs, len(s.Attrs))
+		for k, v := range s.Attrs { // 迭代期间无任何 delete/写，只是读
+			if !strings.HasPrefix(k, "__") {
+				clean[k] = v
 			}
 		}
+		s.Attrs = clean
 	}
 	for i := range s.Children {
 		stripInternalSpanAttrs(s.Children[i])
 	}
 	for i := range s.Events {
-		if s.Events[i] == nil || s.Events[i].Attrs == nil {
+		if s.Events[i] == nil || len(s.Events[i].Attrs) == 0 {
 			continue
 		}
-		for k := range s.Events[i].Attrs {
-			if strings.HasPrefix(k, "__") {
-				delete(s.Events[i].Attrs, k)
+		clean := make(observability.Attrs, len(s.Events[i].Attrs))
+		for k, v := range s.Events[i].Attrs {
+			if !strings.HasPrefix(k, "__") {
+				clean[k] = v
 			}
 		}
+		s.Events[i].Attrs = clean
 	}
 }

@@ -10,8 +10,10 @@ import (
 	"github.com/go-ego/gse"
 	"gorm.io/gorm"
 
+	"solvify-agent/internal/observability"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/stopwords"
 )
 
 var (
@@ -156,20 +158,28 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	vr := <-vectorCh
 	kr := <-keywordCh
 
+	rec := observability.RecorderFromContext(ctx)
+
 	// 向量检索失败时降级：仅用关键词结果，不阻断检索
 	if vr.err != nil {
 		logger.Warnf("向量检索失败，降级为纯关键词检索: %v", vr.err)
 		vr.docs = nil // 清空，后续只用关键词结果
+		rec.Incr(ctx, "rag_retriever_degradation_total", map[string]string{"side": "vector", "reason": "search_error"}, 1)
 	}
 	if kr.err != nil {
 		logger.Warnf("关键词检索失败，降级为纯向量检索: %v", kr.err)
 		kr.docs = nil
+		rec.Incr(ctx, "rag_retriever_degradation_total", map[string]string{"side": "keyword", "reason": "search_error"}, 1)
 	}
 
 	// 两种检索都失败才报错
 	if vr.err != nil && kr.err != nil {
+		rec.Incr(ctx, "rag_retriever_degradation_total", map[string]string{"side": "both", "reason": "search_error"}, 1)
 		return Result{}, fmt.Errorf("混合检索完全失败: 向量(%v), 关键词(%v)", vr.err, kr.err)
 	}
+
+	observeStage(rec, ctx, "vector_raw", float64(len(vr.docs)))
+	observeStage(rec, ctx, "keyword_raw", float64(len(kr.docs)))
 
 	logger.Infof("向量检索命中: %d 条, 关键词检索命中: %d 条", len(vr.docs), len(kr.docs))
 
@@ -182,6 +192,7 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 			filteredVector = append(filteredVector, doc)
 		}
 	}
+	observeStage(rec, ctx, "vector_filtered", float64(len(filteredVector)))
 
 	// 1b. 关键词侧：陡峭度检测 + 最低匹配过滤
 	filteredKeyword := r.keywordSourceFilter(kr.docs)
@@ -189,7 +200,9 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	// 1c. 向量全灭时，对关键词结果加最低匹配比例过滤
 	if len(filteredVector) == 0 && len(filteredKeyword) > 0 {
 		filteredKeyword = filterByMinScore(filteredKeyword, r.keywordScoreThreshold, "关键词")
+		rec.Incr(ctx, "rag_retriever_degradation_total", map[string]string{"side": "keyword_only", "reason": "min_score_filter"}, 1)
 	}
+	observeStage(rec, ctx, "keyword_filtered", float64(len(filteredKeyword)))
 
 	// ===== Step 2: 同源内 Min-Max 归一化 =====
 	vectorNorm := minMaxNormalize(filteredVector)
@@ -197,9 +210,11 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 
 	// ===== Step 3: RRF 融合 =====
 	fused := r.reciprocalRankFusion(filteredVector, filteredKeyword)
+	observeStage(rec, ctx, "rrf_fused", float64(len(fused)))
 
 	// ===== Step 4: 跨源交叉验证 =====
 	fused = r.crossSourceFilter(fused, filteredVector, filteredKeyword, vectorNorm, keywordNorm)
+	observeStage(rec, ctx, "cross_filtered", float64(len(fused)))
 
 	// ===== Step 5: TopK 截取 =====
 	docs := make([]Document, 0, len(fused))
@@ -218,6 +233,7 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 			Score:           item.Score,
 		})
 	}
+	observeStage(rec, ctx, "final", float64(len(docs)))
 
 	logger.Infof("混合检索最终结果: %d 条 (向量过滤阈值=%.2f, TopK=%d, 向量候选=%d, 关键词候选=%d)",
 		len(docs), r.scoreThreshold, topK, len(filteredVector), len(filteredKeyword))
@@ -229,6 +245,9 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 }
 
 // vectorSearch 执行向量检索
+// 优化：主查询只查 document_chunks 表（不 LEFT JOIN documents），
+// 向量距离排序在 chunks 表上直接跑，拿 topK*2 后再批量查 documents 表的 title。
+// 避免对所有候选 chunk 做额外 JOIN。
 func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scoredChunk, error) {
 	embedding, err := r.embeddingFunc(ctx, query.Question)
 	if err != nil {
@@ -236,35 +255,33 @@ func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scor
 	}
 
 	vectorStr := vectorToString(embedding)
-	topK := query.TopK * 2 // 多召回一些用于融合
+	topK := query.TopK * 2
 
 	var results []scoredChunk
 	err = r.db.WithContext(ctx).Raw(`
-		SELECT id, knowledge_base_id, document_id, version_id, chunk_index, title, content, score, keywords
-		FROM (
-			SELECT
-				dc.id,
-				dc.knowledge_base_id,
-				dc.document_id,
-				dc.version_id,
-				dc.chunk_index,
-				COALESCE(d.title, '') as title,
-				dc.content,
-				1 - (dc.embedding <=> ?::vector) AS score,
-				COALESCE(dc.keywords::text, '{}') as keywords
-			FROM document_chunks dc
-			LEFT JOIN documents d ON d.id = dc.document_id
-			WHERE dc.knowledge_base_id IN (?)
-				AND dc.embedding IS NOT NULL
-				AND dc.user_id = ?
-			ORDER BY dc.embedding <=> ?::vector
-			LIMIT ?
-		) sub
+		SELECT
+			dc.id,
+			dc.knowledge_base_id,
+			dc.document_id,
+			dc.version_id,
+			dc.chunk_index,
+			dc.content,
+			1 - (dc.embedding <=> ?::vector) AS score,
+			COALESCE(dc.keywords::text, '{}') as keywords
+		FROM document_chunks dc
+		WHERE dc.knowledge_base_id IN (?)
+			AND dc.embedding IS NOT NULL
+			AND dc.user_id = ?
+		ORDER BY dc.embedding <=> ?::vector
+		LIMIT ?
 	`, vectorStr, query.KnowledgeBaseIDs, query.UserID, vectorStr, topK).Scan(&results).Error
 
 	if err != nil {
 		return nil, err
 	}
+
+	// 批量填 title（只对 topK*2 条查，开销可忽略）
+	batchFillTitles(r.db, results)
 
 	logger.Infof("向量检索原始结果: %d 条", len(results))
 	return results, nil
@@ -272,94 +289,63 @@ func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scor
 
 // keywordSearch 执行关键词检索
 // 优化：GIN 索引加速 && overlap 过滤（主收益），unnest 仅对过滤后的少量行计算分数
+// 也去掉了 LEFT JOIN documents，title 在主查询完成后批量填
 func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]scoredChunk, error) {
-	// 从问题中提取关键词（简单的分词策略）
 	keywords := extractKeywords(query.Question)
 	if len(keywords) == 0 {
 		return nil, nil
 	}
 
-	topK := query.TopK * 2 // 多召回一些用于融合
+	topK := query.TopK * 2
 
 	var results []scoredChunk
 
-	// 构建关键词数组字面量
 	keywordArray := buildPostgresArray(keywords)
 
 	err := r.db.WithContext(ctx).Raw(`
-		SELECT id, knowledge_base_id, document_id, version_id, chunk_index, title, content, score, keywords
-		FROM (
-			SELECT
-				dc.id,
-				dc.knowledge_base_id,
-				dc.document_id,
-				dc.version_id,
-				dc.chunk_index,
-				COALESCE(d.title, '') as title,
-				dc.content,
-				-- 计算匹配关键词占比：匹配数 / 查询关键词总数
-				-- unnest 仅在 && 过滤后的少量行上执行，GIN 索引保证过滤极快
-				(
-					SELECT COUNT(*)::float / GREATEST(cardinality(?::text[]), 1)
-					FROM unnest(dc.keywords) AS kw
-					WHERE kw = ANY(?::text[])
-				) AS score,
-				COALESCE(dc.keywords::text, '{}') as keywords
-			FROM document_chunks dc
-			LEFT JOIN documents d ON d.id = dc.document_id
-			WHERE dc.knowledge_base_id IN (?)
-				AND dc.keywords IS NOT NULL
-				AND dc.keywords && ?::text[]    -- GIN 索引加速：先快速过滤有交集的 chunk
-				AND dc.user_id = ?
-			ORDER BY score DESC
-			LIMIT ?
-		) sub
-		WHERE score > 0
+		SELECT
+			dc.id,
+			dc.knowledge_base_id,
+			dc.document_id,
+			dc.version_id,
+			dc.chunk_index,
+			dc.content,
+			(
+				SELECT COUNT(*)::float / GREATEST(cardinality(?::text[]), 1)
+				FROM unnest(dc.keywords) AS kw
+				WHERE kw = ANY(?::text[])
+			) AS score,
+			COALESCE(dc.keywords::text, '{}') as keywords
+		FROM document_chunks dc
+		WHERE dc.knowledge_base_id IN (?)
+			AND dc.keywords IS NOT NULL
+			AND dc.keywords && ?::text[]
+			AND dc.user_id = ?
+			AND dc.embedding IS NOT NULL
+		ORDER BY score DESC
+		LIMIT ?
 	`, keywordArray, keywordArray, query.KnowledgeBaseIDs, keywordArray, query.UserID, topK).Scan(&results).Error
 
 	if err != nil {
 		return nil, err
 	}
 
-	logger.Infof("关键词检索原始结果: %d 条, 关键词: %v", len(results), keywords)
-	return results, nil
-}
+	batchFillTitles(r.db, results)
 
-// extractKeywords 使用 gse 分词提取关键词
-func extractKeywords(question string) []string {
-	stopWords := map[string]bool{
-		"的": true, "了": true, "在": true, "是": true, "我": true,
-		"有": true, "和": true, "就": true, "不": true, "人": true,
-		"都": true, "一": true, "一个": true, "上": true, "也": true,
-		"很": true, "到": true, "说": true, "要": true, "去": true,
-		"你": true, "会": true, "着": true, "没有": true, "看": true,
-		"好": true, "自己": true, "这": true, "他": true, "她": true,
-		"它": true, "们": true, "那": true, "什么": true,
-		"怎么": true, "如何": true, "为什么": true, "哪": true, "哪个": true,
-		"哪些": true, "吗": true, "呢": true, "吧": true, "啊": true,
-		"the": true, "a": true, "an": true, "is": true, "are": true,
-		"was": true, "were": true, "be": true, "been": true, "being": true,
-		"have": true, "has": true, "had": true, "do": true, "does": true,
-		"did": true, "will": true, "would": true, "could": true, "should": true,
-		"may": true, "might": true, "can": true, "shall": true, "must": true,
-		"to": true, "of": true, "in": true, "for": true, "on": true,
-		"with": true, "at": true, "by": true, "from": true, "as": true,
-		"into": true, "through": true, "during": true, "before": true, "after": true,
-		"above": true, "below": true, "between": true, "and": true, "but": true,
-		"or": true, "nor": true, "not": true, "so": true, "yet": true,
-		"both": true, "either": true, "neither": true, "each": true, "every": true,
-		"all": true, "any": true, "few": true, "more": true, "most": true,
-		"other": true, "some": true, "such": true, "no": true, "only": true,
-		"own": true, "same": true, "than": true, "too": true, "very": true,
-		"just": true, "because": true, "if": true, "when": true, "where": true,
-		"how": true, "what": true, "which": true, "who": true, "whom": true,
-		"this": true, "that": true, "these": true, "those": true, "i": true,
-		"me": true, "my": true, "we": true, "our": true, "you": true,
-		"your": true, "he": true, "him": true, "his": true, "she": true,
-		"her": true, "it": true, "its": true, "they": true, "them": true,
-		"their": true,
+	// 过滤零分结果
+	filtered := results[:0]
+	for _, r := range results {
+		if r.Score > 0 {
+			filtered = append(filtered, r)
+		}
 	}
 
+	logger.Infof("关键词检索原始结果: %d 条(有效), 关键词: %v", len(filtered), keywords)
+	return filtered, nil
+}
+
+// extractKeywords 使用 gse 分词提取关键词，过滤停用词
+func extractKeywords(question string) []string {
 	seg := getSegmenter()
 	words := seg.Cut(question, true)
 
@@ -370,7 +356,7 @@ func extractKeywords(question string) []string {
 		if w == "" || len(w) < 2 {
 			continue
 		}
-		if stopWords[w] {
+		if stopwords.IsStopWord(w) {
 			continue
 		}
 		if seen[w] {
@@ -379,8 +365,48 @@ func extractKeywords(question string) []string {
 		seen[w] = true
 		keywords = append(keywords, w)
 	}
-
 	return keywords
+}
+
+// batchFillTitles 对检索结果批量填充文档标题。
+// 把 LEFT JOIN documents 从主查询里拆出来——主查询只跑 chunks 表排序取 topK，
+// 然后对这少量结果的 document_id 做一次 IN 查询拿 title，JOIN 开销从 O(全量 chunks) 降到 O(topK)。
+func batchFillTitles(db *gorm.DB, chunks []scoredChunk) {
+	if db == nil || len(chunks) == 0 {
+		return
+	}
+	// 收集去重的 document_id
+	docIDs := make(map[string]struct{})
+	for _, c := range chunks {
+		if c.DocumentID != "" {
+			docIDs[c.DocumentID] = struct{}{}
+		}
+	}
+	if len(docIDs) == 0 {
+		return
+	}
+	idList := make([]string, 0, len(docIDs))
+	for id := range docIDs {
+		idList = append(idList, id)
+	}
+
+	var rows []struct {
+		ID    string
+		Title string
+	}
+	if err := db.Raw("SELECT id, title FROM documents WHERE id IN ?", idList).Scan(&rows).Error; err != nil {
+		logger.Warnf("batchFillTitles 查 documents 失败: %v", err)
+		return
+	}
+	titleMap := make(map[string]string, len(rows))
+	for _, r := range rows {
+		titleMap[r.ID] = r.Title
+	}
+	for i := range chunks {
+		if t, ok := titleMap[chunks[i].DocumentID]; ok {
+			chunks[i].Title = t
+		}
+	}
 }
 
 // buildPostgresArray 构建 PostgreSQL 数组字面量
@@ -592,4 +618,13 @@ func (r *HybridRetriever) crossSourceFilter(
 	}
 
 	return result
+}
+
+// observeStage 记录混合检索各阶段的候选条数，供 Prometheus 观测管线漏斗。
+// rec 为 nil 时静默跳过（单元测试或未注册 observability 的场景）。
+func observeStage(rec observability.Recorder, ctx context.Context, stage string, count float64) {
+	if rec == nil {
+		return
+	}
+	rec.Observe(ctx, "rag_retriever_stage_count", map[string]string{"stage": stage}, count)
 }

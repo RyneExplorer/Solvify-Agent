@@ -101,5 +101,6 @@ func NewEmbeddingClientFromConfig(ctx context.Context, cfg *config.EmbeddingConf
 		BaseURL:   cfg.BaseURL,
 		Model:     cfg.Model,
 		Dimension: cfg.Dimension,
+		Timeout:   cfg.Timeout,
 	})
 }

@@ -6,8 +6,9 @@ import (
 )
 
 // sendErrorEvent 发送友好的错误事件
+// 匹配顺序：先查 err.Error()（包含底层错误详情如 503/429/timeout），再查 rawError（自定义描述）
 func sendErrorEvent(eventCh chan<- dto.StreamEvent, err error, rawError string) {
-	friendly := getFriendlyError(rawError)
+	friendly := getFriendlyError(err, rawError)
 
 	logger.Errorf("错误事件: title=%s, raw=%s, err=%v", friendly.Title, rawError, err)
 

@@ -1,5 +1,7 @@
 package service
 
+import "strings"
+
 // ErrorMessage 用户友好的错误消息
 type ErrorMessage struct {
 	Title     string // 错误标题
@@ -8,8 +10,9 @@ type ErrorMessage struct {
 }
 
 // errorMessages 错误消息映射表
+// key 用于模糊匹配：getFriendlyError 会检查 err.Error() 和 rawError 是否包含 key
 var errorMessages = map[string]ErrorMessage{
-	// 模型相关
+	// 模型配置相关
 	"模型配置无效或无权访问": {
 		Title:     "模型加载失败",
 		Detail:    "请在设置中检查模型配置，或选择其他模型",
@@ -43,7 +46,59 @@ var errorMessages = map[string]ErrorMessage{
 		Retryable: false,
 	},
 
-	// LLM 相关
+	// LLM 服务端错误（HTTP 状态码 + 关键词）
+	"503": {
+		Title:     "AI 服务暂时不可用",
+		Detail:    "模型端点暂时无法响应，请稍后重试",
+		Retryable: true,
+	},
+	"Service Unavailable": {
+		Title:     "AI 服务暂时不可用",
+		Detail:    "模型端点暂时无法响应，请稍后重试",
+		Retryable: true,
+	},
+	"Service temporarily unavailable": {
+		Title:     "AI 服务暂时不可用",
+		Detail:    "模型端点暂时无法响应，请稍后重试",
+		Retryable: true,
+	},
+	"429": {
+		Title:     "AI 服务请求过于频繁",
+		Detail:    "模型端点限流了，请稍等一会儿再试",
+		Retryable: true,
+	},
+	"Too Many Requests": {
+		Title:     "AI 服务请求过于频繁",
+		Detail:    "模型端点限流了，请稍等一会儿再试",
+		Retryable: true,
+	},
+	"context length": {
+		Title:     "对话太长了",
+		Detail:    "当前对话超出了模型的上下文限制，请开启新对话继续",
+		Retryable: false,
+	},
+	"token limit": {
+		Title:     "对话太长了",
+		Detail:    "当前对话超出了模型的上下文限制，请开启新对话继续",
+		Retryable: false,
+	},
+	"超时": {
+		Title:     "AI 服务响应超时",
+		Detail:    "模型端点响应过慢，请稍后重试或切换更快的模型",
+		Retryable: true,
+	},
+	"timeout": {
+		Title:     "AI 服务响应超时",
+		Detail:    "模型端点响应过慢，请稍后重试或切换更快的模型",
+		Retryable: true,
+	},
+	"context deadline exceeded": {
+		Title:     "AI 服务响应超时",
+		Detail:    "模型端点响应过慢，请稍后重试或切换更快的模型",
+		Retryable: true,
+	},
+
+	// LLM 调用通用错误
 	"LLM 调用失败": {
 		Title:     "AI 服务异常",
 		Detail:    "AI 服务暂时不可用，请稍后重试",
@@ -69,6 +124,18 @@ var errorMessages = map[string]ErrorMessage{
 	"Agent 流读取失败": {
 		Title:     "推理过程中断",
 		Detail:    "深度推理过程中断，请重试",
+		Retryable: true,
+	},
+
+	// Graph 执行错误（快速模式）
+	"快速检索执行失败": {
+		Title:     "快速检索链路异常",
+		Detail:    "请稍后重试或切换到深度模式",
+		Retryable: true,
+	},
+	"快速检索流式生成失败": {
+		Title:     "AI 生成中断",
+		Detail:    "回答生成过程中断，请重试",
 		Retryable: true,
 	},
 
@@ -118,20 +185,27 @@ var errorMessages = map[string]ErrorMessage{
 }
 
 // getFriendlyError 获取用户友好的错误消息
-func getFriendlyError(errMsg string) ErrorMessage {
-	// 精确匹配
-	if msg, ok := errorMessages[errMsg]; ok {
+// 匹配顺序：先检查 err.Error()（底层错误详情，如 503/429），再检查 rawError（业务层自定义描述）
+// 这样像 "快速检索执行失败" 这种通用描述不会掩盖掉底层真正的错误原因
+func getFriendlyError(err error, rawError string) ErrorMessage {
+	var combined strings.Builder
+	if err != nil {
+		combined.WriteString(err.Error())
+	}
+	combined.WriteString("|")
+	combined.WriteString(rawError)
+	text := combined.String()
+
+	if msg, ok := errorMessages[text]; ok {
 		return msg
 	}
 
-	// 模糊匹配
 	for key, msg := range errorMessages {
-		if contains(errMsg, key) {
+		if contains(text, key) {
 			return msg
 		}
 	}
 
-	// 默认错误消息
 	return ErrorMessage{
 		Title:     "操作失败",
 		Detail:    "请稍后重试，如问题持续请联系管理员",

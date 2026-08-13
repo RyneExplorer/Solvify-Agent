@@ -23,6 +23,11 @@ var (
 	sugar *zap.SugaredLogger
 )
 
+func init() {
+	log = zap.NewNop()
+	sugar = log.Sugar()
+}
+
 // CustomLevelEncoder 自定义日志级别编码器，支持控制台颜色显示
 func CustomLevelEncoder(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	var color string
