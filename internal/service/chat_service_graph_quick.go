@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -254,10 +255,93 @@ func quickRewriteFn(ctx context.Context, input *quickGraphInput) (string, error)
 	return input.OriginalQuery, nil
 }
 
+// matchLocalIntent 本地快速意图匹配（纯正则 + 关键词，0ms）。
+// 返回 (intent, matched) —— matched=false 表示交给 LLM 判定。
+//
+// 覆盖四类场景：
+//   greeting: 你好 / hi / 早上好 / 在吗
+//   identity: 你是谁 / 你能做什么 / 介绍一下自己
+//   chitchat: 今天星期几 / 讲个笑话 / 随便聊聊（含"今天/现在+时间查询"）
+//   meta:     我的历史 / 刚才说了什么
+//
+// 不命中时返回 ("", false)，交给 LLM 做更精细的意图判定。
+func matchLocalIntent(raw string) (string, bool) {
+	q := strings.TrimSpace(strings.ToLower(raw))
+	if q == "" {
+		return intentQuestion, true
+	}
+
+	// ── greeting ──
+	greetingRegex := `^(你好|您好|hi+|hello+|嗨|哈喽|在吗|在不在|早|早上好|下午好|晚上好|晚安|早安|午安|晚安)$`
+	if matchRegex(greetingRegex, q) {
+		return intentGreeting, true
+	}
+
+	// ── identity ──
+	identityRegex := `^(你是谁|你是谁呀|你叫什么|你叫什么名字|你能做什么|你能干什么|你是干什么的|介绍一下你自己|自我介绍|你是什么模型|你是什么)$`
+	if matchRegex(identityRegex, q) {
+		return intentIdentity, true
+	}
+
+	// ── chitchat（闲聊 + 系统信息查询，LLM 容易误识别成 question 的场景）──
+	// 时间日期类
+	timeRegex := `(今天|现在|当前|明天|后天)+(星期几|礼拜几|几号|多少号|日期|几号了|几点|几点钟|时间|日期是)`
+	// 纯闲聊类
+	chitchatRegex := `^(讲个笑话|来个笑话|随便聊聊|聊聊呗|聊聊天|说点什么|有什么好玩的|今天天气怎么样|天气怎么样|心情不好|我心情不好|安慰一下我|夸夸我)$`
+	if matchRegex(timeRegex, q) || matchRegex(chitchatRegex, q) {
+		return intentChitchat, true
+	}
+
+	// ── meta ──
+	metaRegex := `(我的历史|聊天记录|你刚才说了什么|刚才说的什么|上一个问题|前一个问题|回顾对话|我们聊了什么|你还记得|之前说的)`
+	if matchRegex(metaRegex, q) {
+		return intentMeta, true
+	}
+
+	return "", false
+}
+
+// matchRegex 简单的正则匹配封装，避免每次都 re.Compile
+var (
+	reGreeting  = regexp.MustCompile(`^(你好|您好|hi+|hello+|嗨|哈喽|在吗|在不在|早|早上好|下午好|晚上好|晚安|早安|午安|晚安)$`)
+	reIdentity  = regexp.MustCompile(`^(你是谁|你是谁呀|你叫什么|你叫什么名字|你能做什么|你能干什么|你是干什么的|介绍一下你自己|自我介绍|你是什么模型|你是什么)$`)
+	reTimeInfo   = regexp.MustCompile(`(今天|现在|当前|明天|后天)+(星期几|礼拜几|几号|多少号|日期|几号了|几点|几点钟|时间|日期是)`)
+	reChitchat   = regexp.MustCompile(`^(讲个笑话|来个笑话|随便聊聊|聊聊呗|聊聊天|说点什么|有什么好玩的|今天天气怎么样|天气怎么样|心情不好|我心情不好|安慰一下我|夸夸我)$`)
+	reMeta       = regexp.MustCompile(`(我的历史|聊天记录|你刚才说了什么|刚才说的什么|上一个问题|前一个问题|回顾对话|我们聊了什么|你还记得|之前说的)`)
+)
+
+func matchRegex(pattern string, q string) bool {
+	switch pattern {
+	case `^(你好|您好|hi+|hello+|嗨|哈喽|在吗|在不在|早|早上好|下午好|晚上好|晚安|早安|午安|晚安)$`:
+		return reGreeting.MatchString(q)
+	case `^(你是谁|你是谁呀|你叫什么|你叫什么名字|你能做什么|你能干什么|你是干什么的|介绍一下你自己|自我介绍|你是什么模型|你是什么)$`:
+		return reIdentity.MatchString(q)
+	case `(今天|现在|当前|明天|后天)+(星期几|礼拜几|几号|多少号|日期|几号了|几点|几点钟|时间|日期是)`:
+		return reTimeInfo.MatchString(q)
+	case `^(讲个笑话|来个笑话|随便聊聊|聊聊呗|聊聊天|说点什么|有什么好玩的|今天天气怎么样|天气怎么样|心情不好|我心情不好|安慰一下我|夸夸我)$`:
+		return reChitchat.MatchString(q)
+	case `(我的历史|聊天记录|你刚才说了什么|刚才说的什么|上一个问题|前一个问题|回顾对话|我们聊了什么|你还记得|之前说的)`:
+		return reMeta.MatchString(q)
+	default:
+		return false
+	}
+}
+
 // doRewriteWithLLM 调 LLM 做改写，失败时 fallback 原始 query。
 // 返回 (rewritten, intent, keywords, skipRetrieve, needClarify, clarifyQuestion, clarifyOptions)
+//
+// 优化：先本地快速意图匹配（0ms，覆盖问候/身份/闲聊/系统查询等常见场景），
+// 命中后直接返回，省掉 LLM 调用。只有本地判定为 question 或不确定时才调 LLM。
 func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) (string, string, []string, bool, bool, string, []string) {
-	// 1. 从 context 拿 ChatModel
+	// ── Step 0: 本地快速意图匹配（0ms） ──
+	if localIntent, ok := matchLocalIntent(input.OriginalQuery); ok {
+		skip := localIntent == intentGreeting || localIntent == intentChitchat || localIntent == intentIdentity || localIntent == intentMeta
+		logger.Infof("[意图识别-本地] original=%q → intent=%s, skipRetrieve=%v, cost=0ms",
+			input.OriginalQuery, localIntent, skip)
+		return input.OriginalQuery, localIntent, nil, skip, false, "", nil
+	}
+
+	// ── Step 1: 本地没命中 → 调 LLM ──
 	cm, ok := graphChatModelFromContext(ctx)
 	if !ok || cm == nil {
 		logger.Warnf("quickRewriteFn: context 中没有 ChatModel，跳过改写")
@@ -309,8 +393,14 @@ func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) (string, stri
 		result.Intent = intentQuestion
 	}
 
-	// 7. 判定是否跳过检索（greeting/chitchat 不需要知识库）
-	skipRetrieve := result.Intent == intentGreeting || result.Intent == intentChitchat
+	// 7. 判定是否跳过检索
+	// greeting/chitchat → 无需知识库，直接闲聊
+	// identity → "你是谁/你能做什么"，System Prompt 里已定义，不需要检索
+	// meta → "我的历史记录/你刚才说了什么"，属于会话层，不走知识检索
+	skipRetrieve := result.Intent == intentGreeting ||
+		result.Intent == intentChitchat ||
+		result.Intent == intentIdentity ||
+		result.Intent == intentMeta
 
 	// 8. 澄清检查: need_clarify=true 且有 question 才生效
 	needClarify := result.NeedClarify && strings.TrimSpace(result.ClarifyQuestion) != ""
@@ -370,42 +460,76 @@ func buildRewriteHistory(msgs []*schema.Message, currentUserMsgIdx, maxRounds in
 // 超时就放弃，不阻塞主路径。
 const rewriteParallelMaxWait = 500 * time.Millisecond
 
-// addQuickRetrieveNode 节点 2：Retrieve 用 OriginalQuery 先跑，PostHandler 等待后台 LLM 改写
-// 并在改写可用时补一次检索 + 合并去重。
+// addQuickRetrieveNode 节点 2：Retrieve
+// 改进：用 LambdaNode 替代 AddRetrieverNode，在 Lambda 内部提前检查 SkipRetrieve / NeedClarify，
+// 避免 EinoRetrieverAdapter 被实例化后才被 PostHandler 清空——那样知识库查询的开销已经花出去了。
 func addQuickRetrieveNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamReader[*schema.Message]], einoRetriever *rag.EinoRetrieverAdapter) error {
-	return g.AddRetrieverNode(graphQuickNodeRetrieve, einoRetriever,
-		einoCompose.WithNodeName("KnowledgeRetrieve"),
-		einoCompose.WithStatePostHandler(func(ctx context.Context, docs []*schema.Document, state *quickGraphState) ([]*schema.Document, error) {
+	return g.AddLambdaNode(graphQuickNodeRetrieve,
+		einoCompose.InvokableLambda(func(ctx context.Context, query string) ([]*schema.Document, error) {
+			var state *quickGraphState
+			if err := einoCompose.ProcessState(ctx, func(_ context.Context, s *quickGraphState) error {
+				state = s
+				return nil
+			}); err != nil || state == nil {
+				return nil, apperrors.NewDefault(apperrors.CodeInternalError)
+			}
+
+			// 提前短路：Rewrite 阶段已判定不需要检索 → 不查知识库，直接返回空 docs
+			if state.SkipRetrieve || state.NeedClarify {
+				state.RetrievedDocs = nil
+				return nil, nil
+			}
+
+			// 构造 retriever.Option（KBIDs / UserID / TopK）
+			opts := buildRetrieverOpts(state.Input)
+
+			// 用当前 query（Rewrite 返回的原始或改写后 query）先查
+			docs, err := einoRetriever.Retrieve(ctx, query, opts...)
+			if err != nil {
+				logger.Warnf("quickRetrieveFn: 检索失败，降级为空结果: %v", err)
+				state.RetrievedDocs = nil
+				return nil, nil
+			}
 			state.RetrievedDocs = docs
 
-			// 等后台 LLM 改写（最多 rewriteParallelMaxWait）
+			// 等后台 LLM 改写（最多 rewriteParallelMaxWait），改写完成后补一次检索 + 合并去重
 			if state.RewriteDone != nil {
 				select {
 				case <-state.RewriteDone:
-					// 改写完成，检查是否需要补检索
 					if state.RewrittenQuery != "" && state.RewrittenQuery != state.Input.OriginalQuery {
 						if !state.SkipRetrieve && !state.NeedClarify {
-							// 改写 query 与原始不同且不需要跳过 → 补一次检索
-							rewrittenDocs, err := einoRetriever.Retrieve(ctx, state.RewrittenQuery)
-							if err == nil && len(rewrittenDocs) > 0 {
+							rewrittenDocs, rErr := einoRetriever.Retrieve(ctx, state.RewrittenQuery, opts...)
+							if rErr == nil && len(rewrittenDocs) > 0 {
 								docs = mergeDocsByScore(docs, rewrittenDocs)
 								state.RetrievedDocs = docs
 							}
 						}
 					}
 				case <-time.After(rewriteParallelMaxWait):
-					// 改写还在跑，超时放弃，继续用原始 query 结果
 				}
-			}
-
-			// 如果改写判定 skipRetrieve 或 needClarify，清空 docs
-			if state.SkipRetrieve || state.NeedClarify {
-				state.RetrievedDocs = nil
-				return nil, nil
 			}
 			return docs, nil
 		}),
+		einoCompose.WithNodeName("KnowledgeRetrieve"),
 	)
+}
+
+// buildRetrieverOpts 从 quickGraphInput 构造 retriever.Option 切片，
+// 替代之前 quickRetrieverCallOpts 通过 einoCompose.WithRetrieverOption 注入的方式。
+func buildRetrieverOpts(input *quickGraphInput) []retriever.Option {
+	var opts []retriever.Option
+	if input != nil {
+		if len(input.KnowledgeBaseIDs) > 0 {
+			opts = append(opts, rag.WithKnowledgeBaseIDs(input.KnowledgeBaseIDs))
+		}
+		if input.UserID != "" {
+			opts = append(opts, rag.WithUserID(input.UserID))
+		}
+	}
+	if cfg := config.Get(); cfg != nil && cfg.RAG.TopK > 0 {
+		opts = append(opts, retriever.WithTopK(cfg.RAG.TopK))
+	}
+	return opts
 }
 
 // mergeDocsByScore 合并两组 docs，按 ID 去重取最高分，最后按分数降序。
@@ -789,7 +913,10 @@ func (s *chatService) processMessageGraphQuick(
 
 	// 3.5) 预执行 Rewrite + 澄清检查：needClarify=true 时短路返回，不浪费后续节点
 	rewriteCheckCtx := withGraphChatModel(ctx, chatModel)
+	rewriteStart := time.Now()
 	rewritten, intent, keywords, skipRetrieve, needClarify, clarifyQuestion, clarifyOptions := doRewriteWithLLM(rewriteCheckCtx, graphInput)
+	logger.Infof("[意图识别] original=%q → intent=%s, skipRetrieve=%v, needClarify=%v, rewritten=%q, keywords=%v, cost=%dms",
+		req.Content, intent, skipRetrieve, needClarify, rewritten, keywords, time.Since(rewriteStart).Milliseconds())
 
 	if needClarify {
 		// 存 PendingClarify 到 session
@@ -1059,22 +1186,9 @@ func quickIncrError(ctx context.Context, obs observability.Recorder, obsOk bool,
 	obs.Incr(ctx, "chat_quick_graph_errors_total", map[string]string{"stage": stage}, 1)
 }
 
-// quickRetrieverCallOpts 把 KBIDs/UserID/TopK 组合成只作用在 retrieve 节点的 compose.Option
-func quickRetrieverCallOpts(req requestdto.SendMessageRequest, userID string) []einoCompose.Option {
-	opts := []retriever.Option{}
-	if len(req.KnowledgeBaseIDs) > 0 {
-		opts = append(opts, rag.WithKnowledgeBaseIDs(req.KnowledgeBaseIDs))
-	}
-	if userID != "" {
-		opts = append(opts, rag.WithUserID(userID))
-	}
-	if cfg := config.Get(); cfg != nil && cfg.RAG.TopK > 0 {
-		opts = append(opts, retriever.WithTopK(cfg.RAG.TopK))
-	}
-	if len(opts) == 0 {
-		return nil
-	}
-	return []einoCompose.Option{
-		einoCompose.WithRetrieverOption(opts...).DesignateNode(graphQuickNodeRetrieve),
-	}
+// quickRetrieverCallOpts 现在返回 nil——Retrieve 节点已改为 LambdaNode，
+// retriever.Option 通过 buildRetrieverOpts 在 Lambda 内部直接构造。
+// 保留函数签名以减少调用处改动。
+func quickRetrieverCallOpts(_ requestdto.SendMessageRequest, _ string) []einoCompose.Option {
+	return nil
 }
