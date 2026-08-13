@@ -171,79 +171,75 @@
             </div>
           </div>
 
-          <!-- Pending Interrupt Card: clarify 或 danger approval -->
+          <!-- Pending Interrupt: clarify 或 danger approval -->
           <div v-if="pendingApproval" class="flex justify-start">
-            <!-- 澄清追问卡 -->
-            <div v-if="pendingApproval.is_clarify" class="max-w-[80%]">
-              <div class="rounded-xl border border-sky-200 bg-sky-50 shadow-sm overflow-hidden">
-                <div class="flex items-center gap-2 px-4 py-2.5 border-b border-sky-200 bg-sky-100/50">
-                  <svg class="w-4 h-4 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-                  </svg>
-                  <span class="text-xs font-semibold text-sky-800">需要澄清</span>
-                </div>
-                <div class="px-4 py-3">
-                  <p class="text-sm text-sky-900 leading-relaxed">{{ pendingApproval.detail }}</p>
-                  <!-- 选项按钮 -->
-                  <div v-if="pendingApproval.options?.length" class="mt-3 flex flex-wrap gap-2">
-                    <button
-                      v-for="(opt, idx) in pendingApproval.options"
-                      :key="idx"
-                      @click="approvePending(opt)"
-                      class="px-3 py-1.5 text-xs font-medium rounded-lg bg-white hover:bg-sky-50 text-sky-700 border border-sky-200 transition-colors"
-                    >{{ opt }}</button>
-                  </div>
-                  <!-- 自由输入 -->
-                  <div class="mt-3">
-                    <div class="flex gap-2">
-                      <input
-                        v-model="clarifyInput"
-                        @keyup.enter="submitClarify"
-                        placeholder="也可以直接输入你的回答..."
-                        class="flex-1 px-3 py-1.5 text-xs rounded-lg border border-sky-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-300"
-                      />
+            <div class="max-w-[80%] px-4 py-3 rounded-2xl bg-white text-slate-800 text-sm leading-relaxed">
+              <!-- 澄清追问 -->
+              <template v-if="pendingApproval.is_clarify">
+                <div class="flex items-start gap-2">
+                  <span class="text-sky-500 mt-0.5">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+                  </span>
+                  <div class="flex-1">
+                    <p class="text-slate-700">{{ pendingApproval.detail }}</p>
+                    <!-- 选项按钮 -->
+                    <div v-if="pendingApproval.options?.length" class="mt-3 flex flex-wrap gap-2">
                       <button
-                        @click="submitClarify"
-                        :disabled="!clarifyInput.trim()"
-                        class="px-3 py-1.5 text-xs font-medium rounded-lg bg-sky-600 hover:bg-sky-700 disabled:bg-sky-300 text-white transition-colors"
-                      >提交</button>
+                        v-for="(opt, idx) in pendingApproval.options"
+                        :key="idx"
+                        @click="approvePending(opt)"
+                        class="px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 transition-colors"
+                      >{{ opt }}</button>
                     </div>
-                  </div>
-                  <button
-                    @click="cancelApproval"
-                    class="mt-2 px-3 py-1 text-xs text-slate-400 hover:text-slate-600"
-                  >暂不处理</button>
-                </div>
-              </div>
-            </div>
-            <!-- 危险工具审批卡 -->
-            <div v-else class="max-w-[80%]">
-              <div class="rounded-xl border border-amber-200 bg-amber-50 shadow-sm overflow-hidden">
-                <div class="flex items-center gap-2 px-4 py-2.5 border-b border-amber-200 bg-amber-100/50">
-                  <svg class="w-4 h-4 text-amber-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
-                  </svg>
-                  <span class="text-xs font-semibold text-amber-800">需要人工确认</span>
-                  <span v-if="pendingApproval.tool_name" class="ml-auto text-[11px] text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full font-mono">{{ pendingApproval.tool_name }}</span>
-                </div>
-                <div class="px-4 py-3">
-                  <p class="text-sm text-amber-900 leading-relaxed">{{ pendingApproval.detail }}</p>
-                  <div class="mt-3 flex items-center gap-2">
-                    <button
-                      @click="approvePending('approve')"
-                      class="px-4 py-1.5 text-xs font-medium rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white transition-colors shadow-sm"
-                    >同意执行</button>
-                    <button
-                      @click="approvePending('reject')"
-                      class="px-4 py-1.5 text-xs font-medium rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 transition-colors"
-                    >拒绝</button>
+                    <!-- 自由输入 -->
+                    <div class="mt-3">
+                      <div class="flex gap-2">
+                        <input
+                          v-model="clarifyInput"
+                          @keyup.enter="submitClarify"
+                          placeholder="输入你的回答..."
+                          class="flex-1 px-3 py-1.5 text-xs rounded-lg border border-slate-200 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-300 focus:border-slate-300"
+                        />
+                        <button
+                          @click="submitClarify"
+                          :disabled="!clarifyInput.trim()"
+                          class="px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-900 disabled:bg-slate-300 text-white transition-colors"
+                        >提交</button>
+                      </div>
+                    </div>
                     <button
                       @click="cancelApproval"
-                      class="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-600 ml-auto"
+                      class="mt-2 px-3 py-1 text-xs text-slate-400 hover:text-slate-600"
                     >暂不处理</button>
                   </div>
                 </div>
-              </div>
+              </template>
+              <!-- 危险工具审批 -->
+              <template v-else>
+                <div class="flex items-start gap-2">
+                  <span class="text-amber-500 mt-0.5">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                  </span>
+                  <div class="flex-1">
+                    <p class="text-slate-700">{{ pendingApproval.detail }}</p>
+                    <div v-if="pendingApproval.tool_name" class="mt-1 text-[11px] text-slate-400 font-mono">{{ pendingApproval.tool_name }}</div>
+                    <div class="mt-3 flex items-center gap-2">
+                      <button
+                        @click="approvePending('approve')"
+                        class="px-4 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-900 text-white transition-colors"
+                      >同意执行</button>
+                      <button
+                        @click="approvePending('reject')"
+                        class="px-4 py-1.5 text-xs font-medium rounded-lg bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 transition-colors"
+                      >拒绝</button>
+                      <button
+                        @click="cancelApproval"
+                        class="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-600 ml-auto"
+                      >暂不处理</button>
+                    </div>
+                  </div>
+                </div>
+              </template>
             </div>
           </div>
         </div>
