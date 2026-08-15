@@ -59,12 +59,12 @@ type Event struct {
 	// ToolResult 工具调用结果（完整内容，供前端展示）
 	ToolResult string `json:"tool_result,omitempty"`
 	// interrupt 事件字段
-	CheckpointID string         `json:"checkpoint_id,omitempty"`
-	InterruptID  string         `json:"interrupt_id,omitempty"`
+	CheckpointID  string         `json:"checkpoint_id,omitempty"`
+	InterruptID   string         `json:"interrupt_id,omitempty"`
 	InterruptInfo map[string]any `json:"interrupt_info,omitempty"`
 	// clarify 事件字段（ask_clarify 触发的中断）
-	IsClarify      bool     `json:"is_clarify,omitempty"`
-	ClarifyQuestion string  `json:"clarify_question,omitempty"`
+	IsClarify       bool     `json:"is_clarify,omitempty"`
+	ClarifyQuestion string   `json:"clarify_question,omitempty"`
 	ClarifyOptions  []string `json:"clarify_options,omitempty"`
 	ClarifyContext  string   `json:"clarify_context,omitempty"`
 }
