@@ -10,10 +10,10 @@ import (
 
 // FeedbackRequest 反馈提交请求
 type FeedbackRequest struct {
-	Rating    int      `json:"rating"`
-	Reasons   []string `json:"reasons"`
-	Comment   string   `json:"comment"`
-	IsQuick   bool     `json:"is_quick_reply"`
+	Rating  int      `json:"rating"`
+	Reasons []string `json:"reasons"`
+	Comment string   `json:"comment"`
+	IsQuick bool     `json:"is_quick_reply"`
 }
 
 // FeedbackListResponse 反馈列表响应
@@ -24,22 +24,22 @@ type FeedbackListResponse struct {
 
 // TraceAgentTaskResponse Agent 任务追踪详情
 type TraceAgentTaskResponse struct {
-	ID                string  `json:"id"`
-	TraceID           string  `json:"trace_id,omitempty"`
-	SessionID         string  `json:"session_id,omitempty"`
-	UserID            string  `json:"user_id,omitempty"`
-	ModelID           string  `json:"model_id,omitempty"`
-	SearchMode        string  `json:"search_mode,omitempty"`
-	StartedAt         string  `json:"started_at"`
-	EndedAt           string  `json:"ended_at,omitempty"`
-	TotalSteps        int     `json:"total_steps,omitempty"`
-	ToolCalls         int     `json:"tool_calls,omitempty"`
-	Status            string  `json:"status,omitempty"`
-	AbortReason       string  `json:"abort_reason,omitempty"`
-	TokensPrompt      int     `json:"tokens_prompt,omitempty"`
-	TokensCompletion  int     `json:"tokens_completion,omitempty"`
-	TotalCost         float64 `json:"total_cost,omitempty"`
-	ErrorSummary      string  `json:"error_summary,omitempty"`
+	ID               string  `json:"id"`
+	TraceID          string  `json:"trace_id,omitempty"`
+	SessionID        string  `json:"session_id,omitempty"`
+	UserID           string  `json:"user_id,omitempty"`
+	ModelID          string  `json:"model_id,omitempty"`
+	SearchMode       string  `json:"search_mode,omitempty"`
+	StartedAt        string  `json:"started_at"`
+	EndedAt          string  `json:"ended_at,omitempty"`
+	TotalSteps       int     `json:"total_steps,omitempty"`
+	ToolCalls        int     `json:"tool_calls,omitempty"`
+	Status           string  `json:"status,omitempty"`
+	AbortReason      string  `json:"abort_reason,omitempty"`
+	TokensPrompt     int     `json:"tokens_prompt,omitempty"`
+	TokensCompletion int     `json:"tokens_completion,omitempty"`
+	TotalCost        float64 `json:"total_cost,omitempty"`
+	ErrorSummary     string  `json:"error_summary,omitempty"`
 }
 
 // TraceAgentStepResponse Agent 单步追踪详情
@@ -58,22 +58,22 @@ type TraceAgentStepResponse struct {
 
 // TraceResponse 单次追踪详情响应
 type TraceResponse struct {
-	ID            string         `json:"id"`
-	RequestID     string         `json:"request_id,omitempty"`
-	UserID        string         `json:"user_id,omitempty"`
-	SessionID     string         `json:"session_id,omitempty"`
-	SearchMode    string         `json:"search_mode,omitempty"`
-	SampleRate    float64        `json:"sample_rate,omitempty"`
-	Sampled       bool           `json:"sampled"`
-	DurationMs    int64          `json:"duration_ms,omitempty"`
-	Status        string         `json:"status,omitempty"`
-	Error         string         `json:"error,omitempty"`
-	Attrs         any            `json:"attrs,omitempty"`
-	AttrsDisplay  any            `json:"attrs_display,omitempty"`
-	SpanTree      any            `json:"span_tree,omitempty"`
-	AgentTask     *TraceAgentTaskResponse  `json:"agent_task,omitempty"`
-	AgentSteps    []TraceAgentStepResponse `json:"agent_steps,omitempty"`
-	CreatedAt     string         `json:"created_at"`
+	ID           string                   `json:"id"`
+	RequestID    string                   `json:"request_id,omitempty"`
+	UserID       string                   `json:"user_id,omitempty"`
+	SessionID    string                   `json:"session_id,omitempty"`
+	SearchMode   string                   `json:"search_mode,omitempty"`
+	SampleRate   float64                  `json:"sample_rate,omitempty"`
+	Sampled      bool                     `json:"sampled"`
+	DurationMs   int64                    `json:"duration_ms,omitempty"`
+	Status       string                   `json:"status,omitempty"`
+	Error        string                   `json:"error,omitempty"`
+	Attrs        any                      `json:"attrs,omitempty"`
+	AttrsDisplay any                      `json:"attrs_display,omitempty"`
+	SpanTree     any                      `json:"span_tree,omitempty"`
+	AgentTask    *TraceAgentTaskResponse  `json:"agent_task,omitempty"`
+	AgentSteps   []TraceAgentStepResponse `json:"agent_steps,omitempty"`
+	CreatedAt    string                   `json:"created_at"`
 }
 
 // TraceListResponse 追踪列表响应

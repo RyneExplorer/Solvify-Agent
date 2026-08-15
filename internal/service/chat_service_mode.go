@@ -20,23 +20,15 @@ import (
 	"solvify-agent/pkg/logger"
 )
 
-// ─── 快速检索模式 ───────────────────────────────────────────
-
-// processMessage 处理消息的核心流程（快速检索模式）
-// 通过 compose.Graph 显式编排：QueryRewrite → Retrieve → BuildPromptMessages → Generate
-// 四节点各自独立 Span + Metrics（eino 全局 callback 自动打点）。
-func (s *chatService) processMessage(ctx context.Context, userID, sessionID, userMsgID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	s.processMessageGraphQuick(ctx, userID, sessionID, userMsgID, req, eventCh)
-}
-
 // ─── 深度思考模式 ───────────────────────────────────────────
 
 // processDeepMode 深度思考模式处理流程
 // 使用 eino ReAct Agent，自动管理 Think → Act → Observe 循环
 func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, userMsgID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
 	obsOk := s.obs != nil
+	var span *observability.Span
 	if obsOk {
-		_, span := s.obs.StartSpan(ctx, "chat.deep", observability.ComponentAgentEngine, observability.Attrs{
+		ctx, span = s.obs.StartSpan(ctx, "chat.deep", observability.ComponentAgentEngine, observability.Attrs{
 			"session_id":  sessionID,
 			"user_id":     userID,
 			"model_id":    req.ModelID,
@@ -85,7 +77,6 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 			}
 		}
 	}
-	_ = deepCtx
 
 	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content, preToolsTokens)
 	if err != nil {
@@ -101,10 +92,10 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	modelName := client.ModelName()
 	if obsOk {
 		s.obs.AddRootAttrs(ctx, observability.Attrs{
-			"model_name":         modelName,
-			"tools_tokens":       fmt.Sprintf("%d", preToolsTokens),
-			"history_budget":     fmt.Sprintf("%d", enhancedCtx.HistoryBudget),
-			"retrieval_budget":   fmt.Sprintf("%d", enhancedCtx.RetrievalBudget),
+			"model_name":       modelName,
+			"tools_tokens":     fmt.Sprintf("%d", preToolsTokens),
+			"history_budget":   fmt.Sprintf("%d", enhancedCtx.HistoryBudget),
+			"retrieval_budget": fmt.Sprintf("%d", enhancedCtx.RetrievalBudget),
 		})
 		s.obs.Observe(ctx, "chat_deep_init_ctx_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t0).Seconds())
 	}
@@ -123,19 +114,19 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	if session2 != nil && session2.HasPendingCheckpoint() {
 		pc, _ := session2.GetPendingCheckpoint()
 		if pc != nil {
-				logger.Infof("[ChatService] 检测到 pending checkpoint: checkpointID=%s, interruptID=%s", pc.CheckpointID, pc.InterruptID)
-				if req.Content != "" {
-					agentReq.CheckpointID = pc.CheckpointID
-					agentReq.ResumeData = map[string]any{
-						pc.InterruptID: req.Content,
-					}
-					logger.Infof("[ChatService] 设置恢复参数: checkpointID=%s, resumeKeys=%v", pc.CheckpointID, []string{pc.InterruptID})
-				} else {
-					logger.Warnf("[ChatService] 有 pending checkpoint 但用户未提供审批内容，走首次执行")
-					_ = s.sessionRepo.ClearPendingCheckpoint(ctx, sessionID)
-					_ = s.sessionRepo.ClearPendingClarify(ctx, sessionID)
+			logger.Infof("[ChatService] 检测到 pending checkpoint: checkpointID=%s, interruptID=%s", pc.CheckpointID, pc.InterruptID)
+			if req.Content != "" {
+				agentReq.CheckpointID = pc.CheckpointID
+				agentReq.ResumeData = map[string]any{
+					pc.InterruptID: req.Content,
 				}
+				logger.Infof("[ChatService] 设置恢复参数: checkpointID=%s, resumeKeys=%v", pc.CheckpointID, []string{pc.InterruptID})
+			} else {
+				logger.Warnf("[ChatService] 有 pending checkpoint 但用户未提供审批内容，走首次执行")
+				_ = s.sessionRepo.ClearPendingCheckpoint(ctx, sessionID)
+				_ = s.sessionRepo.ClearPendingClarify(ctx, sessionID)
 			}
+		}
 	}
 	t1 := time.Now()
 	agentEventCh, err := s.agentEngine.Execute(deepCtx, agentReq, chatModel)
@@ -170,40 +161,40 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		}
 
 		// ── interrupt 事件：存 checkpoint 到 session，返回中断事件给前端 ──
-			if agentEvent.Type == agent.EventInterrupt {
-				logger.Infof("[ChatService] Agent 中断: checkpointID=%s, interruptID=%s, isClarify=%v", agentEvent.CheckpointID, agentEvent.InterruptID, agentEvent.IsClarify)
-				if agentEvent.CheckpointID != "" {
-					pcData := &entity.PendingCheckpointData{
-						CheckpointID: agentEvent.CheckpointID,
-						InterruptID:  agentEvent.InterruptID,
-						Question:     agentEvent.Detail,
-						IsClarify:    agentEvent.IsClarify,
-						Options:      agentEvent.ClarifyOptions,
-						SetAt:        time.Now(),
-					}
-					raw, _ := json.Marshal(pcData)
-					if sErr := s.sessionRepo.SetPendingCheckpoint(ctx, sessionID, raw); sErr != nil {
-						logger.Errorf("存储 pending checkpoint 失败: %v", sErr)
-					} else {
-						logger.Infof("[ChatService] 已存储 pending checkpoint: sessionID=%s", sessionID)
-					}
+		if agentEvent.Type == agent.EventInterrupt {
+			logger.Infof("[ChatService] Agent 中断: checkpointID=%s, interruptID=%s, isClarify=%v", agentEvent.CheckpointID, agentEvent.InterruptID, agentEvent.IsClarify)
+			if agentEvent.CheckpointID != "" {
+				pcData := &entity.PendingCheckpointData{
+					CheckpointID: agentEvent.CheckpointID,
+					InterruptID:  agentEvent.InterruptID,
+					Question:     agentEvent.Detail,
+					IsClarify:    agentEvent.IsClarify,
+					Options:      agentEvent.ClarifyOptions,
+					SetAt:        time.Now(),
+				}
+				raw, _ := json.Marshal(pcData)
+				if sErr := s.sessionRepo.SetPendingCheckpoint(ctx, sessionID, raw); sErr != nil {
+					logger.Errorf("存储 pending checkpoint 失败: %v", sErr)
+				} else {
+					logger.Infof("[ChatService] 已存储 pending checkpoint: sessionID=%s", sessionID)
+				}
 
-					// clarify 中断额外存到 pending_clarify（兼容旧恢复流程）
-					if agentEvent.IsClarify {
-						clarifyData := &entity.PendingClarifyData{
-							Question: agentEvent.ClarifyQuestion,
-							Options:  agentEvent.ClarifyOptions,
-							SetAt:    time.Now(),
-						}
-						clarifyRaw, _ := json.Marshal(clarifyData)
-						if sErr := s.sessionRepo.SetPendingClarify(ctx, sessionID, clarifyRaw); sErr != nil {
-							logger.Errorf("存储 pending clarify 失败: %v", sErr)
-						}
+				// clarify 中断额外存到 pending_clarify（兼容旧恢复流程）
+				if agentEvent.IsClarify {
+					clarifyData := &entity.PendingClarifyData{
+						Question: agentEvent.ClarifyQuestion,
+						Options:  agentEvent.ClarifyOptions,
+						SetAt:    time.Now(),
+					}
+					clarifyRaw, _ := json.Marshal(clarifyData)
+					if sErr := s.sessionRepo.SetPendingClarify(ctx, sessionID, clarifyRaw); sErr != nil {
+						logger.Errorf("存储 pending clarify 失败: %v", sErr)
 					}
 				}
-				eventCh <- toStreamEvent(agentEvent)
-				return
 			}
+			eventCh <- toStreamEvent(agentEvent)
+			return
+		}
 
 		if agentEvent.Type == agent.EventAnswer {
 			fullContent += agentEvent.Content
@@ -247,12 +238,12 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 			"tool_calls": fmt.Sprintf("%d", toolCallsN),
 		}, 1)
 		s.obs.AddRootAttrs(ctx, observability.Attrs{
-			"tool_calls":    toolCallsN,
-			"tool_errors":   toolErrorsN,
-			"steps_n":       len(reasoningSteps),
-			"rag_docs_n":    len(agentSources),
-			"agent_error":   agentErrorSeen,
-			"tool_used":     toolEventSeen,
+			"tool_calls":      toolCallsN,
+			"tool_errors":     toolErrorsN,
+			"steps_n":         len(reasoningSteps),
+			"rag_docs_n":      len(agentSources),
+			"agent_error":     agentErrorSeen,
+			"tool_used":       toolEventSeen,
 			"assistant_chars": len([]rune(fullContent)),
 		})
 	}

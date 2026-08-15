@@ -248,11 +248,6 @@ func (b *PromptBuilder) BuildHistory(history []entity.ChatMessage) []*schema.Mes
 	return msgs
 }
 
-// BuildHistoryForAgent agent.Request.History 深度模式专用（复用 BuildHistory，语义更清晰）
-func (b *PromptBuilder) BuildHistoryForAgent(history []entity.ChatMessage) []entity.ChatMessage {
-	return history
-}
-
 // BuildAgentRequestFields 深度模式：把 builder 中的摘要 / 记忆 / 用户上下文填充到 agent.Request 对应字段
 // System Prompt 由 PromptBuilder.BuildSystem() 统一产出后塞到 agent.Request.SystemPrompt，
 // agent.runAgent 只负责在前面拼接 ReAct 规则，保证快速/深度两模式的摘要/记忆/偏好注入完全一致。
@@ -289,26 +284,6 @@ func (b *PromptBuilder) toAgentPromptUserContext() agentpkg.PromptUserContext {
 		TableFirst:    b.userCtx.TableFirst,
 		CitationStyle: b.userCtx.CitationStyle,
 	}
-}
-
-// takeStringOrProfile 从 Profile entity 取出字段值（或空）
-func takeStringOrProfile(u *entity.User, field string) string {
-	if u == nil {
-		return ""
-	}
-	switch field {
-	case "Department":
-		return u.Department
-	case "Position":
-		return u.Position
-	case "Expertise":
-		return u.Expertise
-	case "PreferredLanguage":
-		return u.PreferredLanguage
-	case "Timezone":
-		return u.Timezone
-	}
-	return ""
 }
 
 // UserContext 注入到 System Prompt 的用户上下文信息
@@ -357,28 +332,4 @@ func (u UserContext) WithPreference(p *entity.UserPreference) UserContext {
 	u.TableFirst = p.UseMarkdownTable
 	u.CitationStyle = p.CitationStyle
 	return u
-}
-
-// takeAnswerStyle 取用户回答风格，空对象返回空串
-func takeAnswerStyle(p *entity.UserPreference) string {
-	if p == nil {
-		return ""
-	}
-	return p.AnswerStyle
-}
-
-// takeTableFirst 取是否优先表格呈现，空对象默认 true
-func takeTableFirst(p *entity.UserPreference) bool {
-	if p == nil {
-		return true
-	}
-	return p.UseMarkdownTable
-}
-
-// takeCitationStyle 取引用格式，空对象默认 section_title
-func takeCitationStyle(p *entity.UserPreference) string {
-	if p == nil {
-		return "section_title"
-	}
-	return p.CitationStyle
 }

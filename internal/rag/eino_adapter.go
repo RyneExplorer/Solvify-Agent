@@ -60,7 +60,7 @@ func WithUserID(uid string) retriever.Option {
 // 等内部检索逻辑完全不变，仅做输入/输出格式对齐，使上游（eino Graph、Agent、
 // 可观测性 callback）能按 eino 统一组件标准接入。
 type EinoRetrieverAdapter struct {
-	inner      Retriever
+	inner       Retriever
 	defaultTopK int
 }
 

@@ -258,6 +258,11 @@ func einoOnEnd(rec Recorder) func(ctx context.Context, info *callbacks.RunInfo, 
 		}
 
 		endSpanIfPresent(rec, ctx, state, attrs, SpanStatusOK, nil)
+		// End 后把 ctx 的当前 span 恢复为 parent：eino 会把 OnEnd 返回的 ctx 继续传给
+		// 下一个兄弟节点，不恢复的话兄弟会错误地挂到这个已 End 的组件下面（链状嵌套）。
+		if state.span != nil && state.span.parent != nil {
+			ctx = context.WithValue(ctx, currentSpanKey{}, state.span.parent)
+		}
 		return ctx
 	}
 }

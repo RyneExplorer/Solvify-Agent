@@ -58,19 +58,15 @@ type quickGraphInput struct {
 
 // quickGraphState Graph Local State，通过 ProcessState 读写。
 type quickGraphState struct {
-	Input          *quickGraphInput
-	RewrittenQuery string   // 改写后的查询，供 Retrieve / BuildMsgs 使用
-	Intent         string   // greeting / chitchat / question / identity / meta
-	SkipRetrieve   bool     // Greeting/Chitchat 跳过知识库检索
-	NeedClarify    bool     // 意图不明确,需要用户澄清
-	ClarifyQuestion string  // 追问文本
+	Input           *quickGraphInput
+	RewrittenQuery  string   // 改写后的查询，供 Retrieve / BuildMsgs 使用
+	Intent          string   // greeting / chitchat / question / identity / meta
+	SkipRetrieve    bool     // Greeting/Chitchat 跳过知识库检索
+	NeedClarify     bool     // 意图不明确,需要用户澄清
+	ClarifyQuestion string   // 追问文本
 	ClarifyOptions  []string // 追问选项(可选)
-	Keywords       []string // 改写时提取的关键词，可用于日志/调试
-	RetrievedDocs  []*schema.Document
-
-	// RewriteDone 后台 goroutine 完成 LLM 改写后关闭，Retrieve 阶段可选等待
-	RewriteDone chan struct{}
-	RewriteErr  error
+	Keywords        []string // 改写时提取的关键词，可用于日志/调试
+	RetrievedDocs   []*schema.Document
 }
 
 // 查询改写意图类型
@@ -180,89 +176,71 @@ func addQuickRewriteNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamRe
 	)
 }
 
-// quickRewriteFn 节点 1 实现：触发查询改写 + 意图识别，立即返回原始 query 让 Retrieve 先行。
-// 并行策略：LLM 改写放到后台 goroutine 异步执行，Retrieve 用 OriginalQuery 先跑，
-// 改写结果通过 State.RewriteDone channel 通知下游，Retrieve StatePostHandler 可选等待并补检索。
-// 短路优化：如果 graphInput.PreRewrittenQuery 已填（Graph 执行前已算过），直接同步执行不再起 goroutine。
+// quickRewriteFn 节点 1 实现：查询改写 + 意图识别。
+// Graph 启动前 processMessageGraphQuick 已经预执行过 doRewriteWithLLM，
+// 所以正常路径走 PreRewrittenQuery 短路，直接把预计算结果写进 state。
+// 当 PreRewrittenQuery 为空时（Graph 被独立调用的防御性路径），同步调 LLM 改写。
 func quickRewriteFn(ctx context.Context, input *quickGraphInput) (string, error) {
 	if input == nil {
 		return "", apperrors.NewDefault(apperrors.CodeInvalidParam)
 	}
 
-	// 初始化 State：存 Input + 创建 RewriteDone channel
 	if err := einoCompose.ProcessState(ctx, func(_ context.Context, state *quickGraphState) error {
 		state.Input = input
-		state.RewriteDone = make(chan struct{})
 		return nil
 	}); err != nil {
 		return "", err
 	}
 
-	// 短路：Graph 执行前已算好 → 同步写 state，不走并行
+	var rewritten, intent string
+	var keywords []string
+	var skipRetrieve, needClarify bool
+	var clarifyQ string
+	var clarifyO []string
+
 	if input.PreRewrittenQuery != "" {
-		rewritten, intent, keywords := input.PreRewrittenQuery, input.PreIntent, input.PreKeywords
-		skipRetrieve, needClarify := input.PreSkipRetrieve, input.PreNeedClarify
-		clarifyQ, clarifyO := input.PreClarifyQuestion, input.PreClarifyOptions
-		_ = einoCompose.ProcessState(ctx, func(_ context.Context, state *quickGraphState) error {
-			state.RewrittenQuery = rewritten
-			state.Intent = intent
-			state.Keywords = keywords
-			state.SkipRetrieve = skipRetrieve
-			state.NeedClarify = needClarify
-			state.ClarifyQuestion = clarifyQ
-			state.ClarifyOptions = clarifyO
-			close(state.RewriteDone)
-			return nil
-		})
-		observability.SetSpanAttrs(ctx, observability.Attrs{
-			"original_query":  input.OriginalQuery,
-			"rewritten_query": rewritten,
-			"rewrite_mode":    "precomputed",
-		})
-		return rewritten, nil
+		rewritten = input.PreRewrittenQuery
+		intent = input.PreIntent
+		keywords = input.PreKeywords
+		skipRetrieve = input.PreSkipRetrieve
+		needClarify = input.PreNeedClarify
+		clarifyQ = input.PreClarifyQuestion
+		clarifyO = input.PreClarifyOptions
+	} else {
+		rewritten, intent, keywords, skipRetrieve, needClarify, clarifyQ, clarifyO = doRewriteWithLLM(ctx, input)
 	}
 
-	// 正常路径：后台 goroutine 异步跑 LLM 改写，立即返回 OriginalQuery 让 Retrieve 并行
-	go func() {
-		startAt := time.Now()
-		rewritten, intent, keywords, skipRetrieve, needClarify, clarifyQ, clarifyO := doRewriteWithLLM(ctx, input)
-		_ = einoCompose.ProcessState(ctx, func(_ context.Context, state *quickGraphState) error {
-			state.RewrittenQuery = rewritten
-			state.Intent = intent
-			state.Keywords = keywords
-			state.SkipRetrieve = skipRetrieve
-			state.NeedClarify = needClarify
-			state.ClarifyQuestion = clarifyQ
-			state.ClarifyOptions = clarifyO
-			close(state.RewriteDone)
-			return nil
-		})
-		observability.SetSpanAttrs(ctx, observability.Attrs{
-			"rewrite_ms":      time.Since(startAt).Milliseconds(),
-			"rewrite_mode":    "async",
-			"original_query":  input.OriginalQuery,
-			"rewritten_query": rewritten,
-			"intent":          intent,
-			"skip_retrieve":   fmt.Sprintf("%v", skipRetrieve),
-			"need_clarify":    fmt.Sprintf("%v", needClarify),
-		})
-	}()
+	_ = einoCompose.ProcessState(ctx, func(_ context.Context, state *quickGraphState) error {
+		state.RewrittenQuery = rewritten
+		state.Intent = intent
+		state.Keywords = keywords
+		state.SkipRetrieve = skipRetrieve
+		state.NeedClarify = needClarify
+		state.ClarifyQuestion = clarifyQ
+		state.ClarifyOptions = clarifyO
+		return nil
+	})
 
 	observability.SetSpanAttrs(ctx, observability.Attrs{
-		"original_query": input.OriginalQuery,
-		"rewrite_mode":   "async_started",
+		"original_query":  input.OriginalQuery,
+		"rewritten_query": rewritten,
+		"intent":          intent,
+		"skip_retrieve":   fmt.Sprintf("%v", skipRetrieve),
+		"need_clarify":    fmt.Sprintf("%v", needClarify),
 	})
-	return input.OriginalQuery, nil
+
+	return rewritten, nil
 }
 
 // matchLocalIntent 本地快速意图匹配（纯正则 + 关键词，0ms）。
 // 返回 (intent, matched) —— matched=false 表示交给 LLM 判定。
 //
 // 覆盖四类场景：
-//   greeting: 你好 / hi / 早上好 / 在吗
-//   identity: 你是谁 / 你能做什么 / 介绍一下自己
-//   chitchat: 今天星期几 / 讲个笑话 / 随便聊聊（含"今天/现在+时间查询"）
-//   meta:     我的历史 / 刚才说了什么
+//
+//	greeting: 你好 / hi / 早上好 / 在吗
+//	identity: 你是谁 / 你能做什么 / 介绍一下自己
+//	chitchat: 今天星期几 / 讲个笑话 / 随便聊聊（含"今天/现在+时间查询"）
+//	meta:     我的历史 / 刚才说了什么
 //
 // 不命中时返回 ("", false)，交给 LLM 做更精细的意图判定。
 func matchLocalIntent(raw string) (string, bool) {
@@ -303,11 +281,11 @@ func matchLocalIntent(raw string) (string, bool) {
 
 // matchRegex 简单的正则匹配封装，避免每次都 re.Compile
 var (
-	reGreeting  = regexp.MustCompile(`^(你好|您好|hi+|hello+|嗨|哈喽|在吗|在不在|早|早上好|下午好|晚上好|晚安|早安|午安|晚安)$`)
-	reIdentity  = regexp.MustCompile(`^(你是谁|你是谁呀|你叫什么|你叫什么名字|你能做什么|你能干什么|你是干什么的|介绍一下你自己|自我介绍|你是什么模型|你是什么)$`)
-	reTimeInfo   = regexp.MustCompile(`(今天|现在|当前|明天|后天)+(星期几|礼拜几|几号|多少号|日期|几号了|几点|几点钟|时间|日期是)`)
-	reChitchat   = regexp.MustCompile(`^(讲个笑话|来个笑话|随便聊聊|聊聊呗|聊聊天|说点什么|有什么好玩的|今天天气怎么样|天气怎么样|心情不好|我心情不好|安慰一下我|夸夸我)$`)
-	reMeta       = regexp.MustCompile(`(我的历史|聊天记录|你刚才说了什么|刚才说的什么|上一个问题|前一个问题|回顾对话|我们聊了什么|你还记得|之前说的)`)
+	reGreeting = regexp.MustCompile(`^(你好|您好|hi+|hello+|嗨|哈喽|在吗|在不在|早|早上好|下午好|晚上好|晚安|早安|午安|晚安)$`)
+	reIdentity = regexp.MustCompile(`^(你是谁|你是谁呀|你叫什么|你叫什么名字|你能做什么|你能干什么|你是干什么的|介绍一下你自己|自我介绍|你是什么模型|你是什么)$`)
+	reTimeInfo = regexp.MustCompile(`(今天|现在|当前|明天|后天)+(星期几|礼拜几|几号|多少号|日期|几号了|几点|几点钟|时间|日期是)`)
+	reChitchat = regexp.MustCompile(`^(讲个笑话|来个笑话|随便聊聊|聊聊呗|聊聊天|说点什么|有什么好玩的|今天天气怎么样|天气怎么样|心情不好|我心情不好|安慰一下我|夸夸我)$`)
+	reMeta     = regexp.MustCompile(`(我的历史|聊天记录|你刚才说了什么|刚才说的什么|上一个问题|前一个问题|回顾对话|我们聊了什么|你还记得|之前说的)`)
 )
 
 func matchRegex(pattern string, q string) bool {
@@ -455,14 +433,10 @@ func buildRewriteHistory(msgs []*schema.Message, currentUserMsgIdx, maxRounds in
 	return strings.Join(pairs, "\n")
 }
 
-// rewriteParallelMaxWait Retrieve 阶段等待后台 LLM 改写的最长时间。
-// 原始 query 检索通常 0.3-0.8s，LLM 改写通常 0.5-2s——等 500ms 给快模型一个机会，
-// 超时就放弃，不阻塞主路径。
-const rewriteParallelMaxWait = 500 * time.Millisecond
-
 // addQuickRetrieveNode 节点 2：Retrieve
-// 改进：用 LambdaNode 替代 AddRetrieverNode，在 Lambda 内部提前检查 SkipRetrieve / NeedClarify，
+// 用 LambdaNode 替代 AddRetrieverNode，在 Lambda 内部提前检查 SkipRetrieve / NeedClarify，
 // 避免 EinoRetrieverAdapter 被实例化后才被 PostHandler 清空——那样知识库查询的开销已经花出去了。
+// QueryRewrite 已经同步完成，Retrieve 直接用改写后的 query（或原始 query）查一次即可，不再做并行改写等待。
 func addQuickRetrieveNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamReader[*schema.Message]], einoRetriever *rag.EinoRetrieverAdapter) error {
 	return g.AddLambdaNode(graphQuickNodeRetrieve,
 		einoCompose.InvokableLambda(func(ctx context.Context, query string) ([]*schema.Document, error) {
@@ -483,7 +457,6 @@ func addQuickRetrieveNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamR
 			// 构造 retriever.Option（KBIDs / UserID / TopK）
 			opts := buildRetrieverOpts(state.Input)
 
-			// 用当前 query（Rewrite 返回的原始或改写后 query）先查
 			docs, err := einoRetriever.Retrieve(ctx, query, opts...)
 			if err != nil {
 				logger.Warnf("quickRetrieveFn: 检索失败，降级为空结果: %v", err)
@@ -491,23 +464,6 @@ func addQuickRetrieveNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamR
 				return nil, nil
 			}
 			state.RetrievedDocs = docs
-
-			// 等后台 LLM 改写（最多 rewriteParallelMaxWait），改写完成后补一次检索 + 合并去重
-			if state.RewriteDone != nil {
-				select {
-				case <-state.RewriteDone:
-					if state.RewrittenQuery != "" && state.RewrittenQuery != state.Input.OriginalQuery {
-						if !state.SkipRetrieve && !state.NeedClarify {
-							rewrittenDocs, rErr := einoRetriever.Retrieve(ctx, state.RewrittenQuery, opts...)
-							if rErr == nil && len(rewrittenDocs) > 0 {
-								docs = mergeDocsByScore(docs, rewrittenDocs)
-								state.RetrievedDocs = docs
-							}
-						}
-					}
-				case <-time.After(rewriteParallelMaxWait):
-				}
-			}
 			return docs, nil
 		}),
 		einoCompose.WithNodeName("KnowledgeRetrieve"),
@@ -532,37 +488,6 @@ func buildRetrieverOpts(input *quickGraphInput) []retriever.Option {
 	return opts
 }
 
-// mergeDocsByScore 合并两组 docs，按 ID 去重取最高分，最后按分数降序。
-func mergeDocsByScore(a, b []*schema.Document) []*schema.Document {
-	scoreMap := make(map[string]*schema.Document, len(a)+len(b))
-	for _, d := range a {
-		if d == nil {
-			continue
-		}
-		scoreMap[d.ID] = d
-	}
-	for _, d := range b {
-		if d == nil {
-			continue
-		}
-		if existing, ok := scoreMap[d.ID]; ok {
-			if d.Score() > existing.Score() {
-				scoreMap[d.ID] = d
-			}
-		} else {
-			scoreMap[d.ID] = d
-		}
-	}
-	merged := make([]*schema.Document, 0, len(scoreMap))
-	for _, d := range scoreMap {
-		merged = append(merged, d)
-	}
-	sort.Slice(merged, func(i, j int) bool {
-		return merged[i].Score() > merged[j].Score()
-	})
-	return merged
-}
-
 // addQuickBuildMsgsNode 节点 3：BuildPromptMessages。
 // 从 State 拿 Input，在 userQuestionIndex 前插入检索上下文。
 func addQuickBuildMsgsNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamReader[*schema.Message]]) error {
@@ -571,6 +496,7 @@ func addQuickBuildMsgsNode(g *einoCompose.Graph[*quickGraphInput, *schema.Stream
 		einoCompose.WithNodeName("BuildPromptMessages"),
 	)
 }
+
 // quickBuildMsgsFn 节点 3 实现：在用户问题前插入检索上下文块
 
 func quickBuildMsgsFn(ctx context.Context, docs []*schema.Document) ([]*schema.Message, error) {
@@ -857,6 +783,7 @@ var graphCtxChatModelKey = graphCtxChatModelKeyType{}
 func withGraphChatModel(ctx context.Context, cm einoModel.BaseChatModel) context.Context {
 	return context.WithValue(ctx, graphCtxChatModelKey, cm)
 }
+
 // graphChatModelFromContext 从 context 取出 ChatModel
 
 func graphChatModelFromContext(ctx context.Context) (einoModel.BaseChatModel, bool) {
@@ -940,9 +867,9 @@ func (s *chatService) processMessageGraphQuick(
 		}, Done: true}
 		if obsOk {
 			s.obs.EndSpan(ctx, span, observability.SpanStatusOK, nil, observability.Attrs{
-				"need_clarify": "true",
+				"need_clarify":   "true",
 				"clarify_intent": intent,
-				"clarify_ms": fmt.Sprintf("%d", time.Since(obsNow).Milliseconds()),
+				"clarify_ms":     fmt.Sprintf("%d", time.Since(obsNow).Milliseconds()),
 			})
 		}
 		return
@@ -955,8 +882,7 @@ func (s *chatService) processMessageGraphQuick(
 	graphInput.PreSkipRetrieve = skipRetrieve
 
 	// 4) 提前创建 graphState：既是 eino stateGenerator 返回值，也是 Invoke 后外部读取 RetrievedDocs 的入口。
-	// RewriteDone channel 在这里初始化——rewriteFn 后台 goroutine 完成后 close 它，retrieve StatePostHandler 等它。
-	graphState := &quickGraphState{RewriteDone: make(chan struct{})}
+	graphState := &quickGraphState{}
 
 	// 5) 构建并编译 compose.Graph（内部已经 push error 事件）
 	sendProgressEvent(eventCh, "正在组装快速检索链路...")

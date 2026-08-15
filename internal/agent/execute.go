@@ -214,7 +214,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	store := e.buildCheckpointStore(req.SessionID)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:           agent,
-		EnableStreaming:  true,
+		EnableStreaming: true,
 		CheckPointStore: store,
 	})
 
