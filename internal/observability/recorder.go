@@ -122,20 +122,26 @@ func RecorderFromContext(ctx context.Context) Recorder {
 	return r
 }
 
+// currentSpanKey 用于 ctx 直接携带当前自研 *Span 引用。
+// StartSpan 写入返回的 ctx，子 span 挂树和 CurrentSpanFromContext 都优先读它，
+// 不依赖 OTel span 的 IsRecording 状态（eino 流式组件的 OnEnd 会提前 End 父 span）。
+type currentSpanKey struct{}
+
 // CurrentSpanFromContext 定位当前正在运行的 span。
 // 返回项目自研 *Span（包含 otelSpan 字段），找不到时返回 nil，调用方静默降级。
 func CurrentSpanFromContext(ctx context.Context) *Span {
+	// 优先走 currentSpanKey：与 End 状态解耦，流式场景父 span 可能已被回调提前 End
+	if s, ok := ctx.Value(currentSpanKey{}).(*Span); ok && s != nil {
+		return s
+	}
+	// 兜底：OTel span 指针反查（不经 StartSpan 返回 ctx 的旧调用路径）
 	otelSpan := trace.SpanFromContext(ctx)
 	if otelSpan == nil {
 		return nil
 	}
-	// SpanFromContext 返回的是 noopSpan 时，没有项目自研 Span 对应
-	// 这里通过 otelSpan.IsRecording() 判断是否是真实 span
 	if !otelSpan.IsRecording() {
 		return nil
 	}
-	// 项目自研 Span 通过 tracer.Start 时存放在 otelSpan 的私有字段里，
-	// 但 OTel 接口不暴露这个，所以用 sync.Map 按 span 指针关联。
 	if s, ok := spanByOtel.Load(otelSpan); ok {
 		return s.(*Span)
 	}
@@ -269,13 +275,14 @@ func (r *defaultRecorder) StartSpan(ctx context.Context, name string, component 
 		ctx = context.WithValue(ctx, traceIDKey, traceID)
 	}
 
-	// 落库 parent-child：先从入参 ctx 找 parent 自研 Span（必须在 tracer.Start 之前，
-	// 因为 tracer.Start 返回的 ctxWithSpan 会把当前 span 设为 current，再找就是自己了）。
+	// 落库 parent-child：优先从入参 ctx 的 currentSpanKey 取 parent 自研 Span 引用。
+	// 不能用 trace.SpanFromContext(ctx).IsRecording() 判断：eino 流式组件（如 adk Agent）的
+	// OnEnd 会在输出流刚返回时就 End 掉 span，而该 span 仍作为 ctx 的 current 传给后续子组件，
+	// IsRecording()=false 会让整棵子树找不到 parent 变成孤儿（深度模式 trace 断裂的根因）。
+	// ctx 引用与 End 状态解耦后，已 End 的 span 仍是合法 parent。
 	var parentSpan *Span
-	if parentOtelSpan := trace.SpanFromContext(ctx); parentOtelSpan != nil && parentOtelSpan.IsRecording() {
-		if v, ok := spanByOtel.Load(parentOtelSpan); ok {
-			parentSpan, _ = v.(*Span)
-		}
+	if ps, ok := ctx.Value(currentSpanKey{}).(*Span); ok && ps != nil {
+		parentSpan = ps
 	}
 
 	// 用 OTel tracer.Start 创建运行时 span，OTel 自动管理 parent-child 关系。
@@ -300,22 +307,24 @@ func (r *defaultRecorder) StartSpan(ctx context.Context, name string, component 
 		s.ParentID = parentSpan.SpanID
 	}
 
-	// 关联 OTel span 到自研 Span，CurrentSpanFromContext 用
+	// 关联 OTel span 到自研 Span，CurrentSpanFromContext 兜底路径用
 	spanByOtel.Store(otelSpan, s)
 
-	// 登记 traceState 的根 span
+	// ctx 携带自研 Span 引用：子 span 的 parent 查找与 CurrentSpanFromContext 走这里，
+	// 与 span 的 End 状态解耦（见上方 parent 查找注释）。
+	ctxWithSpan = context.WithValue(ctxWithSpan, currentSpanKey{}, s)
+
+	// 登记 traceState 的根 span。用 LoadOrStore 防止后到的孤儿 span 覆盖已登记的树。
 	isChatRoot := ctx.Value(rootAttrsKey) != nil
-	if parentSpan == nil && !isChatRoot {
-		st := &traceState{Trace: &Trace{ID: traceID, Root: s, SampleRate: r.cfg.SamplingRate}}
-		r.traceStates.Store(traceID, st)
-	} else if parentSpan == nil && isChatRoot {
-		// chat 场景：存入 traceStates 供 publishTrace 合并 children，但标记为中间 root 不触发 finalizeTrace
-		st := &traceState{Trace: &Trace{ID: traceID, Root: s, SampleRate: r.cfg.SamplingRate}}
-		r.traceStates.Store(traceID, st)
-		if s.Attrs == nil {
-			s.Attrs = Attrs{}
+	if parentSpan == nil {
+		if isChatRoot {
+			// chat 场景：Root 是 chat.deep/chat.quick 等中间根，publishTrace 时合并到合成 chat.request 下
+			if s.Attrs == nil {
+				s.Attrs = Attrs{}
+			}
+			s.Attrs["__chat_intermediate_root"] = true
 		}
-		s.Attrs["__chat_intermediate_root"] = true
+		r.traceStates.LoadOrStore(traceID, &traceState{Trace: &Trace{ID: traceID, Root: s, SampleRate: r.cfg.SamplingRate}})
 	}
 
 	r.metrics.obsSpanStartTotal.WithLabelValues(string(component)).Inc()
