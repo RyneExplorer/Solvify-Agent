@@ -190,7 +190,12 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 					recAttrs["user_id"] = s
 				}
 			}
-			_, span = m.Recorder.StartSpan(ctx, "http.request", ComponentHTTPServer, recAttrs)
+			// 必须接收 StartSpan 返回的 ctx 并写回请求：它携带 traceID、当前 span 引用
+			// 和 OTel span。丢掉的后果是下游（chat → eino 组件）找不到父 span，各自新建根
+			// span —— OTel 侧同一个 HTTP 请求被拆成两棵互不相关的 trace，三方追踪平台
+			// 看不到父子关系；响应头 X-Trace-ID 也会是空值。
+			ctx, span = m.Recorder.StartSpan(ctx, "http.request", ComponentHTTPServer, recAttrs)
+			c.Request = c.Request.WithContext(ctx)
 		}
 
 		rec := &responseRecorder{ResponseWriter: c.Writer, body: bytes.NewBuffer(nil)}
