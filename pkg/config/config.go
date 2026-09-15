@@ -226,6 +226,16 @@ type ObservabilityConfig struct {
 	OTelServiceName string  `mapstructure:"otel_service_name"`
 	// OTelSamplingRate 头采样概率 0~1，0 = 不采样，1 = 全采样
 	OTelSamplingRate float64 `mapstructure:"otel_sampling_rate"`
+	// OTelInsecure 控制 OTLP gRPC 的传输安全：
+	// true  = 明文连接，适用于内网 / 边车 Collector 或本机 Jaeger；
+	// false = 不传传输凭据选项，由 OTLP SDK 使用默认 TLS（宿主机根证书），适用于 SaaS 后端。
+	// 默认 true，与历史行为保持一致。
+	OTelInsecure bool `mapstructure:"otel_insecure"`
+	// OTelHeaders 是附加到每次 OTLP 请求上的 gRPC metadata，用于鉴权，例如
+	// {"Authorization": "Basic <base64(public_key:secret_key)>"}、
+	// {"x-byteapm-appkey": "xxx"}、{"Authorization": "Bearer <token>"}。
+	// 值属于敏感信息，只放本地配置或环境变量，不要提交进仓库。
+	OTelHeaders map[string]string `mapstructure:"otel_headers"`
 }
 
 var globalConfig *Config
@@ -386,10 +396,12 @@ func Default() *Config {
 			FeedbackEnabled:      true,
 			MaxCardinalityLabels: 500,
 			// OTel 默认值：noop 不打印 span，开发期可改 stdout 调试，生产期改 otlp
-		OTelExporter:     "noop",
+			OTelExporter:     "noop",
 			OTelOTLPEndpoint: "localhost:4317",
 			OTelServiceName:  "solvify-agent",
 			OTelSamplingRate: 1.0,
+			// 默认明文，保持历史行为；接 SaaS 后端时置为 false 走 TLS
+			OTelInsecure: true,
 		},
 	}
 }
@@ -683,6 +695,14 @@ func applyEnv(cfg *Config) {
 	if value := os.Getenv("OTEL_SAMPLING_RATE"); value != "" {
 		cfg.Observability.OTelSamplingRate = parseFloat(value, cfg.Observability.OTelSamplingRate)
 	}
+	if value := os.Getenv("OTEL_INSECURE"); value != "" {
+		cfg.Observability.OTelInsecure = parseBool(value, cfg.Observability.OTelInsecure)
+	}
+	// OTEL_HEADERS 形如 "Authorization=Bearer xxx,x-byteapm-appkey=yyy"，
+	// 与官方 OTEL_EXPORTER_OTLP_HEADERS 的书写格式一致。
+	if value := os.Getenv("OTEL_HEADERS"); value != "" {
+		cfg.Observability.OTelHeaders = parseHeaderList(value)
+	}
 
 	// Agent 行为开关
 	if value := os.Getenv("AGENT_QUICK_MAX_ITERATIONS"); value != "" {
@@ -752,4 +772,30 @@ func parseFloat(value string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
+}
+
+// parseHeaderList 解析 "k1=v1,k2=v2" 形式的头部列表，供 OTEL_HEADERS 环境变量使用。
+// 按第一个 '=' 切分，因此取值里出现 '='（如 base64 填充）不会被截断；
+// 缺少 '=' 或键名为空的条目会被忽略。全部无效时返回 nil，避免下游拿到空 map。
+func parseHeaderList(raw string) map[string]string {
+	out := make(map[string]string)
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		idx := strings.Index(item, "=")
+		if idx <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(item[:idx])
+		if key == "" {
+			continue
+		}
+		out[key] = strings.TrimSpace(item[idx+1:])
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

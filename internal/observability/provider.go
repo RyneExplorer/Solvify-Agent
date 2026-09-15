@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -153,6 +154,10 @@ func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp
 	return globalTracerProvider, globalTracerProvider.Shutdown, nil
 }
 
+// otelExporterInitTimeout 是创建 OTLP exporter 的超时。
+// 注意 grpc.NewClient 是惰性建连，这里超时只覆盖 exporter 自身初始化，不覆盖真实导出。
+const otelExporterInitTimeout = 5 * time.Second
+
 // buildOTelExporter 根据 config 构造对应的 SpanExporter
 func buildOTelExporter(ctx context.Context, cfg config.ObservabilityConfig) (sdktrace.SpanExporter, error) {
 	switch cfg.OTelExporter {
@@ -162,20 +167,53 @@ func buildOTelExporter(ctx context.Context, cfg config.ObservabilityConfig) (sdk
 		// stdouttrace 把 span 以 JSON 形式打印到 stdout，开发期调试用
 		return stdouttrace.New(stdouttrace.WithPrettyPrint())
 	case "otlp":
-		// 生产期走 OTLP gRPC 推到 Collector（默认 endpoint localhost:4317）
-		ctxWithTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+		// 生产期走 OTLP gRPC 推到 Collector 或三方追踪服务端
+		ctxWithTimeout, cancel := context.WithTimeout(ctx, otelExporterInitTimeout)
 		defer cancel()
-		exp, err := otlptracegrpc.New(ctxWithTimeout,
-			otlptracegrpc.WithEndpoint(cfg.OTelOTLPEndpoint),
-			otlptracegrpc.WithInsecure(),
-		)
+
+		opts := make([]otlptracegrpc.Option, 0, 3)
+		// endpoint 为空时不传，交由 OTLP SDK 的默认值或标准
+		// OTEL_EXPORTER_OTLP_ENDPOINT 环境变量决定
+		if cfg.OTelOTLPEndpoint != "" {
+			opts = append(opts, otlptracegrpc.WithEndpoint(cfg.OTelOTLPEndpoint))
+		}
+		// 鉴权头（Authorization / x-byteapm-appkey 等）。为空时不传，
+		// 这样标准 OTEL_EXPORTER_OTLP_HEADERS 环境变量仍能生效
+		if len(cfg.OTelHeaders) > 0 {
+			opts = append(opts, otlptracegrpc.WithHeaders(cfg.OTelHeaders))
+		}
+		// 传输安全：只有显式要求明文时才调 WithInsecure。
+		// WithInsecure 是在 SDK 读完标准 OTEL_EXPORTER_OTLP_* 环境变量之后再应用的，
+		// 无条件调用会把 env 里配好的 https endpoint 悄悄降级成明文。
+		// 不传任何传输凭据选项时，OTLP SDK 默认使用宿主机根证书走 TLS。
+		if cfg.OTelInsecure {
+			opts = append(opts, otlptracegrpc.WithInsecure())
+		}
+
+		exp, err := otlptracegrpc.New(ctxWithTimeout, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("OTLP exporter 创建失败: %w", err)
 		}
+		logger.Infof("OTLP exporter 已创建: endpoint=%q insecure=%v 鉴权头=%v",
+			cfg.OTelOTLPEndpoint, cfg.OTelInsecure, otelHeaderKeys(cfg.OTelHeaders))
 		return exp, nil
 	default:
 		return nil, errors.New("unknown otel_exporter: " + cfg.OTelExporter)
 	}
+}
+
+// otelHeaderKeys 返回鉴权头的键名（按字典序），仅用于日志输出。
+// 绝不返回键值：OTelHeaders 里放的通常是 API Key 或 Token。
+func otelHeaderKeys(headers map[string]string) []string {
+	if len(headers) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(headers))
+	for k := range headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // InitPrometheusRegistry 初始化独立的 Prometheus Registry + 所有指标变量。
