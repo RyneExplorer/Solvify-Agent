@@ -189,6 +189,8 @@ func (a *App) initEmbedding() rag.EmbeddingFunc {
 	if err != nil {
 		logger.Fatal("初始化 Embedding 客户端失败", zap.Error(err))
 	}
+	// 同 chat 的 LLM：登记 modelID → 供应商，供 eino 回调补 gen_ai.provider.name
+	observability.RegisterGenAIProvider(a.cfg.Embedding.Model, a.cfg.Embedding.Provider)
 
 	redisCache := cache.New(a.redis, "emb:", embeddingRedisTTL)
 	var inMem sync.Map // map[string][]float64

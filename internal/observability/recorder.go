@@ -245,6 +245,10 @@ func toKeyValue(k string, v any) (attribute.KeyValue, bool) {
 		return attribute.Int64(k, val), true
 	case float64:
 		return attribute.Float64(k, val), true
+	case float32:
+		// eino 的 model.Config.Temperature / TopP 是 float32，不能落到下面的字符串兜底，
+		// 否则 gen_ai.request.temperature 这类数值属性会以字符串写进 OTel，三方平台的数值解析会失败。
+		return attribute.Float64(k, float64(val)), true
 	case bool:
 		return attribute.Bool(k, val), true
 	case []string:
