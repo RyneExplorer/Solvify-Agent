@@ -112,6 +112,40 @@ func TraceIDFromContext(ctx context.Context) string {
 	return s
 }
 
+// oTelTraceIDFor 取自研 span / ctx 对应的 OTel traceID（双轨 traceID 对齐用）。
+//
+// 查找顺序：
+//  1. 自研 Span 上记录的 OTelTraceID —— 最可靠，创建时直接从 SDK 抄下来
+//  2. ctx 里的 OTel span —— 用于手工构造、没有 otelSpan 的 span
+//     （典型是 publishTrace 合成的 chat.request 根 span）
+//
+// 两者都没有时返回空串，不做任何伪造。
+func oTelTraceIDFor(ctx context.Context, s *Span) string {
+	if s != nil && s.OTelTraceID != "" {
+		return s.OTelTraceID
+	}
+	if sc := trace.SpanFromContext(ctx).SpanContext(); sc.IsValid() {
+		return sc.TraceID().String()
+	}
+	return ""
+}
+
+// oTelExportedFor 判断这条 trace 是否真的会出现在三方追踪平台上。
+//
+// 三个条件缺一不可 —— 只看 SpanContext 合法与否会误判（noop provider 也有合法 SpanContext）：
+//  1. 挂了真实 exporter（otelExportActive）：OTelExporter=noop 时没有任何 SpanProcessor 消费 span
+//  2. OTel 头采样命中（SpanContext.IsSampled）：采样率 < 1 时整条 trace 可能被丢弃
+//  3. span / ctx 里确实存在 OTel span
+func oTelExportedFor(ctx context.Context, s *Span) bool {
+	if !otelExportActive.Load() {
+		return false
+	}
+	if s != nil && s.otelSpan != nil {
+		return s.otelSpan.SpanContext().IsSampled()
+	}
+	return trace.SpanFromContext(ctx).SpanContext().IsSampled()
+}
+
 // RecorderFromContext 从 context 取出绑定的 Recorder。
 func RecorderFromContext(ctx context.Context) Recorder {
 	v := ctx.Value(recorderKey)
@@ -306,6 +340,15 @@ func (r *defaultRecorder) StartSpan(ctx context.Context, name string, component 
 		parent:    parentSpan,
 	}
 
+	// 双轨 traceID 对齐：把 OTel SDK 为这个 span 生成的 traceID / spanID 记到自研 Span 上。
+	// 同一请求内所有 span 由 OTel 从 ctx 继承，共享同一个 OTel traceID；自研轨道则共享
+	// 上面生成的随机 traceID。两者都记下来，落库后一条 trace 就能映射回三方平台。
+	// SpanContext 无效（noop TracerProvider）时留空，不做任何伪造。
+	if sc := otelSpan.SpanContext(); sc.IsValid() {
+		s.OTelTraceID = sc.TraceID().String()
+		s.OTelSpanID = sc.SpanID().String()
+	}
+
 	// parent_id 用于落库：从 parent Span 拿 SpanID（如果有的话）
 	if parentSpan != nil {
 		s.ParentID = parentSpan.SpanID
@@ -462,6 +505,10 @@ func (r *defaultRecorder) finalizeTrace(ctx context.Context, root *Span, endErr 
 		Root:       root,
 		SampleRate: r.cfg.SamplingRate,
 		Sampled:    sampled,
+		// 双轨 traceID 对齐：把 OTel 轨道的 traceID 一并带上，前端据此跳转三方追踪平台。
+		// root 来自 StartSpan，自带 otelSpan，所以这里能直接取到。
+		OTelTraceID:  oTelTraceIDFor(ctx, root),
+		OTelExported: oTelExportedFor(ctx, root),
 	}
 	r.traceStates.Delete(traceID)
 	if sampled {
@@ -775,35 +822,46 @@ func (r *defaultRecorder) publishTrace(ctx context.Context, traceID string, ra *
 	if endErr != nil {
 		root.Error = r.sanitizer.SanitizeString(endErr.Error())
 	}
+	// 双轨 traceID 对齐：合成的 chat.request 根 span 是手工构造的（SpanID == traceID、无 otelSpan），
+	// 所以 OTel traceID 只能从「登记在 traceState 里、真正走过 StartSpan 的那个 span」回捞，
+	// 拿不到再退回 ctx 里的 OTel span。同一 trace 内 OTel 采样结果是共享的，两者取其一即可。
+	var otelRoot *Span
 	if stVal, ok := r.traceStates.LoadAndDelete(traceID); ok {
-		if st, ok := stVal.(*traceState); ok && st != nil && st.Trace != nil && st.Trace.Root != nil {
-			prev := st.Trace.Root
-			if prev.Name != root.Name {
-				if root.Children == nil {
-					root.Children = []*Span{}
-				}
-				root.Children = append(root.Children, prev)
-			} else {
-				if prev.Children != nil {
+		if st, ok := stVal.(*traceState); ok && st != nil && st.Trace != nil {
+			otelRoot = st.Trace.Root
+			if prev := otelRoot; prev != nil {
+				if prev.Name != root.Name {
 					if root.Children == nil {
 						root.Children = []*Span{}
 					}
-					root.Children = append(root.Children, prev.Children...)
-				}
-				if prev.Events != nil {
-					root.Events = append(root.Events, prev.Events...)
-				}
-				if root.Attrs == nil {
-					root.Attrs = Attrs{}
-				}
-				for k, v := range prev.Attrs {
-					if _, exists := root.Attrs[k]; !exists {
-						root.Attrs[k] = v
+					root.Children = append(root.Children, prev)
+				} else {
+					if prev.Children != nil {
+						if root.Children == nil {
+							root.Children = []*Span{}
+						}
+						root.Children = append(root.Children, prev.Children...)
+					}
+					if prev.Events != nil {
+						root.Events = append(root.Events, prev.Events...)
+					}
+					if root.Attrs == nil {
+						root.Attrs = Attrs{}
+					}
+					for k, v := range prev.Attrs {
+						if _, exists := root.Attrs[k]; !exists {
+							root.Attrs[k] = v
+						}
 					}
 				}
 			}
 		}
 	}
+	otelTraceID := oTelTraceIDFor(ctx, otelRoot)
+	otelExported := oTelExportedFor(ctx, otelRoot)
+	// 合成的根 span 本身没有 OTel span，但这条 trace 的 OTel traceID 是已知的，
+	// 记到根上让 span_tree JSON 也能直接取用（OTelSpanID 保持为空，不伪造一个不存在的 span）。
+	root.OTelTraceID = otelTraceID
 	hasErr := endErr != nil || endStatus == SpanStatusError || endStatus == SpanStatusCanceled
 	hasFeedback := false
 	rawDecision, _ := r.traceDecide.LoadAndDelete(traceID)
@@ -841,6 +899,9 @@ func (r *defaultRecorder) publishTrace(ctx context.Context, traceID string, ra *
 		Root:       root,
 		SampleRate: r.cfg.SamplingRate,
 		Sampled:    sampled,
+		// 双轨 traceID 对齐：OTel 轨道的 traceID 一并带上，前端据此跳转三方追踪平台
+		OTelTraceID:  otelTraceID,
+		OTelExported: otelExported,
 	}
 	// 写库用独立 context，避免 HTTP 请求结束后 ctx 被取消导致写库失败
 	writeCtx, writeCancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -11,6 +11,10 @@ type ChatTrace struct {
 	RequestID  string    `gorm:"index;type:varchar(128)" json:"request_id,omitempty"`
 	UserID     string    `gorm:"index;type:varchar(64)" json:"user_id,omitempty"`
 	SessionID  string    `gorm:"index;type:varchar(64)" json:"session_id,omitempty"`
+	// OTelTraceID 是自研 id 对应的 OTel traceID（双轨 traceID 对齐）。
+	// 自研 id 是进程内随机生成的，三方追踪平台不认；带上这个 ID 才能在
+	// ByteAPM / Jaeger / Tempo 等平台上直接检索到同一条链路。为空 = 没走 OTel 轨道。
+	OTelTraceID string   `gorm:"index;type:varchar(32)" json:"otel_trace_id,omitempty"`
 	SampleRate float64   `gorm:"default:0" json:"sample_rate,omitempty"`
 	Sampled    bool      `gorm:"default:false" json:"sampled"`
 	DurationMs int64     `gorm:"default:0" json:"duration_ms,omitempty"`

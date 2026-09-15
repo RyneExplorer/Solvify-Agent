@@ -152,6 +152,12 @@ func (a *App) initDatabase() error {
 		logger.Warnf("message_feedback schema 补齐异常（不阻塞启动）: %v", err)
 	}
 
+	// chat_traces 表 schema 补齐（双轨 traceID 对齐新增 otel_trace_id 列 + 索引，
+	// 缺列会让 GORM INSERT 报 column does not exist，导致所有 trace 落库失败）
+	if err := database.EnsureChatTraceSchema(postgresqlDB); err != nil {
+		logger.Warnf("chat_traces schema 补齐异常（不阻塞启动）: %v", err)
+	}
+
 	// Redis 缓存连接
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
 	if err != nil {

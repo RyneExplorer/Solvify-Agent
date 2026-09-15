@@ -62,6 +62,10 @@ type TraceResponse struct {
 	RequestID    string                   `json:"request_id,omitempty"`
 	UserID       string                   `json:"user_id,omitempty"`
 	SessionID    string                   `json:"session_id,omitempty"`
+	// OTelTraceID 双轨 traceID 对齐：三方追踪平台（ByteAPM / Jaeger / Tempo 等）上同一条
+	// 链路的 ID，前端据此跳转。为空 = 这条 trace 没走 OTel 轨道；非空也要看
+	// attrs.otel_exported 判断平台侧是否真有数据，避免跳过去是空白页。
+	OTelTraceID  string                   `json:"otel_trace_id,omitempty"`
 	SearchMode   string                   `json:"search_mode,omitempty"`
 	SampleRate   float64                  `json:"sample_rate,omitempty"`
 	Sampled      bool                     `json:"sampled"`

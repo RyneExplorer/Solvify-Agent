@@ -112,6 +112,7 @@ CREATE TABLE "public"."chat_traces" (
   "request_id" varchar(128) COLLATE "pg_catalog"."default",
   "user_id" varchar(64) COLLATE "pg_catalog"."default",
   "session_id" varchar(64) COLLATE "pg_catalog"."default",
+  "otel_trace_id" varchar(32) COLLATE "pg_catalog"."default",
   "sample_rate" float8 NOT NULL DEFAULT 0,
   "sampled" bool NOT NULL DEFAULT false,
   "duration_ms" int8 NOT NULL DEFAULT 0,
@@ -777,6 +778,9 @@ CREATE INDEX "idx_chat_traces_session_id" ON "public"."chat_traces" USING btree 
 );
 CREATE INDEX "idx_chat_traces_user_id" ON "public"."chat_traces" USING btree (
   "user_id" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST
+);
+CREATE INDEX "idx_chat_traces_otel_trace_id" ON "public"."chat_traces" USING btree (
+  "otel_trace_id" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST
 );
 
 -- ----------------------------

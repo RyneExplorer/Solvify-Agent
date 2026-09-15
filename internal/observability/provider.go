@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -30,6 +31,17 @@ var (
 
 	tracerInitOnce sync.Once
 	promInitOnce   sync.Once
+
+	// otelExportActive 标记 OTel SDK 是否挂了真实 SpanExporter（InitTracerProvider 里设置）。
+	//
+	// 为什么需要这个标志：SpanContext 合法 != 这条 trace 真的会被导出。
+	//   - OTelExporter=noop 时 exporter == nil，TracerProvider 没有 SpanProcessor，
+	//     但 tracer.Start 照样生成合法 SpanContext（有 traceID），三方平台却查不到任何数据
+	//   - 采样率 < 1 时 OTel 可能整条 trace 丢弃，同样查不到
+	//   - 反过来，自研 track 只关心自己的采样率，会把 Trace 写进 chat_traces
+	// 所以「三方平台到底有没有」= otelExportActive && SpanContext.IsSampled()，
+	// 由 Trace.OTelExported 对外表达。开发环境默认 noop，这个标志恒为 false。
+	otelExportActive atomic.Bool
 )
 
 // promMetrics 集中持有所有 Prometheus 指标变量。
@@ -110,6 +122,8 @@ func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp
 			err = nil
 			exporter = nil
 		}
+		// 记录「是否真有 exporter 消费 span」，供 Trace.OTelExported 判断三方平台有无数据。
+		otelExportActive.Store(exporter != nil)
 
 		// Resource 描述服务身份
 		res, resErr := resource.New(ctx,

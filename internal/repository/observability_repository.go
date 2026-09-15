@@ -89,7 +89,7 @@ func (r *observabilityRepository) ListBySession(ctx context.Context, sessionID, 
 		return nil, 0, err
 	}
 	var rows []entity.ChatTrace
-	err := q.Select("id, request_id, user_id, session_id, sample_rate, sampled, duration_ms, status, error, attrs, created_at").
+	err := q.Select("id, request_id, user_id, session_id, otel_trace_id, sample_rate, sampled, duration_ms, status, error, attrs, created_at").
 		Order("created_at DESC").
 		Offset(offset).Limit(limit).Find(&rows).Error
 	return rows, total, err
@@ -109,7 +109,7 @@ func (r *observabilityRepository) ListAll(ctx context.Context, sessionID string,
 		return nil, 0, err
 	}
 	var rows []entity.ChatTrace
-	err := q.Select("id, request_id, user_id, session_id, sample_rate, sampled, duration_ms, status, error, attrs, created_at").
+	err := q.Select("id, request_id, user_id, session_id, otel_trace_id, sample_rate, sampled, duration_ms, status, error, attrs, created_at").
 		Order("created_at DESC").
 		Offset(offset).Limit(limit).Find(&rows).Error
 	return rows, total, err
@@ -197,20 +197,27 @@ func (r *observabilityRepository) WriteTraces(ctx context.Context, traces []*obs
 		status := string(t.Root.Status)
 		duration := t.Root.DurationMs
 		attrs := AttrsFromRoot(t.Root)
+		// 双轨 traceID 对齐的配套元信息：otel_exported 告诉前端「三方平台到底有没有这条 trace」，
+		// 为 false 时不要给出点进去一片空白的跳转入口（典型是 OTelExporter=noop 的开发环境）。
+		// 没走 OTel 轨道（OTelTraceID 为空）时不写入，避免 attrs 里多一个无意义字段。
+		if t.OTelTraceID != "" {
+			attrs["otel_exported"] = t.OTelExported
+		}
 		attrsJSON, _ := json.Marshal(attrs)
 		row := &entity.ChatTrace{
-			ID:         t.ID,
-			RequestID:  t.RequestID,
-			UserID:     t.UserID,
-			SessionID:  t.SessionID,
-			SampleRate: t.SampleRate,
-			Sampled:    t.Sampled,
-			DurationMs: duration,
-			Status:     status,
-			Error:      t.Root.Error,
-			Attrs:      datatypes.JSON(attrsJSON),
-			SpanTree:   datatypes.JSON(spanTree),
-			CreatedAt:  time.Now(),
+			ID:          t.ID,
+			RequestID:   t.RequestID,
+			UserID:      t.UserID,
+			SessionID:   t.SessionID,
+			OTelTraceID: t.OTelTraceID,
+			SampleRate:  t.SampleRate,
+			Sampled:     t.Sampled,
+			DurationMs:  duration,
+			Status:      status,
+			Error:       t.Root.Error,
+			Attrs:       datatypes.JSON(attrsJSON),
+			SpanTree:    datatypes.JSON(spanTree),
+			CreatedAt:   time.Now(),
 		}
 		// 用 upsert 代替 Save：Save 在主键有值时只走 UPDATE，行不存在时静默失败（rows:0）
 		if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(row).Error; err != nil {
