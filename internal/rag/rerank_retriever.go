@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"solvify-agent/internal/observability"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
 )
@@ -62,6 +63,8 @@ func NewRerankRetriever(cfg RerankRetrieverConfig) *RerankRetriever {
 		threshold = defaultRerankThreshold
 	}
 	d := time.Duration(timeout) * time.Second
+	// 出站追踪挂在 httpClient 上：Rerank 是同步阻塞的外部调用，且带重试逻辑，
+	// 每次尝试都会单独出一个 client span，重试次数与单次失败原因在三方平台上一目了然。
 	return &RerankRetriever{
 		inner:          cfg.Inner,
 		endpoint:       cfg.Endpoint,
@@ -70,7 +73,7 @@ func NewRerankRetriever(cfg RerankRetrieverConfig) *RerankRetriever {
 		topN:           topN,
 		timeout:        d,
 		scoreThreshold: threshold,
-		httpClient:     &http.Client{Timeout: d},
+		httpClient:     &http.Client{Timeout: d, Transport: observability.HTTPTransport(nil)},
 		maxRetries:     defaultRerankMaxRetries,
 		baseBackoff:    defaultRerankBaseBackoff,
 	}

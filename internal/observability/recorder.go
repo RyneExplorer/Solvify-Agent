@@ -301,6 +301,26 @@ func toKeyValue(k string, v any) (attribute.KeyValue, bool) {
 	}
 }
 
+// spanKindFor 把自研 Component 映射为 OTel SpanKind。
+//
+// 为什么必须显式指定：不指定时 SpanKind 恒为 Internal，而三方追踪平台靠它区分
+// 「我作为服务端处理的请求」和「我发出去的调用」。全是 Internal 时，平台的上下游
+// 关系图会把服务端入口和外部依赖混成一类，依赖箭头画不出来。
+//
+// 只映射语义没有歧义的两类，其余一律保持 Internal —— 宁可不分类，也不要给平台
+// 一个错误的分类。注意 rag.reranker / embedding 等真实的出站调用不需要在这里映射，
+// 它们由 HTTPTransport 自己建 SpanKindClient 的 span，本函数产出的是上层的逻辑 span。
+func spanKindFor(component Component) trace.SpanKind {
+	switch component {
+	case ComponentHTTPServer:
+		return trace.SpanKindServer
+	case ComponentLLMClient:
+		return trace.SpanKindClient
+	default:
+		return trace.SpanKindInternal
+	}
+}
+
 func (r *defaultRecorder) StartSpan(ctx context.Context, name string, component Component, attrs Attrs) (context.Context, *Span) {
 	if !r.enabled {
 		s := &Span{Name: name, Component: component, StartAt: time.Now()}
@@ -326,7 +346,9 @@ func (r *defaultRecorder) StartSpan(ctx context.Context, name string, component 
 	// 用 OTel tracer.Start 创建运行时 span，OTel 自动管理 parent-child 关系。
 	// 关键收益：运行时追踪的 parent-child 完全交给 OTel SDK，不管 Eino callback / compose.Graph /
 	// InitCallbacks 包多少层 context.WithValue，OTel 的 trace.SpanFromContext(ctx) 永远能拿回当前 span。
-	ctxWithSpan, otelSpan := r.tracer.Start(ctx, name, trace.WithAttributes(attrsToOTel(r.sanitizer.SanitizeAttrs(attrs))...))
+	ctxWithSpan, otelSpan := r.tracer.Start(ctx, name,
+		trace.WithSpanKind(spanKindFor(component)),
+		trace.WithAttributes(attrsToOTel(r.sanitizer.SanitizeAttrs(attrs))...))
 
 	s := &Span{
 		TraceID:   traceID,

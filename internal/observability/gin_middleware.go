@@ -157,6 +157,13 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 				ctx = SetUserID(ctx, s)
 			}
 		}
+
+		// 入站 trace 上下文提取：必须放在下面 StartSpan("http.request") 之前。
+		// 提取到的远程 span 会成为 http.request 的父节点，本次请求于是复用上游的
+		// traceID，跨服务链路才能串成同一条 trace。上游没接 OTel（不带 traceparent）时
+		// 这里是空操作，行为与改动前完全一致：HTTP 入口依旧是根 span。
+		ctx, inboundTrace := ExtractRemoteContext(ctx, c.Request.Header)
+
 		c.Request = c.Request.WithContext(ctx)
 
 		route := c.FullPath()
@@ -189,6 +196,14 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 				if s, ok := userID.(string); ok {
 					recAttrs["user_id"] = s
 				}
+			}
+			// 只在真有入站父 span 时才记这几个属性，避免「没有上游」被误读成
+			// 「上游要求不采样」（那时 Sampled 也是 false，两者必须靠 Present 区分）。
+			// 排查链路断裂 / 采样被上游掐掉时，先看这几个属性。
+			if inboundTrace.Present {
+				recAttrs["otel.inbound_trace_id"] = inboundTrace.TraceID
+				recAttrs["otel.inbound_parent_span_id"] = inboundTrace.SpanID
+				recAttrs["otel.inbound_parent_sampled"] = inboundTrace.Sampled
 			}
 			// 必须接收 StartSpan 返回的 ctx 并写回请求：它携带 traceID、当前 span 引用
 			// 和 OTel span。丢掉的后果是下游（chat → eino 组件）找不到父 span，各自新建根

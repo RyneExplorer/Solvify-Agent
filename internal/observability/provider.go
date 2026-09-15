@@ -115,6 +115,10 @@ type promMetrics struct {
 // InitTracerProvider 初始化 OTel TracerProvider，启动早期调一次。
 func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp trace.TracerProvider, shutdown func(context.Context) error, err error) {
 	tracerInitOnce.Do(func() {
+		// 传播器必须先装好，且与 exporter 无关：
+		// 无论后面走 noop / stdout / otlp，出站注入与入站提取的语义都要一致。
+		InitPropagator()
+
 		var exporter sdktrace.SpanExporter
 		exporter, err = buildOTelExporter(ctx, cfg)
 		if err != nil {
@@ -136,13 +140,7 @@ func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp
 			logger.Warnf("OTel resource 初始化失败: %v", resErr)
 		}
 
-		// 头采样
-		sampler := sdktrace.TraceIDRatioBased(cfg.OTelSamplingRate)
-		if cfg.OTelSamplingRate <= 0 {
-			sampler = sdktrace.NeverSample()
-		} else if cfg.OTelSamplingRate >= 1 {
-			sampler = sdktrace.AlwaysSample()
-		}
+		sampler := samplerFor(cfg.OTelSamplingRate)
 
 		if exporter == nil {
 			globalTracerProvider = sdktrace.NewTracerProvider(
@@ -156,7 +154,7 @@ func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp
 				sdktrace.WithBatcher(exporter, sdktrace.WithBatchTimeout(200*time.Millisecond)),
 			)
 		}
-		globalTracer = globalTracerProvider.Tracer("solvify-agent")
+		globalTracer = globalTracerProvider.Tracer(tracerName)
 		otel.SetTracerProvider(globalTracerProvider)
 	})
 
@@ -166,6 +164,29 @@ func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp
 		return noopTP, func(context.Context) error { return nil }, nil
 	}
 	return globalTracerProvider, globalTracerProvider.Shutdown, nil
+}
+
+// samplerFor 按本地采样率构造采样器：root span 按本地采样率决定，子 span 跟随父 span。
+//
+// 为什么外层必须包 ParentBased，而不是直接用 TraceIDRatioBased：
+// 后者不看父 span，独立按本地采样率掷骰子。上游已经决定丢弃这条 trace，本地仍可能
+// 采到并单独上报，三方平台上就会出现只有本服务半截 span 的孤儿 trace —— 比不采样更
+// 误导人。ParentBased 的语义是「ctx 里有远程父 span 就跟随它的决定，没有才用 root
+// sampler」，这才是跨服务追踪需要的一致性。
+//
+// 副作用：上游明确标记不采样时，即使本地采样率是 1 也不会记录。该信号由 http.request
+// span 的 otel.inbound_parent_sampled 属性暴露，避免「调了采样率却没有 span」无从排查。
+func samplerFor(rate float64) sdktrace.Sampler {
+	var rootSampler sdktrace.Sampler
+	switch {
+	case rate <= 0:
+		rootSampler = sdktrace.NeverSample()
+	case rate >= 1:
+		rootSampler = sdktrace.AlwaysSample()
+	default:
+		rootSampler = sdktrace.TraceIDRatioBased(rate)
+	}
+	return sdktrace.ParentBased(rootSampler)
 }
 
 // otelExporterInitTimeout 是创建 OTLP exporter 的超时。

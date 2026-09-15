@@ -97,6 +97,47 @@ func TestTraceMiddlewarePropagatesSpanContext(t *testing.T) {
 	}
 }
 
+// TestTraceMiddlewareExtractsInboundTraceparent 断言中间件真的做了入站 trace 上下文提取，
+// http.request span 复用上游 traceID。
+//
+// 为什么必须有这一条：ExtractRemoteContext 本身测得再细，也证明不了「中间件里调了它」。
+// 删掉中间件里的那一行调用，其它 propagation 测试依然全绿，但生产行为已经退化成
+// 「每个服务各自一条 trace」—— 这正是本测试要守住的接线点。
+func TestTraceMiddlewareExtractsInboundTraceparent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	installGlobalPropagator(t)
+	// 装真实 SDK tracer，让自研 Span 能记下 OTel 轨道的 traceID（必须早于 NewRecorder）。
+	installSDKTracer(t)
+	rec := newTestRecorder(t)
+
+	var (
+		gotOTelTraceID  string
+		gotInboundTrace bool
+	)
+	engine := gin.New()
+	engine.Use(NewTraceMiddleware(rec).Handler())
+	engine.POST("/api/v1/chat", func(c *gin.Context) {
+		if s := CurrentSpanFromContext(c.Request.Context()); s != nil {
+			gotOTelTraceID = s.OTelTraceID
+			_, gotInboundTrace = s.Attrs["otel.inbound_trace_id"]
+		}
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", nil)
+	req.Header.Set("traceparent", "00-"+upstreamTraceID+"-"+upstreamSpanID+"-01")
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, req)
+
+	if gotOTelTraceID != upstreamTraceID {
+		t.Fatalf("http.request span 的 OTel traceID 应为上游的 %s，实际 %q —— 中间件没有提取入站 traceparent，跨服务链路会断",
+			upstreamTraceID, gotOTelTraceID)
+	}
+	if !gotInboundTrace {
+		t.Error("http.request span 缺少 otel.inbound_trace_id 属性，入站提取的信号没有暴露出来")
+	}
+}
+
 // TestTraceMiddlewareWithoutRecorder 确认不传 Recorder 时中间件仍能放行请求。
 func TestTraceMiddlewareWithoutRecorder(t *testing.T) {
 	gin.SetMode(gin.TestMode)
