@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 
 	"github.com/cloudwego/eino/adk"
 	einoTool "github.com/cloudwego/eino/components/tool"
@@ -11,6 +12,15 @@ import (
 	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/config"
 )
+
+// dangerousDynamicPatterns 动态工具（MCP 等）名称中的高危操作关键词。
+// MCP 工具由 ToolFactory 在运行时动态创建，不在 internalTools 注册表里，
+// 若不在此按名称兜底识别，write_file / edit_file / move_file 这类写操作
+// 会完全绕过人工审批直接执行。
+var dangerousDynamicPatterns = []string{
+	"write", "edit", "delete", "remove", "move", "rename",
+	"mkdir", "create_directory", "execute", "run_", "kill", "terminate",
+}
 
 // ToolBuildFn 内置工具的构建函数
 // 每个工具从请求里取它需要的参数（userID、kbIDs），返回完整可用的 tool 实例
@@ -76,16 +86,43 @@ func (e *Engine) buildCheckpointStore(sessionID string) adk.CheckPointStore {
 	return NewInMemoryCheckPointStore()
 }
 
-// dangerousToolNames 返回所有标记为 dangerous 的内置工具名集合。
-// 用于构建审批中间件。
-func (e *Engine) dangerousToolNames() map[string]bool {
+// dangerousToolNames 返回需要人工审批的工具名集合，用于构建审批中间件。
+// 来源一：内置工具注册时显式标记的 Dangerous；
+// 来源二：动态工具（MCP 等）按名称模式识别出的写/删除类高危操作。
+func (e *Engine) dangerousToolNames(ctx context.Context, allTools []einoTool.BaseTool) map[string]bool {
 	m := make(map[string]bool, len(e.internalTools))
+	internalSet := make(map[string]bool, len(e.internalTools))
 	for _, entry := range e.internalTools {
 		if entry.Dangerous {
 			m[entry.Name] = true
 		}
+		internalSet[entry.Name] = true
+	}
+	for _, t := range allTools {
+		info, err := t.Info(ctx)
+		if err != nil || info == nil {
+			continue
+		}
+		if internalSet[info.Name] {
+			// 内置工具已按显式 Dangerous 标记处理，不参与模式匹配
+			continue
+		}
+		if isDangerousDynamicTool(info.Name) {
+			m[info.Name] = true
+		}
 	}
 	return m
+}
+
+// isDangerousDynamicTool 判断动态工具（MCP 等）名称是否属于高危写/删除类操作
+func isDangerousDynamicTool(name string) bool {
+	lower := strings.ToLower(name)
+	for _, p := range dangerousDynamicPatterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) clarifyToolNames() map[string]bool {

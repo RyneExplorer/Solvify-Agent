@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -77,19 +76,17 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	}
 
 	// ── 构建工具列表：内置 registry + 用户配置 ──
+	// 深度模式会先调用 EstimateToolsTokens 预构建工具集并写入 ctx，
+	// 这里优先复用；若没有预构建结果（如快速模式/直接调用）才现场构建。
+	// 不复用的话，一次请求会构建两遍工具，冷启动时会重复拉起 MCP Server 子进程。
+	sorted := e.sortedInternalTools()
 	var allTools []einoTool.BaseTool
-
-	// 内置工具按 Order 排序后逐个 Build
-	sorted := make([]internalToolRegistryEntry, len(e.internalTools))
-	copy(sorted, e.internalTools)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Order < sorted[j].Order })
-	for _, entry := range sorted {
-		allTools = append(allTools, entry.Build(ctx, req.UserID, req.KnowledgeBaseIDs))
+	if bundle, ok := prebuiltToolsFromContext(ctx); ok && len(bundle.Tools) > 0 {
+		allTools = bundle.Tools
+		logger.Debugf("[Agent] 复用预构建工具集: tools=%d, tokens=%d", len(bundle.Tools), bundle.TotalTokens)
+	} else {
+		allTools = e.buildTools(ctx, sorted, req.UserID, req.KnowledgeBaseIDs, req.UserToolConfigIDs...)
 	}
-
-	// 用户配置的工具
-	userTools := e.toolFactory.CreateAgentTools(ctx, req.UserID)
-	allTools = append(allTools, userTools...)
 
 	// ── 工具统计 + 日志 ──
 	toolDescMap := make(map[string]string, len(allTools))
@@ -165,7 +162,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	}
 	// ── 注入中间件：危险工具审批 + 澄清追问 ──
 	var middlewares []compose.ToolMiddleware
-	if dangerousNames := e.dangerousToolNames(); len(dangerousNames) > 0 {
+	if dangerousNames := e.dangerousToolNames(ctx, allTools); len(dangerousNames) > 0 {
 		middlewares = append(middlewares, compose.ToolMiddleware{Invokable: buildDangerousToolMiddleware(dangerousNames)})
 		logger.Infof("[Agent] 已注入危险工具审批中间件: %v", dangerousNames)
 	}

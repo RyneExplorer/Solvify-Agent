@@ -532,3 +532,30 @@ func applyReasoningStep(steps *[]dto.ReasoningStep, e agent.Event) {
 		})
 	}
 }
+
+// parseApprovalResult 将前端返回的审批文本映射为官方结构化 ApprovalResult。
+// 这是 Host 的职责：官方 Host 直接发送 ApprovalResult，本项目前端目前发送"同意/拒绝"等文本，
+// 这里做一层等价映射，使中间件可沿用官方 approval_wrapper.go 的 *ApprovalResult 数据契约。
+// 同时兼容官方风格的 JSON：{"approved":true,"disapprove_reason":"..."}（前端若直接发结构化体也支持）。
+func parseApprovalResult(content string) *agent.ApprovalResult {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		reason := "未提供审批内容"
+		return &agent.ApprovalResult{Approved: false, DisapproveReason: &reason}
+	}
+	// 官方风格的结构化 JSON
+	var structured agent.ApprovalResult
+	if json.Unmarshal([]byte(content), &structured) == nil && (structured.Approved || structured.DisapproveReason != nil) {
+		return &structured
+	}
+	// 兼容旧前端：关键词匹配
+	switch strings.ToLower(content) {
+	case "approve", "同意", "确认", "yes", "y", "ok":
+		return &agent.ApprovalResult{Approved: true}
+	case "reject", "拒绝", "取消", "no", "n":
+		return &agent.ApprovalResult{Approved: false, DisapproveReason: &content}
+	default:
+		// 无法识别：默认拒绝，原始文本作为原因便于排查
+		return &agent.ApprovalResult{Approved: false, DisapproveReason: &content}
+	}
+}
