@@ -50,6 +50,9 @@ type App struct {
 	// 阶段 1.4：OTel / Prometheus 资源，由 App 负责生命周期管理
 	tracerShutdown func(context.Context) error
 	promRegistry   *prometheus.Registry
+
+	// MCP 客户端连接池，由 App 负责生命周期管理
+	mcpClientPool *providers.MCPClientPool
 }
 
 // NewApp 创建应用实例
@@ -150,6 +153,11 @@ func (a *App) initDatabase() error {
 	// message_feedback 表 schema 补齐（早期 AutoMigrate 建表后 entity 新增列，AutoMigrate 不会 ADD COLUMN）
 	if err := database.EnsureMessageFeedbackSchema(postgresqlDB); err != nil {
 		logger.Warnf("message_feedback schema 补齐异常（不阻塞启动）: %v", err)
+	}
+
+	// tool_providers 表 schema 补齐（新增 is_system 列，区分系统预置与管理员自定义 MCP 供应商）
+	if err := database.EnsureToolProviderSchema(postgresqlDB); err != nil {
+		logger.Warnf("tool_providers schema 补齐异常（不阻塞启动）: %v", err)
 	}
 
 	// chat_traces 表 schema 补齐（双轨 traceID 对齐新增 otel_trace_id 列 + 索引，
@@ -436,8 +444,16 @@ func (a *App) initDependencies() {
 	// 初始化工具 Provider 注册表——注册通用 Provider 类型
 	toolRegistry := tool.NewProviderRegistry()
 	toolRegistry.Register("http", providers.NewHTTPProvider()) // 通用 HTTP Provider
+
+	// MCP Provider：一个 MCP Server 可提供多个工具（一对多映射）
+	a.mcpClientPool = providers.NewMCPClientPool()
+	toolRegistry.Register("mcp", providers.NewMCPProvider(a.mcpClientPool))
+
 	// ToolFactory——Agent 引擎从 DB/Redis 加载用户配置的工具
 	toolFactory := tool.NewFactory(toolRegistry, cachedUserToolConfigRepo, cachedToolTypeRepo)
+
+	// 加载系统预置 MCP 服务器（从 config.yaml 同步到数据库）
+	a.loadSystemMCPServersWithTimeout()
 
 	// Chunk Repository（文档分块查询）
 	chunkRepo := repository.NewDocumentChunkRepository(a.postgresqlDB)
@@ -588,6 +604,13 @@ func (a *App) gracefulShutdown() {
 	if a.redis != nil {
 		if err := database.CloseRedis(a.redis); err != nil {
 			logger.Error("Redis 连接关闭失败", zap.Error(err))
+		}
+	}
+
+	// 关闭 MCP 客户端连接池（清理 stdio 子进程等资源）
+	if a.mcpClientPool != nil {
+		if err := a.mcpClientPool.Close(); err != nil {
+			logger.Errorf("MCP 客户端连接池关闭失败: %v", err)
 		}
 	}
 

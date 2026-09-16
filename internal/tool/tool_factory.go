@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -130,7 +132,10 @@ func extractPlaceholders(v interface{}) []string {
 				if end == -1 {
 					break
 				}
-				ph := s[start+2 : start+2+end]
+				// 必须 TrimSpace：模板里写 {{ query }} 会提取出 " query "，
+				// 既可能违反 LLM 函数名约束，也会让 filterProvidedPlaceholders 的
+				// 精确匹配失效——用户明明配过的值仍会被要求 LLM 再填一次。
+				ph := strings.TrimSpace(s[start+2 : start+2+end])
 				if ph != "" {
 					seen[ph] = true
 				}
@@ -152,6 +157,9 @@ func extractPlaceholders(v interface{}) []string {
 	for k := range seen {
 		result = append(result, k)
 	}
+	// map 遍历顺序随机，不排序的话每次生成的 schema required 数组顺序都不同，
+	// 导致同一份配置产出不稳定的工具定义（影响缓存与行为确定性）。
+	sort.Strings(result)
 	return result
 }
 
@@ -214,11 +222,27 @@ func NewFactory(registry ProviderRegistry, configRepo UserToolConfigStore, typeR
 }
 
 // CreateAgentTools 根据用户配置创建 Agent 工具列表
-func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string) []einoTool.BaseTool {
+// userConfigIDs 非空时仅加载指定 ID 的启用配置，用于对话级 MCP 白名单
+func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string, userConfigIDs ...string) []einoTool.BaseTool {
 	configs, err := f.configRepo.ListEnabledByUserID(ctx, userID)
 	if err != nil {
 		logger.Errorf("[ToolFactory] 加载用户工具配置失败: userID=%s, err=%v", userID, err)
 		return nil
+	}
+
+	// 白名单过滤：非空时只保留指定 ID
+	if len(userConfigIDs) > 0 {
+		idSet := make(map[string]struct{}, len(userConfigIDs))
+		for _, id := range userConfigIDs {
+			idSet[id] = struct{}{}
+		}
+		filtered := make([]entity.UserToolConfig, 0, len(configs))
+		for _, c := range configs {
+			if _, ok := idSet[c.ID]; ok {
+				filtered = append(filtered, c)
+			}
+		}
+		configs = filtered
 	}
 
 	tools := make([]einoTool.BaseTool, 0, len(configs))
@@ -258,7 +282,33 @@ func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string) []ein
 			}
 		}
 
-		// 创建 AgentTool
+		// MCP 场景：多工具供应商，一个 MCP Server 提供多个工具
+		if multi, ok := provider.(MultiToolProvider); ok && providerConfig.MCP != nil {
+			mcpTools, err := multi.GetTools(ctx, &providerConfig)
+			if err != nil {
+				logger.Warnf("[ToolFactory] MCP 拉取工具列表失败，跳过: providerKey=%s, err=%v",
+					config.ToolProvider.ProviderKey, err)
+				continue
+			}
+
+			// 前缀需带上 provider_key，否则多个 MCP Server 出现同名工具（如都有 search_files）
+			// 时后者会覆盖前者，Agent 实际只能调到其中一个。
+			// 最终形态：{tool_key}_{provider_key}_{tool_name}，例如 mcp_filesystem_read_file
+			prefix := mcpToolPrefix(config.ToolType.ToolKey, config.ToolProvider.ProviderKey)
+			callTimeout := mcpCallTimeout(providerConfig.MCP)
+			for _, mt := range mcpTools {
+				tools = append(tools, &prefixedTool{
+					BaseTool: mt,
+					prefix:   prefix,
+					timeout:  callTimeout,
+				})
+			}
+			logger.Infof("[ToolFactory] MCP 工具加载成功: providerKey=%s, prefix=%s, tools=%d, callTimeout=%v",
+				config.ToolProvider.ProviderKey, prefix, len(mcpTools), callTimeout)
+			continue
+		}
+
+		// 原有逻辑：单工具供应商（HTTP 等）
 		agentTool := NewAgentTool(&AgentToolConfig{
 			ToolType:       &config.ToolType,
 			Provider:       provider,
@@ -272,6 +322,125 @@ func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string) []ein
 	}
 
 	return tools
+}
+
+// mcpToolPrefix 构造 MCP 工具名前缀：{tool_key}_{provider_key}
+// provider_key 由管理员填写，可能含空格等非法字符，需清洗后使用，
+// 保证最终工具名满足模型厂商对函数名的约束（通常只允许字母、数字、下划线、连字符）。
+func mcpToolPrefix(toolKey, providerKey string) string {
+	pk := sanitizeToolNamePart(providerKey)
+	if pk == "" {
+		return toolKey
+	}
+	return toolKey + "_" + pk
+}
+
+// sanitizeToolNamePart 将任意字符串清洗为合法的工具名片段
+func sanitizeToolNamePart(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
+// defaultMCPCallTimeout 未配置 timeout 时的单次 MCP 工具调用超时兜底
+// MCP Server 多为外部进程/远程服务，可能卡死或长时间无响应；
+// 没有兜底的话一次 tools/call 会把整个 Agent 请求无限期挂住。
+const defaultMCPCallTimeout = 300 * time.Second
+
+// maxTimeoutSeconds 超时秒数上限，超过后 int64 纳秒溢出会让 WithTimeout 立即触发
+const maxTimeoutSeconds = 24 * 60 * 60
+
+// mcpCallTimeout 计算单次 MCP 工具调用超时
+// 优先使用管理员配置的 Timeout（秒），未配置时回落到兜底值
+func mcpCallTimeout(cfg *MCPProviderConfig) time.Duration {
+	if cfg == nil || cfg.Timeout <= 0 {
+		return defaultMCPCallTimeout
+	}
+	sec := cfg.Timeout
+	if sec > maxTimeoutSeconds {
+		logger.Warnf("[ToolFactory] MCP timeout 配置值 %d 超过上限，已钳制为 %d 秒", sec, maxTimeoutSeconds)
+		sec = maxTimeoutSeconds
+	}
+	return time.Duration(sec) * time.Second
+}
+
+// prefixedTool 为 BaseTool 的工具名添加前缀，避免不同 MCP Server 工具名冲突
+// 例如 MCP Server "filesystem" 的 read_file 工具 → Agent 看到的工具名为 "mcp_filesystem_read_file"
+type prefixedTool struct {
+	einoTool.BaseTool
+	prefix string
+	// timeout 单次调用超时，<=0 表示不额外限制（仅由上游 ctx 控制）
+	timeout time.Duration
+}
+
+// callContext 为单次工具调用施加超时保护
+func (t *prefixedTool) callContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if t.timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, t.timeout)
+}
+
+func (t *prefixedTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	info, err := t.BaseTool.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// 拷贝 ToolInfo，避免修改底层工具缓存的 ToolInfo（否则每次调用都会叠加前缀）
+	infoCopy := *info
+	infoCopy.Name = t.prefix + "_" + info.Name
+	return &infoCopy, nil
+}
+
+// InvokableRun 转发到底层工具的 InvokableRun（若底层实现了 InvokableTool）
+func (t *prefixedTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...einoTool.Option) (string, error) {
+	if inv, ok := t.BaseTool.(einoTool.InvokableTool); ok {
+		runCtx, cancel := t.callContext(ctx)
+		defer cancel()
+		return inv.InvokableRun(runCtx, argumentsInJSON, opts...)
+	}
+	return "", fmt.Errorf("工具 %s 不支持 InvokableRun", t.prefix)
+}
+
+// StreamableRun 转发到底层工具的 StreamableRun（若底层实现了 StreamableTool）
+//
+// 关键降级：eino-ext 的 MCP 工具只实现了 InvokableRun，没有实现 StreamableRun；
+// 而深度模式 Agent 开启了 EnableStreaming，ToolNode 会优先走流式路径，
+// 若此处不降级会直接报「不支持 StreamableRun」，导致所有 MCP 工具调用全部失败。
+// 因此当底层不支持流式时，用 InvokableRun 的结果包成单元素流返回，
+// 保证非流式工具也能在流式链路中正常工作。
+func (t *prefixedTool) StreamableRun(ctx context.Context, argumentsInJSON string, opts ...einoTool.Option) (*schema.StreamReader[string], error) {
+	if st, ok := t.BaseTool.(einoTool.StreamableTool); ok {
+		// 真流式：返回的是尚未消费的 StreamReader，此处不能提前 cancel，
+		// 否则会立刻掐断流，生命周期交由上游 ctx 控制。
+		return st.StreamableRun(ctx, argumentsInJSON, opts...)
+	}
+	if inv, ok := t.BaseTool.(einoTool.InvokableTool); ok {
+		// 降级路径：结果已完整取出，可以安全地施加超时。
+		runCtx, cancel := t.callContext(ctx)
+		defer cancel()
+		result, err := inv.InvokableRun(runCtx, argumentsInJSON, opts...)
+		if err != nil {
+			return nil, err
+		}
+		return schema.StreamReaderFromArray([]string{result}), nil
+	}
+	name := t.prefix
+	if info, iErr := t.Info(ctx); iErr == nil && info != nil {
+		name = info.Name
+	}
+	return nil, fmt.Errorf("工具 %s 既不支持 StreamableRun 也不支持 InvokableRun", name)
 }
 
 // ========== Schema 构建辅助 ==========

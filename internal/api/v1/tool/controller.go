@@ -182,6 +182,7 @@ func (c *Controller) ListToolTemplates(ctx *gin.Context) {
 		ProviderType string          `json:"provider_type"`
 		ConfigSchema json.RawMessage `json:"config_schema"`
 		InputSchema  json.RawMessage `json:"input_schema"`
+		IsSystem     bool            `json:"is_system"`
 	}
 	type templateInfo struct {
 		ID            string          `json:"id"`
@@ -206,18 +207,19 @@ func (c *Controller) ListToolTemplates(ctx *gin.Context) {
 			Providers:     []providerBrief{},
 		}
 		if providers != nil {
-			for _, p := range providers.Providers {
-				t.Providers = append(t.Providers, providerBrief{
-					ID:           p.ID,
-					ProviderKey:  p.ProviderKey,
-					Name:         p.Name,
-					Description:  p.Description,
-					ProviderType: p.ProviderType,
-					ConfigSchema: p.ConfigSchema,
-					InputSchema:  p.InputSchema,
-				})
+				for _, p := range providers.Providers {
+					t.Providers = append(t.Providers, providerBrief{
+						ID:           p.ID,
+						ProviderKey:  p.ProviderKey,
+						Name:         p.Name,
+						Description:  p.Description,
+						ProviderType: p.ProviderType,
+						ConfigSchema: p.ConfigSchema,
+						InputSchema:  p.InputSchema,
+						IsSystem:     p.IsSystem,
+					})
+				}
 			}
-		}
 		templates = append(templates, t)
 	}
 

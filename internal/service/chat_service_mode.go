@@ -69,7 +69,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 			if obsOk {
 				s.obs.AddRootAttrs(ctx, observability.Attrs{"model_name": modelName})
 			}
-			preToolsTokens, deepCtx, tErr = s.agentEngine.EstimateToolsTokens(ctx, userID, req.KnowledgeBaseIDs, modelName)
+			preToolsTokens, deepCtx, tErr = s.agentEngine.EstimateToolsTokens(ctx, userID, req.KnowledgeBaseIDs, modelName, req.MCPUserConfigIDs...)
 			if tErr != nil {
 				logger.Warnf("预估算工具定义 token 失败，按 0 处理: %v", tErr)
 				preToolsTokens = 0
@@ -106,7 +106,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	agentPB := NewPromptBuilder(PromptModeDeep, "", enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx).
 		WithProfile(enhancedCtx.Profile).
 		WithPreference(enhancedCtx.Preference)
-	agentReq := agentPB.BuildAgentRequestFields(userID, req.Content, req.ModelID, req.ModelType, req.KnowledgeBaseIDs, history)
+	agentReq := agentPB.BuildAgentRequestFields(userID, req.Content, req.ModelID, req.ModelType, req.KnowledgeBaseIDs, req.MCPUserConfigIDs, history)
 	agentReq.SessionID = sessionID
 
 	// ── 恢复流程：session 有待恢复 checkpoint 且用户带了审批结果 ──

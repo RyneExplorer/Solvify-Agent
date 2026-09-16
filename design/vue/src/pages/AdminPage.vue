@@ -192,7 +192,8 @@
             <tr class="bg-slate-50 border-b border-slate-200">
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">名称</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">Provider Key</th>
-              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">描述</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">类型</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">来源</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">状态</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">操作</th>
             </tr>
@@ -201,13 +202,39 @@
             <tr v-for="p in toolProviders" :key="p.id" class="border-b border-slate-100 last:border-b-0">
               <td class="px-4 py-3 font-medium text-slate-900">{{ p.name }}</td>
               <td class="px-4 py-3 text-slate-900">{{ p.provider_key }}</td>
-              <td class="px-4 py-3 text-slate-900">{{ p.description || '-' }}</td>
+              <td class="px-4 py-3">
+                <AppBadge :variant="providerTypeBadgeVariant(p.provider_type)">{{ providerTypeText(p.provider_type) }}</AppBadge>
+              </td>
+              <td class="px-4 py-3">
+                <AppBadge v-if="p.is_system" variant="blue">系统预置</AppBadge>
+                <AppBadge v-else variant="neutral">管理员配置</AppBadge>
+              </td>
               <td class="px-4 py-3"><AppBadge :variant="p.is_enabled ? 'success' : 'neutral'">{{ p.is_enabled ? '启用' : '停用' }}</AppBadge></td>
               <td class="px-4 py-3">
                 <div class="flex items-center gap-1">
-                  <AppButton variant="ghost" size="sm" @click="openToolProviderModal(p)">编辑</AppButton>
-                  <AppButton variant="ghost" size="sm" @click="toggleToolProviderEnabled(p)">{{ p.is_enabled ? '停用' : '启用' }}</AppButton>
-                  <AppButton variant="ghost" size="sm" class="text-red-600 hover:text-red-700 hover:bg-red-50" @click="deleteToolProvider(p.id)">删除</AppButton>
+                  <AppButton
+                    variant="ghost" size="sm"
+                    :disabled="p.is_system"
+                    :title="p.is_system ? '系统预置供应商不支持编辑' : ''"
+                    @click="openToolProviderModal(p)"
+                  >编辑</AppButton>
+                  <AppButton
+                    variant="ghost" size="sm"
+                    :disabled="p.is_system"
+                    :title="p.is_system ? '系统预置供应商不支持启停（由配置文件管理）' : ''"
+                    @click="toggleToolProviderEnabled(p)"
+                  >{{ p.is_enabled ? '停用' : '启用' }}</AppButton>
+                  <AppButton
+                    variant="ghost" size="sm"
+                    @click="quickTestToolProvider(p)"
+                  >测试</AppButton>
+                  <AppButton
+                    variant="ghost" size="sm"
+                    :disabled="p.is_system"
+                    :title="p.is_system ? '系统预置供应商不支持删除（修改配置文件后会自动删除）' : ''"
+                    class="text-red-600 hover:text-red-700 hover:bg-red-50 disabled:!text-slate-300 disabled:hover:!bg-transparent"
+                    @click="deleteToolProvider(p.id)"
+                  >删除</AppButton>
                 </div>
               </td>
             </tr>
@@ -639,6 +666,91 @@
             </div>
           </div>
 
+          <!-- MCP 配置 -->
+          <div v-if="toolProviderForm.provider_type === 'mcp'">
+            <div class="flex items-center justify-between mb-1.5">
+              <label class="block text-[13px] font-medium text-slate-600">MCP 服务器配置 <span class="text-red-500">*</span></label>
+              <span v-if="editingToolProvider?.is_system" class="text-xs text-amber-600 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">系统预置</span>
+            </div>
+            <div class="space-y-3 border border-slate-200 rounded-xl p-3 bg-slate-50">
+              <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">传输方式 <span class="text-red-500">*</span></label>
+                <AppSelect v-model="mcpForm.transport" class="w-full">
+                  <el-option value="stdio" label="Stdio (本地进程)" />
+                  <el-option value="sse" label="SSE (远程 HTTP 流)" />
+                  <el-option value="http" label="HTTP (同步接口)" />
+                </AppSelect>
+              </div>
+
+              <!-- Stdio -->
+              <template v-if="mcpForm.transport === 'stdio'">
+                <div>
+                  <label class="block text-xs font-medium text-slate-500 mb-1">启动命令 <span class="text-red-500">*</span></label>
+                  <input v-model="mcpForm.command" placeholder="如：uvx 或 python" class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                </div>
+                <div>
+                  <div class="flex items-center justify-between mb-1">
+                    <label class="text-xs font-medium text-slate-500">命令参数</label>
+                    <button type="button" @click="addMCPStdioArg" class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-0.5 rounded-md hover:bg-slate-50">+ 添加</button>
+                  </div>
+                  <div v-if="!mcpForm.args.length" class="text-xs text-slate-400 px-3 py-2 bg-white rounded-lg border border-slate-200 border-dashed text-center">暂无参数</div>
+                  <div v-for="(a, idx) in mcpForm.args" :key="idx" class="flex items-center gap-2 mb-2">
+                    <input v-model="mcpForm.args[idx]" placeholder="如：mcp-server-gmail" class="flex-1 rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                    <button type="button" @click="removeMCPStdioArg(idx)" class="text-xs text-red-600 hover:text-red-700 px-1">删除</button>
+                  </div>
+                </div>
+                <div>
+                  <div class="flex items-center justify-between mb-1">
+                    <label class="text-xs font-medium text-slate-500">环境变量</label>
+                    <button type="button" @click="addKV(mcpForm.env_rows)" class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-0.5 rounded-md hover:bg-slate-50">+ 添加</button>
+                  </div>
+                  <div v-if="!mcpForm.env_rows.length" class="text-xs text-slate-400 px-3 py-2 bg-white rounded-lg border border-slate-200 border-dashed text-center">暂无</div>
+                  <div v-for="(row, idx) in mcpForm.env_rows" :key="idx" class="flex items-center gap-2 mb-2">
+                    <input v-model="row.key" placeholder="API_KEY" class="flex-1 rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                    <input v-model="row.value" placeholder="value" class="flex-1 rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                    <button type="button" @click="removeKV(mcpForm.env_rows, idx)" class="text-xs text-red-600 hover:text-red-700 px-1">删除</button>
+                  </div>
+                </div>
+              </template>
+
+              <!-- SSE / HTTP -->
+              <template v-else>
+                <div>
+                  <label class="block text-xs font-medium text-slate-500 mb-1">服务端点 URL <span class="text-red-500">*</span></label>
+                  <input
+                    v-model="mcpForm.url"
+                    :placeholder="mcpForm.transport === 'sse' ? 'https://mcp.example.com/sse' : 'https://mcp.example.com/mcp'"
+                    class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900"
+                  />
+                </div>
+                <div>
+                  <div class="flex items-center justify-between mb-1">
+                    <label class="text-xs font-medium text-slate-500">请求 Headers（可选）</label>
+                    <button type="button" @click="addKV(mcpForm.headers_rows)" class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-0.5 rounded-md hover:bg-slate-50">+ 添加</button>
+                  </div>
+                  <div v-if="!mcpForm.headers_rows.length" class="text-xs text-slate-400 px-3 py-2 bg-white rounded-lg border border-slate-200 border-dashed text-center">暂无</div>
+                  <div v-for="(row, idx) in mcpForm.headers_rows" :key="idx" class="flex items-center gap-2 mb-2">
+                    <input v-model="row.key" placeholder="Authorization" class="flex-1 rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                    <input v-model="row.value" placeholder="Bearer xxx" class="flex-1 rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                    <button type="button" @click="removeKV(mcpForm.headers_rows, idx)" class="text-xs text-red-600 hover:text-red-700 px-1">删除</button>
+                  </div>
+                </div>
+              </template>
+
+              <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">超时时间（秒，可选）</label>
+                <input
+                  v-model.number="mcpForm.timeout"
+                  type="number"
+                  min="1"
+                  max="300"
+                  placeholder="默认 30"
+                  class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900"
+                />
+              </div>
+            </div>
+          </div>
+
           <!-- Config Schema Builder -->
           <div>
             <div class="flex items-center justify-between mb-1.5">
@@ -708,6 +820,18 @@
               <div v-if="toolTestResult.response_time_ms" class="text-xs opacity-70">响应时间: {{ toolTestResult.response_time_ms }}ms</div>
               <div v-if="toolTestResult.error" class="text-xs mt-1 opacity-70">错误: {{ toolTestResult.error }}</div>
               <div v-if="toolTestResult.details" class="text-xs mt-1 opacity-70">详情: {{ toolTestResult.details }}</div>
+
+              <!-- MCP 工具清单 -->
+              <div v-if="toolTestResult.mcp_tool_count" class="mt-3 border-t border-green-200/60 pt-2">
+                <div class="text-xs font-medium opacity-80 mb-1.5">发现 {{ toolTestResult.mcp_tool_count }} 个工具：</div>
+                <div class="flex flex-wrap gap-1.5">
+                  <div v-for="t in toolTestResult.mcp_tools" :key="t.name"
+                       class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/70 border border-green-200 text-green-900 text-xs">
+                    <span class="font-medium">{{ t.name }}</span>
+                    <span v-if="t.description" class="opacity-60 font-normal truncate max-w-[180px]" :title="t.description">・{{ t.description }}</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -715,6 +839,44 @@
           <AppButton variant="secondary" @click="toolProviderModalVisible = false">取消</AppButton>
           <AppButton variant="outline" :disabled="!toolProviderFormValid" :loading="toolTesting" @click="testToolProvider">{{ toolTesting ? '测试中...' : '测试连接' }}</AppButton>
           <AppButton :disabled="!toolProviderFormValid" @click="saveToolProvider">保存</AppButton>
+        </div>
+      </div>
+    </div>
+
+    <!-- 快速测试结果弹窗 -->
+    <div v-if="quickTestModalVisible" class="fixed inset-0 z-50 flex items-center justify-center">
+      <div class="absolute inset-0 bg-black/30" @click="quickTestModalVisible = false" />
+      <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-[520px] max-h-[80vh] overflow-y-auto">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-lg font-semibold text-slate-900">测试连接 · {{ quickTestProviderName }}</h3>
+          <button type="button" class="text-xl leading-none text-slate-400 hover:text-slate-600" @click="quickTestModalVisible = false">×</button>
+        </div>
+        <div v-if="quickTestLoading" class="py-8 text-center text-sm text-slate-400">正在连接 MCP 服务器...</div>
+        <div v-else-if="quickTestResult">
+          <div :class="['p-3 rounded-xl text-sm', quickTestResult.success ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800']">
+            <div class="flex items-center gap-2 mb-1">
+              <span>{{ quickTestResult.success ? '✓' : '✗' }}</span>
+              <span class="font-medium">{{ quickTestResult.message }}</span>
+            </div>
+            <div v-if="quickTestResult.response_time_ms" class="text-xs opacity-70">响应时间: {{ quickTestResult.response_time_ms }}ms</div>
+            <div v-if="quickTestResult.error" class="text-xs mt-1 opacity-70 break-words">错误: {{ quickTestResult.error }}</div>
+            <div v-if="quickTestResult.details" class="text-xs mt-1 opacity-70 break-words">详情: {{ quickTestResult.details }}</div>
+
+            <div v-if="quickTestResult.mcp_tool_count" class="mt-3 border-t border-green-200/60 pt-2">
+              <div class="text-xs font-medium opacity-80 mb-1.5">发现 {{ quickTestResult.mcp_tool_count }} 个工具：</div>
+              <div class="space-y-1 max-h-[240px] overflow-y-auto pr-1">
+                <div v-for="t in quickTestResult.mcp_tools" :key="t.name"
+                     class="px-2 py-1.5 rounded-md bg-white/70 border border-green-200 text-green-900 text-xs">
+                  <div class="font-medium">{{ t.name }}</div>
+                  <div v-if="t.description" class="opacity-60 font-normal mt-0.5">{{ t.description }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-else class="py-8 text-center text-sm text-slate-400">等待测试...</div>
+        <div class="flex justify-end gap-2 mt-6">
+          <AppButton variant="secondary" @click="quickTestModalVisible = false">关闭</AppButton>
         </div>
       </div>
     </div>
@@ -781,7 +943,7 @@
 </template>
 
 <script setup lang="ts">
-import { provide, ref, computed, onMounted, watch } from 'vue'
+import { provide, ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AppCard from '../components/ui/AppCard.vue'
 import AppButton from '../components/ui/AppButton.vue'
@@ -792,7 +954,7 @@ import SearchInput from '../components/ui/SearchInput.vue'
 import StatCard from '../components/StatCard.vue'
 import TraceRootProvider from '../components/TraceRootProvider.vue'
 import type { ModelInfo, ModelTestResult } from '@/types/model'
-import type { ToolTypeInfo, ToolProviderInfo } from '@/types/tool'
+import type { ToolTypeInfo, ToolProviderInfo, ToolTestResult, MCPConfig } from '@/types/tool'
 import type { AdminSession, TraceSummary, ChatTraceDetail, MetricsSnapshot } from '@/types/chat'
 import {
   adminListUsers,
@@ -812,6 +974,7 @@ import {
   adminCreateToolProvider,
   adminUpdateToolProvider,
   adminDeleteToolProvider,
+  adminListProviderTypes,
   adminListSessions,
   adminDeleteSession,
   adminCleanupSessions,
@@ -1204,14 +1367,134 @@ const toolProviderForm = ref<{
   response_mapping_rows: KVRow[]
 }>({ name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] })
 const toolProviderFormValid = computed(() => toolProviderForm.value.name.trim() && toolProviderForm.value.provider_key.trim() && toolProviderForm.value.provider_type.trim())
-const toolTestResult = ref<{
-  success: boolean
-  message: string
-  error?: string
-  response_time_ms: number
-  details?: string
-} | null>(null)
+const toolTestResult = ref<ToolTestResult | null>(null)
 const toolTesting = ref(false)
+
+// ── MCP 专用表单状态 ──
+interface MCPFormState {
+  transport: MCPConfig['transport']
+  command: string
+  args: string[]
+  env_rows: KVRow[]
+  url: string
+  headers_rows: KVRow[]
+  timeout: number
+}
+function createEmptyMCPForm(): MCPFormState {
+  return {
+    transport: 'stdio',
+    command: '',
+    args: [],
+    env_rows: [],
+    url: '',
+    headers_rows: [],
+    timeout: 30,
+  }
+}
+const mcpForm = reactive<MCPFormState>(createEmptyMCPForm())
+function addMCPStdioArg() { mcpForm.args.push('') }
+function removeMCPStdioArg(idx: number) { mcpForm.args.splice(idx, 1) }
+
+// 从 JSON 解析 MCP 配置（支持两种格式：{mcp:{...}} 或 裸 {...}）
+function mcpFromJSON(json: string | object | null): MCPFormState {
+  const form = createEmptyMCPForm()
+  if (!json) return form
+  try {
+    const obj = typeof json === 'string' ? JSON.parse(json) : json
+    const cfg: Record<string, unknown> = obj && typeof obj === 'object' && 'mcp' in obj && (obj as any).mcp ? (obj as any).mcp : (obj as any)
+    if (cfg.transport === 'stdio' || cfg.transport === 'sse' || cfg.transport === 'http') form.transport = cfg.transport
+    form.command = cfg.command ? String(cfg.command) : ''
+    form.args = Array.isArray(cfg.args) ? cfg.args.map(String) : []
+    form.env_rows = []
+    if (cfg.env && typeof cfg.env === 'object') {
+      for (const [k, v] of Object.entries(cfg.env as Record<string, unknown>)) {
+        form.env_rows.push({ key: k, value: String(v) })
+      }
+    }
+    form.url = cfg.url ? String(cfg.url) : ''
+    form.headers_rows = []
+    if (cfg.headers && typeof cfg.headers === 'object') {
+      for (const [k, v] of Object.entries(cfg.headers as Record<string, unknown>)) {
+        form.headers_rows.push({ key: k, value: String(v) })
+      }
+    }
+    form.timeout = typeof cfg.timeout === 'number' ? cfg.timeout : 30
+  } catch { /* ignore */ }
+  return form
+}
+
+// 构建 MCP provider_config（裸配置格式，后端自动包装）
+function buildMCPProviderConfig(form: MCPFormState): Record<string, unknown> | undefined {
+  const base: Record<string, unknown> = {
+    transport: form.transport,
+  }
+  if (form.timeout && form.timeout !== 30) base.timeout = form.timeout
+  if (form.transport === 'stdio') {
+    if (!form.command.trim()) return undefined
+    base.command = form.command.trim()
+    if (form.args.length) {
+      const args = form.args.map(s => s.trim()).filter(Boolean)
+      if (args.length) base.args = args
+    }
+    const env = parseKVRows(form.env_rows)
+    if (env) base.env = env
+  } else {
+    if (!form.url.trim()) return undefined
+    base.url = form.url.trim()
+    const headers = parseKVRows(form.headers_rows)
+    if (headers) base.headers = headers
+  }
+  return base
+}
+
+// ── 快速测试（列表行测试） ──
+const quickTestModalVisible = ref(false)
+const quickTestLoading = ref(false)
+const quickTestResult = ref<ToolTestResult | null>(null)
+const quickTestProviderName = ref('')
+
+async function quickTestToolProvider(p: ToolProviderInfo) {
+  quickTestProviderName.value = p.name
+  quickTestModalVisible.value = true
+  quickTestLoading.value = true
+  quickTestResult.value = null
+  try {
+    // provider_config 从 ToolProviderInfo.provider_config 取已经是标准格式
+    const pcfg = p.provider_config && typeof p.provider_config === 'object'
+      ? (p.provider_config as unknown as Record<string, unknown>)
+      : undefined
+    const res = await adminTestTool({
+      provider_type: p.provider_type,
+      provider_config: pcfg,
+      admin_config: p.admin_config ? (p.admin_config as Record<string, unknown>) : undefined,
+      tool_input: {},
+    })
+    quickTestResult.value = res.data
+  } catch (e: any) {
+    quickTestResult.value = {
+      success: false,
+      message: '测试失败',
+      error: e.message || '未知错误',
+      response_time_ms: 0,
+    }
+  } finally {
+    quickTestLoading.value = false
+  }
+}
+
+// Provider 类型显示文本 & 颜色
+function providerTypeText(t: string): string {
+  if (t === 'http') return 'HTTP'
+  if (t === 'mcp') return 'MCP'
+  if (t === 'custom') return '自定义'
+  return t || '-'
+}
+function providerTypeBadgeVariant(t: string): 'blue' | 'success' | 'warning' | 'neutral' {
+  if (t === 'mcp') return 'blue'
+  if (t === 'http') return 'success'
+  if (t === 'custom') return 'warning'
+  return 'neutral'
+}
 
 function addSchemaField() {
   toolProviderForm.value.schema_fields.push({ key: '', title: '', type: 'string', description: '', default_value: '', required: true, secret: false })
@@ -1368,6 +1651,8 @@ async function loadToolProviders(toolTypeId: string) {
 function openToolProviderModal(provider?: ToolProviderInfo) {
   editingToolProvider.value = provider ?? null
   const providerConfig = provider?.provider_config ? providerConfigFromJSON(provider.provider_config) : null
+  // 载入 MCP 配置
+  Object.assign(mcpForm, provider?.provider_type === 'mcp' ? mcpFromJSON(provider.provider_config) : createEmptyMCPForm())
   if (provider) {
     toolProviderForm.value = {
       name: provider.name,
@@ -1386,13 +1671,20 @@ function openToolProviderModal(provider?: ToolProviderInfo) {
   } else {
     toolProviderForm.value = { name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] }
   }
+  toolTestResult.value = null
   toolProviderModalVisible.value = true
 }
 
 async function saveToolProvider() {
   if (!currentToolType.value) return
   try {
-    const providerConfig = buildProviderConfig(toolProviderForm.value)
+    let providerConfig: Record<string, unknown> | undefined
+    if (toolProviderForm.value.provider_type === 'mcp') {
+      providerConfig = buildMCPProviderConfig(mcpForm)
+      if (!providerConfig) throw new Error('MCP 配置不完整，请检查必填项')
+    } else {
+      providerConfig = buildProviderConfig(toolProviderForm.value)
+    }
     if (editingToolProvider.value) {
       const payload: Parameters<typeof adminUpdateToolProvider>[2] = {
         name: toolProviderForm.value.name,
@@ -1431,7 +1723,13 @@ async function testToolProvider() {
   try {
     toolTesting.value = true
     toolTestResult.value = null
-    const providerConfig = buildProviderConfig(toolProviderForm.value)
+    let providerConfig: Record<string, unknown> | undefined
+    if (toolProviderForm.value.provider_type === 'mcp') {
+      providerConfig = buildMCPProviderConfig(mcpForm)
+      if (!providerConfig) throw new Error('MCP 配置不完整，请检查必填项')
+    } else {
+      providerConfig = buildProviderConfig(toolProviderForm.value)
+    }
     const res = await adminTestTool({
       provider_type: toolProviderForm.value.provider_type,
       provider_config: providerConfig,

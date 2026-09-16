@@ -253,18 +253,19 @@ func (b *PromptBuilder) BuildHistory(history []entity.ChatMessage) []*schema.Mes
 // agent.runAgent 只负责在前面拼接 ReAct 规则，保证快速/深度两模式的摘要/记忆/偏好注入完全一致。
 // 同时完整填充 UserCtx 作为兜底：如果将来 runAgent 因某种原因拿到空的 SystemPrompt，
 // 还能从 UserCtx + Summary + Memories 重建增强提示词。
-func (b *PromptBuilder) BuildAgentRequestFields(userID, query, modelID, modelType string, kbIDs []string, history []entity.ChatMessage) agentpkg.Request {
+func (b *PromptBuilder) BuildAgentRequestFields(userID, query, modelID, modelType string, kbIDs []string, userToolConfigIDs []string, history []entity.ChatMessage) agentpkg.Request {
 	return agentpkg.Request{
-		UserID:           userID,
-		Query:            query,
-		History:          history,
-		KnowledgeBaseIDs: kbIDs,
-		ModelID:          modelID,
-		ModelType:        modelType,
-		Summary:          b.summary,
-		Memories:         b.memories,
-		UserCtx:          b.toAgentPromptUserContext(),
-		SystemPrompt:     b.BuildSystem(),
+		UserID:            userID,
+		Query:             query,
+		History:           history,
+		KnowledgeBaseIDs:  kbIDs,
+		UserToolConfigIDs: userToolConfigIDs,
+		ModelID:           modelID,
+		ModelType:         modelType,
+		Summary:           b.summary,
+		Memories:          b.memories,
+		UserCtx:           b.toAgentPromptUserContext(),
+		SystemPrompt:      b.BuildSystem(),
 	}
 }
 

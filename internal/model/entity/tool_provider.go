@@ -22,6 +22,7 @@ type ToolProvider struct {
 	AdminConfig    datatypes.JSON `gorm:"type:jsonb" json:"admin_config"`                              // 管理员业务参数
 	RateLimit      datatypes.JSON `gorm:"type:jsonb" json:"rate_limit"`                                // 限流配置
 	IsEnabled      bool           `gorm:"default:true;index" json:"is_enabled"`
+	IsSystem       bool           `gorm:"default:false;comment:是否系统预置" json:"is_system"` // 系统预置不可删除
 	DisplayOrder   int            `gorm:"default:0" json:"display_order"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`

@@ -46,6 +46,17 @@ func (r *toolProviderRepository) GetByID(ctx context.Context, id string) (*entit
 	return &provider, nil
 }
 
+func (r *toolProviderRepository) GetByProviderKey(ctx context.Context, toolTypeID, providerKey string) (*entity.ToolProvider, error) {
+	var provider entity.ToolProvider
+	err := r.db.WithContext(ctx).
+		Where("tool_type_id = ? AND provider_key = ?", toolTypeID, providerKey).
+		First(&provider).Error
+	if err != nil {
+		return nil, err
+	}
+	return &provider, nil
+}
+
 func (r *toolProviderRepository) ListByToolTypeID(ctx context.Context, toolTypeID string) ([]entity.ToolProvider, error) {
 	var providers []entity.ToolProvider
 	err := r.db.WithContext(ctx).Where("tool_type_id = ?", toolTypeID).Order("name ASC").Find(&providers).Error

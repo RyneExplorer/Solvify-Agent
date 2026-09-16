@@ -109,8 +109,12 @@ func (s *userToolConfigService) Create(ctx context.Context, userID string, req r
 		return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 
-	if err := s.repo.DisableOthersByToolType(ctx, userID, req.ToolTypeID, config.ID); err != nil {
-		return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
+	// MCP 类型不执行互斥（允许用户同时启用多个 MCP Server）
+	// 其他类型保持原有互斥逻辑：同 ToolType 下只能启用一个配置
+	if toolType.ToolKey != "mcp" {
+		if err := s.repo.DisableOthersByToolType(ctx, userID, req.ToolTypeID, config.ID); err != nil {
+			return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
+		}
 	}
 
 	return s.toConfigInfo(config, toolType, provider), nil
@@ -200,7 +204,9 @@ func (s *userToolConfigService) Update(ctx context.Context, userID, id string, r
 		return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 
-	if config.IsEnabled {
+	// MCP 类型不执行互斥（允许用户同时启用多个 MCP Server）
+	// 其他类型保持原有互斥逻辑：同 ToolType 下只能启用一个配置
+	if config.IsEnabled && config.ToolType.ToolKey != "mcp" {
 		if err := s.repo.DisableOthersByToolType(ctx, userID, config.ToolTypeID, config.ID); err != nil {
 			return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 		}

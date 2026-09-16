@@ -1,6 +1,6 @@
 import { request } from './client'
 import type { ModelInfo, ModelTestResult } from '@/types/model'
-import type { ToolTypeInfo, ToolProviderInfo } from '@/types/tool'
+import type { ToolTypeInfo, ToolProviderInfo, ToolTestResult } from '@/types/tool'
 import type { AdminUser } from '@/types/auth'
 import type { AdminSession, MetricsSnapshot, TraceSummary, ChatTraceDetail } from '@/types/chat'
 
@@ -195,7 +195,12 @@ export function adminDeleteToolProvider(toolTypeId: string, providerId: string) 
   })
 }
 
-// 测试工具连通性
+// 列出已注册的供应商类型（http, mcp, custom 等）
+export function adminListProviderTypes() {
+  return request<string[]>('/admin/provider-types')
+}
+
+// 测试工具连通性（MCP 场景返回工具清单）
 export function adminTestTool(data: {
   provider_type: string
   provider_config?: Record<string, unknown>
@@ -203,13 +208,7 @@ export function adminTestTool(data: {
   admin_config?: Record<string, unknown>
   tool_input?: Record<string, unknown>
 }) {
-  return request<{
-    success: boolean
-    message: string
-    error?: string
-    response_time_ms: number
-    details?: string
-  }>('/admin/tools/test', { method: 'POST', body: data })
+  return request<ToolTestResult>('/admin/tools/test', { method: 'POST', body: data })
 }
 
 // ── 会话管理 ──

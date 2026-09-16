@@ -33,6 +33,7 @@ type ToolProviderInfo struct {
 	AdminConfig    json.RawMessage `json:"admin_config"`
 	RateLimit      json.RawMessage `json:"rate_limit"`
 	IsEnabled      bool            `json:"is_enabled"`
+	IsSystem       bool            `json:"is_system"` // 是否系统预置（系统预置不可删除）
 	DisplayOrder   int             `json:"display_order"`
 }
 

@@ -118,6 +118,44 @@
           </section>
         </template>
 
+        <!-- MCP 服务器标签页 -->
+        <template v-if="activeTab === 'mcp'">
+          <section>
+            <div class="flex items-center justify-between mb-3">
+              <h2 class="text-sm font-semibold text-slate-900">可用 MCP 服务器</h2>
+              <span class="text-xs text-slate-400">{{ mcpProviders.length }} 个</span>
+            </div>
+            <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <div v-if="!mcpProviders.length" class="px-4 py-8 text-center text-sm text-slate-400">
+                暂无 MCP 服务器，请等待管理员配置或在配置文件中添加系统预置服务器
+              </div>
+              <div
+                  v-for="p in mcpProviders"
+                  :key="p.id"
+                  class="flex items-center justify-between px-4 py-3 border-b border-slate-100 last:border-0"
+              >
+                <div class="min-w-0 flex-1 mr-3">
+                  <div class="flex items-center gap-2">
+                    <div class="text-sm font-medium text-slate-900 truncate">{{ p.name }}</div>
+                    <AppBadge v-if="p.is_system" variant="blue">系统预置</AppBadge>
+                    <AppBadge v-else variant="neutral">管理员配置</AppBadge>
+                  </div>
+                  <div class="text-xs text-slate-400 mt-0.5 truncate">
+                    {{ p.description || '暂无描述' }}
+                  </div>
+                </div>
+                <div class="flex items-center gap-1.5 shrink-0">
+                  <button
+                      @click="handleMCPToggle(p)"
+                      class="text-xs px-2.5 py-1 rounded-md border"
+                      :class="isMCPEnabled(p.id) ? 'text-emerald-600 bg-emerald-50 border-emerald-200' : 'text-slate-600 hover:bg-slate-100 border-slate-200'"
+                  >{{ isMCPEnabled(p.id) ? '已启用' : '启用' }}</button>
+                </div>
+              </div>
+            </div>
+          </section>
+        </template>
+
         <!-- 同步配置标签页 -->
         <template v-if="activeTab === 'sync'">
           <section>
@@ -183,6 +221,11 @@
               <div class="text-xs text-slate-400 mb-1">已启用工具</div>
               <div class="text-lg font-semibold text-slate-900">{{ userToolConfigs.filter(c => c.is_enabled).length }}</div>
               <div class="text-xs text-slate-400 mt-0.5">共 {{ userToolConfigs.length }} 个配置</div>
+            </div>
+            <div v-if="activeTab === 'mcp'">
+              <div class="text-xs text-slate-400 mb-1">已启用 MCP</div>
+              <div class="text-lg font-semibold text-slate-900">{{ mcpEnabledCount }}</div>
+              <div class="text-xs text-slate-400 mt-0.5">共 {{ mcpProviders.length }} 个服务器</div>
             </div>
             <div v-if="activeTab === 'sync'">
               <div class="text-xs text-slate-400 mb-1">钉钉账号</div>
@@ -361,12 +404,14 @@ const activeTab = ref('model')
 const tabs = [
   { key: 'model', label: 'AI 模型' },
   { key: 'search', label: '工具配置' },
+  { key: 'mcp', label: 'MCP 服务器' },
   { key: 'sync', label: '同步配置' },
 ]
 
 // 当前标签页的提示文案
 const tabHint = computed(() => {
   if (activeTab.value === 'model') return '系统模型由管理员统一配置；自定义模型仅当前用户可用。请选择支持工具调用的模型，以配合快速检索和联网搜索功能。'
+  if (activeTab.value === 'mcp') return 'MCP 服务器通过标准协议接入外部工具，一个服务器可提供多个工具。启用后将在深度模式下自动加载该服务器所有工具。'
   if (activeTab.value === 'sync') return '钉钉账号绑定状态与知识库页面保持一致，解绑不会删除已创建的同步知识库。'
   return '配置需要在深度模式下使用的工具。启用后，AI 将根据对话内容自动调用相应工具获取信息。'
 })
@@ -560,6 +605,74 @@ async function handleToolDelete(id: string) {
   } catch (e: any) {
     if (e === 'cancel' || e === 'close') return
     ElMessage.error(e.message || '删除失败')
+  }
+}
+
+// ── MCP 服务器 ──
+// 所有可用的 MCP 供应商（来自 tool_key === 'mcp' 的工具模板）
+const mcpProviders = computed(() => {
+  const t = toolTemplates.value.find(t => t.tool_key === 'mcp')
+  return t?.providers ?? []
+})
+
+// 当前用户已启用的 MCP 配置（按 provider_id 索引）
+const mcpUserConfigsByProvider = computed(() => {
+  const map = new Map<string, UserToolConfigInfo>()
+  for (const c of userToolConfigs.value) {
+    if (c.tool_type_key === 'mcp') map.set(c.provider_id, c)
+  }
+  return map
+})
+
+// 判断某个 MCP 供应商是否已启用
+function isMCPEnabled(providerId: string): boolean {
+  const c = mcpUserConfigsByProvider.value.get(providerId)
+  return !!c && c.is_enabled
+}
+
+// 已启用的 MCP 服务器数量
+const mcpEnabledCount = computed(() => {
+  let n = 0
+  for (const p of mcpProviders.value) {
+    if (isMCPEnabled(p.id)) n++
+  }
+  return n
+})
+
+// MCP 工具类型 ID（用于创建用户配置）
+const mcpToolTypeId = computed(() => {
+  const t = toolTemplates.value.find(t => t.tool_key === 'mcp')
+  return t?.id ?? ''
+})
+
+// 启用/禁用 MCP 服务器
+// MCP 无需用户填写 config（连接信息在供应商上），config 传空对象即可
+// 后端已对 mcp 类型放开互斥限制，可同时启用多个
+async function handleMCPToggle(p: { id: string; name: string }) {
+  const existing = mcpUserConfigsByProvider.value.get(p.id)
+  try {
+    if (existing) {
+      // 切换启用状态
+      const newEnabled = !existing.is_enabled
+      await updateTool(existing.id, { is_enabled: newEnabled })
+      await loadTools()
+      ElMessage.success(newEnabled ? `已启用 ${p.name}` : `已停用 ${p.name}`)
+    } else {
+      // 首次启用：创建配置（config 为空对象）
+      if (!mcpToolTypeId.value) {
+        throw new Error('未找到 MCP 工具类型')
+      }
+      await createTool({
+        tool_type_id: mcpToolTypeId.value,
+        provider_id: p.id,
+        display_name: p.name,
+        config: {},
+      })
+      await loadTools()
+      ElMessage.success(`已启用 ${p.name}`)
+    }
+  } catch (e: unknown) {
+    ElMessage.error(e instanceof Error ? e.message : '操作失败')
   }
 }
 

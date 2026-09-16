@@ -12,6 +12,7 @@ type ToolProviderRepository interface {
 	Update(ctx context.Context, provider *entity.ToolProvider) error
 	Delete(ctx context.Context, id string) error
 	GetByID(ctx context.Context, id string) (*entity.ToolProvider, error)
+	GetByProviderKey(ctx context.Context, toolTypeID, providerKey string) (*entity.ToolProvider, error)
 	ListByToolTypeID(ctx context.Context, toolTypeID string) ([]entity.ToolProvider, error)
 	ListEnabledByToolTypeID(ctx context.Context, toolTypeID string) ([]entity.ToolProvider, error)
 	ExistsByKey(ctx context.Context, toolTypeID, providerKey string) (bool, error)

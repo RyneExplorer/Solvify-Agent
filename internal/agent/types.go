@@ -30,6 +30,7 @@ type Request struct {
 	Query            string               // 原始用户问题
 	History          []entity.ChatMessage // 历史对话
 	KnowledgeBaseIDs []string             // 知识库 ID 列表
+	UserToolConfigIDs []string            // 用户工具配置 ID 白名单（对话级 MCP 选择）；空=使用全部已启用
 	ModelID          string               // 模型 ID
 	ModelType        string               // 模型类型（user/system）
 	Summary          *entity.ChatSummary  // 会话摘要（长对话压缩内容）— 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段

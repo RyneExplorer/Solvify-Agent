@@ -128,14 +128,28 @@ type ExpanderConfig struct {
 
 // ToolsConfig 描述工具调用配置
 type ToolsConfig struct {
-	Enabled   bool            `mapstructure:"enabled"`
-	WebSearch WebSearchConfig `mapstructure:"web_search"`
+	Enabled    bool                   `mapstructure:"enabled"`
+	WebSearch  WebSearchConfig        `mapstructure:"web_search"`
+	MCPServers []SystemMCPServerConfig `mapstructure:"mcp_servers"`
 }
 
 // WebSearchConfig 描述网络搜索工具配置
 type WebSearchConfig struct {
 	APIKey  string `mapstructure:"api_key"`
 	BaseURL string `mapstructure:"base_url"`
+}
+
+// SystemMCPServerConfig 系统预置 MCP 服务器配置
+type SystemMCPServerConfig struct {
+	Name        string            `mapstructure:"name" json:"name"`
+	Description string            `mapstructure:"description" json:"description"`
+	Transport   string            `mapstructure:"transport" json:"transport"`               // stdio | sse | http
+	Command     string            `mapstructure:"command" json:"command,omitempty"`         // stdio
+	Args        []string          `mapstructure:"args" json:"args,omitempty"`               // stdio
+	Env         map[string]string `mapstructure:"env" json:"env,omitempty"`                 // stdio
+	URL         string            `mapstructure:"url" json:"url,omitempty"`                 // sse/http
+	Headers     map[string]string `mapstructure:"headers" json:"headers,omitempty"`         // sse/http
+	Timeout     int               `mapstructure:"timeout" json:"timeout,omitempty"`         // 默认 30
 }
 
 // DingTalkConfig 描述钉钉开放平台配置
