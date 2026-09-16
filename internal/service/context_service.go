@@ -62,9 +62,8 @@ func (s *contextService) SetEmbedClient(client *llm.EmbeddingClient) {
 
 // BuildContext 构建增强后的对话上下文
 func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, currentQuery string, cfg BuildContextConfig, chatModel model.BaseChatModel) (*EnhancedContext, error) {
-	obsOk := s.obs != nil
 	var span *observability.Span
-	if obsOk {
+	if s.obs != nil {
 		// 接住 StartSpan 返回的 newCtx：后面 messageRepo/SummaryRepo 再开子 span 时能正确找到 ctx.build 当 parent。
 		// 之前写成 _, span = StartSpan(ctx, …)，newCtx 被丢了，上下文子链只能靠 span.parent 碰巧挂到根。
 		ctx, span = s.obs.StartSpan(ctx, "ctx.build", observability.ComponentServiceContext, observability.Attrs{
@@ -72,9 +71,7 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 			"has_query":  fmt.Sprintf("%t", currentQuery != ""),
 		})
 		defer func() {
-			if span != nil {
-				s.obs.EndSpan(ctx, span, observability.SpanStatusOK, nil, nil)
-			}
+			obsEndSpan(ctx, s.obs, span, observability.SpanStatusOK, nil, nil)
 		}()
 	}
 	if cfg.MaxTokens <= 0 {
@@ -170,7 +167,7 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 	history = truncateHistoryByTokens(history, cfg.MaxTokens, cfg.ModelName)
 	memories = truncateMemoriesByTokens(memories, cfg.MemoryBudget, cfg.ModelName)
 
-	if obsOk && span != nil {
+	if span != nil {
 		if span.Attrs == nil {
 			span.Attrs = observability.Attrs{}
 		}
@@ -210,20 +207,17 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 		ctx = context.Background()
 	}
 
-	obsOk := s.obs != nil
 	var span *observability.Span
-	if obsOk {
+	if s.obs != nil {
 		ctx, span = s.obs.StartSpan(ctx, "ctx.summarize", observability.ComponentServiceContext, observability.Attrs{"session_id": sessionID})
 		defer func() {
-			if span != nil {
-				status := observability.SpanStatusOK
-				var errVal error
-				if retErr != nil {
-					status = observability.SpanStatusError
-					errVal = retErr
-				}
-				s.obs.EndSpan(ctx, span, status, errVal, nil)
+			status := observability.SpanStatusOK
+			var errVal error
+			if retErr != nil {
+				status = observability.SpanStatusError
+				errVal = retErr
 			}
+			obsEndSpan(ctx, s.obs, span, status, errVal, nil)
 		}()
 	}
 	messages, err := s.messageRepo.FindBySessionIDForContext(ctx, sessionID)
@@ -270,9 +264,7 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 	dialogue := buildDialogueText(summaryMessages)
 	summaryText, err := s.generateSummary(ctx, chatModel, dialogue, existing)
 	if err != nil {
-		if obsOk {
-			s.obs.Incr(ctx, "ctx_summary_errors_total", nil, 1)
-		}
+		obsIncr(ctx, s.obs, "ctx_summary_errors_total", nil, 1)
 		return nil, fmt.Errorf("生成摘要失败: %w", err)
 	}
 
@@ -294,9 +286,7 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 	if err := s.summaryRepo.Upsert(ctx, newSummary); err != nil {
 		return nil, fmt.Errorf("保存摘要失败: %w", err)
 	}
-	if obsOk {
-		s.obs.Incr(ctx, "ctx_summary_updates_total", nil, 1)
-	}
+	obsIncr(ctx, s.obs, "ctx_summary_updates_total", nil, 1)
 
 	return newSummary, nil
 // ExtractMemories 从消息中提取用户长期记忆
@@ -323,23 +313,20 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 		ctx = context.Background()
 	}
 
-	obsOk := s.obs != nil
 	var span *observability.Span
-	if obsOk {
+	if s.obs != nil {
 		ctx, span = s.obs.StartSpan(ctx, "ctx.extract_memories", observability.ComponentServiceContext, observability.Attrs{
 			"user_id": userID,
 			"msgs_n":  fmt.Sprintf("%d", len(messages)),
 		})
 		defer func() {
-			if span != nil {
-				status := observability.SpanStatusOK
-				var errVal error
-				if retErr != nil {
-					status = observability.SpanStatusError
-					errVal = retErr
-				}
-				s.obs.EndSpan(ctx, span, status, errVal, nil)
+			status := observability.SpanStatusOK
+			var errVal error
+			if retErr != nil {
+				status = observability.SpanStatusError
+				errVal = retErr
 			}
+			obsEndSpan(ctx, s.obs, span, status, errVal, nil)
 		}()
 	}
 	if len(messages) == 0 {
@@ -349,9 +336,7 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 	dialogue := buildDialogueText(messages)
 	rawMemories, err := s.generateMemories(ctx, chatModel, dialogue)
 	if err != nil {
-		if obsOk {
-			s.obs.Incr(ctx, "ctx_memory_errors_total", nil, 1)
-		}
+		obsIncr(ctx, s.obs, "ctx_memory_errors_total", nil, 1)
 		return nil, fmt.Errorf("提取记忆失败: %w", err)
 	}
 
@@ -372,9 +357,7 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 		}
 		result = append(result, m)
 	}
-	if obsOk {
-		s.obs.Incr(ctx, "ctx_memory_extracted_total", nil, int64(len(result)))
-	}
+	obsIncr(ctx, s.obs, "ctx_memory_extracted_total", nil, int64(len(result)))
 
 	return result, nil
 }

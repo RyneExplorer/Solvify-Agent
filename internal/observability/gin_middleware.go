@@ -128,6 +128,29 @@ func (w *responseRecorder) Size() int {
 	return w.size
 }
 
+// traceExemptPaths 是不产生 trace 的路径：集群探针与指标抓取端点。
+//
+// 为什么必须豁免：这类路径会被高频拉取（K8s liveness + readiness 按 10s 间隔
+// 约 1.7 万次/天），而三方可观测平台的计费单位是「trace + observation」——
+// 一次健康检查约 2 units，免费档 50k units/月 约 1.5 天就会被打满；
+// 即便不计费，trace 列表也会被单 span 的健康检查刷屏，平台失去排障价值。
+//
+// 只豁免 span，不豁免 Prometheus 指标：指标在进程内聚合、不产生外部成本，
+// 而探针的延迟与失败率恰恰是运维需要长期观察的信号。
+var traceExemptPaths = map[string]struct{}{
+	"/health":  {},
+	"/readyz":  {},
+	"/livez":   {},
+	"/metrics": {},
+}
+
+// isTraceExemptPath 判断路径是否不建 trace。按 URL 路径精确匹配：
+// 不能用 c.FullPath()=="" 当判据 —— 那语义是「未匹配到路由」，会把 404 也放进来。
+func isTraceExemptPath(path string) bool {
+	_, exempt := traceExemptPaths[path]
+	return exempt
+}
+
 // TraceMiddleware 给每个 HTTP 请求打 OTel 根 span + 记录 Prometheus HTTP 指标。
 type TraceMiddleware struct {
 	Recorder Recorder
@@ -175,6 +198,11 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 		}
 		method := c.Request.Method
 
+		// 探针 / 抓取端点不建 trace（详见 traceExemptPaths 注释）。
+		// 判断放在这里而不是 Handler 最开头：豁免路径仍要保留 X-Request-ID、
+		// Prometheus 指标与 panic 兜底，只是不产生会外发到三方平台的 span。
+		traceEnabled := !isTraceExemptPath(c.Request.URL.Path)
+
 		// 在途请求 Gauge
 		metrics := GlobalMetrics()
 		if metrics != nil && metrics.HTTPRequestInflight != nil {
@@ -184,7 +212,7 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 
 		start := time.Now()
 		var span *Span
-		if m.Recorder != nil {
+		if m.Recorder != nil && traceEnabled {
 			recAttrs := Attrs{
 				"method":     method,
 				"path":       c.Request.URL.Path,
@@ -252,7 +280,10 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 
 		dur := time.Since(start)
 		status := rec.Status()
-		c.Writer.Header().Set("X-Trace-ID", TraceIDFromContext(c.Request.Context()))
+		// 豁免路径不产生 traceID，不写空响应头；有 trace 的请求行为不变。
+		if tid := TraceIDFromContext(c.Request.Context()); tid != "" {
+			c.Writer.Header().Set("X-Trace-ID", tid)
+		}
 		statusGrp := statusGroup(status)
 		if span != nil && m.Recorder != nil {
 			attrs := Attrs{

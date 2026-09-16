@@ -160,3 +160,63 @@ func TestTraceMiddlewareWithoutRecorder(t *testing.T) {
 		t.Fatalf("状态码不符: got=%d want=%d", w.Code, http.StatusOK)
 	}
 }
+
+// TestTraceMiddlewareExemptsProbePaths 锁定探针路径不建 trace。
+//
+// 为什么必须有这一条：健康检查会被集群探针高频拉取（10s 间隔约 1.7 万次/天）。
+// 一旦被埋点，三方平台的计费单位（trace + observation）数天内就会打满免费额度，
+// trace 列表也会被单 span 的健康检查刷屏、失去排障价值。
+// 这类问题功能上完全看不出来（请求照常 200），所以必须由测试守住，不能只靠注释提醒。
+func TestTraceMiddlewareExemptsProbePaths(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := newTestRecorder(t)
+
+	var (
+		probeSpanNil   bool
+		probeTraceID   string
+		bizSpanCreated bool
+	)
+	engine := gin.New()
+	engine.Use(NewTraceMiddleware(rec).Handler())
+	engine.GET("/health", func(c *gin.Context) {
+		probeSpanNil = CurrentSpanFromContext(c.Request.Context()) == nil
+		probeTraceID = TraceIDFromContext(c.Request.Context())
+		c.Status(http.StatusOK)
+	})
+	engine.GET("/api/v1/chat/sessions", func(c *gin.Context) {
+		bizSpanCreated = CurrentSpanFromContext(c.Request.Context()) != nil
+		c.Status(http.StatusOK)
+	})
+
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("/health 未被正常放行: status=%d", w.Code)
+	}
+	if !probeSpanNil {
+		t.Error("/health 不该建 span —— 探针高频拉取会打满三方平台额度并刷屏 trace 列表")
+	}
+	if probeTraceID != "" {
+		t.Errorf("/health 不该分配 traceID，实际 %q", probeTraceID)
+	}
+	// 豁免的只是 span：请求标识与放行行为必须保持不变
+	if w.Header().Get("X-Request-ID") == "" {
+		t.Error("/health 仍应保留 X-Request-ID 响应头")
+	}
+	if got := w.Header().Get("X-Trace-ID"); got != "" {
+		t.Errorf("/health 不该回 X-Trace-ID，实际 %q", got)
+	}
+
+	// 对照组：普通业务路径必须照旧建 span，
+	// 防止「豁免名单写错」把正常接口一起豁免掉。
+	w2 := httptest.NewRecorder()
+	engine.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/api/v1/chat/sessions", nil))
+
+	if !bizSpanCreated {
+		t.Error("业务路径未建 span —— 豁免名单误伤了正常接口")
+	}
+	if w2.Header().Get("X-Trace-ID") == "" {
+		t.Error("业务路径仍应回 X-Trace-ID")
+	}
+}

@@ -343,12 +343,30 @@ func (r *defaultRecorder) StartSpan(ctx context.Context, name string, component 
 		parentSpan = ps
 	}
 
+	// OTel 侧属性单独算一份：自研轨用的下划线 user_id / session_id 只落在自研根 span 上，
+	// 而自研合成的 chat.request 根 span 在 OTel 侧并不存在；三方平台（如 Langfuse）又是按
+	// DOT 记法 user.id / session.id 做用户与会话分组的。所以在这里补一份别名。
+	// 只补在根 span（无父）上：子 span 会从 ctx 继承 trace 级属性，无需重复携带。
+	otelAttrs := r.sanitizer.SanitizeAttrs(attrs)
+	if parentSpan == nil {
+		if ra, ok := ctx.Value(rootAttrsKey).(*rootAttrs); ok && ra != nil {
+			ra.mu.Lock()
+			if ra.userID != "" {
+				otelAttrs["user.id"] = ra.userID
+			}
+			if ra.sessionID != "" {
+				otelAttrs["session.id"] = ra.sessionID
+			}
+			ra.mu.Unlock()
+		}
+	}
+
 	// 用 OTel tracer.Start 创建运行时 span，OTel 自动管理 parent-child 关系。
 	// 关键收益：运行时追踪的 parent-child 完全交给 OTel SDK，不管 Eino callback / compose.Graph /
 	// InitCallbacks 包多少层 context.WithValue，OTel 的 trace.SpanFromContext(ctx) 永远能拿回当前 span。
 	ctxWithSpan, otelSpan := r.tracer.Start(ctx, name,
 		trace.WithSpanKind(spanKindFor(component)),
-		trace.WithAttributes(attrsToOTel(r.sanitizer.SanitizeAttrs(attrs))...))
+		trace.WithAttributes(attrsToOTel(otelAttrs)...))
 
 	s := &Span{
 		TraceID:   traceID,
@@ -662,6 +680,26 @@ func (r *defaultRecorder) WithTraceRoot(ctx context.Context, attrs TraceRootAttr
 		requestID:  attrs.RequestID,
 		searchMode: attrs.SearchMode,
 		modelID:    attrs.ModelID,
+	}
+
+	// 三方平台（如 Langfuse）按 DOT 记法 user.id / session.id 做用户与会话归组，
+	// 而自研轨用的是下划线 user_id / session_id，会被平台当「未映射属性」丢进 metadata。
+	// 这里是「用户 + 会话同时可知」的唯一位置：HTTP 中间件建根 span 时只拿得到 user_id，
+	// 还没有 session_id（session 是本次请求体的参数）。
+	// 此刻 ctx 里的当前 OTel span 就是整条 trace 的根（http.request），把 trace 级属性
+	// 打在根 span 上最符合平台的归组语义。没有 OTel span（noop provider）时静默跳过，
+	// 不产生任何伪造数据。
+	if otelSpan := trace.SpanFromContext(ctx); otelSpan.SpanContext().IsValid() {
+		kv := make([]attribute.KeyValue, 0, 2)
+		if attrs.UserID != "" {
+			kv = append(kv, attribute.String("user.id", attrs.UserID))
+		}
+		if attrs.SessionID != "" {
+			kv = append(kv, attribute.String("session.id", attrs.SessionID))
+		}
+		if len(kv) > 0 {
+			otelSpan.SetAttributes(kv...)
+		}
 	}
 	return context.WithValue(ctx, rootAttrsKey, ra)
 }

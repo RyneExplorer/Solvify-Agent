@@ -25,33 +25,30 @@ import (
 // processDeepMode 深度思考模式处理流程
 // 使用 eino ReAct Agent，自动管理 Think → Act → Observe 循环
 func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, userMsgID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	obsOk := s.obs != nil
 	var span *observability.Span
-	if obsOk {
+	if s.obs != nil {
 		ctx, span = s.obs.StartSpan(ctx, "chat.deep", observability.ComponentAgentEngine, observability.Attrs{
 			"session_id":  sessionID,
 			"user_id":     userID,
 			"model_id":    req.ModelID,
 			"search_mode": "deep",
 		})
-		defer func() {
-			status := observability.SpanStatusOK
-			var errVal error
-			if r := recover(); r != nil {
-				status = observability.SpanStatusError
-				errVal = fmt.Errorf("panic: %v", r)
-				s.obs.MarkTraceError(ctx, errVal)
-				eventCh <- dto.StreamEvent{Type: "error", Detail: "处理过程中发生未预期错误", Done: true}
-			}
-			s.obs.EndSpan(ctx, span, status, errVal, nil)
-		}()
-		s.obs.Incr(ctx, "chat_deep_requests_total", map[string]string{"model_id": req.ModelID}, 1)
 	}
+	defer func() {
+		status := observability.SpanStatusOK
+		var errVal error
+		if r := recover(); r != nil {
+			status = observability.SpanStatusError
+			errVal = fmt.Errorf("panic: %v", r)
+			obsMarkError(ctx, s.obs, errVal)
+			eventCh <- dto.StreamEvent{Type: "error", Detail: "处理过程中发生未预期错误", Done: true}
+		}
+		obsEndSpan(ctx, s.obs, span, status, errVal, nil)
+	}()
+	obsIncr(ctx, s.obs, "chat_deep_requests_total", map[string]string{"model_id": req.ModelID}, 1)
 
 	assistantMsgID := uuid.New().String()
-	if obsOk {
-		s.obs.AddRootAttrs(ctx, observability.Attrs{"assistant_message_id": assistantMsgID})
-	}
+	obsAddRootAttrs(ctx, s.obs, observability.Attrs{"assistant_message_id": assistantMsgID})
 
 	// P0-④ 关键修复：在 initContext 之前，先把"将发送给模型的工具定义"预构建并按真 BPE 算总 token，
 	// 之后把 toolsTokens 传给 initContext，calculateContextBudgets 会先从 maxCtx 扣除，
@@ -66,9 +63,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		client, cErr := s.resolveClient(ctx, userID, req.ModelID, req.ModelType)
 		if cErr == nil {
 			modelName := client.ModelName()
-			if obsOk {
-				s.obs.AddRootAttrs(ctx, observability.Attrs{"model_name": modelName})
-			}
+			obsAddRootAttrs(ctx, s.obs, observability.Attrs{"model_name": modelName})
 			preToolsTokens, deepCtx, tErr = s.agentEngine.EstimateToolsTokens(ctx, userID, req.KnowledgeBaseIDs, modelName, req.MCPUserConfigIDs...)
 			if tErr != nil {
 				logger.Warnf("预估算工具定义 token 失败，按 0 处理: %v", tErr)
@@ -80,25 +75,21 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 
 	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content, preToolsTokens)
 	if err != nil {
-		if obsOk {
-			s.obs.Incr(ctx, "chat_deep_errors_total", map[string]string{"stage": "init_ctx"}, 1)
-			s.obs.MarkTraceError(ctx, err)
-		}
+		obsIncr(ctx, s.obs, "chat_deep_errors_total", map[string]string{"stage": "init_ctx"}, 1)
+		obsMarkError(ctx, s.obs, err)
 		sendErrorEvent(eventCh, err, err.Error())
 		return
 	}
 	history := excludeByMessageID(enhancedCtx.History, userMsgID)
 	chatModel := client.ChatModel()
 	modelName := client.ModelName()
-	if obsOk {
-		s.obs.AddRootAttrs(ctx, observability.Attrs{
-			"model_name":       modelName,
-			"tools_tokens":     fmt.Sprintf("%d", preToolsTokens),
-			"history_budget":   fmt.Sprintf("%d", enhancedCtx.HistoryBudget),
-			"retrieval_budget": fmt.Sprintf("%d", enhancedCtx.RetrievalBudget),
-		})
-		s.obs.Observe(ctx, "chat_deep_init_ctx_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t0).Seconds())
-	}
+	obsAddRootAttrs(ctx, s.obs, observability.Attrs{
+		"model_name":       modelName,
+		"tools_tokens":     fmt.Sprintf("%d", preToolsTokens),
+		"history_budget":   fmt.Sprintf("%d", enhancedCtx.HistoryBudget),
+		"retrieval_budget": fmt.Sprintf("%d", enhancedCtx.RetrievalBudget),
+	})
+	obsObserve(ctx, s.obs, "chat_deep_init_ctx_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t0).Seconds())
 
 	eventCh <- dto.StreamEvent{Type: "start", MessageID: assistantMsgID}
 
@@ -151,10 +142,8 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	t1 := time.Now()
 	agentEventCh, err := s.agentEngine.Execute(deepCtx, agentReq, chatModel)
 	if err != nil {
-		if obsOk {
-			s.obs.Incr(ctx, "chat_deep_errors_total", map[string]string{"stage": "agent_execute"}, 1)
-			s.obs.MarkTraceError(ctx, err)
-		}
+		obsIncr(ctx, s.obs, "chat_deep_errors_total", map[string]string{"stage": "agent_execute"}, 1)
+		obsMarkError(ctx, s.obs, err)
 		logger.Errorf("Agent 执行失败, sessionID=%s: %v", sessionID, err)
 		llm.ReduceContextBudgetOnError(req.ModelID, err)
 		sendErrorEvent(eventCh, err, "Agent 执行失败")
@@ -251,35 +240,29 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		}
 		_ = s.sessionRepo.ClearPendingClarify(ctx, sessionID)
 	}
-	if obsOk {
-		s.obs.Observe(ctx, "chat_deep_agent_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t1).Seconds())
-		s.obs.Incr(ctx, "agent_runs_total", map[string]string{
-			"error_seen": fmt.Sprintf("%t", agentErrorSeen),
-			"tool_calls": fmt.Sprintf("%d", toolCallsN),
-		}, 1)
-		s.obs.AddRootAttrs(ctx, observability.Attrs{
-			"tool_calls":      toolCallsN,
-			"tool_errors":     toolErrorsN,
-			"steps_n":         len(reasoningSteps),
-			"rag_docs_n":      len(agentSources),
-			"agent_error":     agentErrorSeen,
-			"tool_used":       toolEventSeen,
-			"assistant_chars": len([]rune(fullContent)),
-		})
-	}
+	obsObserve(ctx, s.obs, "chat_deep_agent_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t1).Seconds())
+	obsIncr(ctx, s.obs, "agent_runs_total", map[string]string{
+		"error_seen": fmt.Sprintf("%t", agentErrorSeen),
+		"tool_calls": fmt.Sprintf("%d", toolCallsN),
+	}, 1)
+	obsAddRootAttrs(ctx, s.obs, observability.Attrs{
+		"tool_calls":      toolCallsN,
+		"tool_errors":     toolErrorsN,
+		"steps_n":         len(reasoningSteps),
+		"rag_docs_n":      len(agentSources),
+		"agent_error":     agentErrorSeen,
+		"tool_used":       toolEventSeen,
+		"assistant_chars": len([]rune(fullContent)),
+	})
 
 	if agentErrorSeen {
-		if obsOk {
-			s.obs.MarkTraceError(ctx, fmt.Errorf("agent 执行过程中发生错误"))
-		}
+		obsMarkError(ctx, s.obs, fmt.Errorf("agent 执行过程中发生错误"))
 		return
 	}
 	if !toolEventSeen && looksLikeExecutionPlan(fullContent) {
 		logger.Warnf("深度模式未产生工具调用，仅返回执行计划，sessionID=%s, content=%q", sessionID, fullContent)
-		if obsOk {
-			s.obs.Incr(ctx, "agent_plan_without_tool_total", nil, 1)
-			s.obs.MarkTraceError(ctx, fmt.Errorf("深度模式未产生工具调用"))
-		}
+		obsIncr(ctx, s.obs, "agent_plan_without_tool_total", nil, 1)
+		obsMarkError(ctx, s.obs, fmt.Errorf("深度模式未产生工具调用"))
 		eventCh <- dto.StreamEvent{
 			Type:      "error",
 			Title:     "深度推理未完成",
@@ -298,7 +281,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	if len(reasoningSteps) > 0 {
 		metaMap["reasoning_steps"] = reasoningSteps
 	}
-	if obsOk {
+	if s.obs != nil {
 		metaMap["trace_id"] = observability.TraceIDFromContext(ctx)
 	}
 	if len(metaMap) > 0 {
@@ -316,60 +299,62 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 //     → 历史越跑越长真的爆窗口。现在 SummarizeSession / ExtractMemories 各自独立 3 次指数退避。
 //   - 任何一步失败都记 Obs 指标（summary_refresh_errors_total / memory_extract_errors_total），
 //     后面上线可从 /metrics 直接看成功率。
+//   - trace 连续性：后台任务用 DetachedTraceContext 派生上下文，而不是 context.Background()。
+//     前者只切断取消信号、保留 SpanContext，两个后台 span 因而仍挂在本次请求的同一条 trace 下；
+//     后者会让它们成为独立根 trace（三方平台上的「孤儿 trace」）。
 func (s *chatService) refreshContextAsync(ctx context.Context, userID, sessionID string, history []entity.ChatMessage, chatModel model.BaseChatModel) {
 	if s == nil || s.contextSvc == nil {
 		return
 	}
-	obsOk := s.obs != nil
+	obs := s.obs
+
+	// 后台刷新要脱离请求 ctx（响应已返回，不能被请求取消掐断），
+	// 但不能连 trace 上下文一起丢 —— 直接用 context.Background() 会让
+	// ctx.summarize / ctx.extract_memories 失去父节点、各自成为独立根 trace，
+	// 在三方平台上表现为「孤儿 trace」且拿不到 user/session 归属。
+	// DetachedTraceContext 只搬 SpanContext、不搬取消信号，正好是这里要的语义。
+	// 在 goroutine 外先取一次，避免与父 span 结束产生竞态。
+	baseCtx := observability.DetachedTraceContext(ctx)
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.Errorf("refreshContextAsync panic 已恢复: sessionID=%s, err=%v", sessionID, r)
-				if obsOk {
-					s.obs.Incr(context.Background(), "ctx_refresh_panic_total", nil, 1)
-				}
+				obsIncr(context.Background(), obs, "ctx_refresh_panic_total", nil, 1)
 			}
 		}()
 
-		if obsOk {
-			s.obs.Incr(context.Background(), "ctx_refresh_requests_total", nil, 1)
-		}
+		obsIncr(context.Background(), obs, "ctx_refresh_requests_total", nil, 1)
 
 		summaryOK := true
 		if err := runWithRetry(3, "ctx.summary", func(attempt int) error {
-			refreshCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second+time.Duration(attempt*15)*time.Second)
+			refreshCtx, cancel := context.WithTimeout(baseCtx, 45*time.Second+time.Duration(attempt*15)*time.Second)
 			defer cancel()
 			_, err := s.contextSvc.SummarizeSession(refreshCtx, sessionID, chatModel)
 			return err
 		}); err != nil {
 			summaryOK = false
 			logger.Warnf("生成会话摘要失败（已重试 3 次）: sessionID=%s, err=%v", sessionID, err)
-			if obsOk {
-				s.obs.Incr(context.Background(), "ctx_summary_refresh_errors_total", nil, 1)
-			}
+			obsIncr(context.Background(), obs, "ctx_summary_refresh_errors_total", nil, 1)
 		}
 
 		memoryOK := true
 		if err := runWithRetry(3, "ctx.memory", func(attempt int) error {
-			refreshCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second+time.Duration(attempt*15)*time.Second)
+			refreshCtx, cancel := context.WithTimeout(baseCtx, 45*time.Second+time.Duration(attempt*15)*time.Second)
 			defer cancel()
 			_, err := s.contextSvc.ExtractMemories(refreshCtx, userID, sessionID, history, chatModel)
 			return err
 		}); err != nil {
 			memoryOK = false
 			logger.Warnf("提取用户记忆失败（已重试 3 次）: sessionID=%s, err=%v", sessionID, err)
-			if obsOk {
-				s.obs.Incr(context.Background(), "ctx_memory_extract_errors_total", nil, 1)
-			}
+			obsIncr(context.Background(), obs, "ctx_memory_extract_errors_total", nil, 1)
 		}
 
-		if obsOk {
-			labels := map[string]string{
-				"summary_ok": ctxBoolLabel(summaryOK),
-				"memory_ok":  ctxBoolLabel(memoryOK),
-			}
-			s.obs.Incr(context.Background(), "ctx_refresh_runs_total", labels, 1)
+		labels := map[string]string{
+			"summary_ok": ctxBoolLabel(summaryOK),
+			"memory_ok":  ctxBoolLabel(memoryOK),
 		}
+		obsIncr(context.Background(), obs, "ctx_refresh_runs_total", labels, 1)
 	}()
 }
 

@@ -49,6 +49,31 @@ func InitPropagator() {
 	otel.SetTextMapPropagator(textMapPropagator)
 }
 
+// DetachedTraceContext 返回一个「保留 trace 上下文、但切断取消/超时」的派生 context。
+//
+// 适用场景：HTTP 响应返回之后仍要继续跑的后台任务（异步生成会话摘要、抽取用户记忆等）。
+// 这类任务不能用请求的 ctx —— 响应一返回请求 ctx 就被取消，后台任务会被立刻打断；
+// 但也不能图省事写 context.Background()：那会把当前 SpanContext 一并丢掉，
+// 后台 span 失去父节点、各自成为独立根 trace。后果在自研页面上看不出来，
+// 一接三方平台就是 trace 列表里一批「孤儿 trace」，且拿不到用户/会话归属。
+//
+// 实现只搬 SpanContext，不搬 Done/Err/Deadline 通道，所以取消信号被真正切断，
+// 而父子关系与 traceID 保持不变。父 span 即使已经 End 也仍是合法 parent
+// （OTel 的父子关系在建 span 时确定，与父的 End 状态无关），因此本函数对
+// 「请求已结束、后台才开跑」的场景同样成立。
+func DetachedTraceContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		// 没有有效 span（noop provider 或本就不在 trace 内）时退化为 Background，
+		// 行为与改动前一致，不伪造任何 span 上下文。
+		return context.Background()
+	}
+	return trace.ContextWithSpanContext(context.Background(), sc)
+}
+
 // InboundTraceInfo 描述入站请求携带的远程 trace 上下文，供中间件记属性与排查使用。
 type InboundTraceInfo struct {
 	// Present 表示请求头里有一份合法、且标记为 remote 的 SpanContext。

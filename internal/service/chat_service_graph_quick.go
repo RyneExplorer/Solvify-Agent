@@ -668,38 +668,32 @@ func (s *chatService) processMessageGraphQuick(
 	req requestdto.SendMessageRequest,
 	eventCh chan<- dto.StreamEvent,
 ) {
-	// 根 Span + panic recover（单独抽成 startQuickSpan 更清爽）
-	ctx, span, obsOk := startQuickSpan(ctx, s.obs, sessionID, userID, req.ModelID)
-	if obsOk {
-		defer func() {
-			status := observability.SpanStatusOK
-			var errVal error
-			if r := recover(); r != nil {
-				status = observability.SpanStatusError
-				errVal = fmt.Errorf("panic: %v", r)
-				eventCh <- dto.StreamEvent{Type: "error", Detail: "处理过程中发生未预期错误", Done: true}
-			}
-			s.obs.EndSpan(ctx, span, status, errVal, nil)
-		}()
-		s.obs.Incr(ctx, "chat_quick_graph_requests_total", map[string]string{"model_id": req.ModelID}, 1)
-	}
+	// 根 Span + panic recover
+	ctx, span := startQuickSpan(ctx, s.obs, sessionID, userID, req.ModelID)
+	defer func() {
+		status := observability.SpanStatusOK
+		var errVal error
+		if r := recover(); r != nil {
+			status = observability.SpanStatusError
+			errVal = fmt.Errorf("panic: %v", r)
+			eventCh <- dto.StreamEvent{Type: "error", Detail: "处理过程中发生未预期错误", Done: true}
+		}
+		obsEndSpan(ctx, s.obs, span, status, errVal, nil)
+	}()
+	obsIncr(ctx, s.obs, "chat_quick_graph_requests_total", map[string]string{"model_id": req.ModelID}, 1)
 
 	// 1) 初始化上下文（历史/摘要/记忆/画像/预算）
 	sendProgressEvent(eventCh, "正在加载上下文...")
 	t0 := time.Now()
 	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content)
 	if err != nil {
-		quickIncrError(ctx, s.obs, obsOk, "init_ctx")
-		if obsOk {
-			s.obs.MarkTraceError(ctx, err)
-		}
+		obsIncr(ctx, s.obs, "chat_quick_graph_errors_total", map[string]string{"stage": "init_ctx"}, 1)
+		obsMarkError(ctx, s.obs, err)
 		sendErrorEvent(eventCh, err, err.Error())
 		return
 	}
 	chatModel := client.ChatModel()
-	if obsOk {
-		s.obs.Observe(ctx, "chat_quick_graph_init_ctx_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t0).Seconds())
-	}
+	obsObserve(ctx, s.obs, "chat_quick_graph_init_ctx_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t0).Seconds())
 
 	// 2~3) 组装 Graph Input：System Prompt / History / 模型名 / 检索预算
 	graphInput := buildQuickInput(req, userID, userMsgID, enhancedCtx, client)
@@ -731,13 +725,11 @@ func (s *chatService) processMessageGraphQuick(
 			Question: clarifyQuestion,
 			Options:  clarifyOptions,
 		}, Done: true}
-		if obsOk {
-			s.obs.EndSpan(ctx, span, observability.SpanStatusOK, nil, observability.Attrs{
-				"need_clarify":   "true",
-				"clarify_intent": intent,
-				"clarify_ms":     fmt.Sprintf("%d", time.Since(obsNow).Milliseconds()),
-			})
-		}
+		obsEndSpan(ctx, s.obs, span, observability.SpanStatusOK, nil, observability.Attrs{
+			"need_clarify":   "true",
+			"clarify_intent": intent,
+			"clarify_ms":     fmt.Sprintf("%d", time.Since(obsNow).Milliseconds()),
+		})
 		return
 	}
 
@@ -754,11 +746,9 @@ func (s *chatService) processMessageGraphQuick(
 	sendProgressEvent(eventCh, "正在组装快速检索链路...")
 	graphCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	runnable, err := compileQuickGraphLocal(graphState, s.einoRetriever, req.ModelID, s.obs, obsOk, eventCh)
+	runnable, err := compileQuickGraphLocal(graphState, s.einoRetriever, s.obs, eventCh)
 	if err != nil {
-		if obsOk {
-			s.obs.MarkTraceError(ctx, err)
-		}
+		obsMarkError(ctx, s.obs, err)
 		return
 	}
 
@@ -768,19 +758,15 @@ func (s *chatService) processMessageGraphQuick(
 
 	// 7) 生成助手消息 ID + 流式驱动 Graph 执行
 	assistantMsgID := uuid.New().String()
-	if obsOk {
-		s.obs.AddRootAttrs(ctx, observability.Attrs{"assistant_message_id": assistantMsgID})
-	}
+	obsAddRootAttrs(ctx, s.obs, observability.Attrs{"assistant_message_id": assistantMsgID})
 	eventCh <- dto.StreamEvent{Type: "start", MessageID: assistantMsgID}
 
 	fullContent, err := runQuickStream(
 		graphCtx, runnable, graphInput, callOpts,
-		eventCh, req.ModelID, assistantMsgID, s.obs, obsOk,
+		eventCh, req.ModelID, assistantMsgID, s.obs,
 	)
 	if err != nil {
-		if obsOk {
-			s.obs.MarkTraceError(ctx, err)
-		}
+		obsMarkError(ctx, s.obs, err)
 		llmpkg.ReduceContextBudgetOnError(req.ModelID, err)
 		return
 	}
@@ -794,16 +780,14 @@ func (s *chatService) processMessageGraphQuick(
 		sources = einoDocsToSourceInfos(graphState.RetrievedDocs)
 		docsCount = len(graphState.RetrievedDocs)
 	}
-	if obsOk {
-		s.obs.AddRootAttrs(ctx, observability.Attrs{
-			"assistant_chars": fmt.Sprintf("%d", len([]rune(fullContent))),
-			"retrieved_docs":  fmt.Sprintf("%d", docsCount),
-		})
-	}
+	obsAddRootAttrs(ctx, s.obs, observability.Attrs{
+		"assistant_chars": fmt.Sprintf("%d", len([]rune(fullContent))),
+		"retrieved_docs":  fmt.Sprintf("%d", docsCount),
+	})
 
 	// 8) 结束事件 + 异步落库 + 异步刷新摘要记忆
 	s.emitDoneAndSave(eventCh, sessionID, assistantMsgID, fullContent, req, sources, nil, func(meta map[string]any) {
-		if obsOk && meta != nil {
+		if s.obs != nil && meta != nil {
 			meta["trace_id"] = observability.TraceIDFromContext(ctx)
 			meta["eino_quick_graph_mode"] = true
 		}
@@ -811,10 +795,10 @@ func (s *chatService) processMessageGraphQuick(
 	s.refreshContextAsync(ctx, userID, sessionID, enhancedCtx.History, chatModel)
 }
 
-// startQuickSpan 创建根 Span，返回 (newCtx, span, ok)，避免主流程写一长串可观测性样板
-func startQuickSpan(ctx context.Context, obs observability.Recorder, sessionID, userID, modelID string) (context.Context, *observability.Span, bool) {
+// startQuickSpan 创建根 Span。obs 为 nil 时返回 nil span，调用方通过 obsEndSpan 空安全结束。
+func startQuickSpan(ctx context.Context, obs observability.Recorder, sessionID, userID, modelID string) (context.Context, *observability.Span) {
 	if obs == nil {
-		return ctx, nil, false
+		return ctx, nil
 	}
 	newCtx, span := obs.StartSpan(ctx, "chat.quick.graph", observability.ComponentAgentEngine, observability.Attrs{
 		"session_id":  sessionID,
@@ -822,10 +806,7 @@ func startQuickSpan(ctx context.Context, obs observability.Recorder, sessionID, 
 		"model_id":    modelID,
 		"search_mode": "quick_graph",
 	})
-	if span == nil {
-		return ctx, nil, false
-	}
-	return newCtx, span, true
+	return newCtx, span
 }
 
 // buildQuickInput 组装 quickGraphInput：System Prompt / History / 预算 / 模型名
@@ -858,20 +839,18 @@ func buildQuickInput(
 func compileQuickGraphLocal(
 	graphState *quickGraphState,
 	einoRetriever *rag.EinoRetrieverAdapter,
-	modelID string,
 	obs observability.Recorder,
-	obsOk bool,
 	eventCh chan<- dto.StreamEvent,
 ) (einoCompose.Runnable[*quickGraphInput, *schema.StreamReader[*schema.Message]], error) {
 	g, err := buildQuickGraph(graphState, einoRetriever)
 	if err != nil {
-		quickIncrError(nil, obs, obsOk, "build_graph")
+		obsIncr(nil, obs, "chat_quick_graph_errors_total", map[string]string{"stage": "build_graph"}, 1)
 		sendErrorEvent(eventCh, err, "快速检索链路初始化失败")
 		return nil, err
 	}
 	r, err := g.Compile(nil, einoCompose.WithGraphName("quick_rag_pipeline"))
 	if err != nil {
-		quickIncrError(nil, obs, obsOk, "compile_graph")
+		obsIncr(nil, obs, "chat_quick_graph_errors_total", map[string]string{"stage": "compile_graph"}, 1)
 		sendErrorEvent(eventCh, err, "快速检索链路编译失败")
 		return nil, err
 	}
@@ -887,14 +866,11 @@ func runQuickStream(
 	eventCh chan<- dto.StreamEvent,
 	modelID, assistantMsgID string,
 	obs observability.Recorder,
-	obsOk bool,
 ) (string, error) {
 	sendProgressEvent(eventCh, "正在执行快速检索链路...")
 	t0 := time.Now()
 	reader, invErr := runnable.Invoke(graphCtx, graphInput, callOpts...)
-	if obsOk {
-		obs.Observe(graphCtx, "chat_quick_graph_run_seconds", map[string]string{"model_id": modelID}, time.Since(t0).Seconds())
-	}
+	obsObserve(graphCtx, obs, "chat_quick_graph_run_seconds", map[string]string{"model_id": modelID}, time.Since(t0).Seconds())
 	if invErr != nil {
 		sendErrorEvent(eventCh, invErr, "快速检索执行失败")
 		return "", invErr
@@ -969,14 +945,6 @@ func einoDocsToSourceInfos(docs []*schema.Document) []dto.SourceInfo {
 }
 
 // ---------- 前向声明：可观测性 & 选项小工具（被上面拆分后的子函数调用） ----------
-
-// quickIncrError 快速模式错误计数（避免 if obsOk 到处写）
-func quickIncrError(ctx context.Context, obs observability.Recorder, obsOk bool, stage string) {
-	if !obsOk {
-		return
-	}
-	obs.Incr(ctx, "chat_quick_graph_errors_total", map[string]string{"stage": stage}, 1)
-}
 
 // quickRetrieverCallOpts 现在返回 nil——Retrieve 节点已改为 LambdaNode，
 // retriever.Option 通过 buildRetrieverOpts 在 Lambda 内部直接构造。
