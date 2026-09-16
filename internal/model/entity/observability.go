@@ -14,7 +14,13 @@ type ChatTrace struct {
 	// OTelTraceID 是自研 id 对应的 OTel traceID（双轨 traceID 对齐）。
 	// 自研 id 是进程内随机生成的，三方追踪平台不认；带上这个 ID 才能在
 	// ByteAPM / Jaeger / Tempo 等平台上直接检索到同一条链路。为空 = 没走 OTel 轨道。
-	OTelTraceID string   `gorm:"index;type:varchar(32)" json:"otel_trace_id,omitempty"`
+	//
+	// 必须显式写 column：默认命名策略会把 OTelTraceID 拆成 o_tel_trace_id
+	// （在 "OT" 这个连续大写段后遇小写会插下划线），与建表脚本
+	// scripts/init_knowledge_schema.sql 及 EnsureChatTraceSchema 里的
+	// otel_trace_id 不一致 —— 后果是 INSERT 报 column "o_tel_trace_id" does not exist，
+	// 所有 trace 全部落库失败。
+	OTelTraceID string   `gorm:"column:otel_trace_id;index;type:varchar(32)" json:"otel_trace_id,omitempty"`
 	SampleRate float64   `gorm:"default:0" json:"sample_rate,omitempty"`
 	Sampled    bool      `gorm:"default:false" json:"sampled"`
 	DurationMs int64     `gorm:"default:0" json:"duration_ms,omitempty"`
