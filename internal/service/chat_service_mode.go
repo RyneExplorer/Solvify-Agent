@@ -114,17 +114,37 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	if session2 != nil && session2.HasPendingCheckpoint() {
 		pc, _ := session2.GetPendingCheckpoint()
 		if pc != nil {
-			logger.Infof("[ChatService] 检测到 pending checkpoint: checkpointID=%s, interruptID=%s", pc.CheckpointID, pc.InterruptID)
+			// 超时判断：clarify 走 10min（ClarifyDefaultTimeout），danger/其它走 24h（CheckpointDefaultTimeout）。
+			// 超时说明用户长时间未处理，checkpoint 字节可能已被后台 Ticker 清理，继续恢复无意义，直接放弃并清除。
+			timeout := entity.CheckpointDefaultTimeout
+			if pc.IsClarify {
+				timeout = entity.ClarifyDefaultTimeout
+			}
+			if pc.IsExpired(timeout) {
+				logger.Warnf("[ChatService] pending checkpoint 已超时（%v），放弃恢复并清除: checkpointID=%s", timeout, pc.CheckpointID)
+				_ = s.sessionRepo.ClearPendingCheckpoint(ctx, sessionID)
+				_ = s.sessionRepo.ClearPendingClarify(ctx, sessionID)
+			} else {
+				logger.Infof("[ChatService] 检测到 pending checkpoint: checkpointID=%s, interruptID=%s", pc.CheckpointID, pc.InterruptID)
 			if req.Content != "" {
 				agentReq.CheckpointID = pc.CheckpointID
-				agentReq.ResumeData = map[string]any{
-					pc.InterruptID: req.Content,
+				if pc.IsClarify {
+					// clarify：恢复数据为用户回答（字符串），与官方 FollowUpTool 的 UserAnswer 语义一致
+					agentReq.ResumeData = map[string]any{
+						pc.InterruptID: req.Content,
+					}
+				} else {
+					// danger：恢复数据为结构化 ApprovalResult，对齐官方 approval_wrapper.go 的 *ApprovalResult 数据契约
+					agentReq.ResumeData = map[string]any{
+						pc.InterruptID: parseApprovalResult(req.Content),
+					}
 				}
 				logger.Infof("[ChatService] 设置恢复参数: checkpointID=%s, resumeKeys=%v", pc.CheckpointID, []string{pc.InterruptID})
 			} else {
-				logger.Warnf("[ChatService] 有 pending checkpoint 但用户未提供审批内容，走首次执行")
-				_ = s.sessionRepo.ClearPendingCheckpoint(ctx, sessionID)
-				_ = s.sessionRepo.ClearPendingClarify(ctx, sessionID)
+					logger.Warnf("[ChatService] 有 pending checkpoint 但用户未提供审批内容，走首次执行")
+					_ = s.sessionRepo.ClearPendingCheckpoint(ctx, sessionID)
+					_ = s.sessionRepo.ClearPendingClarify(ctx, sessionID)
+				}
 			}
 		}
 	}

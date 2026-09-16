@@ -51,6 +51,9 @@ type App struct {
 	tracerShutdown func(context.Context) error
 	promRegistry   *prometheus.Registry
 
+	// checkpoint 过期清理后台任务的取消函数，由 App 负责生命周期管理
+	checkpointCleanupCancel context.CancelFunc
+
 	// MCP 客户端连接池，由 App 负责生命周期管理
 	mcpClientPool *providers.MCPClientPool
 }
@@ -464,6 +467,34 @@ func (a *App) initDependencies() {
 	// 注入 DB 版 CheckPointStore 所需的 AgentCheckpointRepo
 	ai.AgentEngine.WithCheckpointRepo(agentCheckpointRepo)
 
+	// 启动 checkpoint 过期清理后台任务：定期删除 agent_checkpoints 中超过 TTL 的行。
+	// Eino 框架不自动调用 CheckPointStore.Delete（Delete 是可选接口），原 DeleteExpired 是死代码（无调用方）。
+	// 这里起 Ticker 周期性清理，与 runWithRunner 恢复成功后即时删除互补，彻底堵住 checkpoint 字节泄漏。
+	{
+		cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+		a.checkpointCleanupCancel = cleanupCancel
+		const cleanupInterval = time.Hour
+		go func() {
+			ticker := time.NewTicker(cleanupInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-cleanupCtx.Done():
+					logger.Info("checkpoint 过期清理任务已停止")
+					return
+				case <-ticker.C:
+					n, dErr := agentCheckpointRepo.DeleteExpired(cleanupCtx, time.Now())
+					if dErr != nil {
+						logger.Warnf("[CheckpointCleanup] 删除过期 checkpoint 失败: %v", dErr)
+					} else if n > 0 {
+						logger.Infof("[CheckpointCleanup] 已清理 %d 条过期 checkpoint", n)
+					}
+				}
+			}
+		}()
+		logger.Infof("checkpoint 过期清理任务已启动: interval=%v", cleanupInterval)
+	}
+
 	// 初始化 Service
 	prefSvc := service.NewUserPreferenceService(userPreferenceRepo)
 	userSvc := service.NewUserService(userRepo, prefSvc, userModelCache)
@@ -612,6 +643,11 @@ func (a *App) gracefulShutdown() {
 		if err := a.mcpClientPool.Close(); err != nil {
 			logger.Errorf("MCP 客户端连接池关闭失败: %v", err)
 		}
+	}
+
+	// 停止 checkpoint 过期清理后台任务
+	if a.checkpointCleanupCancel != nil {
+		a.checkpointCleanupCancel()
 	}
 
 	logger.Info("HTTP 服务已停止")

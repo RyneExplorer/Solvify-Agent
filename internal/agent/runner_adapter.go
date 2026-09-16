@@ -197,6 +197,18 @@ func (e *Engine) runWithRunner(
 		// Runner 已经在内部处理了完整的 step tracker，这里兜底留空即可
 	}
 
+	// 清理本次运行产生的 checkpoint 字节行：
+	// Eino 框架不会在恢复完成后自动删除 CheckPointStore 中的记录（Delete 是可选接口，框架从不主动调用），
+	// 若不清理，agent_checkpoints 会无限堆积。恢复执行成功后这里主动删除，避免泄漏。
+	// 仅在正常完成（到达 EventDone）时清理：interrupt / error 早返回路径需要保留 checkpoint 供后续恢复。
+	if e.checkpointRepo != nil && checkpointID != "" {
+		if dErr := e.checkpointRepo.Delete(ctx, checkpointID); dErr != nil {
+			logger.Warnf("[Agent] 删除 checkpoint 字节失败（不阻塞）: checkpointID=%s, err=%v", checkpointID, dErr)
+		} else {
+			logger.Infof("[Agent] 已删除 checkpoint 字节: checkpointID=%s", checkpointID)
+		}
+	}
+
 	eventCh <- Event{
 		Type:    EventDone,
 		Content: fullAnswer.String(),
