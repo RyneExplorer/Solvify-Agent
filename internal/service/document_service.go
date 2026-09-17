@@ -25,11 +25,12 @@ import (
 )
 
 const (
-	documentStatusUploaded   = 1
-	documentStatusProcessing = 2
-	documentStatusReady      = 3
-	documentStatusFailed     = 4
-	documentStatusDeleted    = 5
+	// 文档状态码的唯一真相源在 entity（检索层也要用），这里只留本地别名方便阅读。
+	documentStatusUploaded   = entity.DocumentStatusUploaded
+	documentStatusProcessing = entity.DocumentStatusProcessing
+	documentStatusReady      = entity.DocumentStatusReady
+	documentStatusFailed     = entity.DocumentStatusFailed
+	documentStatusDeleted    = entity.DocumentStatusDeleted
 
 	documentSourceUpload = "upload"
 	documentSourceNote   = "note"

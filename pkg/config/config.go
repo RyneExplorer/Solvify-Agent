@@ -96,15 +96,18 @@ type EmbeddingConfig struct {
 
 // RAGConfig 描述检索增强配置
 type RAGConfig struct {
-	Enabled        bool           `mapstructure:"enabled"`
-	TopK           int            `mapstructure:"top_k"`
-	RecallK        int            `mapstructure:"recall_k"` // 混合检索召回量（Rerank 前），默认 TopK*5
-	ScoreThreshold float64        `mapstructure:"score_threshold"`
-	VectorWeight   float64        `mapstructure:"vector_weight"`
-	KeywordWeight  float64        `mapstructure:"keyword_weight"`
-	RRFK           float64        `mapstructure:"rrf_k"`
-	Reranker       RerankerConfig `mapstructure:"reranker"`
-	Expander       ExpanderConfig `mapstructure:"expander"`
+	Enabled        bool    `mapstructure:"enabled"`
+	TopK           int     `mapstructure:"top_k"`
+	RecallK        int     `mapstructure:"recall_k"` // 混合检索召回量（Rerank 前），默认 TopK*5
+	ScoreThreshold float64 `mapstructure:"score_threshold"`
+	VectorWeight   float64 `mapstructure:"vector_weight"`
+	KeywordWeight  float64 `mapstructure:"keyword_weight"`
+	// KeywordScoreThreshold 是「向量侧全灭时」关键词结果的最低匹配比例。
+	// 之前这个字段没有配置入口，构造器只能吃硬编码默认值 0.25。
+	KeywordScoreThreshold float64        `mapstructure:"keyword_score_threshold"`
+	RRFK                  float64        `mapstructure:"rrf_k"`
+	Reranker              RerankerConfig `mapstructure:"reranker"`
+	Expander              ExpanderConfig `mapstructure:"expander"`
 }
 
 // RerankerConfig 描述重排序配置

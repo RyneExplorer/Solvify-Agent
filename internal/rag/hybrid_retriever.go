@@ -11,6 +11,7 @@ import (
 	"github.com/go-ego/gse"
 	"gorm.io/gorm"
 
+	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/observability"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
@@ -100,7 +101,11 @@ func NewHybridRetrieverFromConfig(db *gorm.DB, embeddingFunc EmbeddingFunc) *Hyb
 		ScoreThreshold: cfg.ScoreThreshold,
 		VectorWeight:   cfg.VectorWeight,
 		KeywordWeight:  cfg.KeywordWeight,
-		RRFK:           cfg.RRFK,
+		// KeywordScoreThreshold 曾经漏传：字段有默认值、构造器也认，
+		// 但这个唯一的配置入口不传它 → 线上恒为硬编码的 0.25，配置里也没有对应项，
+		// 想调只能改代码。这里补上，并在 pkg/config 里加了 keyword_score_threshold。
+		KeywordScoreThreshold: cfg.KeywordScoreThreshold,
+		RRFK:                  cfg.RRFK,
 	})
 }
 
@@ -123,10 +128,7 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 		return Result{Hit: false, Documents: nil}, nil
 	}
 
-	topK := query.TopK
-	if topK <= 0 {
-		topK = 5
-	}
+	topK := query.effectiveTopK()
 
 	logger.Infof("混合检索开始: vectorQuery=%q, keywordQuery=%q, topK=%d, knowledgeBaseIDs=%v",
 		query.Question, query.keywordQueryText(), topK, query.KnowledgeBaseIDs)
@@ -246,21 +248,32 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	}, nil
 }
 
+// retrievedChunkVisibilitySQL 是所有 chunk 检索路径**必须**拼上的可见性边界：排除已软删文档。
+//
+// 为什么需要它：软删（documents.status = 5）不会物理删除 chunk，所以「忘了过滤」=
+// 用户已经删掉的文档继续出现在回答与引用里。原先两条 SQL 各自内联、只过滤
+// knowledge_base_id / user_id，谁都没写这条 —— 而 service 侧的状态码是私有常量，
+// rag 层既看不到也不知道「删除」是几，**定义的缺失本身就是缺陷的成因**。
+//
+// 抽成常量、由两条 SQL 共同引用，是为了让「新增一条检索 SQL 漏了它」一眼可见，
+// 并且能被 hybrid_retriever_sql_test.go 直接断言。
+//
+// 用 NOT IN 子查询而不是 JOIN documents：沿用本文件既有的「主查询不 JOIN documents」
+// 优化，软删文档只占极小比例，子查询结果集很小；documents.id 是主键，无需额外索引。
+// 状态值取自 entity.DocumentStatusDeleted（领域层唯一真相源），不写字面量。
+var retrievedChunkVisibilitySQL = fmt.Sprintf(`
+			AND dc.document_id NOT IN (
+				SELECT d.id FROM documents d WHERE d.status = %d)`,
+	entity.DocumentStatusDeleted)
+
 // vectorSearch 执行向量检索
 // 优化：主查询只查 document_chunks 表（不 LEFT JOIN documents），
-// 向量距离排序在 chunks 表上直接跑，拿 topK*2 后再批量查 documents 表的 title。
+// 向量距离排序在 chunks 表上直接跑，拿候选数后再批量查 documents 表的 title。
 // 避免对所有候选 chunk 做额外 JOIN。
-func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scoredChunk, error) {
-	embedding, err := r.embeddingFunc(ctx, query.Question)
-	if err != nil {
-		return nil, fmt.Errorf("生成查询向量失败: %w", err)
-	}
-
-	vectorStr := vectorToString(embedding)
-	topK := query.TopK * 2
-
-	var results []scoredChunk
-	err = r.db.WithContext(ctx).Raw(`
+//
+// 注意 dc.embedding IS NOT NULL 在向量侧是**必需**的（没有向量就没法算距离），
+// 但它在关键词侧是多余的 —— 见 keywordSearchSQL。
+var vectorSearchSQL = `
 		SELECT
 			dc.id,
 			dc.knowledge_base_id,
@@ -273,10 +286,32 @@ func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scor
 		FROM document_chunks dc
 		WHERE dc.knowledge_base_id IN (?)
 			AND dc.embedding IS NOT NULL
-			AND dc.user_id = ?
+			AND dc.user_id = ?` + retrievedChunkVisibilitySQL + `
 		ORDER BY dc.embedding <=> ?::vector
-		LIMIT ?
-	`, vectorStr, query.KnowledgeBaseIDs, query.UserID, vectorStr, topK).Scan(&results).Error
+		LIMIT ?`
+
+// vectorSearchArgs 按 vectorSearchSQL 里 ? 的出现顺序组装参数。
+//
+// 单独抽出来有两个理由：
+//  1. 5 个位置参数里有 2 个是同一个 vectorStr（SELECT 与 ORDER BY 各一次），内联极易错位；
+//  2. 末位 LIMIT 走 query.candidateLimit()，于是能被测试直接断言。
+//     这点很关键：曾经 Retrieve 里算了一遍兜底、两条 search 却各自重算 `query.TopK * 2`，
+//     调用方漏传 TopK 就静默变成 `LIMIT 0` 恒空；而单测若只覆盖 effectiveTopK 本身，
+//     抓不到"调用点没走它"这种回退。
+func vectorSearchArgs(query Query, vectorStr string) []any {
+	return []any{vectorStr, query.KnowledgeBaseIDs, query.UserID, vectorStr, query.candidateLimit()}
+}
+
+func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scoredChunk, error) {
+	embedding, err := r.embeddingFunc(ctx, query.Question)
+	if err != nil {
+		return nil, fmt.Errorf("生成查询向量失败: %w", err)
+	}
+
+	vectorStr := vectorToString(embedding)
+
+	var results []scoredChunk
+	err = r.db.WithContext(ctx).Raw(vectorSearchSQL, vectorSearchArgs(query, vectorStr)...).Scan(&results).Error
 
 	if err != nil {
 		return nil, err
@@ -289,30 +324,13 @@ func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scor
 	return results, nil
 }
 
-// keywordSearch 执行关键词检索
-// 优化：GIN 索引加速 && overlap 过滤（主收益），unnest 仅对过滤后的少量行计算分数
-// 也去掉了 LEFT JOIN documents，title 在主查询完成后批量填
+// keywordSearchSQL 是关键词检索 SQL。
 //
-// 打分口径（注意不是 BM25）：score = COUNT(chunk 关键词 ∩ query 词项) / cardinality(query 词项)，
-// 即「这条 chunk 覆盖了 query 的多少比例」—— 没有词频、没有 IDF、没有 chunk 长度归一化。
-// 分母完全由 query 决定，所以 query 越长，所有候选的分数被同一比例压得越低；
-// 而 vector 全灭时才启用的 keywordScoreThreshold（默认 0.25）会把这些被压低的候选成片滤掉。
-//
-// 因此 query 文本取 keywordQueryText()：调用方（快速模式）传「实体回填后的短 query」，
-// 避免把最近几轮用户提问拼进来抬高分母、把排序拉向历史话题。
-func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]scoredChunk, error) {
-	keywords := extractKeywords(query.keywordQueryText())
-	if len(keywords) == 0 {
-		return nil, nil
-	}
-
-	topK := query.TopK * 2
-
-	var results []scoredChunk
-
-	keywordArray := buildPostgresArray(keywords)
-
-	err := r.db.WithContext(ctx).Raw(`
+// ⚠️ 这里**不能**带 `dc.embedding IS NOT NULL`。那个条件是从向量检索抄过来的：
+// 关键词命中与这条 chunk 有没有向量毫无关系。带上它的后果是 —— 向量化失败
+// （embedding 生成报错、模型没起、文档处理中途失败）的 chunk 在关键词侧**永久不可见**，
+// 而关键词侧本来就是这类 chunk 唯一的救命通道。向量侧保留该条件是必需的（要算距离）。
+var keywordSearchSQL = `
 		SELECT
 			dc.id,
 			dc.knowledge_base_id,
@@ -330,11 +348,51 @@ func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]sco
 		WHERE dc.knowledge_base_id IN (?)
 			AND dc.keywords IS NOT NULL
 			AND dc.keywords && ?::text[]
-			AND dc.user_id = ?
-			AND dc.embedding IS NOT NULL
+			AND dc.user_id = ?` + retrievedChunkVisibilitySQL + `
 		ORDER BY score DESC
-		LIMIT ?
-	`, keywordArray, keywordArray, query.KnowledgeBaseIDs, keywordArray, query.UserID, topK).Scan(&results).Error
+		LIMIT ?`
+
+// chunkReadSQLs 登记所有「读取 chunk 内容、可能把内容交给用户」的检索 SQL。
+//
+// 存在的意义：可见性边界必须是**每一个** chunk 出口的共同约束，但 Go 的类型系统管不到
+// SQL 文本 —— 「新加一条检索路径忘了过滤软删文档」正是本次缺陷的形态。把出口登记到一处，
+// 配合 TestAllChunkReadSQLsCarryVisibilityBoundary 就把它从「靠人记得」变成「测试变红」。
+//
+// ⚠️ 新增任何读取 chunk 内容的检索 SQL，必须登记到这里，否则该测试覆盖不到它。
+var chunkReadSQLs = map[string]string{
+	"vectorSearchSQL":         vectorSearchSQL,
+	"keywordSearchSQL":        keywordSearchSQL,
+	"expandAdjacentChunksSQL": expandAdjacentChunksSQL,
+}
+
+// keywordSearch 执行关键词检索
+// 优化：GIN 索引加速 && overlap 过滤（主收益），unnest 仅对过滤后的少量行计算分数
+// 也去掉了 LEFT JOIN documents，title 在主查询完成后批量填
+//
+// 打分口径（注意不是 BM25）：score = COUNT(chunk 关键词 ∩ query 词项) / cardinality(query 词项)，
+// 即「这条 chunk 覆盖了 query 的多少比例」—— 没有词频、没有 IDF、没有 chunk 长度归一化。
+// 分母完全由 query 决定，所以 query 越长，所有候选的分数被同一比例压得越低；
+// 而 vector 全灭时才启用的 keywordScoreThreshold（默认 0.25）会把这些被压低的候选成片滤掉。
+//
+// 因此 query 文本取 keywordQueryText()：调用方（快速模式）传「实体回填后的短 query」，
+// 避免把最近几轮用户提问拼进来抬高分母、把排序拉向历史话题。
+
+// keywordSearchArgs 按 keywordSearchSQL 里 ? 的出现顺序组装参数（理由同 vectorSearchArgs）。
+func keywordSearchArgs(query Query, keywordArray string) []any {
+	return []any{keywordArray, keywordArray, query.KnowledgeBaseIDs, keywordArray, query.UserID, query.candidateLimit()}
+}
+
+func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]scoredChunk, error) {
+	keywords := extractKeywords(query.keywordQueryText())
+	if len(keywords) == 0 {
+		return nil, nil
+	}
+
+	var results []scoredChunk
+
+	keywordArray := buildPostgresArray(keywords)
+
+	err := r.db.WithContext(ctx).Raw(keywordSearchSQL, keywordSearchArgs(query, keywordArray)...).Scan(&results).Error
 
 	if err != nil {
 		return nil, err
