@@ -17,6 +17,7 @@ import (
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/observability"
+	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
 )
 
@@ -41,7 +42,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 			status = observability.SpanStatusError
 			errVal = fmt.Errorf("panic: %v", r)
 			obsMarkError(ctx, s.obs, errVal)
-			eventCh <- dto.StreamEvent{Type: "error", Detail: "处理过程中发生未预期错误", Done: true}
+			eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "error", Detail: "处理过程中发生未预期错误", Done: true})
 		}
 		obsEndSpan(ctx, s.obs, span, status, errVal, nil)
 	}()
@@ -53,7 +54,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	// P0-④ 关键修复：在 initContext 之前，先把"将发送给模型的工具定义"预构建并按真 BPE 算总 token，
 	// 之后把 toolsTokens 传给 initContext，calculateContextBudgets 会先从 maxCtx 扣除，
 	// 避免工具定义悄悄吃掉历史/检索预算，导致最终请求超上下文长度。
-	sendProgressEvent(eventCh, "正在加载上下文...")
+	sendProgressEvent(ctx, eventCh, "正在加载上下文...")
 	t0 := time.Now()
 	preToolsTokens := 0
 	deepCtx := ctx
@@ -77,7 +78,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	if err != nil {
 		obsIncr(ctx, s.obs, "chat_deep_errors_total", map[string]string{"stage": "init_ctx"}, 1)
 		obsMarkError(ctx, s.obs, err)
-		sendErrorEvent(eventCh, err, err.Error())
+		sendErrorEvent(ctx, eventCh, err, err.Error())
 		return
 	}
 	history := excludeByMessageID(enhancedCtx.History, userMsgID)
@@ -91,9 +92,9 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	})
 	obsObserve(ctx, s.obs, "chat_deep_init_ctx_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t0).Seconds())
 
-	eventCh <- dto.StreamEvent{Type: "start", MessageID: assistantMsgID}
+	eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "start", MessageID: assistantMsgID})
 
-	sendProgressEvent(eventCh, "正在深度推理...")
+	sendProgressEvent(ctx, eventCh, "正在深度推理...")
 	agentPB := NewPromptBuilder(PromptModeDeep, "", enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx).
 		WithProfile(enhancedCtx.Profile).
 		WithPreference(enhancedCtx.Preference)
@@ -146,7 +147,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		obsMarkError(ctx, s.obs, err)
 		logger.Errorf("Agent 执行失败, sessionID=%s: %v", sessionID, err)
 		llm.ReduceContextBudgetOnError(req.ModelID, err)
-		sendErrorEvent(eventCh, err, "Agent 执行失败")
+		sendErrorEvent(ctx, eventCh, err, "Agent 执行失败")
 		return
 	}
 
@@ -201,7 +202,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 					}
 				}
 			}
-			eventCh <- toStreamEvent(agentEvent)
+			eventch.Send(ctx, eventCh, toStreamEvent(agentEvent))
 			return
 		}
 
@@ -223,7 +224,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 			llm.ReduceContextBudgetOnError(req.ModelID, fmt.Errorf("%s", agentEvent.Error))
 		}
 
-		eventCh <- toStreamEvent(agentEvent)
+		eventch.Send(ctx, eventCh, toStreamEvent(agentEvent))
 
 		if len(agentEvent.Sources) > 0 {
 			agentSources = agentEvent.Sources
@@ -263,13 +264,13 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		logger.Warnf("深度模式未产生工具调用，仅返回执行计划，sessionID=%s, content=%q", sessionID, fullContent)
 		obsIncr(ctx, s.obs, "agent_plan_without_tool_total", nil, 1)
 		obsMarkError(ctx, s.obs, fmt.Errorf("深度模式未产生工具调用"))
-		eventCh <- dto.StreamEvent{
+		eventch.Send(ctx, eventCh, dto.StreamEvent{
 			Type:      "error",
 			Title:     "深度推理未完成",
 			Detail:    "当前模型没有正确发起工具调用，请重试或切换支持工具调用的模型",
 			Retryable: true,
 			Done:      true,
-		}
+		})
 		return
 	}
 	// 空回答守卫（与快速模式共用 rejectEmptyAnswer，口径一致）。
@@ -296,7 +297,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	if len(metaMap) > 0 {
 		metadata = datatypes.JSON(mustMarshal(metaMap))
 	}
-	s.emitDoneAndSave(eventCh, sessionID, assistantMsgID, fullContent, req, agentSources, metadata, nil)
+	s.emitDoneAndSave(ctx, eventCh, sessionID, assistantMsgID, fullContent, req, agentSources, metadata, nil)
 
 	s.refreshContextAsync(ctx, userID, sessionID, enhancedCtx.History, chatModel)
 }
@@ -401,9 +402,10 @@ func ctxBoolLabel(b bool) string {
 
 // ─── 共享辅助方法 ───────────────────────────────────────────
 
-// emitDoneAndSave 发送 done 事件并异步保存助手消息
+// emitDoneAndSave 发送 done 事件并异步保存助手消息。
+// ctx 已取消（客户端断连）时 done 事件被丢弃、不阻塞（见 pkg/eventch）；落库仍走独立超时 ctx，不受影响。
 // 注意：保存失败只记日志，禁止再向 eventCh 写事件（外层 defer close 后会 panic）
-func (s *chatService) emitDoneAndSave(eventCh chan<- dto.StreamEvent, sessionID, msgID, content string, req requestdto.SendMessageRequest, sources []dto.SourceInfo, metadata datatypes.JSON, metaHook func(map[string]any)) {
+func (s *chatService) emitDoneAndSave(ctx context.Context, eventCh chan<- dto.StreamEvent, sessionID, msgID, content string, req requestdto.SendMessageRequest, sources []dto.SourceInfo, metadata datatypes.JSON, metaHook func(map[string]any)) {
 	finalMeta := metadata
 	if metaHook != nil && len(metadata) == 0 {
 		m := map[string]any{}
@@ -418,7 +420,7 @@ func (s *chatService) emitDoneAndSave(eventCh chan<- dto.StreamEvent, sessionID,
 			finalMeta = datatypes.JSON(mustMarshal(m))
 		}
 	}
-	eventCh <- dto.StreamEvent{Type: "done", MessageID: msgID, Content: content, Sources: sources, Done: true}
+	eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "done", MessageID: msgID, Content: content, Sources: sources, Done: true})
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {

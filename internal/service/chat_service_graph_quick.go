@@ -24,6 +24,7 @@ import (
 	"solvify-agent/internal/rag"
 	"solvify-agent/pkg/config"
 	apperrors "solvify-agent/pkg/errors"
+	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/tokenutil"
 )
@@ -724,20 +725,20 @@ func (s *chatService) processMessageGraphQuick(
 		if r := recover(); r != nil {
 			status = observability.SpanStatusError
 			errVal = fmt.Errorf("panic: %v", r)
-			eventCh <- dto.StreamEvent{Type: "error", Detail: "处理过程中发生未预期错误", Done: true}
+			eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "error", Detail: "处理过程中发生未预期错误", Done: true})
 		}
 		obsEndSpan(ctx, s.obs, span, status, errVal, nil)
 	}()
 	obsIncr(ctx, s.obs, "chat_quick_graph_requests_total", map[string]string{"model_id": req.ModelID}, 1)
 
 	// 1) 初始化上下文（历史/摘要/记忆/画像/预算）
-	sendProgressEvent(eventCh, "正在加载上下文...")
+	sendProgressEvent(ctx, eventCh, "正在加载上下文...")
 	t0 := time.Now()
 	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content)
 	if err != nil {
 		obsIncr(ctx, s.obs, "chat_quick_graph_errors_total", map[string]string{"stage": "init_ctx"}, 1)
 		obsMarkError(ctx, s.obs, err)
-		sendErrorEvent(eventCh, err, err.Error())
+		sendErrorEvent(ctx, eventCh, err, err.Error())
 		return
 	}
 	chatModel := client.ChatModel()
@@ -772,10 +773,10 @@ func (s *chatService) processMessageGraphQuick(
 			logger.Warnf("存储澄清追问消息失败: %v", err)
 		}
 		obsNow := time.Now()
-		eventCh <- dto.StreamEvent{Type: "clarify", Clarify: &dto.ClarifyPayload{
+		eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "clarify", Clarify: &dto.ClarifyPayload{
 			Question: clarifyQuestion,
 			Options:  clarifyOptions,
-		}, Done: true}
+		}, Done: true})
 		obsEndSpan(ctx, s.obs, span, observability.SpanStatusOK, nil, observability.Attrs{
 			"need_clarify":   "true",
 			"clarify_intent": intent,
@@ -794,10 +795,10 @@ func (s *chatService) processMessageGraphQuick(
 	graphState := &quickGraphState{}
 
 	// 5) 构建并编译 compose.Graph（内部已经 push error 事件）
-	sendProgressEvent(eventCh, "正在组装快速检索链路...")
+	sendProgressEvent(ctx, eventCh, "正在组装快速检索链路...")
 	graphCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	runnable, err := compileQuickGraphLocal(graphState, s.einoRetriever, s.obs, eventCh)
+	runnable, err := compileQuickGraphLocal(ctx, graphState, s.einoRetriever, s.obs, eventCh)
 	if err != nil {
 		obsMarkError(ctx, s.obs, err)
 		return
@@ -810,7 +811,7 @@ func (s *chatService) processMessageGraphQuick(
 	// 7) 生成助手消息 ID + 流式驱动 Graph 执行
 	assistantMsgID := uuid.New().String()
 	obsAddRootAttrs(ctx, s.obs, observability.Attrs{"assistant_message_id": assistantMsgID})
-	eventCh <- dto.StreamEvent{Type: "start", MessageID: assistantMsgID}
+	eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "start", MessageID: assistantMsgID})
 
 	fullContent, err := runQuickStream(
 		graphCtx, runnable, graphInput, callOpts,
@@ -846,7 +847,7 @@ func (s *chatService) processMessageGraphQuick(
 	})
 
 	// 8) 结束事件 + 异步落库 + 异步刷新摘要记忆
-	s.emitDoneAndSave(eventCh, sessionID, assistantMsgID, fullContent, req, sources, nil, func(meta map[string]any) {
+	s.emitDoneAndSave(ctx, eventCh, sessionID, assistantMsgID, fullContent, req, sources, nil, func(meta map[string]any) {
 		if s.obs != nil && meta != nil {
 			meta["trace_id"] = observability.TraceIDFromContext(ctx)
 			meta["eino_quick_graph_mode"] = true
@@ -897,6 +898,7 @@ func buildQuickInput(
 // graphState 在调用处提前创建好，此函数会把它传给 buildQuickGraph，使其成为 eino stateGenerator 的返回值。
 // 这样 Invoke 返回后外部直接读 graphState.RetrievedDocs 即可，不需要再从 context 里 ProcessState。
 func compileQuickGraphLocal(
+	ctx context.Context,
 	graphState *quickGraphState,
 	einoRetriever *rag.EinoRetrieverAdapter,
 	obs observability.Recorder,
@@ -905,13 +907,13 @@ func compileQuickGraphLocal(
 	g, err := buildQuickGraph(graphState, einoRetriever)
 	if err != nil {
 		obsIncr(nil, obs, "chat_quick_graph_errors_total", map[string]string{"stage": "build_graph"}, 1)
-		sendErrorEvent(eventCh, err, "快速检索链路初始化失败")
+		sendErrorEvent(ctx, eventCh, err, "快速检索链路初始化失败")
 		return nil, err
 	}
 	r, err := g.Compile(nil, einoCompose.WithGraphName("quick_rag_pipeline"))
 	if err != nil {
 		obsIncr(nil, obs, "chat_quick_graph_errors_total", map[string]string{"stage": "compile_graph"}, 1)
-		sendErrorEvent(eventCh, err, "快速检索链路编译失败")
+		sendErrorEvent(ctx, eventCh, err, "快速检索链路编译失败")
 		return nil, err
 	}
 	return r, nil
@@ -927,16 +929,16 @@ func runQuickStream(
 	modelID, assistantMsgID string,
 	obs observability.Recorder,
 ) (string, error) {
-	sendProgressEvent(eventCh, "正在执行快速检索链路...")
+	sendProgressEvent(graphCtx, eventCh, "正在执行快速检索链路...")
 	t0 := time.Now()
 	reader, invErr := runnable.Invoke(graphCtx, graphInput, callOpts...)
 	obsObserve(graphCtx, obs, "chat_quick_graph_run_seconds", map[string]string{"model_id": modelID}, time.Since(t0).Seconds())
 	if invErr != nil {
-		sendErrorEvent(eventCh, invErr, "快速检索执行失败")
+		sendErrorEvent(graphCtx, eventCh, invErr, "快速检索执行失败")
 		return "", invErr
 	}
 	if reader == nil {
-		sendErrorEvent(eventCh, fmt.Errorf("nil stream reader"), "快速检索未返回结果")
+		sendErrorEvent(graphCtx, eventCh, fmt.Errorf("nil stream reader"), "快速检索未返回结果")
 		return "", fmt.Errorf("nil stream reader")
 	}
 	defer reader.Close()
@@ -959,23 +961,23 @@ func consumeQuickGraphStream(
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			sendErrorEvent(eventCh, err, "快速检索流式生成失败")
+			sendErrorEvent(ctx, eventCh, err, "快速检索流式生成失败")
 			return "", err
 		}
 		if msg == nil {
 			continue
 		}
 		if !assistantSeen {
-			sendProgressEvent(eventCh, "正在生成回答...")
+			sendProgressEvent(ctx, eventCh, "正在生成回答...")
 			assistantSeen = true
 		}
 		if msg.Content != "" {
 			fullContent += msg.Content
-			eventCh <- dto.StreamEvent{
+			eventch.Send(ctx, eventCh, dto.StreamEvent{
 				Type:      "content",
 				MessageID: assistantMsgID,
 				Content:   msg.Content,
-			}
+			})
 		}
 		// 快速模式不期望 tool_calls，收到时打 warn 但不报错
 		if len(msg.ToolCalls) > 0 {
@@ -983,7 +985,6 @@ func consumeQuickGraphStream(
 				len(msg.ToolCalls), safeFirstToolName(msg.ToolCalls))
 		}
 	}
-	_ = ctx
 	return fullContent, nil
 }
 

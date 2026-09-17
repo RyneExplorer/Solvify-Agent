@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/observability"
@@ -96,5 +97,46 @@ func TestRejectEmptyAnswer_ReportsModeLabelAndSentinel(t *testing.T) {
 		if len(rec.markedErrors) != 1 || !errors.Is(rec.markedErrors[0], errEmptyAnswer) {
 			t.Errorf("mode=%s 未标记哨兵错误 errEmptyAnswer: %v", mode, rec.markedErrors)
 		}
+	}
+}
+
+// ─── 事件下发的 ctx 守卫（审查报告 P0-1 回归） ─────────────────────────────
+//
+// 故障注入口径：eventCh 无缓冲且无人消费，等价于「客户端断连后 gin 的 c.Stream
+// 不再 drain eventCh」。此时 ctx 已取消，事件必须被丢弃并立即返回；否则发送方
+// 永久阻塞，每次断连都会泄漏一份 goroutine + DB 连接 + 上游 LLM 流。
+
+// ctx 已取消 + 无消费者：必须立即返回，而不是永久阻塞。
+func TestSendErrorEvent_ReturnsImmediatelyWhenCtxCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	eventCh := make(chan dto.StreamEvent) // 故意不缓冲、不消费
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sendErrorEvent(ctx, eventCh, errors.New("boom"), "")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ctx 已取消但 sendErrorEvent 仍阻塞 —— 断连会拖死整条链路（P0-1 回归）")
+	}
+}
+
+// 反向保护：ctx 存活且消费者就绪时事件必须真的送达。
+// 缺了这条，把 Send 写成「无条件丢弃」也能让上面的用例通过。
+func TestSendErrorEvent_DeliversWhenCtxAlive(t *testing.T) {
+	eventCh := make(chan dto.StreamEvent, 1)
+	sendErrorEvent(context.Background(), eventCh, errors.New("boom"), "原始描述")
+
+	select {
+	case ev := <-eventCh:
+		if ev.Type != "error" || !ev.Done {
+			t.Errorf("事件类型/终态不对: %+v", ev)
+		}
+	default:
+		t.Fatal("ctx 存活时事件被丢弃 —— 正常路径不应降级")
 	}
 }
