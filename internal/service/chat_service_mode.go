@@ -118,21 +118,21 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 				_ = s.sessionRepo.ClearPendingClarify(ctx, sessionID)
 			} else {
 				logger.Infof("[ChatService] 检测到 pending checkpoint: checkpointID=%s, interruptID=%s", pc.CheckpointID, pc.InterruptID)
-			if req.Content != "" {
-				agentReq.CheckpointID = pc.CheckpointID
-				if pc.IsClarify {
-					// clarify：恢复数据为用户回答（字符串），与官方 FollowUpTool 的 UserAnswer 语义一致
-					agentReq.ResumeData = map[string]any{
-						pc.InterruptID: req.Content,
+				if req.Content != "" {
+					agentReq.CheckpointID = pc.CheckpointID
+					if pc.IsClarify {
+						// clarify：恢复数据为用户回答（字符串），与官方 FollowUpTool 的 UserAnswer 语义一致
+						agentReq.ResumeData = map[string]any{
+							pc.InterruptID: req.Content,
+						}
+					} else {
+						// danger：恢复数据为结构化 ApprovalResult，对齐官方 approval_wrapper.go 的 *ApprovalResult 数据契约
+						agentReq.ResumeData = map[string]any{
+							pc.InterruptID: parseApprovalResult(req.Content),
+						}
 					}
+					logger.Infof("[ChatService] 设置恢复参数: checkpointID=%s, resumeKeys=%v", pc.CheckpointID, []string{pc.InterruptID})
 				} else {
-					// danger：恢复数据为结构化 ApprovalResult，对齐官方 approval_wrapper.go 的 *ApprovalResult 数据契约
-					agentReq.ResumeData = map[string]any{
-						pc.InterruptID: parseApprovalResult(req.Content),
-					}
-				}
-				logger.Infof("[ChatService] 设置恢复参数: checkpointID=%s, resumeKeys=%v", pc.CheckpointID, []string{pc.InterruptID})
-			} else {
 					logger.Warnf("[ChatService] 有 pending checkpoint 但用户未提供审批内容，走首次执行")
 					_ = s.sessionRepo.ClearPendingCheckpoint(ctx, sessionID)
 					_ = s.sessionRepo.ClearPendingClarify(ctx, sessionID)
