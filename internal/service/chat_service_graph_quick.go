@@ -267,43 +267,36 @@ func quickRewriteFn(ctx context.Context, input *quickGraphInput) (string, error)
 //	meta:     我的历史 / 刚才说了什么
 //
 // 不命中时返回 ("", false)，交给 LLM 做更精细的意图判定。
+// localIntentRules 是本地意图规则表，顺序即优先级：命中即返回。
+// 新增规则只需在这里加一行，正则本身统一维护在下方 re* 变量里。
+var localIntentRules = []struct {
+	intent string
+	re     *regexp.Regexp
+}{
+	{intentGreeting, reGreeting},
+	{intentIdentity, reIdentity},
+	// chitchat 覆盖「闲聊 + 系统信息查询」，都是 LLM 容易误识别成 question 的场景
+	{intentChitchat, reTimeInfo}, // 时间日期类
+	{intentChitchat, reChitchat}, // 纯闲聊类
+	{intentMeta, reMeta},
+}
+
+// matchLocalIntent 用本地规则做意图识别，命中返回 (intent, true)；
+// 未命中返回 ("", false)，交由 LLM 判断。
 func matchLocalIntent(raw string) (string, bool) {
 	q := strings.TrimSpace(strings.ToLower(raw))
 	if q == "" {
 		return intentQuestion, true
 	}
-
-	// ── greeting ──
-	greetingRegex := `^(你好|您好|hi+|hello+|嗨|哈喽|在吗|在不在|早|早上好|下午好|晚上好|晚安|早安|午安|晚安)$`
-	if matchRegex(greetingRegex, q) {
-		return intentGreeting, true
+	for _, rule := range localIntentRules {
+		if rule.re.MatchString(q) {
+			return rule.intent, true
+		}
 	}
-
-	// ── identity ──
-	identityRegex := `^(你是谁|你是谁呀|你叫什么|你叫什么名字|你能做什么|你能干什么|你是干什么的|介绍一下你自己|自我介绍|你是什么模型|你是什么)$`
-	if matchRegex(identityRegex, q) {
-		return intentIdentity, true
-	}
-
-	// ── chitchat（闲聊 + 系统信息查询，LLM 容易误识别成 question 的场景）──
-	// 时间日期类
-	timeRegex := `(今天|现在|当前|明天|后天)+(星期几|礼拜几|几号|多少号|日期|几号了|几点|几点钟|时间|日期是)`
-	// 纯闲聊类
-	chitchatRegex := `^(讲个笑话|来个笑话|随便聊聊|聊聊呗|聊聊天|说点什么|有什么好玩的|今天天气怎么样|天气怎么样|心情不好|我心情不好|安慰一下我|夸夸我)$`
-	if matchRegex(timeRegex, q) || matchRegex(chitchatRegex, q) {
-		return intentChitchat, true
-	}
-
-	// ── meta ──
-	metaRegex := `(我的历史|聊天记录|你刚才说了什么|刚才说的什么|上一个问题|前一个问题|回顾对话|我们聊了什么|你还记得|之前说的)`
-	if matchRegex(metaRegex, q) {
-		return intentMeta, true
-	}
-
 	return "", false
 }
 
-// matchRegex 简单的正则匹配封装，避免每次都 re.Compile
+// 本地意图匹配用的正则，包级编译一次、全局复用。
 var (
 	reGreeting = regexp.MustCompile(`^(你好|您好|hi+|hello+|嗨|哈喽|在吗|在不在|早|早上好|下午好|晚上好|晚安|早安|午安|晚安)$`)
 	reIdentity = regexp.MustCompile(`^(你是谁|你是谁呀|你叫什么|你叫什么名字|你能做什么|你能干什么|你是干什么的|介绍一下你自己|自我介绍|你是什么模型|你是什么)$`)
@@ -311,23 +304,6 @@ var (
 	reChitchat = regexp.MustCompile(`^(讲个笑话|来个笑话|随便聊聊|聊聊呗|聊聊天|说点什么|有什么好玩的|今天天气怎么样|天气怎么样|心情不好|我心情不好|安慰一下我|夸夸我)$`)
 	reMeta     = regexp.MustCompile(`(我的历史|聊天记录|你刚才说了什么|刚才说的什么|上一个问题|前一个问题|回顾对话|我们聊了什么|你还记得|之前说的)`)
 )
-
-func matchRegex(pattern string, q string) bool {
-	switch pattern {
-	case `^(你好|您好|hi+|hello+|嗨|哈喽|在吗|在不在|早|早上好|下午好|晚上好|晚安|早安|午安|晚安)$`:
-		return reGreeting.MatchString(q)
-	case `^(你是谁|你是谁呀|你叫什么|你叫什么名字|你能做什么|你能干什么|你是干什么的|介绍一下你自己|自我介绍|你是什么模型|你是什么)$`:
-		return reIdentity.MatchString(q)
-	case `(今天|现在|当前|明天|后天)+(星期几|礼拜几|几号|多少号|日期|几号了|几点|几点钟|时间|日期是)`:
-		return reTimeInfo.MatchString(q)
-	case `^(讲个笑话|来个笑话|随便聊聊|聊聊呗|聊聊天|说点什么|有什么好玩的|今天天气怎么样|天气怎么样|心情不好|我心情不好|安慰一下我|夸夸我)$`:
-		return reChitchat.MatchString(q)
-	case `(我的历史|聊天记录|你刚才说了什么|刚才说的什么|上一个问题|前一个问题|回顾对话|我们聊了什么|你还记得|之前说的)`:
-		return reMeta.MatchString(q)
-	default:
-		return false
-	}
-}
 
 // doRewriteWithLLM 调 LLM 做改写，失败时 fallback 原始 query。
 // 返回 (rewritten, intent, keywords, skipRetrieve, needClarify, clarifyQuestion, clarifyOptions)
@@ -514,8 +490,7 @@ func addQuickRetrieveNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamR
 	)
 }
 
-// buildRetrieverOpts 从 quickGraphInput 构造 retriever.Option 切片，
-// 替代之前 quickRetrieverCallOpts 通过 einoCompose.WithRetrieverOption 注入的方式。
+// buildRetrieverOpts 从 quickGraphInput 构造 retriever.Option 切片。
 // keywordQuery 非空时，关键字侧改用它而不是公共 query。
 func buildRetrieverOpts(input *quickGraphInput, keywordQuery string) []retriever.Option {
 	var opts []retriever.Option
@@ -804,9 +779,8 @@ func (s *chatService) processMessageGraphQuick(
 		return
 	}
 
-	// 6) 注入 per-request ChatModel + Retriever 节点选项
+	// 6) 注入 per-request ChatModel
 	graphCtx = withGraphChatModel(graphCtx, chatModel)
-	callOpts := quickRetrieverCallOpts(req, userID)
 
 	// 7) 生成助手消息 ID + 流式驱动 Graph 执行
 	assistantMsgID := uuid.New().String()
@@ -814,7 +788,7 @@ func (s *chatService) processMessageGraphQuick(
 	eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "start", MessageID: assistantMsgID})
 
 	fullContent, err := runQuickStream(
-		graphCtx, runnable, graphInput, callOpts,
+		graphCtx, runnable, graphInput,
 		eventCh, req.ModelID, assistantMsgID, s.obs,
 	)
 	if err != nil {
@@ -924,14 +898,13 @@ func runQuickStream(
 	graphCtx context.Context,
 	runnable einoCompose.Runnable[*quickGraphInput, *schema.StreamReader[*schema.Message]],
 	graphInput *quickGraphInput,
-	callOpts []einoCompose.Option,
 	eventCh chan<- dto.StreamEvent,
 	modelID, assistantMsgID string,
 	obs observability.Recorder,
 ) (string, error) {
 	sendProgressEvent(graphCtx, eventCh, "正在执行快速检索链路...")
 	t0 := time.Now()
-	reader, invErr := runnable.Invoke(graphCtx, graphInput, callOpts...)
+	reader, invErr := runnable.Invoke(graphCtx, graphInput)
 	obsObserve(graphCtx, obs, "chat_quick_graph_run_seconds", map[string]string{"model_id": modelID}, time.Since(t0).Seconds())
 	if invErr != nil {
 		sendErrorEvent(graphCtx, eventCh, invErr, "快速检索执行失败")
@@ -1003,13 +976,4 @@ func einoDocsToSourceInfos(docs []*schema.Document) []dto.SourceInfo {
 		ragDocs = append(ragDocs, rag.EinoDocToRagDoc(d))
 	}
 	return groupDocumentsToSources(ragDocs)
-}
-
-// ---------- 前向声明：可观测性 & 选项小工具（被上面拆分后的子函数调用） ----------
-
-// quickRetrieverCallOpts 现在返回 nil——Retrieve 节点已改为 LambdaNode，
-// retriever.Option 通过 buildRetrieverOpts 在 Lambda 内部直接构造。
-// 保留函数签名以减少调用处改动。
-func quickRetrieverCallOpts(_ requestdto.SendMessageRequest, _ string) []einoCompose.Option {
-	return nil
 }
