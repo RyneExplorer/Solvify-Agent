@@ -180,14 +180,6 @@ func (a *App) initDatabase() error {
 	return nil
 }
 
-// ensureStorageQuotaUniqueIndex 确保存储配额用户唯一索引存在
-func (a *App) ensureStorageQuotaUniqueIndex(db *gorm.DB) error {
-	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS storage_quotas_user_unique ON storage_quotas(user_id)").Error; err != nil {
-		return fmt.Errorf("创建存储配额用户唯一索引失败: %w", err)
-	}
-	return nil
-}
-
 const (
 	embeddingInMemCacheSize = 2048
 	embeddingRedisTTL       = 24 * time.Hour

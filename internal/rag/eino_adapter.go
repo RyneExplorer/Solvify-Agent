@@ -68,7 +68,7 @@ func WithKeywordQuery(q string) retriever.Option {
 }
 
 // EinoRetrieverAdapter 把项目内自研的 rag.Retriever 包装成 eino 的
-// components/retriever.Retriever 接口。现有 HybridRetriever/VectorRetriever
+// components/retriever.Retriever 接口。现有 HybridRetriever 及其装饰器链
 // 等内部检索逻辑完全不变，仅做输入/输出格式对齐，使上游（eino Graph、Agent、
 // 可观测性 callback）能按 eino 统一组件标准接入。
 type EinoRetrieverAdapter struct {

@@ -77,39 +77,6 @@ func Auth(revoker TokenRevoker) gin.HandlerFunc {
 	}
 }
 
-// OptionalAuth 可选 JWT 认证中间件
-func OptionalAuth(revoker TokenRevoker) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		token := ExtractToken(c)
-		if token == "" {
-			c.Next()
-			return
-		}
-
-		// 2. 请求携带有效 Token 时写入用户上下文，供列表/详情接口返回真实交互状态
-		// 3. 请求携带无效 Token 时也继续放行，由需要强登录的接口继续使用 Auth 严格拦截
-		if revoker != nil {
-			revoked, err := revoker.IsTokenRevoked(c.Request.Context(), token)
-			if err != nil || revoked {
-				c.Next()
-				return
-			}
-		}
-
-		claims, err := jwt.ParseToken(token)
-		if err != nil {
-			c.Next()
-			return
-		}
-
-		c.Set(ContextUserID, claims.GetUserID())
-		c.Set(ContextUsername, claims.GetUsername())
-		c.Set(ContextUserRole, claims.GetRole())
-		c.Set(ContextToken, token)
-		c.Next()
-	}
-}
-
 // ExtractToken 从请求中读取认证令牌
 func ExtractToken(c *gin.Context) string {
 	authHeader := c.GetHeader("Authorization")

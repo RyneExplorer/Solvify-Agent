@@ -489,19 +489,6 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 	return client, enhancedCtx, nil
 }
 
-// loadUserContext 加载用户基本信息，失败时返回空上下文（不阻断主流程）
-func (s *chatService) loadUserContext(ctx context.Context, userID string) UserContext {
-	if s.userRepo == nil || userID == "" {
-		return NewUserContext(entity.User{})
-	}
-	user, err := s.userRepo.FindByID(userID)
-	if err != nil {
-		logger.Warnf("加载用户信息失败, userID=%s: %v", userID, err)
-		return NewUserContext(entity.User{})
-	}
-	return NewUserContext(*user)
-}
-
 // resolveClient 根据模型配置解析 LLM 客户端
 func (s *chatService) resolveClient(ctx context.Context, userID, modelID, modelType string) (*llm.OpenAIClient, error) {
 	var cfg llm.ModelConfig
