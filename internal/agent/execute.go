@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -16,7 +15,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"solvify-agent/internal/model/entity"
-	"solvify-agent/internal/observability"
 	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
@@ -35,22 +33,6 @@ func (e *Engine) Execute(ctx context.Context, req Request, chatModel model.ToolC
 	return eventCh, nil
 }
 
-type agentStepTracker struct {
-	mu          sync.Mutex
-	stepIdx     int
-	pendingByID map[string]*agentStepPending
-	closed      bool
-}
-
-type agentStepPending struct {
-	StepIndex       int
-	TaskID          string
-	ThinkingSummary string
-	ToolName        string
-	ToolInputMasked string
-	StartedAt       time.Time
-}
-
 // isInternalToolName 判断工具名是否为内置工具
 // registry 里注册过的就是内置，否则是用户配置的
 func (e *Engine) isInternalToolName(name string) bool {
@@ -64,16 +46,7 @@ func (e *Engine) isInternalToolName(name string) bool {
 
 func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.ToolCallingChatModel, eventCh chan<- Event) {
 	obsOk := e.obs != nil
-	var tracker *agentStepTracker
-	taskID := ""
 	if obsOk {
-		taskID = observability.TraceIDFromContext(ctx)
-		if taskID == "" {
-			taskID = randomStr16()
-		}
-		tracker = &agentStepTracker{
-			pendingByID: make(map[string]*agentStepPending),
-		}
 		e.obs.Incr(ctx, "agent_engine_runs_total", nil, 1)
 	}
 
@@ -218,7 +191,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	})
 
 	// ── 执行：首次 Run 或带 ResumeData 的 Resume ──
-	e.runWithRunner(ctx, runner, checkpointID, inputMessages, req, ksToolForStream, toolDescMap, eventCh, tracker, taskID)
+	e.runWithRunner(ctx, runner, checkpointID, inputMessages, req, ksToolForStream, toolDescMap, eventCh)
 }
 
 func randomStr(n int) string {
@@ -232,8 +205,7 @@ func randomStr(n int) string {
 	return string(buf)
 }
 
-func randomStr16() string { return randomStr(16) }
-func randomStr8() string  { return randomStr(8) }
+func randomStr8() string { return randomStr(8) }
 
 func buildInputMessages(query string, history []entity.ChatMessage) []*schema.Message {
 	msgs := make([]*schema.Message, 0, len(history)+1)

@@ -31,8 +31,6 @@ func (e *Engine) runWithRunner(
 	ksTool *tool.KnowledgeSearchTool,
 	toolDescMap map[string]string,
 	eventCh chan<- Event,
-	tracker *agentStepTracker,
-	taskID string,
 ) {
 	var (
 		iter *adk.AsyncIterator[*adk.AgentEvent]
@@ -204,11 +202,6 @@ func (e *Engine) runWithRunner(
 	}
 	if len(sources) > 0 {
 		eventch.Send(ctx, eventCh, Event{Type: EventSources, Sources: sources})
-	}
-
-	// observability
-	if tracker != nil && taskID != "" && e.obs != nil {
-		// Runner 已经在内部处理了完整的 step tracker，这里兜底留空即可
 	}
 
 	// 清理本次运行产生的 checkpoint 字节行：
