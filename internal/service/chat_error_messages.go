@@ -1,6 +1,9 @@
 package service
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // ErrorMessage 用户友好的错误消息
 type ErrorMessage struct {
@@ -184,26 +187,30 @@ var errorMessages = map[string]ErrorMessage{
 	},
 }
 
-// getFriendlyError 获取用户友好的错误消息
-// 匹配顺序：先检查 err.Error()（底层错误详情，如 503/429），再检查 rawError（业务层自定义描述）
-// 这样像 "快速检索执行失败" 这种通用描述不会掩盖掉底层真正的错误原因
+// getFriendlyError 获取用户友好的错误消息。
+//
+// 匹配规则（两级，结果完全确定，不依赖 map 遍历顺序）：
+//  1. 底层错误详情优先：先在 err.Error() 里找命中，再在 rawError 里找。
+//     err.Error() 通常带着上游真实原因（503 / 429 / timeout），rawError 往往是我们自己的
+//     兜底话术（"LLM 调用失败"），让前者胜出才不会被后者掩盖；
+//  2. 同一片段内取最具体的命中：见 errorKeysBySpecificity。
+//
+// 旧实现直接 for range map 找第一个命中的 key，而 Go 的 map 遍历顺序是随机的：
+// 同一个错误在多次请求里会随机命中不同规则。典型如被包装成
+// "LLM 调用失败: 429 Too Many Requests" 的限流错误，可能命中 "429"、"Too Many Requests"
+// 或 "LLM 调用失败" 三条规则之一，用户看到的提示时好时坏 ——
+// 具体可操作的「请求过于频繁」会被随机替换成笼统的「AI 服务异常」。
 func getFriendlyError(err error, rawError string) ErrorMessage {
-	var combined strings.Builder
+	errText := ""
 	if err != nil {
-		combined.WriteString(err.Error())
+		errText = err.Error()
 	}
-	combined.WriteString("|")
-	combined.WriteString(rawError)
-	text := combined.String()
 
-	if msg, ok := errorMessages[text]; ok {
+	if msg, ok := matchErrorMessage(errText); ok {
 		return msg
 	}
-
-	for key, msg := range errorMessages {
-		if contains(text, key) {
-			return msg
-		}
+	if msg, ok := matchErrorMessage(rawError); ok {
+		return msg
 	}
 
 	return ErrorMessage{
@@ -213,16 +220,39 @@ func getFriendlyError(err error, rawError string) ErrorMessage {
 	}
 }
 
-// contains 检查字符串是否包含子串
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && len(substr) > 0 && containsSubstring(s, substr))
-}
-
-func containsSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
+// matchErrorMessage 在一个文本片段里找「最具体」的命中特征串，按
+// errorKeysBySpecificity 的顺序查找，先命中先返回。
+func matchErrorMessage(text string) (ErrorMessage, bool) {
+	if text == "" {
+		return ErrorMessage{}, false
+	}
+	for _, key := range errorKeysBySpecificity {
+		if strings.Contains(text, key) {
+			return errorMessages[key], true
 		}
 	}
-	return false
+	return ErrorMessage{}, false
+}
+
+// errorKeysBySpecificity 是 errorMessages 的 key 按「具体 → 通用」排好的查找顺序。
+//
+// 用 key 的字节长度作为具体程度的代理（UTF-8 下越长的特征串越具体，例如
+// "Too Many Requests" 比 "429" 具体、"Service Unavailable" 比 "超时" 具体），
+// 长度相同再按字典序，保证任何输入下命中的都是同一条规则。
+//
+// 该顺序由 errorMessages 派生，新增 key 时无需同步维护第二张表。
+var errorKeysBySpecificity = buildErrorKeysBySpecificity()
+
+func buildErrorKeysBySpecificity() []string {
+	keys := make([]string, 0, len(errorMessages))
+	for key := range errorMessages {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if len(keys[i]) != len(keys[j]) {
+			return len(keys[i]) > len(keys[j])
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
 }
