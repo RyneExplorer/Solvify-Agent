@@ -58,14 +58,18 @@ type quickGraphInput struct {
 // quickGraphState Graph Local State，通过 ProcessState 读写。
 type quickGraphState struct {
 	Input           *quickGraphInput
-	RewrittenQuery  string   // 改写后的查询，供 Retrieve / BuildMsgs 使用
+	RewrittenQuery  string   // 改写后的查询，供 BuildMsgs 替换用户消息使用
 	Intent          string   // greeting / chitchat / question / identity / meta
 	SkipRetrieve    bool     // Greeting/Chitchat 跳过知识库检索
 	NeedClarify     bool     // 意图不明确,需要用户澄清
 	ClarifyQuestion string   // 追问文本
 	ClarifyOptions  []string // 追问选项(可选)
 	Keywords        []string // 改写时提取的关键词，可用于日志/调试
-	RetrievedDocs   []*schema.Document
+	// VectorQuery 向量检索 query：当前问题 + 最近 1~2 轮用户提问（长 query）
+	VectorQuery string
+	// KeywordQuery 关键字检索 query：指代回填后的短句（关键字打分是命中率，分母=query 词项数）
+	KeywordQuery  string
+	RetrievedDocs []*schema.Document
 }
 
 // 查询改写意图类型
@@ -89,6 +93,14 @@ type rewriteResult struct {
 
 // rewriteMaxHistoryRounds 改写时拼入历史的最大轮数（每轮=user+assistant）
 const rewriteMaxHistoryRounds = 3
+
+// rewriteLLMTimeout 是「指代场景」下 LLM 改写的硬超时。
+//
+// 背景：线上日志里改写耗时 p50=1.87s / p90=10.0s / max=27.05s，而它的产出
+// 78% 只是确认本地默认意图、need_clarify 命中 0 次 —— 唯一的不可替代价值是消解指代。
+// 所以：只在含指代表达时才调 LLM，且给硬超时兜底（超时后检索 query 由本地实体回填提供，
+// 不会像改造前那样「白等满超时再 fallback」）。
+const rewriteLLMTimeout = 2 * time.Second
 
 // rewriteSystemPrompt 改写专用的 System Prompt
 const rewriteSystemPrompt = `你是一个查询改写助手。根据用户的原始问题和对话历史，对问题进行改写并识别意图。
@@ -206,8 +218,15 @@ func quickRewriteFn(ctx context.Context, input *quickGraphInput) (string, error)
 		clarifyQ = input.PreClarifyQuestion
 		clarifyO = input.PreClarifyOptions
 	} else {
-		rewritten, intent, keywords, skipRetrieve, needClarify, clarifyQ, clarifyO = doRewriteWithLLM(ctx, input)
+		// 防御性路径（Graph 被独立调用）：同样给 LLM 加硬超时，超时走本地 query。
+		llmCtx, cancel := context.WithTimeout(ctx, rewriteLLMTimeout)
+		defer cancel()
+		rewritten, intent, keywords, skipRetrieve, needClarify, clarifyQ, clarifyO = doRewriteWithLLM(llmCtx, input)
 	}
+
+	// 检索 query 双轨规划：本地规则，不依赖 LLM 结果是否可用。
+	// 向量侧吃「当前问题 + 最近几轮用户提问」，关键字侧吃「指代回填后的短句」。
+	queries := planQueriesFromInput(input, rewritten)
 
 	_ = einoCompose.ProcessState(ctx, func(_ context.Context, state *quickGraphState) error {
 		state.RewrittenQuery = rewritten
@@ -217,18 +236,23 @@ func quickRewriteFn(ctx context.Context, input *quickGraphInput) (string, error)
 		state.NeedClarify = needClarify
 		state.ClarifyQuestion = clarifyQ
 		state.ClarifyOptions = clarifyO
+		state.VectorQuery = queries.Vector
+		state.KeywordQuery = queries.Keyword
 		return nil
 	})
 
 	observability.SetSpanAttrs(ctx, observability.Attrs{
 		"original_query":  input.OriginalQuery,
 		"rewritten_query": rewritten,
+		"vector_query":    queries.Vector,
+		"keyword_query":   queries.Keyword,
 		"intent":          intent,
 		"skip_retrieve":   fmt.Sprintf("%v", skipRetrieve),
 		"need_clarify":    fmt.Sprintf("%v", needClarify),
 	})
 
-	return rewritten, nil
+	// 节点输出改为向量检索 query（Graph 边把它传给 Retrieve 节点）
+	return queries.Vector, nil
 }
 
 // matchLocalIntent 本地快速意图匹配（纯正则 + 关键词，0ms）。
@@ -308,7 +332,11 @@ func matchRegex(pattern string, q string) bool {
 // 返回 (rewritten, intent, keywords, skipRetrieve, needClarify, clarifyQuestion, clarifyOptions)
 //
 // 优化：先本地快速意图匹配（0ms，覆盖问候/身份/闲聊/系统查询等常见场景），
-// 命中后直接返回，省掉 LLM 调用。只有本地判定为 question 或不确定时才调 LLM。
+// 命中后直接返回，省掉 LLM 调用。本地没命中时再判一次「有没有必要调 LLM」：
+// 只有问题里含真实指代表达时才调 —— 见 hasAnaphora 与 rewriteLLMTimeout 的说明。
+//
+// 检索 query 已经与这里解耦（见 retrieval_query.go），所以即使本函数走本地短路，
+// 检索侧依然拿得到上下文相关的 query。
 func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) (string, string, []string, bool, bool, string, []string) {
 	// ── Step 0: 本地快速意图匹配（0ms） ──
 	if localIntent, ok := matchLocalIntent(input.OriginalQuery); ok {
@@ -318,7 +346,21 @@ func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) (string, stri
 		return input.OriginalQuery, localIntent, nil, skip, false, "", nil
 	}
 
-	// ── Step 1: 本地没命中 → 调 LLM ──
+	// ── Step 1: 无指代 → 用本地默认意图，不调 LLM ──
+	// 依据（线上日志实测，36 个快速模式样本）：
+	//   - 23 次真调 LLM 中 18 次（78%）返回默认意图 question，等于白调；
+	//   - need_clarify 命中 0 次；
+	//   - keywords 字段下游从未消费（只写进 state.Keywords 打日志）。
+	// 因此「无指代」时 LLM 没有不可替代的产出，直接判定为 question。
+	// 代价：本地正则漏掉的闲聊/元问题（约 22%）会多跑一次检索（p50≈1s），
+	// 但生成侧有完整 history，回答质量不受影响。
+	if !hasAnaphora(input.OriginalQuery) {
+		logger.Infof("[意图识别-跳过大模型] original=%q → intent=%s（无疑义词，检索 query 已由本地规划）cost=0ms",
+			input.OriginalQuery, intentQuestion)
+		return input.OriginalQuery, intentQuestion, nil, false, false, "", nil
+	}
+
+	// ── Step 2: 有指代 → 调 LLM（消解指代是它不可替代的能力） ──
 	cm, ok := graphChatModelFromContext(ctx)
 	if !ok || cm == nil {
 		logger.Warnf("quickRewriteFn: context 中没有 ChatModel，跳过改写")
@@ -342,10 +384,10 @@ func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) (string, stri
 		schema.UserMessage(userContent.String()),
 	}
 
-	// 4. 同步调 Generate（改写不需要流式）
+	// 4. 同步调 Generate（改写不需要流式）。ctx 由调用方带硬超时。
 	msg, err := cm.Generate(ctx, msgs)
 	if err != nil || msg == nil || msg.Content == "" {
-		logger.Warnf("quickRewriteFn: LLM 改写失败，fallback 原始 query: err=%v", err)
+		logger.Warnf("quickRewriteFn: LLM 改写失败/超时（%v），fallback 到原问题；检索 query 走本地实体回填", err)
 		return input.OriginalQuery, intentQuestion, nil, false, false, "", nil
 	}
 
@@ -436,6 +478,8 @@ func buildRewriteHistory(msgs []*schema.Message, currentUserMsgIdx, maxRounds in
 // 用 LambdaNode 替代 AddRetrieverNode，在 Lambda 内部提前检查 SkipRetrieve / NeedClarify，
 // 避免 EinoRetrieverAdapter 被实例化后才被 PostHandler 清空——那样知识库查询的开销已经花出去了。
 // QueryRewrite 已经同步完成，Retrieve 直接用改写后的 query（或原始 query）查一次即可，不再做并行改写等待。
+//
+// query 入参是「向量检索 query」（改写节点输出）；关键字检索 query 通过 retriever option 单独传入。
 func addQuickRetrieveNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamReader[*schema.Message]], einoRetriever *rag.EinoRetrieverAdapter) error {
 	return g.AddLambdaNode(graphQuickNodeRetrieve,
 		einoCompose.InvokableLambda(func(ctx context.Context, query string) ([]*schema.Document, error) {
@@ -453,8 +497,8 @@ func addQuickRetrieveNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamR
 				return nil, nil
 			}
 
-			// 构造 retriever.Option（KBIDs / UserID / TopK）
-			opts := buildRetrieverOpts(state.Input)
+			// 构造 retriever.Option（KBIDs / UserID / TopK / 关键字侧短 query）
+			opts := buildRetrieverOpts(state.Input, state.KeywordQuery)
 
 			docs, err := einoRetriever.Retrieve(ctx, query, opts...)
 			if err != nil {
@@ -471,7 +515,8 @@ func addQuickRetrieveNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamR
 
 // buildRetrieverOpts 从 quickGraphInput 构造 retriever.Option 切片，
 // 替代之前 quickRetrieverCallOpts 通过 einoCompose.WithRetrieverOption 注入的方式。
-func buildRetrieverOpts(input *quickGraphInput) []retriever.Option {
+// keywordQuery 非空时，关键字侧改用它而不是公共 query。
+func buildRetrieverOpts(input *quickGraphInput, keywordQuery string) []retriever.Option {
 	var opts []retriever.Option
 	if input != nil {
 		if len(input.KnowledgeBaseIDs) > 0 {
@@ -480,6 +525,9 @@ func buildRetrieverOpts(input *quickGraphInput) []retriever.Option {
 		if input.UserID != "" {
 			opts = append(opts, rag.WithUserID(input.UserID))
 		}
+	}
+	if strings.TrimSpace(keywordQuery) != "" {
+		opts = append(opts, rag.WithKeywordQuery(keywordQuery))
 	}
 	if cfg := config.Get(); cfg != nil && cfg.RAG.TopK > 0 {
 		opts = append(opts, retriever.WithTopK(cfg.RAG.TopK))
@@ -698,10 +746,13 @@ func (s *chatService) processMessageGraphQuick(
 	// 2~3) 组装 Graph Input：System Prompt / History / 模型名 / 检索预算
 	graphInput := buildQuickInput(req, userID, userMsgID, enhancedCtx, client)
 
-	// 3.5) 预执行 Rewrite + 澄清检查：needClarify=true 时短路返回，不浪费后续节点
+	// 3.5) 预执行 Rewrite + 澄清检查：needClarify=true 时短路返回，不浪费后续节点。
+	// 硬超时兜底：即使 LLM 卡住，最多等 rewriteLLMTimeout 就带着本地检索 query 继续。
 	rewriteCheckCtx := withGraphChatModel(ctx, chatModel)
+	rewriteCtx, cancelRewrite := context.WithTimeout(rewriteCheckCtx, rewriteLLMTimeout)
 	rewriteStart := time.Now()
-	rewritten, intent, keywords, skipRetrieve, needClarify, clarifyQuestion, clarifyOptions := doRewriteWithLLM(rewriteCheckCtx, graphInput)
+	rewritten, intent, keywords, skipRetrieve, needClarify, clarifyQuestion, clarifyOptions := doRewriteWithLLM(rewriteCtx, graphInput)
+	cancelRewrite()
 	logger.Infof("[意图识别] original=%q → intent=%s, skipRetrieve=%v, needClarify=%v, rewritten=%q, keywords=%v, cost=%dms",
 		req.Content, intent, skipRetrieve, needClarify, rewritten, keywords, time.Since(rewriteStart).Milliseconds())
 

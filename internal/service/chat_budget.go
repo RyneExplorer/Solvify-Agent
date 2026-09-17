@@ -5,6 +5,13 @@ import (
 	"solvify-agent/pkg/tokenutil"
 )
 
+// truncationMarker 是上下文预算裁剪时追加在消息末尾的标记。
+//
+// 它描述的是「预算不够、这条消息被裁过」这件事，不是用户原始内容。
+// 任何二次消费历史文本的地方（例如构造检索 query、抽实体）都必须先剥掉它，
+// 否则标记里的「内容/过长/截断」会被当成正文词汇混进检索条件 —— 见 stripTruncationMarker。
+const truncationMarker = "\n\n（内容过长，已截断）"
+
 // calculateContextBudgets 根据模型最大上下文窗口 + 工具定义占用，分配历史、检索、记忆的 token 预算。
 //
 // P0-④ 关键修复：toolsTokens (深度模式/多工具场景的工具 JSON Schema 真 token 数) 必须先从总窗口
@@ -151,7 +158,7 @@ func truncateHistoryByTokens(messages []entity.ChatMessage, maxTokens int, model
 				m := messages[u]
 				cut, actual := truncateContentHeadByTokens(m.Content, modelName, remain)
 				if actual > 0 {
-					m.Content = cut + "\n\n（内容过长，已截断）"
+					m.Content = cut + truncationMarker
 					pairs = append(pairs, []entity.ChatMessage{m})
 				}
 			}

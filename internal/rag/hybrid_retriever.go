@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/go-ego/gse"
 	"gorm.io/gorm"
@@ -127,7 +128,8 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 		topK = 5
 	}
 
-	logger.Infof("混合检索开始: query=%q, topK=%d, knowledgeBaseIDs=%v", query.Question, topK, query.KnowledgeBaseIDs)
+	logger.Infof("混合检索开始: vectorQuery=%q, keywordQuery=%q, topK=%d, knowledgeBaseIDs=%v",
+		query.Question, query.keywordQueryText(), topK, query.KnowledgeBaseIDs)
 
 	// 并行执行向量检索和关键词检索
 	type vectorResult struct {
@@ -290,8 +292,16 @@ func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scor
 // keywordSearch 执行关键词检索
 // 优化：GIN 索引加速 && overlap 过滤（主收益），unnest 仅对过滤后的少量行计算分数
 // 也去掉了 LEFT JOIN documents，title 在主查询完成后批量填
+//
+// 打分口径（注意不是 BM25）：score = COUNT(chunk 关键词 ∩ query 词项) / cardinality(query 词项)，
+// 即「这条 chunk 覆盖了 query 的多少比例」—— 没有词频、没有 IDF、没有 chunk 长度归一化。
+// 分母完全由 query 决定，所以 query 越长，所有候选的分数被同一比例压得越低；
+// 而 vector 全灭时才启用的 keywordScoreThreshold（默认 0.25）会把这些被压低的候选成片滤掉。
+//
+// 因此 query 文本取 keywordQueryText()：调用方（快速模式）传「实体回填后的短 query」，
+// 避免把最近几轮用户提问拼进来抬高分母、把排序拉向历史话题。
 func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]scoredChunk, error) {
-	keywords := extractKeywords(query.Question)
+	keywords := extractKeywords(query.keywordQueryText())
 	if len(keywords) == 0 {
 		return nil, nil
 	}
@@ -344,7 +354,27 @@ func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]sco
 	return filtered, nil
 }
 
+// ExtractKeywords 用与关键词检索完全一致的分词 + 停用词口径从文本中提取词项。
+// 供上层（service 层构造检索 query、做实体回填）复用，保证「规划出的词」
+// 与「实际参与关键字匹配的词」是同一套口径。
+func ExtractKeywords(text string) []string {
+	return extractKeywords(text)
+}
+
 // extractKeywords 使用 gse 分词提取关键词，过滤停用词
+//
+// 长度要求「≥2 个字符」（按 rune 算，不是按字节）。这不是排版偏好，而是由检索的打分口径决定的：
+// keywordSearch 的分数是「这条 chunk 覆盖了 query 的多少比例」——
+//
+//	score = COUNT(chunk 关键词 ∩ query 词项) / cardinality(query 词项)
+//
+// 而 chunk 侧的关键词只有两类来源（见 document_chunk_service.extractKeywords）：
+// 中文 2~12 字 ngram、英文/数字 `[A-Za-z0-9_./:-]{2,64}` —— **不存在单字符词条**
+// （实测：全表 171 个 chunk、3286 个词条里长度=1 的有 0 个）。
+// 所以单字符 query 词项（「分」「能」「做」「里」「层」这类由分词切出来的字）
+// 分子恒为 0，却照样占一个分母：纯噪声，只会把所有候选分数一起压低，
+// 在 keywordScoreThreshold 兜底过滤下甚至能把结果全滤光。故直接丢弃。
+// 纯标点（“？”、“，”）同理，用 hasWordChar 兜住。
 func extractKeywords(question string) []string {
 	seg := getSegmenter()
 	words := seg.Cut(question, true)
@@ -353,7 +383,10 @@ func extractKeywords(question string) []string {
 	seen := make(map[string]bool)
 	for _, w := range words {
 		w = strings.ToLower(strings.TrimSpace(w))
-		if w == "" || len(w) < 2 {
+		if w == "" || len([]rune(w)) < 2 {
+			continue
+		}
+		if !hasWordChar(w) {
 			continue
 		}
 		if stopwords.IsStopWord(w) {
@@ -366,6 +399,16 @@ func extractKeywords(question string) []string {
 		keywords = append(keywords, w)
 	}
 	return keywords
+}
+
+// hasWordChar 判断词项里是否含字母或数字（纯标点/空白/换行的词项对检索无意义）。
+func hasWordChar(s string) bool {
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // batchFillTitles 对检索结果批量填充文档标题。
