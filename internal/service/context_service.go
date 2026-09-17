@@ -11,7 +11,6 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
-	"solvify-agent/internal/llm"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/observability"
 	"solvify-agent/internal/rag"
@@ -21,40 +20,28 @@ import (
 )
 
 // contextService 上下文管理服务实现
-
 type contextService struct {
 	messageRepo repository.ChatMessageRepo
 	memoryRepo  repository.UserMemoryRepo
 	summaryRepo repository.SummaryRepo
 	obs         observability.Recorder
-	embedClient *llm.EmbeddingClient
-// NewContextService 创建上下文管理服务
 }
 
+// NewContextService 创建上下文管理服务。
+// obs 由可变参数改为显式参数：变参形式漏传（或传 nil）时不会报错，
+// 只会在运行时静默失去上下文构建的链路埋点。
 func NewContextService(
 	messageRepo repository.ChatMessageRepo,
 	memoryRepo repository.UserMemoryRepo,
 	summaryRepo repository.SummaryRepo,
-	obs ...observability.Recorder,
+	obs observability.Recorder,
 ) ContextServiceInterface {
-	s := &contextService{
+	return &contextService{
 		messageRepo: messageRepo,
 		memoryRepo:  memoryRepo,
 		summaryRepo: summaryRepo,
+		obs:         obs,
 	}
-	if len(obs) > 0 && obs[0] != nil {
-		s.obs = obs[0]
-	}
-	return s
-}
-
-// SetObservability 注入可观测性记录器
-func (s *contextService) SetObservability(obs observability.Recorder) {
-	s.obs = obs
-}
-// SetEmbedClient 注入向量客户端，用于语义相关历史检索
-func (s *contextService) SetEmbedClient(client *llm.EmbeddingClient) {
-	s.embedClient = client
 }
 
 // BuildContext 构建增强后的对话上下文
@@ -181,8 +168,8 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 		RetrievalBudget: cfg.RetrievalBudget,
 	}, nil
 }
-// SummarizeSession 对会话生成或更新摘要
 
+// SummarizeSession 对会话生成或更新摘要
 func (s *contextService) SummarizeSession(ctx context.Context, sessionID string, chatModel model.BaseChatModel) (summary *entity.ChatSummary, retErr error) {
 	if s == nil {
 		return nil, nil
@@ -286,9 +273,9 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 	obsIncr(ctx, s.obs, "ctx_summary_updates_total", nil, 1)
 
 	return newSummary, nil
-// ExtractMemories 从消息中提取用户长期记忆
 }
 
+// ExtractMemories 从消息中提取用户长期记忆
 func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID string, messages []entity.ChatMessage, chatModel model.BaseChatModel) (memories []entity.UserMemory, retErr error) {
 	if s == nil {
 		return nil, nil

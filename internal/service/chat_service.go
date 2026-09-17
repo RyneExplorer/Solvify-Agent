@@ -47,7 +47,10 @@ type chatService struct {
 	embedClient         *llm.EmbeddingClient
 }
 
-// NewChatService 创建聊天业务服务
+// NewChatService 创建聊天业务服务。
+//
+// 依赖全部显式声明：旧版本把 obs/obsRepo 塞在 extra ...interface{} 里再靠类型 switch
+// 分派，漏传或传错类型都不会报错，只会在运行时静默丢链路（s.obs == nil）。
 func NewChatService(
 	sessionRepo repository.ChatSessionRepo,
 	messageRepo repository.ChatMessageRepo,
@@ -59,13 +62,14 @@ func NewChatService(
 	agentEngine *agent.Engine,
 	contextSvc ContextServiceInterface,
 	prefSvc UserPreferenceService,
-	extra ...interface{},
+	obs observability.Recorder,
+	obsRepo repository.ObservabilityRepo,
 ) ChatServiceInterface {
 	defaultTopK := 10
 	if cfg := config.Get(); cfg != nil && cfg.RAG.TopK > 0 {
 		defaultTopK = cfg.RAG.TopK
 	}
-	s := &chatService{
+	return &chatService{
 		sessionRepo:         sessionRepo,
 		messageRepo:         messageRepo,
 		retriever:           retriever,
@@ -77,22 +81,9 @@ func NewChatService(
 		agentEngine:         agentEngine,
 		contextSvc:          contextSvc,
 		prefSvc:             prefSvc,
+		obs:                 obs,
+		obsRepo:             obsRepo,
 	}
-	for _, it := range extra {
-		switch v := it.(type) {
-		case observability.Recorder:
-			s.obs = v
-		case repository.ObservabilityRepo:
-			s.obsRepo = v
-		}
-	}
-	return s
-}
-
-// SetObservability 注入可观测性记录器和仓储
-func (s *chatService) SetObservability(obs observability.Recorder, repo repository.ObservabilityRepo) {
-	s.obs = obs
-	s.obsRepo = repo
 }
 
 // SendMessage 发送消息并获取流式响应
