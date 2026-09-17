@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -15,14 +14,12 @@ import (
 	"solvify-agent/internal/llm"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/observability"
+	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/logger"
-	"solvify-agent/pkg/stopwords"
 	"solvify-agent/pkg/tokenutil"
 )
 
-// tokenRegexp 用于切分中英文关键词的正则
-var tokenRegexp = regexp.MustCompile(`[\x{4e00}-\x{9fff}]+|[a-zA-Z0-9]+`)
 // contextService 上下文管理服务实现
 
 type contextService struct {
@@ -501,58 +498,25 @@ func buildDialogueText(messages []entity.ChatMessage) string {
 	return sb.String()
 }
 
-// extractKeywords 从查询中提取关键词，过滤停用词
+// maxHistoryKeywords 「相关历史」通道最多使用的关键词条数：每个词项都会变成一个 ILIKE 条件
+const maxHistoryKeywords = 5
+
+// extractKeywords 提取「相关历史」通道用的关键词。
+//
+// 必须复用 rag.ExtractKeywords（gse 分词），不要在这里另写一套切词规则：
+// 旧实现用 tokenRegexp = [\x{4e00}-\x{9fff}]+ 切分，会把一整段连续中文当成**一个**词项，
+// 于是 SearchRecentByKeywords 真正执行的是 content ILIKE '%那网络安全这块你们是怎么做的%'
+// —— 历史消息里不可能出现这么长的整串，一条都匹配不上，「相关历史」通道等于空转；
+// gse 切出的短词（"网络安全"）才可能命中。
+//
+// 第二个理由是口径统一：调用方通过 cfg.PreExtractedKeywords 传进来的那条快路径，
+// 本来就是 rag.ExtractKeywords 的产物。两条路径同源，行为才不会随「传没传」而变。
 func extractKeywords(query string) []string {
-	parts := tokenRegexp.FindAllString(query, -1)
-
-	seen := make(map[string]struct{})
-	var keywords []string
-	for _, p := range parts {
-		p = strings.TrimSpace(strings.ToLower(p))
-		if p == "" {
-			continue
-		}
-		if stopwords.IsStopWord(p) {
-			continue
-		}
-		if len([]rune(p)) < 2 {
-			continue
-		}
-		if isChineseString(p) && allRunesAreStopWord(p) {
-			continue
-		}
-		if _, ok := seen[p]; ok {
-			continue
-		}
-		seen[p] = struct{}{}
-		keywords = append(keywords, p)
-	}
-
-	// 最多返回 5 个关键词
-	if len(keywords) > 5 {
-		keywords = keywords[:5]
+	keywords := rag.ExtractKeywords(query)
+	if len(keywords) > maxHistoryKeywords {
+		keywords = keywords[:maxHistoryKeywords]
 	}
 	return keywords
-}
-
-// isChineseString 判断字符串是否全部由中文组成
-func isChineseString(s string) bool {
-	for _, r := range s {
-		if r < '\u4e00' || r > '\u9fff' {
-			return false
-		}
-	}
-	return true
-}
-
-// allRunesAreStopWord 判断字符串中每个 rune（单字）是否都是停用词
-func allRunesAreStopWord(s string) bool {
-	for _, r := range s {
-		if !stopwords.IsStopWord(string(r)) {
-			return false
-		}
-	}
-	return true
 }
 
 // truncateMemoriesByTokens 按真 BPE token 预算截断记忆，优先保留"重要度+更新时间"综合靠前的。
