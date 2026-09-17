@@ -62,6 +62,7 @@ type documentService struct {
 	documentVersionRepo repository.DocumentVersionRepository
 	documentJobRepo     repository.DocumentProcessingJobRepository
 	storageQuotaRepo    repository.StorageQuotaRepository
+	chunkRepo           repository.DocumentChunkRepository
 	chunkService        DocumentChunkServiceInterface
 	textExtractor       documentparser.TextExtractor
 	uploadRoot          string
@@ -74,6 +75,7 @@ func NewDocumentServiceWithChunkService(
 	documentVersionRepo repository.DocumentVersionRepository,
 	documentJobRepo repository.DocumentProcessingJobRepository,
 	storageQuotaRepo repository.StorageQuotaRepository,
+	chunkRepo repository.DocumentChunkRepository,
 	chunkService DocumentChunkServiceInterface,
 	textExtractor documentparser.TextExtractor,
 	uploadRoot string,
@@ -84,6 +86,7 @@ func NewDocumentServiceWithChunkService(
 		documentVersionRepo: documentVersionRepo,
 		documentJobRepo:     documentJobRepo,
 		storageQuotaRepo:    storageQuotaRepo,
+		chunkRepo:           chunkRepo,
 		chunkService:        chunkService,
 		textExtractor:       textExtractor,
 		uploadRoot:          uploadRoot,
@@ -851,4 +854,24 @@ func documentVersionDetailResponse(version entity.DocumentVersion) dto.DocumentV
 		ChangeSummary: version.ChangeSummary,
 		CreatedAt:     version.CreatedAt,
 	}
+}
+
+// ChunkDetail 查询 chunk 详情（用于引用预览）
+func (s *documentService) ChunkDetail(ctx context.Context, userID, chunkID string) (dto.ChunkDetailResponse, error) {
+	chunk, found, err := s.chunkRepo.FindByID(ctx, userID, chunkID)
+	if err != nil {
+		return dto.ChunkDetailResponse{}, apperrors.New(apperrors.CodeInternalError, "查询 chunk 失败")
+	}
+	if !found {
+		return dto.ChunkDetailResponse{}, apperrors.New(apperrors.CodeNotFound, "chunk 不存在")
+	}
+	return dto.ChunkDetailResponse{
+		ID:                chunk.ID,
+		Content:           chunk.Content,
+		SectionTitle:      chunk.SectionTitle,
+		DocumentID:        chunk.DocumentID,
+		KnowledgeBaseID:   chunk.KnowledgeBaseID,
+		DocumentTitle:     chunk.DocumentTitle,
+		KnowledgeBaseName: chunk.KnowledgeBaseName,
+	}, nil
 }

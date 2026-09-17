@@ -25,6 +25,17 @@ type DocumentResponse struct {
 	DeleteExpiredAt *time.Time `json:"delete_expired_at"`
 }
 
+// ChunkDetailResponse 描述 chunk 详情（用于引用预览）
+type ChunkDetailResponse struct {
+	ID                string `json:"id"`
+	Content           string `json:"content"`
+	SectionTitle      string `json:"section_title"`
+	DocumentID        string `json:"document_id"`
+	KnowledgeBaseID   string `json:"knowledge_base_id"`
+	DocumentTitle     string `json:"document_title"`
+	KnowledgeBaseName string `json:"knowledge_base_name"`
+}
+
 // UploadDocumentResponse 描述文档上传并触发处理响应
 type UploadDocumentResponse struct {
 	Document DocumentResponse              `json:"document"`

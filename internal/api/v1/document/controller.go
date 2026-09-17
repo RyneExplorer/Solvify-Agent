@@ -10,7 +10,6 @@ import (
 	"solvify-agent/internal/api/v1/shared"
 	"solvify-agent/internal/middleware"
 	requestdto "solvify-agent/internal/model/dto/request"
-	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
 )
@@ -18,12 +17,11 @@ import (
 // Controller 处理文档模块请求
 type Controller struct {
 	documentService service.DocumentServiceInterface
-	chunkRepo       repository.DocumentChunkRepository
 }
 
 // NewController 创建文档控制器
-func NewController(documentService service.DocumentServiceInterface, chunkRepo repository.DocumentChunkRepository) *Controller {
-	return &Controller{documentService: documentService, chunkRepo: chunkRepo}
+func NewController(documentService service.DocumentServiceInterface) *Controller {
+	return &Controller{documentService: documentService}
 }
 
 // Upload 上传文档到指定知识库
@@ -260,23 +258,10 @@ func (ctrl *Controller) ChunkDetail(c *gin.Context) {
 		return
 	}
 
-	chunk, found, err := ctrl.chunkRepo.FindByID(c.Request.Context(), userID, chunkID)
+	output, err := ctrl.documentService.ChunkDetail(c.Request.Context(), userID, chunkID)
 	if err != nil {
-		response.InternalError(c, "查询 chunk 失败")
+		response.BizError(c, err)
 		return
 	}
-	if !found {
-		response.NotFound(c, "chunk 不存在")
-		return
-	}
-
-	response.Success(c, gin.H{
-		"id":                  chunk.ID,
-		"content":             chunk.Content,
-		"section_title":       chunk.SectionTitle,
-		"document_id":         chunk.DocumentID,
-		"knowledge_base_id":   chunk.KnowledgeBaseID,
-		"document_title":      chunk.DocumentTitle,
-		"knowledge_base_name": chunk.KnowledgeBaseName,
-	})
+	response.Success(c, output)
 }

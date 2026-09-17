@@ -504,7 +504,7 @@ func (a *App) initDependencies() {
 		ScriptPath:     a.cfg.DocumentParser.ScriptPath,
 		TimeoutSeconds: a.cfg.DocumentParser.TimeoutSeconds,
 	})
-	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentVersionRepo, documentJobRepo, storageQuotaRepo, documentChunkSvc, textExtractor, "data/uploads")
+	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentVersionRepo, documentJobRepo, storageQuotaRepo, chunkRepo, documentChunkSvc, textExtractor, "data/uploads")
 	dingtalkClient := dingtalk.NewClient(a.cfg.DingTalk)
 	dingtalkStateCache := cache.New(a.redis, "dingtalk:oauth:state:", 10*time.Minute)
 	dingtalkSvc := service.NewDingTalkService(a.cfg.DingTalk, dingtalkBindingRepo, dingtalkStateCache, dingtalkClient)
@@ -533,7 +533,6 @@ func (a *App) initDependencies() {
 		chatSvc,
 		syncSvc,
 		dingtalkSvc,
-		chunkRepo,
 		toolTypeService,
 		toolProviderService,
 		userToolConfigService,

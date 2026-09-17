@@ -20,7 +20,6 @@ import (
 	"solvify-agent/internal/api/v1/user"
 	usermodelconfigapi "solvify-agent/internal/api/v1/user_model_config"
 	"solvify-agent/internal/middleware"
-	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/response"
 )
@@ -58,7 +57,6 @@ func NewRouter(
 	chatSvc service.ChatServiceInterface,
 	syncSvc service.SyncServiceInterface,
 	dingtalkSvc service.DingTalkServiceInterface,
-	chunkRepo repository.DocumentChunkRepository,
 	toolTypeService service.ToolTypeService,
 	toolProviderService service.ToolProviderService,
 	userToolConfigService service.UserToolConfigService,
@@ -72,7 +70,7 @@ func NewRouter(
 		modelCtrl:         model.NewController(modelService),
 		userModelCtrl:     usermodelconfigapi.NewController(userModelConfigService),
 		knowledgeBaseCtrl: knowledgebase.NewController(knowledgeBaseSvc),
-		documentCtrl:      document.NewController(documentSvc, chunkRepo),
+		documentCtrl:      document.NewController(documentSvc),
 		storageCtrl:       storage.NewController(storageSvc),
 		syncCtrl:          syncapi.NewController(syncSvc),
 		dingtalkCtrl:      dingtalkapi.NewController(dingtalkSvc),
