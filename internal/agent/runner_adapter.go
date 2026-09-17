@@ -381,38 +381,46 @@ func mapKeys(m map[string]any) []string {
 	return out
 }
 
-// collectSources 从 KnowledgeSearchTool.CollectedSources 转换成 response.SourceInfo
+// collectSources 从 KnowledgeSearchTool.CollectedSources 转换成 response.SourceInfo。
+//
+// 分组口径与 chat_service_mapper.go 的 groupDocumentsToSources 保持一致，两条关键规则：
+//  1. 按 DocumentID 分组，不按 Title。同一份文档通常会命中多个 chunk 需要并成一条来源；
+//     但不同文档完全可能同名（附件默认标题、重名文件），按 Title 分组会把两份不同文档
+//     并成一条，并让后者的 chunk 挂到前者的 documentID 上 —— 前端点击引用会跳到错的文档。
+//  2. 用 docOrder 记录首次出现顺序。直接遍历 map 会打乱来源顺序，而该顺序即检索的
+//     相似度顺序，打乱后用户每次看到的引用列表顺序都不一样。
 func collectSources(sources []tool.SourceDocument) []response.SourceInfo {
 	if len(sources) == 0 {
 		return nil
 	}
-	type docInfo struct {
-		documentID      string
-		knowledgeBaseID string
-		chunks          []response.ChunkSource
-	}
-	docMap := make(map[string]*docInfo)
+
+	docMap := make(map[string]*response.SourceInfo, len(sources))
+	docOrder := make([]string, 0, len(sources))
 	for _, src := range sources {
-		if _, exists := docMap[src.Title]; !exists {
-			docMap[src.Title] = &docInfo{
-				documentID:      src.DocumentID,
-				knowledgeBaseID: src.KnowledgeBaseID,
+		info, exists := docMap[src.DocumentID]
+		if !exists {
+			info = &response.SourceInfo{
+				DocumentID:      src.DocumentID,
+				KnowledgeBaseID: src.KnowledgeBaseID,
+				Title:           src.Title,
 			}
+			docMap[src.DocumentID] = info
+			docOrder = append(docOrder, src.DocumentID)
 		}
-		docMap[src.Title].chunks = append(docMap[src.Title].chunks, response.ChunkSource{
+		info.Chunks = append(info.Chunks, response.ChunkSource{
 			ID:      src.ID,
 			Content: src.Content,
 			Score:   src.Score,
 		})
+		// 文档级 score 取命中的最高分 chunk：来源列表按该分值展示相关度
+		if src.Score > info.Score {
+			info.Score = src.Score
+		}
 	}
-	result := make([]response.SourceInfo, 0, len(docMap))
-	for title, info := range docMap {
-		result = append(result, response.SourceInfo{
-			DocumentID:      info.documentID,
-			KnowledgeBaseID: info.knowledgeBaseID,
-			Title:           title,
-			Chunks:          info.chunks,
-		})
+
+	result := make([]response.SourceInfo, 0, len(docOrder))
+	for _, docID := range docOrder {
+		result = append(result, *docMap[docID])
 	}
 	return result
 }
