@@ -189,6 +189,14 @@ func (s *modelService) Test(ctx context.Context, req requestdto.TestModelRequest
 	}, nil
 }
 
+// toModelInfo 把系统模型实体转为响应 DTO。
+//
+// 注意 APIKey 走 maskAPIKey 脱敏：系统模型是平台级共享凭据（所有用户共用一个上游密钥），
+// 原样返回意味着任意登录用户 GET /api/v1/models 就能拿到 OpenAI / DeepSeek 等全部上游
+// 密钥并盗用配额，密钥还会顺带进入浏览器内存、前端缓存与反向代理响应日志。
+//
+// 内部解析凭据不经过本函数（chat_service 直接用 modelRepo 取 entity），故脱敏无副作用；
+// 管理台也从不回读密钥（AdminPage 编辑时提交空 api_key，服务端保持原值）。
 func toModelInfo(m entity.Model) responsedto.ModelInfo {
 	return responsedto.ModelInfo{
 		ID:               m.ID,
@@ -196,7 +204,7 @@ func toModelInfo(m entity.Model) responsedto.ModelInfo {
 		Provider:         m.Provider,
 		ModelID:          m.ModelID,
 		BaseURL:          m.BaseURL,
-		APIKey:           m.APIKey,
+		APIKey:           maskAPIKey(m.APIKey),
 		IsEnabled:        m.IsEnabled,
 		MaxContextLength: m.MaxContextLength,
 	}
