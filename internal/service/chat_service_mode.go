@@ -272,7 +272,16 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		}
 		return
 	}
-	if fullContent == "" && len(reasoningSteps) == 0 {
+	// 空回答守卫（与快速模式共用 rejectEmptyAnswer，口径一致）。
+	//
+	// 旧实现这里是裸 return：不落库，但也不发任何终态事件，SSE 流就此断掉，
+	// 前端只收到 start 和中间事件、永远等不到 done 或 error，只能一直停在「正在生成」。
+	// 更糟的是原条件里的 len(reasoningSteps) == 0 —— 「有推理步骤但没正文」的空回答
+	// 会直接穿过该分支，被下面的 emitDoneAndSave 当成功收尾：用户看到空白气泡，
+	// 且空 assistant 消息进入后续 history（部分厂商对空 content 直接 400），
+	// 一次空回答污染该会话之后每一轮。
+	if rejectEmptyAnswer(ctx, eventCh, s.obs, "deep", sessionID, req.ModelID, assistantMsgID,
+		fullContent, fmt.Sprintf("sources=%d, steps=%d", len(agentSources), len(reasoningSteps))) {
 		return
 	}
 

@@ -81,12 +81,6 @@ const (
 	intentMeta     = "meta"     // 元问题（我的历史记录、你刚才说了什么）
 )
 
-// errEmptyAnswer 是「上游成功返回、但内容为空」的哨兵错误。
-//
-// 单独定义而非就地 errors.New：空回答要能被识别成一个明确的可重试失败 ——
-// 既用于可观测性打点，也用于测试断言（errors.Is），避免与"真·执行错误"混在一处判断。
-var errEmptyAnswer = errors.New("模型未返回任何内容")
-
 // rewriteResult LLM 返回的 JSON 解析结果
 type rewriteResult struct {
 	Rewritten       string   `json:"rewritten"`
@@ -829,23 +823,11 @@ func (s *chatService) processMessageGraphQuick(
 	}
 
 	// 空回答守卫：上游（尤其 OpenAI 兼容网关）会偶发返回「成功但 content 为空」。
-	// 不拦的话这里会照发 done 并把空 assistant 消息落库，造成两个后果：
-	//  1. 用户看到空白气泡（前端把 done 当成正常收尾）；
-	//  2. 空消息进入后续 history（AssistantMessage("")），部分厂商对空 content 直接返回 400，
-	//     会让该会话之后每一轮都失败 —— 一次空回答污染整条会话。
-	// 所以这里宁可按「可重试错误」收尾，也不落库空消息（不调 emitDoneAndSave）。
-	if strings.TrimSpace(fullContent) == "" {
-		obsIncr(ctx, s.obs, "chat_quick_graph_errors_total", map[string]string{"stage": "empty_answer"}, 1)
-		obsMarkError(ctx, s.obs, errEmptyAnswer)
-		logger.Warnf("快速模式收到空回答，已拦截（不落库）: sessionID=%s, modelID=%s, assistantMsgID=%s, retrievedDocs=%d",
-			sessionID, req.ModelID, assistantMsgID, len(graphState.RetrievedDocs))
-		eventCh <- dto.StreamEvent{
-			Type:      "error",
-			Title:     "AI 未返回内容",
-			Detail:    "模型本次没有返回任何内容，请重试或切换其他模型",
-			Retryable: true,
-			Done:      true,
-		}
+	// 不拦的话这里会照发 done 并把空 assistant 消息落库，用户看到空白气泡，
+	// 且空消息进入后续 history 后会让该会话之后每一轮都失败 —— 一次空回答污染整条会话。
+	// 具体口径见 rejectEmptyAnswer（与深度模式共用）。
+	if rejectEmptyAnswer(ctx, eventCh, s.obs, "quick", sessionID, req.ModelID, assistantMsgID,
+		fullContent, fmt.Sprintf("retrievedDocs=%d", len(graphState.RetrievedDocs))) {
 		return
 	}
 
