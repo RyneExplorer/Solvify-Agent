@@ -15,6 +15,7 @@ import (
 	"solvify-agent/internal/observability"
 	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // HTTPProvider 通用 HTTP 供应商
@@ -154,7 +155,7 @@ func (p *HTTPProvider) Execute(ctx context.Context, config *tool.ExecuteConfig) 
 		zap.String("url", url),
 		zap.Int("status", resp.StatusCode),
 		zap.Int("result_length", len(result)),
-		zap.String("result_preview", truncate(result, 2000)))
+		zap.String("result_preview", strutil.Truncate(result, 2000)))
 
 	return result, err
 }
@@ -413,11 +414,4 @@ func base64Encode(s string) string {
 	}
 
 	return string(result)
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }

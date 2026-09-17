@@ -13,6 +13,7 @@ import (
 	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // runWithRunner 用 adk.Runner 执行 Agent，产出 AgentEvent 并转换到 eventCh。
@@ -114,7 +115,7 @@ func (e *Engine) runWithRunner(
 						infoStr = s
 					}
 				}
-				logger.Infof("[Agent] 执行中断: checkpointID=%s, interruptID=%s, info=%s", checkpointID, interruptID, truncateStr(infoStr, 200))
+				logger.Infof("[Agent] 执行中断: checkpointID=%s, interruptID=%s, info=%s", checkpointID, interruptID, strutil.Truncate(infoStr, 200))
 
 				infoType, infoData := parseInterruptInfo(infoStr)
 
@@ -142,7 +143,7 @@ func (e *Engine) runWithRunner(
 					eventch.Send(ctx, eventCh, Event{
 						Type:          EventInterrupt,
 						Title:         "需要人工确认",
-						Detail:        truncateStr(message, 256),
+						Detail:        strutil.Truncate(message, 256),
 						Status:        "interrupt",
 						Error:         interruptID,
 						CheckpointID:  checkpointID,
@@ -275,7 +276,7 @@ func (e *Engine) consumeMessageStream(
 						eventch.Send(ctx, eventCh, Event{
 							Type:   EventToolCall,
 							Title:  "调用工具",
-							Detail: truncateStr(tc.Function.Arguments, 200),
+							Detail: strutil.Truncate(tc.Function.Arguments, 200),
 							Status: "running",
 						})
 						toolCallPending = true
@@ -285,7 +286,7 @@ func (e *Engine) consumeMessageStream(
 					eventch.Send(ctx, eventCh, Event{
 						Type:   EventThinking,
 						Title:  "深度推理中",
-						Detail: truncateStr(msg.Content, 200),
+						Detail: strutil.Truncate(msg.Content, 200),
 						Status: "running",
 					})
 				}
@@ -343,7 +344,7 @@ func (e *Engine) handleMessage(
 				eventch.Send(ctx, eventCh, Event{
 					Type:   EventThinking,
 					Title:  "深度推理中",
-					Detail: truncateStr(msg.Content, 200),
+					Detail: strutil.Truncate(msg.Content, 200),
 					Status: "running",
 				})
 			}

@@ -16,6 +16,7 @@ import (
 	"solvify-agent/internal/rag"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // KnowledgeSearchTool 知识库语义搜索工具
@@ -113,7 +114,7 @@ func (t *KnowledgeSearchTool) InvokableRun(ctx context.Context, argumentsInJSON 
 	contentBuilder.WriteString("回答时必须在句末插入引用标签，格式为 <kb doc=\"文档名\" chunk_id=\"真实ID\" />。\n")
 	contentBuilder.WriteString("【禁止】把以下原文复制到回答中。\n\n")
 	for _, doc := range result.Documents {
-		contentBuilder.WriteString(fmt.Sprintf("[chunk_id=%s] %s: %s\n\n", doc.ID, doc.Title, truncateRunes(doc.Content, 150)))
+		contentBuilder.WriteString(fmt.Sprintf("[chunk_id=%s] %s: %s\n\n", doc.ID, doc.Title, strutil.Truncate(doc.Content, 150)))
 		sources = append(sources, SourceDocument{
 			ID:              doc.ID,
 			DocumentID:      doc.DocumentID,
@@ -152,15 +153,6 @@ type SourceDocument struct {
 	Title           string  `json:"title"`
 	Score           float64 `json:"score"`
 	Content         string  `json:"content"`
-}
-
-// truncateRunes 截断字符串到指定 rune 长度
-func truncateRunes(s string, maxLen int) string {
-	runes := []rune(s)
-	if len(runes) <= maxLen {
-		return s
-	}
-	return string(runes[:maxLen]) + "..."
 }
 
 // buildProperties 构建单个属性的 JSON Schema ordered map

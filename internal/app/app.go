@@ -36,6 +36,7 @@ import (
 	"solvify-agent/pkg/database"
 	"solvify-agent/pkg/documentparser"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // App 是全局应用结构体，集中持有配置、基础设施和路由实例
@@ -235,7 +236,7 @@ func (a *App) initEmbedding() rag.EmbeddingFunc {
 			}
 
 			// 层级 3：调 API
-			logger.Infof("[Embedding] 全缓存未命中: key=%s text=%q, 调用 API...", cacheKey[:8], truncateText(text, 60))
+			logger.Infof("[Embedding] 全缓存未命中: key=%s text=%q, 调用 API...", cacheKey[:8], strutil.Truncate(text, 60))
 			vec, err := embeddingClient.Embed(ctx, text)
 			if err != nil {
 				logger.Errorf("[Embedding] API 调用失败: %v", err)
@@ -279,14 +280,6 @@ func (a *App) initEmbedding() rag.EmbeddingFunc {
 			return nil, ctx.Err()
 		}
 	}
-}
-
-func truncateText(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "..."
 }
 
 // initRetriever 初始化 RAG 检索器（混合检索 + 可选装饰器链）

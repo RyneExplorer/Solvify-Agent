@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 type userIDKey struct{}
@@ -252,8 +253,8 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 				if span != nil && m.Recorder != nil {
 					m.Recorder.AddEvent(ctx, span, "panic", Attrs{
 						"panic_type":  fmt.Sprintf("%T", err),
-						"panic_value": truncateForEvent(fmt.Sprintf("%v", err)),
-						"stack":       truncateForEvent(stackStr),
+						"panic_value": strutil.TruncateWith(fmt.Sprintf("%v", err), eventMaxRunes, strutil.EllipsisChar),
+						"stack":       strutil.TruncateWith(stackStr, eventMaxRunes, strutil.EllipsisChar),
 					})
 				}
 				if m.Recorder != nil {
@@ -288,12 +289,12 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 		if span != nil && m.Recorder != nil {
 			attrs := Attrs{
 				"status":       status,
-				"bytes":         rec.Size(),
-				"errors":        len(c.Errors),
-				"status_group":  statusGrp,
+				"bytes":        rec.Size(),
+				"errors":       len(c.Errors),
+				"status_group": statusGrp,
 			}
 			if len(c.Errors) > 0 {
-				attrs["last_error"] = truncateForEvent(c.Errors.Last().Error())
+				attrs["last_error"] = strutil.TruncateWith(c.Errors.Last().Error(), eventMaxRunes, strutil.EllipsisChar)
 			}
 			endStatus := SpanStatusOK
 			var recErr error
@@ -313,7 +314,7 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 			m.Recorder.Incr(c.Request.Context(), "http_request_total", map[string]string{
 				"method":       method,
 				"route":        route,
-				"status_group":  statusGrp,
+				"status_group": statusGrp,
 			}, 1)
 			m.Recorder.Observe(c.Request.Context(), "http_request_duration_seconds", map[string]string{
 				"method": method,
@@ -330,13 +331,9 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 	}
 }
 
-func truncateForEvent(s string) string {
-	const max = 512
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "…"
-}
+// eventMaxRunes 事件属性中长文本（panic 值、调用栈、错误信息）的截断上限，
+// 按字符数而非字节数计，避免中文被切成乱码。
+const eventMaxRunes = 512
 
 func statusGroup(status int) string {
 	switch {

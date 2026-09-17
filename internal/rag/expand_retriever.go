@@ -8,6 +8,7 @@ import (
 
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // ExpandRetriever 装饰器：检索后扩展相邻分块并去重
@@ -90,7 +91,7 @@ func (r *ExpandRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	logger.Infof("[Expand] 内层检索返回 %d 条", len(result.Documents))
 	for i, doc := range result.Documents {
 		logger.Infof("[Expand]   输入#%d: [%s] score=%.4f chunk#%d title=%q content=%q",
-			i, doc.DocumentID, doc.Score, doc.ChunkIndex, doc.Title, truncate(doc.Content, 60))
+			i, doc.DocumentID, doc.Score, doc.ChunkIndex, doc.Title, strutil.Truncate(doc.Content, 60))
 	}
 
 	// 按 document_id 分组
@@ -113,7 +114,7 @@ func (r *ExpandRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 		}
 		logger.Infof("[Expand]   文档 %s: %d 条 → %d 条", docID, len(docs), len(expandedDocs))
 		for j, doc := range expandedDocs {
-			logger.Infof("[Expand]     扩展#%d: chunk#%d content=%q", j, doc.ChunkIndex, truncate(doc.Content, 80))
+			logger.Infof("[Expand]     扩展#%d: chunk#%d content=%q", j, doc.ChunkIndex, strutil.Truncate(doc.Content, 80))
 		}
 		expanded = append(expanded, expandedDocs...)
 	}
@@ -128,7 +129,7 @@ func (r *ExpandRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 		len(result.Documents), len(expanded), len(deduped))
 	for i, doc := range deduped {
 		logger.Infof("[Expand]   最终#%d: [%s] score=%.4f chunk#%d title=%q content=%q",
-			i, doc.DocumentID, doc.Score, doc.ChunkIndex, doc.Title, truncate(doc.Content, 80))
+			i, doc.DocumentID, doc.Score, doc.ChunkIndex, doc.Title, strutil.Truncate(doc.Content, 80))
 	}
 
 	return Result{
@@ -183,7 +184,7 @@ func (r *ExpandRetriever) expandDocumentChunks(ctx context.Context, knowledgeBas
 		if hitIndices[c.ChunkIndex] {
 			hitMark = "*"
 		}
-		logger.Infof("[Expand]     %s chunk#%d: %q", hitMark, c.ChunkIndex, truncate(c.Content, 60))
+		logger.Infof("[Expand]     %s chunk#%d: %q", hitMark, c.ChunkIndex, strutil.Truncate(c.Content, 60))
 	}
 
 	// 按连续区间分组并合并

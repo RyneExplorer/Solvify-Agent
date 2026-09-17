@@ -10,6 +10,7 @@ import (
 	"github.com/cloudwego/eino/compose"
 
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // DangerousToolState 审批中间件持久化到 checkpoint 的状态
@@ -65,7 +66,7 @@ func buildDangerousToolMiddleware(dangerousNames map[string]bool) compose.Invoka
 					"arguments": input.Arguments,
 					"message":   fmt.Sprintf("即将执行危险工具 %s，请确认是否继续", input.Name),
 				})
-				logger.Infof("[ToolMiddleware] 危险工具 %s 触发审批中断, args=%s", input.Name, truncateStr(input.Arguments, 200))
+				logger.Infof("[ToolMiddleware] 危险工具 %s 触发审批中断, args=%s", input.Name, strutil.Truncate(input.Arguments, 200))
 				return nil, compose.StatefulInterrupt(ctx, info, DangerousToolState{
 					ToolName:  input.Name,
 					Arguments: input.Arguments,
@@ -138,7 +139,7 @@ func buildClarifyMiddleware(clarifyNames map[string]bool) compose.InvokableToolM
 					"options":  extractClarifyOptions(input.Arguments),
 					"context":  extractClarifyContext(input.Arguments),
 				})
-				logger.Infof("[ClarifyMiddleware] ask_clarify 触发中断: args=%s", truncateStr(input.Arguments, 200))
+				logger.Infof("[ClarifyMiddleware] ask_clarify 触发中断: args=%s", strutil.Truncate(input.Arguments, 200))
 				return nil, compose.StatefulInterrupt(ctx, info, ClarifyState{
 					Question: q,
 					Options:  extractClarifyOptions(input.Arguments),

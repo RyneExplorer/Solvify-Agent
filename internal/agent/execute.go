@@ -20,6 +20,7 @@ import (
 	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // Execute 启动 Agent 执行流程，通过事件通道异步返回推理结果
@@ -102,7 +103,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 			userToolsN++
 		}
 		toolDescMap[info.Name] = info.Desc
-		logger.Infof("[Agent]   工具: name=%s, desc=%s", info.Name, truncateStr(info.Desc, 80))
+		logger.Infof("[Agent]   工具: name=%s, desc=%s", info.Name, strutil.Truncate(info.Desc, 80))
 	}
 	logger.Infof("[Agent] userID=%s, 工具总数=%d (内置=%d + 用户工具=%d)",
 		req.UserID, len(allTools), len(e.internalTools), userToolsN)
@@ -126,7 +127,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	} else {
 		systemPromptFinal = baseSystemPrompt
 	}
-	logger.Infof("[Agent] SystemPrompt (前400字符): %s", truncateStr(systemPromptFinal, 400))
+	logger.Infof("[Agent] SystemPrompt (前400字符): %s", strutil.Truncate(systemPromptFinal, 400))
 
 	inputMessages := buildInputMessages(req.Query, req.History)
 
@@ -150,14 +151,14 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 			var tmp map[string]any
 			if err := sonic.UnmarshalString(arguments, &tmp); err != nil {
 				logger.Warnf("[Agent] ToolArgumentsHandler: %s 参数 JSON 解析失败，已降级为空对象: raw=%q, err=%v",
-					toolName, truncateStr(arguments, 200), err)
+					toolName, strutil.Truncate(arguments, 200), err)
 				return "{}", nil
 			}
 			return arguments, nil
 		},
 
 		UnknownToolsHandler: func(ctx context.Context, name, input string) (string, error) {
-			logger.Warnf("[Agent] UnknownToolsHandler: LLM 调用了不存在的工具 %q，参数=%s", name, truncateStr(input, 200))
+			logger.Warnf("[Agent] UnknownToolsHandler: LLM 调用了不存在的工具 %q，参数=%s", name, strutil.Truncate(input, 200))
 			return fmt.Sprintf("⚠️ 工具 %q 不存在，可用工具请查看系统提示。请检查工具名拼写后重试。", name), nil
 		},
 	}
@@ -248,13 +249,6 @@ func buildInputMessages(query string, history []entity.ChatMessage) []*schema.Me
 
 	msgs = append(msgs, schema.UserMessage(query))
 	return msgs
-}
-
-func truncateStr(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }
 
 func extractQueryFromArgs(args string) string {

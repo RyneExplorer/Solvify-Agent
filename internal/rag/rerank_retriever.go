@@ -13,6 +13,7 @@ import (
 	"solvify-agent/internal/observability"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // RerankRetriever 装饰器：在内层 Retriever 检索后调用外部 Rerank API 重排序
@@ -41,10 +42,10 @@ type RerankRetrieverConfig struct {
 }
 
 const (
-	defaultRerankTimeout    = 5
-	defaultRerankTopN       = 3
-	defaultRerankThreshold  = 0.5
-	defaultRerankMaxRetries = 3
+	defaultRerankTimeout     = 5
+	defaultRerankTopN        = 3
+	defaultRerankThreshold   = 0.5
+	defaultRerankMaxRetries  = 3
 	defaultRerankBaseBackoff = 100 * time.Millisecond
 )
 
@@ -130,7 +131,7 @@ func (r *RerankRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	logger.Infof("[Rerank] 内层检索返回 %d 条，开始调用 Rerank API", len(result.Documents))
 	for i, doc := range result.Documents {
 		logger.Debugf("[Rerank]   输入#%d: [%s] score=%.4f chunk#%d title=%q content=%q",
-			i, doc.DocumentID, doc.Score, doc.ChunkIndex, doc.Title, truncate(doc.Content, 60))
+			i, doc.DocumentID, doc.Score, doc.ChunkIndex, doc.Title, strutil.Truncate(doc.Content, 60))
 	}
 
 	reranked, err := r.rerankWithRetry(ctx, query.Question, result.Documents)
@@ -265,7 +266,7 @@ func (r *RerankRetriever) tryRerank(ctx context.Context, query string, docs []Do
 		var rerankResp rerankResponse
 		if err := json.Unmarshal(respBody, &rerankResp); err != nil {
 			// 响应格式错误，可能服务端临时返回异常内容，重试一次看看
-			return nil, true, fmt.Errorf("解析响应失败: %w, status=200, body=%q", err, truncate(string(respBody), 200))
+			return nil, true, fmt.Errorf("解析响应失败: %w, status=200, body=%q", err, strutil.Truncate(string(respBody), 200))
 		}
 		return rerankResp.Results, false, nil
 
@@ -275,9 +276,9 @@ func (r *RerankRetriever) tryRerank(ctx context.Context, query string, docs []Do
 	default:
 		if resp.StatusCode >= 500 {
 			// 5xx 服务端错误，可重试
-			return nil, true, fmt.Errorf("rerank API 返回 %d (5xx): %s", resp.StatusCode, truncate(string(respBody), 200))
+			return nil, true, fmt.Errorf("rerank API 返回 %d (5xx): %s", resp.StatusCode, strutil.Truncate(string(respBody), 200))
 		}
 		// 其他 4xx（400, 401, 403, 404 等）：客户端错误，不可重试
-		return nil, false, fmt.Errorf("rerank API 返回 %d (4xx, 不可重试): %s", resp.StatusCode, truncate(string(respBody), 200))
+		return nil, false, fmt.Errorf("rerank API 返回 %d (4xx, 不可重试): %s", resp.StatusCode, strutil.Truncate(string(respBody), 200))
 	}
 }

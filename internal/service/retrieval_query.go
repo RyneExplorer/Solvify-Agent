@@ -349,7 +349,11 @@ func prevRune(s string, idx int) (rune, bool) {
 	return r, true
 }
 
-// truncateRunes 按字符数截断，超出时补省略号。
+// truncateRunes 按字符数截断，并去掉尾部空白。
+//
+// 这里刻意「不补省略号」：返回值会直接进入关键词检索的词项切分，
+// 补省略号会凭空多出一个词项、稀释命中率分母（分母 = query 词项数）。
+// 因此不复用 pkg/strutil.Truncate（那个是给日志/预览用的，会补省略号）。
 func truncateRunes(s string, max int) string {
 	if max <= 0 {
 		return ""
@@ -362,6 +366,7 @@ func truncateRunes(s string, max int) string {
 }
 
 // truncateTailRunes 按字符数截断但保留尾部：拼接型 query 里越靠后越新，优先保新。
+// 与 truncateRunes 一样不补省略号，避免污染关键词词项。
 func truncateTailRunes(s string, max int) string {
 	r := []rune(s)
 	if len(r) <= max {
