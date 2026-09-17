@@ -24,9 +24,9 @@ import (
 type contextKey string
 
 const (
-	traceIDKey    contextKey = "obs_trace_id"
-	recorderKey   contextKey = "obs_recorder"
-	rootAttrsKey  contextKey = "obs_root_attrs"
+	traceIDKey   contextKey = "obs_trace_id"
+	recorderKey  contextKey = "obs_recorder"
+	rootAttrsKey contextKey = "obs_root_attrs"
 )
 
 type rootAttrs struct {
@@ -982,7 +982,10 @@ func (r *defaultRecorder) RecordTrace(trace *Trace) {
 		logger.Warnf("RecordTrace: %v", err)
 	}
 	if r.dbSink != nil && r.cfg.TraceTableEnabled && trace.Sampled {
-		if err := r.dbSink.WriteTraces(context.Background(), []*Trace{trace}); err != nil {
+		// 落库前统一脱敏：DB 出口与 LogSink 是两条独立路径，DB 不会经过 BatchSink 扇出，
+		// 只能在这里自己清洁。sanitizeTrace 同时深拷贝整棵树 —— 落库仓储会就地把树改写成
+		// 可落库形态（stripInternalSpanAttrs），与日志侧的并发序列化共享同一棵树是隐患。
+		if err := r.dbSink.WriteTraces(context.Background(), []*Trace{sanitizeTrace(trace, r.sanitizer)}); err != nil {
 			r.metrics.obsDBSinkErrorsTotal.WithLabelValues("trace").Inc()
 		}
 	}
@@ -1003,7 +1006,8 @@ func (r *defaultRecorder) RecordFeedback(fb *Feedback) {
 		logger.Warnf("RecordFeedback: %v", err)
 	}
 	if r.dbSink != nil {
-		if err := r.dbSink.WriteFeedbacks(context.Background(), []*Feedback{fb}); err != nil {
+		// 用户填写的反馈评论是自由文本，最可能带邮箱 / 手机号；DB 出口必须自己脱敏。
+		if err := r.dbSink.WriteFeedbacks(context.Background(), []*Feedback{sanitizeFeedback(fb, r.sanitizer)}); err != nil {
 			r.metrics.obsDBSinkErrorsTotal.WithLabelValues("feedback").Inc()
 		}
 	}
@@ -1018,7 +1022,8 @@ func (r *defaultRecorder) RecordAgentStep(step *AgentStep) {
 		logger.Warnf("RecordAgentStep: %v", err)
 	}
 	if r.dbSink != nil {
-		if err := r.dbSink.WriteAgentSteps(context.Background(), []*AgentStep{step}); err != nil {
+		// 思考摘要 / 工具入参 / 工具结果 / 工具报错都可能回显用户原文或凭证，DB 出口必须自己脱敏。
+		if err := r.dbSink.WriteAgentSteps(context.Background(), []*AgentStep{sanitizeAgentStep(step, r.sanitizer)}); err != nil {
 			r.metrics.obsDBSinkErrorsTotal.WithLabelValues("agent_step").Inc()
 		}
 	}
@@ -1330,7 +1335,9 @@ func (r *defaultRecorder) flushTraceState(ctx context.Context, traceID string, s
 		}
 	}
 	if sampled && r.dbSink != nil && r.cfg.TraceTableEnabled {
-		if err := r.dbSink.WriteTraces(writeCtx, []*Trace{t}); err != nil {
+		// 与 RecordTrace 同理：DB 出口不经 BatchSink，需自行脱敏 + 深拷贝，
+		// 避免落库仓储的就地改写（stripInternalSpanAttrs）与日志侧的序列化互相干扰。
+		if err := r.dbSink.WriteTraces(writeCtx, []*Trace{sanitizeTrace(t, r.sanitizer)}); err != nil {
 			if republish {
 				logger.Warnf("迟到 span 重发写库失败: %v", err)
 			} else {

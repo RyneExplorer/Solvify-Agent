@@ -66,57 +66,10 @@ func (l *LogSink) Shutdown(context.Context) error {
 	return nil
 }
 
+// clean 返回日志用的脱敏副本。实现统一收敛到 redact.go 的 sanitizeRecord，
+// 避免日志出口与落库出口各维护一套脱敏规则（历史上正是这种分叉导致 DB 侧漏网）。
 func (l *LogSink) clean(r *SinkRecord) *SinkRecord {
-	cp := *r
-	if l.PII == nil {
-		return &cp
-	}
-	if cp.Trace != nil && cp.Trace.Root != nil {
-		root := *cp.Trace.Root
-		cleanSpan(root, l.PII)
-		cp.Trace = &Trace{
-			ID:         cp.Trace.ID,
-			RequestID:  cp.Trace.RequestID,
-			UserID:     cp.Trace.UserID,
-			SessionID:  cp.Trace.SessionID,
-			Root:       &root,
-			SampleRate: cp.Trace.SampleRate,
-			Sampled:    cp.Trace.Sampled,
-		}
-	}
-	if cp.Feedback != nil {
-		fb := *cp.Feedback
-		fb.Comment = l.PII.SanitizeString(fb.Comment)
-		cp.Feedback = &fb
-	}
-	if cp.AgentStep != nil {
-		st := *cp.AgentStep
-		st.ThinkingSummary = l.PII.SanitizeString(st.ThinkingSummary)
-		st.ToolInputMasked = l.PII.SanitizeString(st.ToolInputMasked)
-		st.ToolResultSummary = l.PII.SanitizeString(st.ToolResultSummary)
-		st.ToolError = l.PII.SanitizeString(st.ToolError)
-		cp.AgentStep = &st
-	}
-	return &cp
-}
-
-func cleanSpan(s Span, pii *PIISanitizer) {
-	if len(s.Attrs) > 0 {
-		s.Attrs = pii.SanitizeAttrs(s.Attrs)
-	}
-	if s.Error != "" {
-		s.Error = pii.SanitizeString(s.Error)
-	}
-	for i := range s.Events {
-		if len(s.Events[i].Attrs) > 0 {
-			s.Events[i].Attrs = pii.SanitizeAttrs(s.Events[i].Attrs)
-		}
-	}
-	for i := range s.Children {
-		cp := *s.Children[i]
-		cleanSpan(cp, pii)
-		s.Children[i] = &cp
-	}
+	return sanitizeRecord(r, l.PII)
 }
 
 type DBSink interface {
