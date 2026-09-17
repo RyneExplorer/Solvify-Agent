@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"solvify-agent/internal/api/v1/shared"
 	"solvify-agent/internal/middleware"
 	requestdto "solvify-agent/internal/model/dto/request"
 	"solvify-agent/internal/repository"
@@ -27,7 +28,7 @@ func NewController(documentService service.DocumentServiceInterface, chunkRepo r
 
 // Upload 上传文档到指定知识库
 func (ctrl *Controller) Upload(c *gin.Context) {
-	userID, kbID, ok := ctrl.userAndKnowledgeBaseID(c)
+	userID, kbID, ok := shared.UserAndUUIDParam(c, "id", "知识库")
 	if !ok {
 		return
 	}
@@ -48,7 +49,7 @@ func (ctrl *Controller) Upload(c *gin.Context) {
 
 // CreateNote 将文本笔记保存到指定知识库
 func (ctrl *Controller) CreateNote(c *gin.Context) {
-	userID, kbID, ok := ctrl.userAndKnowledgeBaseID(c)
+	userID, kbID, ok := shared.UserAndUUIDParam(c, "id", "知识库")
 	if !ok {
 		return
 	}
@@ -69,7 +70,7 @@ func (ctrl *Controller) CreateNote(c *gin.Context) {
 
 // List 查询知识库下文档列表
 func (ctrl *Controller) List(c *gin.Context) {
-	userID, kbID, ok := ctrl.userAndKnowledgeBaseID(c)
+	userID, kbID, ok := shared.UserAndUUIDParam(c, "id", "知识库")
 	if !ok {
 		return
 	}
@@ -84,7 +85,7 @@ func (ctrl *Controller) List(c *gin.Context) {
 
 // Detail 查询文档详情
 func (ctrl *Controller) Detail(c *gin.Context) {
-	userID, documentID, ok := ctrl.userAndDocumentID(c)
+	userID, documentID, ok := shared.UserAndUUIDParam(c, "id", "文档")
 	if !ok {
 		return
 	}
@@ -99,7 +100,7 @@ func (ctrl *Controller) Detail(c *gin.Context) {
 
 // Preview 返回当前用户有权访问的原始文件流
 func (ctrl *Controller) Preview(c *gin.Context) {
-	userID, documentID, ok := ctrl.userAndDocumentID(c)
+	userID, documentID, ok := shared.UserAndUUIDParam(c, "id", "文档")
 	if !ok {
 		return
 	}
@@ -120,7 +121,7 @@ func (ctrl *Controller) Preview(c *gin.Context) {
 
 // Delete 软删除文档
 func (ctrl *Controller) Delete(c *gin.Context) {
-	userID, documentID, ok := ctrl.userAndDocumentID(c)
+	userID, documentID, ok := shared.UserAndUUIDParam(c, "id", "文档")
 	if !ok {
 		return
 	}
@@ -134,7 +135,7 @@ func (ctrl *Controller) Delete(c *gin.Context) {
 
 // Process 手动触发文档处理
 func (ctrl *Controller) Process(c *gin.Context) {
-	userID, documentID, ok := ctrl.userAndDocumentID(c)
+	userID, documentID, ok := shared.UserAndUUIDParam(c, "id", "文档")
 	if !ok {
 		return
 	}
@@ -149,7 +150,7 @@ func (ctrl *Controller) Process(c *gin.Context) {
 
 // Jobs 查询文档处理任务列表
 func (ctrl *Controller) Jobs(c *gin.Context) {
-	userID, documentID, ok := ctrl.userAndDocumentID(c)
+	userID, documentID, ok := shared.UserAndUUIDParam(c, "id", "文档")
 	if !ok {
 		return
 	}
@@ -164,7 +165,7 @@ func (ctrl *Controller) Jobs(c *gin.Context) {
 
 // JobDetail 查询文档处理任务详情
 func (ctrl *Controller) JobDetail(c *gin.Context) {
-	userID, jobID, ok := ctrl.userAndDocumentJobID(c)
+	userID, jobID, ok := shared.UserAndUUIDParam(c, "id", "文档处理任务")
 	if !ok {
 		return
 	}
@@ -179,7 +180,7 @@ func (ctrl *Controller) JobDetail(c *gin.Context) {
 
 // Versions 查询文档版本列表
 func (ctrl *Controller) Versions(c *gin.Context) {
-	userID, documentID, ok := ctrl.userAndDocumentID(c)
+	userID, documentID, ok := shared.UserAndUUIDParam(c, "id", "文档")
 	if !ok {
 		return
 	}
@@ -194,7 +195,11 @@ func (ctrl *Controller) Versions(c *gin.Context) {
 
 // VersionDetail 查询文档版本详情
 func (ctrl *Controller) VersionDetail(c *gin.Context) {
-	userID, documentID, versionID, ok := ctrl.userAndDocumentVersionID(c)
+	userID, documentID, ok := shared.UserAndUUIDParam(c, "id", "文档")
+	if !ok {
+		return
+	}
+	versionID, ok := shared.UUIDParam(c, "version_id", "文档版本")
 	if !ok {
 		return
 	}
@@ -209,7 +214,7 @@ func (ctrl *Controller) VersionDetail(c *gin.Context) {
 
 // CreateVersion 保存文档新版本并重新向量化
 func (ctrl *Controller) CreateVersion(c *gin.Context) {
-	userID, documentID, ok := ctrl.userAndDocumentID(c)
+	userID, documentID, ok := shared.UserAndUUIDParam(c, "id", "文档")
 	if !ok {
 		return
 	}
@@ -229,7 +234,7 @@ func (ctrl *Controller) CreateVersion(c *gin.Context) {
 
 // Reindex 手动重新构建文档索引
 func (ctrl *Controller) Reindex(c *gin.Context) {
-	userID, documentID, ok := ctrl.userAndDocumentID(c)
+	userID, documentID, ok := shared.UserAndUUIDParam(c, "id", "文档")
 	if !ok {
 		return
 	}
@@ -274,60 +279,4 @@ func (ctrl *Controller) ChunkDetail(c *gin.Context) {
 		"document_title":      chunk.DocumentTitle,
 		"knowledge_base_name": chunk.KnowledgeBaseName,
 	})
-}
-
-// userAndKnowledgeBaseID 读取当前用户和知识库 ID
-func (ctrl *Controller) userAndKnowledgeBaseID(c *gin.Context) (string, string, bool) {
-	userID, ok := middleware.CurrentUserID(c)
-	if !ok {
-		return "", "", false
-	}
-	kbID := c.Param("id")
-	if !middleware.IsUUID(kbID) {
-		response.BadRequest(c, "知识库 ID 格式错误")
-		return "", "", false
-	}
-	return userID, kbID, true
-}
-
-// userAndDocumentID 读取当前用户和文档 ID
-func (ctrl *Controller) userAndDocumentID(c *gin.Context) (string, string, bool) {
-	userID, ok := middleware.CurrentUserID(c)
-	if !ok {
-		return "", "", false
-	}
-	documentID := c.Param("id")
-	if !middleware.IsUUID(documentID) {
-		response.BadRequest(c, "文档 ID 格式错误")
-		return "", "", false
-	}
-	return userID, documentID, true
-}
-
-// userAndDocumentJobID 读取当前用户和文档处理任务 ID
-func (ctrl *Controller) userAndDocumentJobID(c *gin.Context) (string, string, bool) {
-	userID, ok := middleware.CurrentUserID(c)
-	if !ok {
-		return "", "", false
-	}
-	jobID := c.Param("id")
-	if !middleware.IsUUID(jobID) {
-		response.BadRequest(c, "文档处理任务 ID 格式错误")
-		return "", "", false
-	}
-	return userID, jobID, true
-}
-
-// userAndDocumentVersionID 读取当前用户、文档 ID 和版本 ID
-func (ctrl *Controller) userAndDocumentVersionID(c *gin.Context) (string, string, string, bool) {
-	userID, documentID, ok := ctrl.userAndDocumentID(c)
-	if !ok {
-		return "", "", "", false
-	}
-	versionID := c.Param("version_id")
-	if !middleware.IsUUID(versionID) {
-		response.BadRequest(c, "文档版本 ID 格式错误")
-		return "", "", "", false
-	}
-	return userID, documentID, versionID, true
 }
