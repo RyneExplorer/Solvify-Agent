@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -24,10 +25,30 @@ type KnowledgeSearchTool struct {
 	userID    string
 	kbIDs     []string
 
-	// CollectedSources 记录本次请求中所有检索命中的来源（Agent 结束后读取）
-	CollectedSources []SourceDocument
-	// SearchCount 记录搜索次数
-	SearchCount int
+	// mu 保护 collectedSources。eino 的 ToolsNode 默认并行执行同一轮内的多个工具调用
+	// （compose.ToolsNodeConfig.ExecuteSequentially 默认 false），而模型面对多主题提问
+	// 常在一轮里并发发起多个 knowledge_search —— 同一实例被并发写会让 append 丢元素，
+	// 甚至损坏切片内部结构，前端引用来源因此缺失或错位（审查报告 P0-4）。
+	// 工具实例本身是按请求新建的（app.go 用工厂闭包
+	// NewKnowledgeSearchTool(...).WithContext(...) 注册），故不需要跨请求加锁。
+	mu sync.Mutex
+	// collectedSources 记录本次请求中所有检索命中的来源（Agent 结束后经 Sources 读取）
+	collectedSources []SourceDocument
+}
+
+// Sources 返回本次请求已收集到的来源快照。
+//
+// 返回**副本**而非内部切片：调用方拿到后要遍历/按文档分组，若直接交出内部切片，
+// 并发写入会让它读到撕裂的中间状态；快照同时保证一次请求内多处读取看到同一份视图。
+func (t *KnowledgeSearchTool) Sources() []SourceDocument {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.collectedSources) == 0 {
+		return nil
+	}
+	out := make([]SourceDocument, len(t.collectedSources))
+	copy(out, t.collectedSources)
+	return out
 }
 
 // NewKnowledgeSearchTool 创建知识库搜索工具
@@ -104,9 +125,10 @@ func (t *KnowledgeSearchTool) InvokableRun(ctx context.Context, argumentsInJSON 
 	}
 	contentBuilder.WriteString("以上为知识库检索结果，不需要联网搜索来补充。如果这些内容满足用户需求，直接组织答案；如果需要列出文档清单、关键词精准查找等其他操作，可以继续调用知识库内部工具。\n")
 
-	// 记录来源（Agent 结束后从 CollectedSources 读取）
-	t.CollectedSources = append(t.CollectedSources, sources...)
-	t.SearchCount++
+	// 记录来源（Agent 结束后经 Sources 读取）。同一轮可能并行进来多个调用，必须加锁。
+	t.mu.Lock()
+	t.collectedSources = append(t.collectedSources, sources...)
+	t.mu.Unlock()
 
 	searchResult := SearchResult{
 		Content: contentBuilder.String(),

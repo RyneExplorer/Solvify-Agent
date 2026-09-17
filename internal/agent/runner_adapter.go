@@ -177,17 +177,25 @@ func (e *Engine) runWithRunner(
 		e.handleMessage(ctx, msg, mv.Role, mv.ToolName, toolDescMap, &fullAnswer, eventCh)
 	}
 
+	// 取一次来源快照：同一轮可能并行跑多个 knowledge_search，工具侧的收集结果由
+	// Sources() 在互斥锁下复制（审查报告 P0-4）；快照也让下面的兜底与来源收集
+	// 读到同一份一致视图，而不是各读一次可能已被改写的内部切片。
+	var collected []tool.SourceDocument
+	if ksTool != nil {
+		collected = ksTool.Sources()
+	}
+
 	// ── 兜底：没拿到 ToolCalls 也没拿到最终答案，但 KB 有结果 ──
-	if strings.TrimSpace(fullAnswer.String()) == "" && ksTool != nil && len(ksTool.CollectedSources) > 0 {
-		fallback := buildFallbackAnswer(ksTool.CollectedSources)
+	if strings.TrimSpace(fullAnswer.String()) == "" && len(collected) > 0 {
+		fallback := buildFallbackAnswer(collected)
 		fullAnswer.WriteString(fallback)
 		eventch.Send(ctx, eventCh, Event{Type: EventAnswer, Content: fallback})
 	}
 
 	// ── 收集 Sources ──
 	var sources []response.SourceInfo
-	if ksTool != nil {
-		sources = collectSources(ksTool.CollectedSources)
+	if len(collected) > 0 {
+		sources = collectSources(collected)
 	}
 
 	if strings.TrimSpace(fullAnswer.String()) != "" {
