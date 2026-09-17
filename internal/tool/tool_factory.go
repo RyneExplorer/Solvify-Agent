@@ -377,6 +377,20 @@ func mcpCallTimeout(cfg *MCPProviderConfig) time.Duration {
 
 // prefixedTool 为 BaseTool 的工具名添加前缀，避免不同 MCP Server 工具名冲突
 // 例如 MCP Server "filesystem" 的 read_file 工具 → Agent 看到的工具名为 "mcp_filesystem_read_file"
+//
+// ⚠️ 本类型**只实现 InvokableRun，刻意不实现 StreamableRun**。别"顺手补上"，补上会让危险工具审批失效：
+//
+//	eino v0.9.1 compose/tool_node.go:524-527
+//	  实现了 StreamableTool → streamable = wrapStreamToolCall(它, params.middlewares.streamable)
+//	  —— 只套「流式」中间件列表；本项目只注册了 ToolMiddleware{Invokable: ...}，流式列表为空 → 审批被静默跳过。
+//	eino v0.9.1 compose/tool_node.go:566-571
+//	  未实现 StreamableTool → streamable = invokableToStreamable(已包 Invokable 中间件的端点)
+//	  —— 流式端点由已包中间件的 invokable 端点派生，审批/澄清正常工作。
+//
+// 而且 invokableToStreamable 的语义与手写降级分支完全等价（调 InvokableRun 后把结果包成
+// 单元素 StreamReader），MCP 调用超时也仍由 InvokableRun 内的 callContext 施加 —— 所以
+// "不实现" 既不会让 MCP 工具在流式链路报错，也是唯一能让审批生效的写法。
+// 回归闸：internal/tool/prefixed_tool_test.go 的 TestPrefixedTool_StreamPath_AppliesInvokableMiddleware。
 type prefixedTool struct {
 	einoTool.BaseTool
 	prefix string
@@ -411,36 +425,6 @@ func (t *prefixedTool) InvokableRun(ctx context.Context, argumentsInJSON string,
 		return inv.InvokableRun(runCtx, argumentsInJSON, opts...)
 	}
 	return "", fmt.Errorf("工具 %s 不支持 InvokableRun", t.prefix)
-}
-
-// StreamableRun 转发到底层工具的 StreamableRun（若底层实现了 StreamableTool）
-//
-// 关键降级：eino-ext 的 MCP 工具只实现了 InvokableRun，没有实现 StreamableRun；
-// 而深度模式 Agent 开启了 EnableStreaming，ToolNode 会优先走流式路径，
-// 若此处不降级会直接报「不支持 StreamableRun」，导致所有 MCP 工具调用全部失败。
-// 因此当底层不支持流式时，用 InvokableRun 的结果包成单元素流返回，
-// 保证非流式工具也能在流式链路中正常工作。
-func (t *prefixedTool) StreamableRun(ctx context.Context, argumentsInJSON string, opts ...einoTool.Option) (*schema.StreamReader[string], error) {
-	if st, ok := t.BaseTool.(einoTool.StreamableTool); ok {
-		// 真流式：返回的是尚未消费的 StreamReader，此处不能提前 cancel，
-		// 否则会立刻掐断流，生命周期交由上游 ctx 控制。
-		return st.StreamableRun(ctx, argumentsInJSON, opts...)
-	}
-	if inv, ok := t.BaseTool.(einoTool.InvokableTool); ok {
-		// 降级路径：结果已完整取出，可以安全地施加超时。
-		runCtx, cancel := t.callContext(ctx)
-		defer cancel()
-		result, err := inv.InvokableRun(runCtx, argumentsInJSON, opts...)
-		if err != nil {
-			return nil, err
-		}
-		return schema.StreamReaderFromArray([]string{result}), nil
-	}
-	name := t.prefix
-	if info, iErr := t.Info(ctx); iErr == nil && info != nil {
-		name = info.Name
-	}
-	return nil, fmt.Errorf("工具 %s 既不支持 StreamableRun 也不支持 InvokableRun", name)
 }
 
 // ========== Schema 构建辅助 ==========
