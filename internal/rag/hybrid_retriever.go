@@ -166,17 +166,17 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	if vr.err != nil {
 		logger.Warnf("向量检索失败，降级为纯关键词检索: %v", vr.err)
 		vr.docs = nil // 清空，后续只用关键词结果
-		rec.Incr(ctx, "rag_retriever_degradation_total", map[string]string{"side": "vector", "reason": "search_error"}, 1)
+		observeIncr(rec, ctx, "rag_retriever_degradation_total", map[string]string{"side": "vector", "reason": "search_error"})
 	}
 	if kr.err != nil {
 		logger.Warnf("关键词检索失败，降级为纯向量检索: %v", kr.err)
 		kr.docs = nil
-		rec.Incr(ctx, "rag_retriever_degradation_total", map[string]string{"side": "keyword", "reason": "search_error"}, 1)
+		observeIncr(rec, ctx, "rag_retriever_degradation_total", map[string]string{"side": "keyword", "reason": "search_error"})
 	}
 
 	// 两种检索都失败才报错
 	if vr.err != nil && kr.err != nil {
-		rec.Incr(ctx, "rag_retriever_degradation_total", map[string]string{"side": "both", "reason": "search_error"}, 1)
+		observeIncr(rec, ctx, "rag_retriever_degradation_total", map[string]string{"side": "both", "reason": "search_error"})
 		return Result{}, fmt.Errorf("混合检索完全失败: 向量(%v), 关键词(%v)", vr.err, kr.err)
 	}
 
@@ -202,7 +202,7 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	// 1c. 向量全灭时，对关键词结果加最低匹配比例过滤
 	if len(filteredVector) == 0 && len(filteredKeyword) > 0 {
 		filteredKeyword = filterByMinScore(filteredKeyword, r.keywordScoreThreshold, "关键词")
-		rec.Incr(ctx, "rag_retriever_degradation_total", map[string]string{"side": "keyword_only", "reason": "min_score_filter"}, 1)
+		observeIncr(rec, ctx, "rag_retriever_degradation_total", map[string]string{"side": "keyword_only", "reason": "min_score_filter"})
 	}
 	observeStage(rec, ctx, "keyword_filtered", float64(len(filteredKeyword)))
 
@@ -670,4 +670,14 @@ func observeStage(rec observability.Recorder, ctx context.Context, stage string,
 		return
 	}
 	rec.Observe(ctx, "rag_retriever_stage_count", map[string]string{"stage": stage}, count)
+}
+
+// observeIncr 记录一次检索侧计数指标。
+// 与 observeStage 一样对 nil Recorder 静默跳过：检索器会被非 HTTP 入口（脚本、批处理、
+// 单元测试）直接调用，那里没有注入 Recorder，不能因此 panic。
+func observeIncr(rec observability.Recorder, ctx context.Context, name string, labels map[string]string) {
+	if rec == nil {
+		return
+	}
+	rec.Incr(ctx, name, labels, 1)
 }
