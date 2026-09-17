@@ -18,6 +18,7 @@ import (
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/observability"
 	"solvify-agent/internal/tool"
+	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
 )
 
@@ -189,7 +190,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 		if obsOk {
 			e.obs.Incr(ctx, "agent_engine_errors_total", map[string]string{"stage": "init"}, 1)
 		}
-		eventCh <- Event{
+		eventch.Send(ctx, eventCh, Event{
 			Type:      EventError,
 			Title:     "深度模式启动失败",
 			Detail:    "请尝试切换到快速模式，或稍后重试",
@@ -197,7 +198,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 			Status:    "error",
 			Retryable: true,
 			Done:      true,
-		}
+		})
 		return
 	}
 

@@ -11,11 +11,16 @@ import (
 
 	"solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/tool"
+	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
 )
 
 // runWithRunner 用 adk.Runner 执行 Agent，产出 AgentEvent 并转换到 eventCh。
 // 首次执行调 runner.Run，带 ResumeData 时调 runner.ResumeWithParams。
+//
+// 事件一律经 pkg/eventch 投递：ctx 取消（客户端断连、请求超时）时丢弃而非阻塞。
+// 否则 eventCh 写满后本函数会永久卡在发送上，连带下面的 checkpoint 清理与 DB 连接
+// 一起泄漏，且每次断连都新增一份（审查报告 P0-1）。
 func (e *Engine) runWithRunner(
 	ctx context.Context,
 	runner *adk.Runner,
@@ -41,7 +46,7 @@ func (e *Engine) runWithRunner(
 		})
 		if err != nil {
 			logger.Errorf("[Agent] ResumeWithParams 失败: %v", err)
-			eventCh <- Event{
+			eventch.Send(ctx, eventCh, Event{
 				Type:      EventError,
 				Title:     "恢复执行失败",
 				Detail:    "无法从中断点恢复，请重新发起深度模式请求",
@@ -49,7 +54,7 @@ func (e *Engine) runWithRunner(
 				Status:    "error",
 				Retryable: false,
 				Done:      true,
-			}
+			})
 			return
 		}
 	} else {
@@ -72,7 +77,7 @@ func (e *Engine) runWithRunner(
 			}
 			logger.Errorf("[Agent] Runner 事件错误: %v", agentEvent.Err)
 			if isToolChoiceUnsupportedError(agentEvent.Err.Error()) {
-				eventCh <- Event{
+				eventch.Send(ctx, eventCh, Event{
 					Type:      EventError,
 					Title:     "当前模型不支持工具调用",
 					Detail:    "该模型不支持工具调用功能，无法使用联网搜索、天气查询等工具。建议切换到支持工具调用的模型（如通义千问、智谱清言、DeepSeek 等），或使用快速模式。",
@@ -80,10 +85,10 @@ func (e *Engine) runWithRunner(
 					Status:    "error",
 					Retryable: false,
 					Done:      true,
-				}
+				})
 				return
 			}
-			eventCh <- Event{
+			eventch.Send(ctx, eventCh, Event{
 				Type:      EventError,
 				Title:     "深度推理失败",
 				Detail:    "深度思考模式执行异常，请重试或使用快速模式",
@@ -91,7 +96,7 @@ func (e *Engine) runWithRunner(
 				Status:    "error",
 				Retryable: true,
 				Done:      true,
-			}
+			})
 			return
 		}
 
@@ -114,7 +119,7 @@ func (e *Engine) runWithRunner(
 				infoType, infoData := parseInterruptInfo(infoStr)
 
 				if infoType == "clarify" {
-					eventCh <- Event{
+					eventch.Send(ctx, eventCh, Event{
 						Type:            EventInterrupt,
 						Title:           "需要澄清",
 						Detail:          getString(infoData, "question"),
@@ -127,14 +132,14 @@ func (e *Engine) runWithRunner(
 						ClarifyOptions:  getStringSlice(infoData, "options"),
 						ClarifyContext:  getString(infoData, "context"),
 						Done:            true,
-					}
+					})
 				} else {
 					// danger 或未知类型 → 按审批处理
 					message := getString(infoData, "message")
 					if message == "" {
 						message = formatInterruptInfo(infoStr)
 					}
-					eventCh <- Event{
+					eventch.Send(ctx, eventCh, Event{
 						Type:          EventInterrupt,
 						Title:         "需要人工确认",
 						Detail:        truncateStr(message, 256),
@@ -144,7 +149,7 @@ func (e *Engine) runWithRunner(
 						InterruptID:   interruptID,
 						InterruptInfo: infoData,
 						Done:          true,
-					}
+					})
 				}
 				return
 			}
@@ -176,7 +181,7 @@ func (e *Engine) runWithRunner(
 	if strings.TrimSpace(fullAnswer.String()) == "" && ksTool != nil && len(ksTool.CollectedSources) > 0 {
 		fallback := buildFallbackAnswer(ksTool.CollectedSources)
 		fullAnswer.WriteString(fallback)
-		eventCh <- Event{Type: EventAnswer, Content: fallback}
+		eventch.Send(ctx, eventCh, Event{Type: EventAnswer, Content: fallback})
 	}
 
 	// ── 收集 Sources ──
@@ -186,10 +191,10 @@ func (e *Engine) runWithRunner(
 	}
 
 	if strings.TrimSpace(fullAnswer.String()) != "" {
-		eventCh <- Event{Type: EventThinking, Title: "正在生成答案", Status: "success"}
+		eventch.Send(ctx, eventCh, Event{Type: EventThinking, Title: "正在生成答案", Status: "success"})
 	}
 	if len(sources) > 0 {
-		eventCh <- Event{Type: EventSources, Sources: sources}
+		eventch.Send(ctx, eventCh, Event{Type: EventSources, Sources: sources})
 	}
 
 	// observability
@@ -209,11 +214,11 @@ func (e *Engine) runWithRunner(
 		}
 	}
 
-	eventCh <- Event{
+	eventch.Send(ctx, eventCh, Event{
 		Type:    EventDone,
 		Content: fullAnswer.String(),
 		Sources: sources,
-	}
+	})
 }
 
 func (e *Engine) consumeMessageStream(
@@ -259,22 +264,22 @@ func (e *Engine) consumeMessageStream(
 				for _, tc := range msg.ToolCalls {
 					if tc.Function.Name != "" {
 						toolCallName = tc.Function.Name
-						eventCh <- Event{
+						eventch.Send(ctx, eventCh, Event{
 							Type:   EventToolCall,
 							Title:  "调用工具",
 							Detail: truncateStr(tc.Function.Arguments, 200),
 							Status: "running",
-						}
+						})
 						toolCallPending = true
 					}
 				}
 				if strings.TrimSpace(msg.Content) != "" {
-					eventCh <- Event{
+					eventch.Send(ctx, eventCh, Event{
 						Type:   EventThinking,
 						Title:  "深度推理中",
 						Detail: truncateStr(msg.Content, 200),
 						Status: "running",
-					}
+					})
 				}
 				continue
 			}
@@ -282,7 +287,7 @@ func (e *Engine) consumeMessageStream(
 			// 最终答案
 			if msg.Content != "" {
 				fullAnswer.WriteString(msg.Content)
-				eventCh <- Event{Type: EventAnswer, Content: msg.Content}
+				eventch.Send(ctx, eventCh, Event{Type: EventAnswer, Content: msg.Content})
 			}
 			continue
 		}
@@ -290,13 +295,13 @@ func (e *Engine) consumeMessageStream(
 		// Role=Tool 完整结果
 		if mv.Role == schema.Tool && msg.Content != "" {
 			title, detail, _ := formatToolEnd(toolCallName, &einoTool.CallbackOutput{Response: msg.Content}, toolDescMap)
-			eventCh <- Event{
+			eventch.Send(ctx, eventCh, Event{
 				Type:       EventToolResult,
 				Title:      title,
 				Detail:     detail,
 				Status:     "success",
 				ToolResult: msg.Content,
-			}
+			})
 			toolCallPending = false
 		}
 	}
@@ -319,38 +324,38 @@ func (e *Engine) handleMessage(
 					continue
 				}
 				title, detail := formatToolStart(tc.Function.Name, extractQueryFromArgs(tc.Function.Arguments), nil, toolDescMap)
-				eventCh <- Event{
+				eventch.Send(ctx, eventCh, Event{
 					Type:   EventToolCall,
 					Title:  title,
 					Detail: detail,
 					Status: "running",
-				}
+				})
 			}
 			if strings.TrimSpace(msg.Content) != "" {
-				eventCh <- Event{
+				eventch.Send(ctx, eventCh, Event{
 					Type:   EventThinking,
 					Title:  "深度推理中",
 					Detail: truncateStr(msg.Content, 200),
 					Status: "running",
-				}
+				})
 			}
 			return
 		}
 		if msg.Content != "" {
 			fullAnswer.WriteString(msg.Content)
-			eventCh <- Event{Type: EventAnswer, Content: msg.Content}
+			eventch.Send(ctx, eventCh, Event{Type: EventAnswer, Content: msg.Content})
 		}
 
 	case schema.Tool:
 		if msg.Content != "" {
 			title, detail, _ := formatToolEnd(toolName, &einoTool.CallbackOutput{Response: msg.Content}, toolDescMap)
-			eventCh <- Event{
+			eventch.Send(ctx, eventCh, Event{
 				Type:       EventToolResult,
 				Title:      title,
 				Detail:     detail,
 				Status:     "success",
 				ToolResult: msg.Content,
-			}
+			})
 		}
 	}
 }
