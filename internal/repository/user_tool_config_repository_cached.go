@@ -12,7 +12,7 @@ import (
 // cachedUserToolConfigRepository 为 UserToolConfigRepository 添加 Redis 缓存层
 //
 //	缓存策略：写时失效
-//	- 按 userID 查已启用配置：key = "tool:config:{userID}"
+//	- 按 userID 查已启用配置：key = "tool:config:user:{userID}"
 //	- 按 ID 查单条：key = "tool:config:id:{id}"
 //	- Create/Update/Delete → 清除对应用户缓存
 type cachedUserToolConfigRepository struct {

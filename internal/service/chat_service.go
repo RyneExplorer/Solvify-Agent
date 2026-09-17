@@ -184,7 +184,9 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 
 // updateUserLastModel 更新用户上次使用的模型（缓存比对策略）
 func (s *chatService) updateUserLastModel(ctx context.Context, userID, modelID string) {
-	cacheKey := "user:model:" + userID
+	// key 只需用户维度：userCache 实例已带 "user:model:" 前缀，
+	// 这里再拼一次会变成 user:model:user:model:<userID>
+	cacheKey := userID
 
 	// 1. 从缓存获取上次使用的模型
 	var cachedModelID string

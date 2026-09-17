@@ -407,8 +407,10 @@ func (a *App) initDependencies() {
 
 	// 模型配置缓存（10 分钟 TTL）
 	modelCache := cache.New(a.redis, "model:", 10*time.Minute)
+	// 用户模型配置是另一份数据，单独命名空间，避免与系统模型共用实例导致 key 归属混乱
+	userModelConfigCache := cache.New(a.redis, "user:model:config:", 10*time.Minute)
 	modelRepo := repository.NewCachedModelRepository(repository.NewModelRepository(a.postgresqlDB), modelCache)
-	userModelConfigRepo := repository.NewCachedUserModelConfigRepository(repository.NewUserModelConfigRepository(a.postgresqlDB), modelCache)
+	userModelConfigRepo := repository.NewCachedUserModelConfigRepository(repository.NewUserModelConfigRepository(a.postgresqlDB), userModelConfigCache)
 	chatSessionRepo := repository.NewChatSessionRepository(a.postgresqlDB)
 	chatMessageRepo := repository.NewChatMessageRepository(a.postgresqlDB)
 	memoryRepo := repository.NewUserMemoryRepository(a.postgresqlDB)
