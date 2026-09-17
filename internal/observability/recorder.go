@@ -53,11 +53,194 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// 发布后保活窗口与重发防抖，见 traceState 的注释。
+const (
+	// tracePublishGraceWindow 是 trace 落库后仍为其保活的时长。
+	//
+	// 为什么需要：会话摘要 / 记忆抽取这类后台任务的 span 在 HTTP 响应返回、主 trace
+	// 已经落库之后才 End。旧实现「发布即 LoadAndDelete 状态」，迟到 span 找不到所属 trace，
+	// 只能按无父根 span 另起一行写入 chat_traces —— 前端就多出一条 user/session=unknown 的
+	// 「孤儿 trace」，与真正的会话彻底割裂。保活期内这类 span 会被并回同一行
+	// （WriteTraces 是 upsert，重复写同一主键只会覆盖，不会新增行）。
+	//
+	// 取 3 分钟：后台任务最长链路 ≈ 3 次重试 × (45s + 15s·attempt) ≈ 135s，留约 2 倍余量。
+	tracePublishGraceWindow = 3 * time.Minute
+
+	// traceRepublishDebounce 把同一 trace 内连续 End 的多个迟到 span 合并成一次重发。
+	// 摘要与记忆抽取两个后台 span 通常前后脚结束，不防抖会对同一行 upsert 两次。
+	traceRepublishDebounce = 800 * time.Millisecond
+)
+
+// traceState 是一条 trace 在内存中的活跃状态，也是「迟到 span 合并」的载体。
+//
+// 生命周期：StartSpan 登记 → 首发落库（publishTrace / finalizeTrace）→
+// 保活窗口内迟到 span 触发防抖重发（upsert 覆盖同一行）→ 窗口到期 GC 释放。
 type traceState struct {
-	mu           sync.Mutex
+	// mu 保护下面的标量生命周期字段。
+	mu sync.Mutex
+	// traceMu 保护 Trace.Root 这棵树的 Children / Events 结构。
+	//
+	// 为什么必须单独一把锁：后台 span（DetachedTraceContext 派生）会在请求已经落库之后
+	// 才 End 并往树上挂节点，而重发要克隆整棵树 —— 不加锁就是 slice 的并发读写。
+	traceMu sync.Mutex
+	// flushMu 串行化首发与重发，保证不会出现「后发起的重发先落库、
+	// 用更旧的树覆盖更新的树」这种乱序写入。
+	flushMu sync.Mutex
+
 	Trace        *Trace
 	decision     SampleDecision
 	PendingForce bool
+
+	// —— 发布后保活（迟到 span 合并）——
+	// published 表示这条 trace 已进入「落库 + 保活」阶段。置位时机**早于**首次写库，
+	// 这样写库期间（最长 10s）结束的后台 span 也能被感知并触发重发，不会静默漏掉。
+	published bool
+	// synthetic 区分两种发布形态：
+	//   true  —— publishTrace 路径（chat 场景）：发布根是合成的 chat.request，Trace.Root 挂在其下
+	//   false —— finalizeTrace 路径（非 chat 根 span）：Trace.Root 本身即发布根
+	synthetic bool
+	// sampled 是首发算出的采样决定。重发一律复用它 —— rollSample 用的是随机数，
+	// 重算会让同一条 trace 在两次写入之间采样结果翻转，甚至把已落库的行「重发成不写」。
+	sampled bool
+	// snap 是首发时对 rootAttrs 的快照。重发发生在请求结束之后，那时的 ctx 早已回收，
+	// 只能靠快照拿 user / session / message 归属。
+	snap *rootAttrsSnapshot
+	// graceUntil 是状态回收时刻；每次迟到 span 到达都会把它往后推（滑动窗口续期）。
+	graceUntil time.Time
+	// treeGen 是树结构的代次，每次挂上新子 span 自增。重发写完后再对比一次：
+	// 若写库期间又有 span 挂上，就再排一轮，保证不漏。内容为 0 表示树未变。
+	treeGen uint64
+	// republish 是防抖计时器，非空表示已有一轮重发在排队。
+	republish *time.Timer
+}
+
+// rootAttrsSnapshot 是 rootAttrs 的只读快照，供 trace 重发时复用。
+// 字段与 publishTrace 需要的一致，避免重发路径再去碰那个早已无人持有的 rootAttrs。
+type rootAttrsSnapshot struct {
+	userID     string
+	sessionID  string
+	requestID  string
+	messageID  string
+	searchMode string
+	modelID    string
+	beginAt    time.Time
+	endAt      time.Time
+	endErr     error
+	endStatus  SpanStatus
+	attrs      Attrs
+}
+
+// snapshotRootAttrs 拷贝 rootAttrs 的当前值。
+// 顺带把 rootDone 置位，语义与旧实现一致：请求侧的根已经收口，后续不再被业务改写。
+func snapshotRootAttrs(ra *rootAttrs) *rootAttrsSnapshot {
+	snap := &rootAttrsSnapshot{}
+	if ra == nil {
+		return snap
+	}
+	ra.mu.Lock()
+	defer ra.mu.Unlock()
+	snap.userID = ra.userID
+	snap.sessionID = ra.sessionID
+	snap.requestID = ra.requestID
+	snap.messageID = ra.messageID
+	snap.searchMode = ra.searchMode
+	snap.modelID = ra.modelID
+	snap.beginAt = ra.beginAt
+	snap.endAt = ra.endAt
+	snap.endErr = ra.endErr
+	snap.endStatus = ra.endStatus
+	if len(ra.attrs) > 0 {
+		snap.attrs = make(Attrs, len(ra.attrs))
+		for k, v := range ra.attrs {
+			snap.attrs[k] = v
+		}
+	}
+	ra.rootDone = true
+	return snap
+}
+
+// cloneSpan 深拷贝一棵 span 树，用于「快照式落库」。
+//
+// 为什么必须拷贝：后台 span 会在主 trace 已经落库之后继续往活树上挂，而写库路径
+// （observabilityRepository.WriteTraces）会对这棵树做 stripInternalSpanAttrs 改写 + JSON marshal。
+// 把活树直接交出去，等于让序列化过程和并发挂树赛跑 —— 轻则 marshal 出半棵树，
+// 重则 slice 并发写。树规模只有几十个节点，拷贝成本可以忽略。
+//
+// otelSpan / parent 刻意不拷：两者都是 json:"-" 的运行期引用，序列化用不到，
+// 拷过去反而埋下「对同一个 OTel span 调两次 End」的隐患。
+func cloneSpan(s *Span) *Span {
+	if s == nil {
+		return nil
+	}
+	out := &Span{
+		TraceID:     s.TraceID,
+		SpanID:      s.SpanID,
+		ParentID:    s.ParentID,
+		Name:        s.Name,
+		Component:   s.Component,
+		StartAt:     s.StartAt,
+		EndAt:       s.EndAt,
+		DurationMs:  s.DurationMs,
+		Status:      s.Status,
+		Error:       s.Error,
+		OTelTraceID: s.OTelTraceID,
+		OTelSpanID:  s.OTelSpanID,
+	}
+	if len(s.Attrs) > 0 {
+		out.Attrs = make(Attrs, len(s.Attrs))
+		for k, v := range s.Attrs {
+			out.Attrs[k] = v
+		}
+	}
+	if len(s.Events) > 0 {
+		out.Events = make([]*SpanEvent, 0, len(s.Events))
+		for _, e := range s.Events {
+			if e == nil {
+				continue
+			}
+			ce := &SpanEvent{Name: e.Name, Timestamp: e.Timestamp}
+			if len(e.Attrs) > 0 {
+				ce.Attrs = make(Attrs, len(e.Attrs))
+				for k, v := range e.Attrs {
+					ce.Attrs[k] = v
+				}
+			}
+			out.Events = append(out.Events, ce)
+		}
+	}
+	if len(s.Children) > 0 {
+		out.Children = make([]*Span, 0, len(s.Children))
+		for _, c := range s.Children {
+			if cloned := cloneSpan(c); cloned != nil {
+				out.Children = append(out.Children, cloned)
+			}
+		}
+	}
+	return out
+}
+
+// mergeChildRoot 把自研轨登记的根 span 挂到即将落库的发布根下。
+//
+// 同名（都是 chat.request）说明自研轨里已经有显式的 chat.request span，
+// 这时合并其子树 / 事件 / 属性，避免树里出现两个同名节点。
+func mergeChildRoot(root, prev *Span) {
+	if root == nil || prev == nil {
+		return
+	}
+	if prev.Name != root.Name {
+		root.Children = append(root.Children, prev)
+		return
+	}
+	root.Children = append(root.Children, prev.Children...)
+	root.Events = append(root.Events, prev.Events...)
+	if root.Attrs == nil {
+		root.Attrs = Attrs{}
+	}
+	for k, v := range prev.Attrs {
+		if _, exists := root.Attrs[k]; !exists {
+			root.Attrs[k] = v
+		}
+	}
 }
 
 // defaultRecorder 内部用 OTel Tracer 管运行时 span，用 promMetrics 管指标。
@@ -475,11 +658,25 @@ func (r *defaultRecorder) EndSpan(ctx context.Context, span *Span, status SpanSt
 	// 落库 parent-child：用 StartSpan 时存的 parent 引用挂接 children。
 	// 不依赖 trace.SpanFromContext(ctx)：ctx 可能是 eino_callback 透传的 ctxWithSpan，
 	// SpanFromContext 拿回的是当前 span 自己，parent != span 永远失败。
+	//
+	// 挂树全程持 traceState.traceMu：后台 span（DetachedTraceContext 派生）会在主 trace
+	// 已经落库之后才 End，与「重发时克隆树」并发，不加锁就是对 Children slice 的并发写。
+	st := r.loadTraceState(span.TraceID)
+	if st != nil {
+		st.traceMu.Lock()
+	}
 	if span.parent != nil {
 		if span.parent.Children == nil {
 			span.parent.Children = []*Span{}
 		}
 		span.parent.Children = append(span.parent.Children, span)
+		if st != nil {
+			// 只有树真的变了才记代次：重发写完靠它判断有没有漏
+			st.treeGen++
+		}
+	}
+	if st != nil {
+		st.traceMu.Unlock()
 	}
 
 	// 根 span 结束时触发 finalizeTrace；chat 中间 root span 跳过
@@ -490,11 +687,21 @@ func (r *defaultRecorder) EndSpan(ctx context.Context, span *Span, status SpanSt
 				isIntermediate = true
 			}
 		}
-		if !isIntermediate {
-			if stVal, ok := r.traceStates.Load(span.TraceID); ok {
-				if st, ok := stVal.(*traceState); ok && st.Trace != nil && st.Trace.Root == span {
+		if !isIntermediate && st != nil && st.Trace != nil {
+			switch {
+			case st.Trace.Root == span:
+				// 已发布过就不再走 finalizeTrace：那会用「直接根」形态把同一行再写一遍，
+				// 把 publishTrace 合成的 chat.request 树和 rootAttrs 里的归属信息覆盖掉
+				// （WriteTraces 是 upsert + UpdateAll）。真实链路里这正是 gin 中间件的
+				// http.request 根 span —— 它在 SSE 收尾、FlushTrace 之后才 End。
+				// 它带的新子树早已由各自的 EndSpan 触发过重发，这里无需再做任何事。
+				if !r.traceAlreadyPublished(st) {
 					r.finalizeTrace(ctx, span, err)
 				}
+			case r.traceAlreadyPublished(st):
+				// 迟到 span：所属 trace 已经落库（典型是 DetachedTraceContext 派生的后台任务）。
+				// 不再为它新开一行 chat_traces，而是防抖重发、并回同一行。
+				r.scheduleRepublish(span.TraceID, st)
 			}
 		}
 	}
@@ -502,72 +709,252 @@ func (r *defaultRecorder) EndSpan(ctx context.Context, span *Span, status SpanSt
 	r.metrics.obsSpanDurationSec.WithLabelValues(string(span.Component), string(span.Status)).Observe(float64(span.DurationMs) / 1000.0)
 }
 
+// finalizeTrace 在「非 chat 的自研根 span」结束时落库（chat 场景走 publishTrace）。
+//
+// 与 publishTrace 的唯一区别是发布根的形态：这里 root 自己就是发布根，
+// 而 chat 场景要在合成 chat.request 下面再挂一层中间根（见 traceState.synthetic）。
+//
+// 落库后**不销毁** traceState，改为进入保活窗口：请求结束后才 End 的后台 span
+// 依然能把子树并回同一行（见 tracePublishGraceWindow）。
 func (r *defaultRecorder) finalizeTrace(ctx context.Context, root *Span, endErr error) {
-	if root == nil {
+	if root == nil || root.TraceID == "" {
 		return
 	}
 	traceID := root.TraceID
-	userID := ""
-	sessionID := ""
-	requestID := ""
-	if root.Attrs != nil {
-		if v, ok := root.Attrs["user_id"]; ok {
-			userID, _ = v.(string)
-		}
-		if v, ok := root.Attrs["session_id"]; ok {
-			sessionID, _ = v.(string)
-		}
-		if v, ok := root.Attrs["request_id"]; ok {
-			requestID, _ = v.(string)
-		}
+	snap := &rootAttrsSnapshot{
+		beginAt: root.StartAt,
+		endAt:   root.EndAt,
+		endErr:  endErr,
 	}
-	// 兜底：空值统一填 unknown，避免数据库字段为空导致前端列表筛选 / 详情查询失败
-	if userID == "" {
-		userID = "unknown"
-	}
-	if sessionID == "" {
-		sessionID = "unknown"
-	}
-	hasErr := endErr != nil || root.Status == SpanStatusError || root.Status == SpanStatusCanceled
-	hasFeedback := false
-	rawDecision, _ := r.traceDecide.LoadAndDelete(traceID)
-	var decision SampleDecision
-	if rawDecision != nil {
-		decision, _ = rawDecision.(SampleDecision)
-	}
-	dur := time.Duration(root.DurationMs) * time.Millisecond
-	sampled := r.sampler.ShouldSample(traceID, userID, hasErr, dur, hasFeedback, decision)
-	t := &Trace{
-		ID:         traceID,
-		RequestID:  requestID,
-		UserID:     userID,
-		SessionID:  sessionID,
-		Root:       root,
-		SampleRate: r.cfg.SamplingRate,
-		Sampled:    sampled,
-		// 双轨 traceID 对齐：把 OTel 轨道的 traceID 一并带上，前端据此跳转三方追踪平台。
-		// root 来自 StartSpan，自带 otelSpan，所以这里能直接取到。
-		OTelTraceID:  oTelTraceIDFor(ctx, root),
-		OTelExported: oTelExportedFor(ctx, root),
-	}
-	r.traceStates.Delete(traceID)
-	if sampled {
-		// 写库用独立 context，避免 HTTP 请求结束后 ctx 被取消导致写库失败
-		writeCtx, writeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer writeCancel()
-		rec := &SinkRecord{Kind: "trace", Timestamp: time.Now(), Trace: t}
-		if e := r.sinks.Write(writeCtx, rec); e != nil {
-			logger.Warnf("trace 写入 sink 失败: %v", e)
-		}
-		if r.dbSink != nil && r.cfg.TraceTableEnabled {
-			if err := r.dbSink.WriteTraces(writeCtx, []*Trace{t}); err != nil {
-				logger.Warnf("trace 写库失败: %v", err)
-				r.metrics.obsDBSinkErrorsTotal.WithLabelValues("trace").Inc()
-			}
-		}
+	if root.Status == SpanStatusError || root.Status == SpanStatusCanceled {
+		snap.endStatus = root.Status
 	} else {
-		r.metrics.obsTraceNotSampled.Inc()
+		snap.endStatus = SpanStatusOK
 	}
+	// 兜底到 attrs：非 chat 路径没有 rootAttrs，归属信息只能从根 span 的 attrs 上取
+	if root.Attrs != nil {
+		if v, ok := root.Attrs["user_id"].(string); ok {
+			snap.userID = v
+		}
+		if v, ok := root.Attrs["session_id"].(string); ok {
+			snap.sessionID = v
+		}
+		if v, ok := root.Attrs["request_id"].(string); ok {
+			snap.requestID = v
+		}
+	}
+
+	st := r.ensureTraceState(traceID)
+	st.mu.Lock()
+	st.snap = snap
+	st.synthetic = false
+	st.published = true
+	st.graceUntil = time.Now().Add(tracePublishGraceWindow)
+	st.mu.Unlock()
+
+	r.flushTraceState(ctx, traceID, st, false)
+	r.armTraceGC(traceID)
+}
+
+// ensureTraceState 取（必要时新建）traceID 对应的 traceState。
+//
+// 允许存在「没有登记过根 span 的空状态」：FlushTrace 可能对一条没有自研根 span 的 trace
+// 调用（例如只有 HTTP 层 span 的请求），这种情况同样要能落库。
+func (r *defaultRecorder) ensureTraceState(traceID string) *traceState {
+	if v, ok := r.traceStates.Load(traceID); ok {
+		if st, ok := v.(*traceState); ok && st != nil {
+			return st
+		}
+	}
+	fresh := &traceState{Trace: &Trace{ID: traceID, SampleRate: r.cfg.SamplingRate}}
+	actual, _ := r.traceStates.LoadOrStore(traceID, fresh)
+	if st, ok := actual.(*traceState); ok && st != nil {
+		return st
+	}
+	return fresh
+}
+
+// loadTraceState 取 traceID 的状态，没有则返回 nil（调用方静默降级）。
+func (r *defaultRecorder) loadTraceState(traceID string) *traceState {
+	if traceID == "" {
+		return nil
+	}
+	v, ok := r.traceStates.Load(traceID)
+	if !ok {
+		return nil
+	}
+	st, _ := v.(*traceState)
+	return st
+}
+
+// traceAlreadyPublished 表示这条 trace 已经进入落库 + 保活阶段。
+//
+// 判据用 snap != nil 而不是 sampled：首发置位 published 早于写库完成，
+// 写库期间结束的后台 span 也必须被判为「迟到」并触发重发，否则会被静默丢掉。
+func (r *defaultRecorder) traceAlreadyPublished(st *traceState) bool {
+	if st == nil {
+		return false
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.published && st.snap != nil
+}
+
+// scheduleRepublish 排一次防抖重发：把 trace 的当前树重新 upsert 到同一行。
+//
+// 防抖的意义：会话摘要 + 记忆抽取两个后台 span 通常前后脚结束，不防抖会对同一行写两次。
+// 每次调用同时把保活窗口往后推，避免后台任务还在跑、状态就被 GC 回收。
+func (r *defaultRecorder) scheduleRepublish(traceID string, st *traceState) {
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	if !st.published || st.snap == nil {
+		// 还没发布过（快照都没建），首发自会带上最新的树，无需重发
+		st.mu.Unlock()
+		return
+	}
+	st.graceUntil = time.Now().Add(tracePublishGraceWindow)
+	if st.republish != nil {
+		st.republish.Stop()
+	}
+	st.republish = time.AfterFunc(traceRepublishDebounce, func() {
+		st.mu.Lock()
+		st.republish = nil
+		st.mu.Unlock()
+		r.republishTrace(traceID)
+	})
+	st.mu.Unlock()
+	r.armTraceGC(traceID)
+}
+
+// republishTrace 把保活中的 trace 再写一次（upsert 覆盖同一行，不会新增行）。
+//
+// ctx 用 Background：请求 ctx 早已被回收。OTel traceID 不依赖 ctx ——
+// 它保存在保活的自研根 span 上（见 oTelTraceIDFor 的第一条查找路径）。
+func (r *defaultRecorder) republishTrace(traceID string) {
+	st := r.loadTraceState(traceID)
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	ready := st.published && st.snap != nil
+	st.mu.Unlock()
+	if !ready {
+		return
+	}
+	r.flushTraceState(context.Background(), traceID, st, true)
+	r.armTraceGC(traceID)
+}
+
+// armTraceGC 安排一次状态回收。每次发布与每个迟到 span 都会续期，
+// 所以实际回收时刻跟随 graceUntil（滑动窗口），而不是「首次发布 + 固定时长」。
+func (r *defaultRecorder) armTraceGC(traceID string) {
+	st := r.loadTraceState(traceID)
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	until := st.graceUntil
+	st.mu.Unlock()
+	if until.IsZero() {
+		// 没设过保活窗口就不排 GC：否则 time.Until(零值) 是极大负数，会立刻误删状态
+		return
+	}
+	d := time.Until(until)
+	if d < 0 {
+		d = 0
+	}
+	time.AfterFunc(d, func() { r.releaseTraceState(traceID) })
+}
+
+// releaseTraceState 保活到期后释放 traceState 与采样决定，避免内存无界增长。
+//
+// 必须先确认 graceUntil 没有被迟到 span 续期：抢先回收会把还在用的状态删掉。
+// 被续期时直接返回即可 —— 续期那次调用已经排了新的 GC。
+func (r *defaultRecorder) releaseTraceState(traceID string) {
+	st := r.loadTraceState(traceID)
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	if time.Now().Before(st.graceUntil) {
+		st.mu.Unlock()
+		return
+	}
+	if st.republish != nil {
+		st.republish.Stop()
+		st.republish = nil
+	}
+	st.mu.Unlock()
+
+	r.traceStates.Delete(traceID)
+	r.traceDecide.Delete(traceID)
+}
+
+// buildSyntheticRoot 构造落库用的 chat.request 根 span。
+//
+// 自研轨登记的是 chat.deep / chat.quick 这类中间根（真实走过 StartSpan、带 OTel span），
+// 而前端列表 / 详情需要一个统一的会话级根节点，所以落库时合成一个 chat.request，
+// 再把中间根挂成它的子节点。
+//
+// SpanID 直接复用 traceID：合成的根没有真实 OTel span，用 traceID 占位既保证 SpanID 非空
+// （前端树渲染需要），又天然与行主键一致，排查时一眼能对上。OTelSpanID 保持为空，
+// 不伪造一个并不存在的 span。
+func (r *defaultRecorder) buildSyntheticRoot(traceID string, snap *rootAttrsSnapshot) *Span {
+	beginAt := snap.beginAt
+	endAt := snap.endAt
+	if beginAt.IsZero() {
+		beginAt = time.Now()
+	}
+	if endAt.IsZero() {
+		endAt = time.Now()
+	}
+	status := snap.endStatus
+	if status == "" {
+		if snap.endErr != nil {
+			status = SpanStatusError
+		} else {
+			status = SpanStatusOK
+		}
+	}
+	attrs := Attrs{}
+	for k, v := range snap.attrs {
+		attrs[k] = v
+	}
+	if snap.userID != "" {
+		attrs["user_id"] = snap.userID
+	}
+	if snap.sessionID != "" {
+		attrs["session_id"] = snap.sessionID
+	}
+	if snap.messageID != "" {
+		attrs["message_id"] = snap.messageID
+	}
+	if snap.requestID != "" {
+		attrs["request_id"] = snap.requestID
+	}
+	if snap.searchMode != "" {
+		attrs["search_mode"] = snap.searchMode
+	}
+	if snap.modelID != "" {
+		attrs["model_id"] = snap.modelID
+	}
+	root := &Span{
+		TraceID:    traceID,
+		SpanID:     traceID,
+		Name:       "chat.request",
+		Component:  ComponentServiceChat,
+		StartAt:    beginAt,
+		EndAt:      endAt,
+		DurationMs: endAt.Sub(beginAt).Milliseconds(),
+		Status:     status,
+		Attrs:      r.sanitizer.SanitizeAttrs(attrs),
+	}
+	if snap.endErr != nil {
+		root.Error = r.sanitizer.SanitizeString(snap.endErr.Error())
+	}
+	return root
 }
 
 // Incr 是业务代码统一 metric 入口，内部代理到 Prometheus CounterVec。
@@ -800,190 +1187,181 @@ func (r *defaultRecorder) FlushTrace(ctx context.Context, userID, sessionID, mes
 	return traceID
 }
 
+// publishTrace 在请求收尾（FlushTrace）时把 chat trace 落库，并进入保活窗口。
+//
+// 保活的必要性：会话摘要 / 记忆抽取是响应返回之后才跑的后台任务，它们的 span 会在
+// 本函数已经写完库之后才 End。旧实现在这里 LoadAndDelete 掉状态，迟到 span 无处可归，
+// 只能另写一行 chat_traces（session=unknown 的孤儿 trace）。现在改为保活 + 迟到重发。
 func (r *defaultRecorder) publishTrace(ctx context.Context, traceID string, ra *rootAttrs) {
-	var (
-		userID     string
-		sessionID  string
-		requestID  string
-		attrs      Attrs
-		beginAt    time.Time
-		endAt      time.Time
-		endErr     error
-		endStatus  SpanStatus
-		messageID  string
-		searchMode string
-		modelID    string
-	)
-	if ra != nil {
-		ra.mu.Lock()
-		userID = ra.userID
-		sessionID = ra.sessionID
-		requestID = ra.requestID
-		beginAt = ra.beginAt
-		endAt = ra.endAt
-		endErr = ra.endErr
-		endStatus = ra.endStatus
-		messageID = ra.messageID
-		searchMode = ra.searchMode
-		modelID = ra.modelID
-		attrs = make(Attrs, len(ra.attrs))
-		for k, v := range ra.attrs {
-			attrs[k] = v
+	st := r.ensureTraceState(traceID)
+	snap := snapshotRootAttrs(ra)
+	st.mu.Lock()
+	st.snap = snap
+	st.synthetic = true
+	// 早于写库置位：写库期间（最长 10s）结束的后台 span 也必须是「迟到」，
+	// 否则它既没被本次克隆抓到、又不会触发重发，就被静默丢了。
+	st.published = true
+	st.graceUntil = time.Now().Add(tracePublishGraceWindow)
+	st.mu.Unlock()
+
+	r.flushTraceState(ctx, traceID, st, false)
+	r.armTraceGC(traceID)
+}
+
+// flushTraceState 把 traceState 里当前的 span 树写成一条 chat_traces 记录。
+//
+//	republish=false —— 首发：算采样决定、写 sink、记指标
+//	republish=true  —— 迟到 span 触发的重发：只做 DB upsert（覆盖同一行），
+//	                   不重复写 sink / 记指标，也不重掷采样（见 traceState.sampled）
+//
+// 三点并发约束：
+//  1. flushMu 串行化首发与重发，避免乱序写入让更旧的树覆盖更新的树；
+//  2. traceMu 下克隆整棵树，之后序列化只碰私有副本，后台 span 继续挂树不受影响；
+//  3. 写完再对比 treeGen，写库期间有新节点挂上就再排一轮重发，保证不漏。
+func (r *defaultRecorder) flushTraceState(ctx context.Context, traceID string, st *traceState, republish bool) {
+	if st == nil {
+		return
+	}
+	st.flushMu.Lock()
+	defer st.flushMu.Unlock()
+
+	st.mu.Lock()
+	snap := st.snap
+	synthetic := st.synthetic
+	prevSampled := st.sampled
+	st.mu.Unlock()
+	if snap == nil {
+		snap = &rootAttrsSnapshot{}
+	}
+
+	st.traceMu.Lock()
+	var registeredRoot *Span
+	if st.Trace != nil {
+		registeredRoot = cloneSpan(st.Trace.Root)
+	}
+	treeGen := st.treeGen
+	st.traceMu.Unlock()
+
+	var root *Span
+	if synthetic {
+		// chat 场景：合成 chat.request 作发布根，自研轨登记的中间根挂到它下面
+		root = r.buildSyntheticRoot(traceID, snap)
+		mergeChildRoot(root, registeredRoot)
+	} else {
+		// 非 chat 场景：登记根自己就是发布根，无需再套一层
+		if registeredRoot == nil {
+			return
 		}
-		ra.rootDone = true
-		ra.mu.Unlock()
+		root = registeredRoot
 	}
-	if beginAt.IsZero() {
-		beginAt = time.Now()
-	}
-	if endAt.IsZero() {
-		endAt = time.Now()
-	}
-	if endStatus == "" {
-		if endErr != nil {
-			endStatus = SpanStatusError
-		} else {
-			endStatus = SpanStatusOK
-		}
-	}
-	if attrs == nil {
-		attrs = Attrs{}
-	}
-	if userID != "" {
-		attrs["user_id"] = userID
-	}
-	if sessionID != "" {
-		attrs["session_id"] = sessionID
-	}
-	if messageID != "" {
-		attrs["message_id"] = messageID
-	}
-	if requestID != "" {
-		attrs["request_id"] = requestID
-	}
-	if searchMode != "" {
-		attrs["search_mode"] = searchMode
-	}
-	if modelID != "" {
-		attrs["model_id"] = modelID
-	}
-	dur := endAt.Sub(beginAt)
-	root := &Span{
-		TraceID:    traceID,
-		SpanID:     traceID,
-		Name:       "chat.request",
-		Component:  ComponentServiceChat,
-		StartAt:    beginAt,
-		EndAt:      endAt,
-		DurationMs: dur.Milliseconds(),
-		Status:     endStatus,
-		Attrs:      r.sanitizer.SanitizeAttrs(attrs),
-	}
-	if endErr != nil {
-		root.Error = r.sanitizer.SanitizeString(endErr.Error())
-	}
-	// 双轨 traceID 对齐：合成的 chat.request 根 span 是手工构造的（SpanID == traceID、无 otelSpan），
-	// 所以 OTel traceID 只能从「登记在 traceState 里、真正走过 StartSpan 的那个 span」回捞，
-	// 拿不到再退回 ctx 里的 OTel span。同一 trace 内 OTel 采样结果是共享的，两者取其一即可。
-	var otelRoot *Span
-	if stVal, ok := r.traceStates.LoadAndDelete(traceID); ok {
-		if st, ok := stVal.(*traceState); ok && st != nil && st.Trace != nil {
-			otelRoot = st.Trace.Root
-			if prev := otelRoot; prev != nil {
-				if prev.Name != root.Name {
-					if root.Children == nil {
-						root.Children = []*Span{}
-					}
-					root.Children = append(root.Children, prev)
-				} else {
-					if prev.Children != nil {
-						if root.Children == nil {
-							root.Children = []*Span{}
-						}
-						root.Children = append(root.Children, prev.Children...)
-					}
-					if prev.Events != nil {
-						root.Events = append(root.Events, prev.Events...)
-					}
-					if root.Attrs == nil {
-						root.Attrs = Attrs{}
-					}
-					for k, v := range prev.Attrs {
-						if _, exists := root.Attrs[k]; !exists {
-							root.Attrs[k] = v
-						}
-					}
-				}
-			}
-		}
-	}
-	otelTraceID := oTelTraceIDFor(ctx, otelRoot)
-	otelExported := oTelExportedFor(ctx, otelRoot)
-	// 合成的根 span 本身没有 OTel span，但这条 trace 的 OTel traceID 是已知的，
-	// 记到根上让 span_tree JSON 也能直接取用（OTelSpanID 保持为空，不伪造一个不存在的 span）。
+
+	// 双轨对齐：OTel traceID 从保活的自研根上回捞（重发时 ctx 已经没有了），
+	// 拿不到再退回 ctx 里的 OTel span。
+	otelTraceID := oTelTraceIDFor(ctx, registeredRoot)
+	otelExported := oTelExportedFor(ctx, registeredRoot)
 	root.OTelTraceID = otelTraceID
-	hasErr := endErr != nil || endStatus == SpanStatusError || endStatus == SpanStatusCanceled
-	hasFeedback := false
-	rawDecision, _ := r.traceDecide.LoadAndDelete(traceID)
-	var decision SampleDecision
-	if rawDecision != nil {
-		decision, _ = rawDecision.(SampleDecision)
+
+	attrs := root.Attrs
+	userID := snap.userID
+	sessionID := snap.sessionID
+	requestID := snap.requestID
+	if userID == "" && attrs != nil {
+		if v, ok := attrs["user_id"].(string); ok {
+			userID = v
+		}
 	}
-	// user_id / session_id 空值兜底：从 attrs 回捞，仍为空则填 unknown
+	if sessionID == "" && attrs != nil {
+		if v, ok := attrs["session_id"].(string); ok {
+			sessionID = v
+		}
+	}
+	// 兜底：空值统一填 unknown，避免数据库字段为空导致前端列表筛选 / 详情查询失败
 	if userID == "" {
-		if root.Attrs != nil {
-			if v, ok := root.Attrs["user_id"].(string); ok && v != "" {
-				userID = v
-			}
-		}
-		if userID == "" {
-			userID = "unknown"
-		}
+		userID = "unknown"
 	}
 	if sessionID == "" {
-		if root.Attrs != nil {
-			if v, ok := root.Attrs["session_id"].(string); ok && v != "" {
-				sessionID = v
-			}
-		}
-		if sessionID == "" {
-			sessionID = "unknown"
-		}
+		sessionID = "unknown"
 	}
-	sampled := r.sampler.ShouldSample(traceID, userID, hasErr, dur, hasFeedback, decision)
+
+	dur := time.Duration(root.DurationMs) * time.Millisecond
+	hasErr := snap.endErr != nil || snap.endStatus == SpanStatusError || snap.endStatus == SpanStatusCanceled ||
+		root.Status == SpanStatusError || root.Status == SpanStatusCanceled
+
+	var sampled bool
+	if republish {
+		// 复用首发决定。rollSample 是随机的，重算可能把已落库的行「重发成不写」。
+		sampled = prevSampled
+	} else {
+		rawDecision, _ := r.traceDecide.Load(traceID)
+		var decision SampleDecision
+		if rawDecision != nil {
+			decision, _ = rawDecision.(SampleDecision)
+		}
+		// 这里刻意用 Load 而不是 LoadAndDelete：保活期内可能还有迟到 span 触发重发，
+		// 删掉会让「用户点赞强制保留」（RecordFeedback / ForceSampling）在重发时失效。
+		// 真正的清理交给保活到期后的 releaseTraceState。
+		sampled = r.sampler.ShouldSample(traceID, userID, hasErr, dur, false, decision)
+	}
+	st.mu.Lock()
+	st.sampled = sampled
+	st.published = true
+	st.mu.Unlock()
+
 	t := &Trace{
-		ID:         traceID,
-		RequestID:  requestID,
-		UserID:     userID,
-		SessionID:  sessionID,
-		Root:       root,
-		SampleRate: r.cfg.SamplingRate,
-		Sampled:    sampled,
-		// 双轨 traceID 对齐：OTel 轨道的 traceID 一并带上，前端据此跳转三方追踪平台
+		ID:           traceID,
+		RequestID:    requestID,
+		UserID:       userID,
+		SessionID:    sessionID,
+		Root:         root,
+		SampleRate:   r.cfg.SamplingRate,
+		Sampled:      sampled,
 		OTelTraceID:  otelTraceID,
 		OTelExported: otelExported,
 	}
+
 	// 写库用独立 context，避免 HTTP 请求结束后 ctx 被取消导致写库失败
 	writeCtx, writeCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer writeCancel()
-	rec := &SinkRecord{Kind: "trace", Timestamp: endAt, Trace: t}
-	if e := r.sinks.Write(writeCtx, rec); e != nil {
-		logger.Warnf("FlushTrace sink 写失败: %v", e)
+
+	if !republish {
+		rec := &SinkRecord{Kind: "trace", Timestamp: root.EndAt, Trace: t}
+		if e := r.sinks.Write(writeCtx, rec); e != nil {
+			logger.Warnf("trace 写入 sink 失败: %v", e)
+		}
 	}
 	if sampled && r.dbSink != nil && r.cfg.TraceTableEnabled {
 		if err := r.dbSink.WriteTraces(writeCtx, []*Trace{t}); err != nil {
-			logger.Warnf("FlushTrace 写库失败: %v", err)
+			if republish {
+				logger.Warnf("迟到 span 重发写库失败: %v", err)
+			} else {
+				logger.Warnf("trace 写库失败: %v", err)
+			}
 			r.metrics.obsDBSinkErrorsTotal.WithLabelValues("trace").Inc()
 		}
+	} else if !republish && !sampled {
+		r.metrics.obsTraceNotSampled.Inc()
 	}
-	r.metrics.obsTraceFlushTotal.WithLabelValues(
-		boolLabelO(sampled),
-		searchModeOrDefault(searchMode),
-	).Inc()
-	r.metrics.obsTraceDurationSec.WithLabelValues(
-		searchModeOrDefault(searchMode),
-		string(endStatus),
-	).Observe(dur.Seconds())
+
+	if !republish {
+		searchMode := snap.searchMode
+		r.metrics.obsTraceFlushTotal.WithLabelValues(
+			boolLabelO(sampled),
+			searchModeOrDefault(searchMode),
+		).Inc()
+		r.metrics.obsTraceDurationSec.WithLabelValues(
+			searchModeOrDefault(searchMode),
+			string(root.Status),
+		).Observe(dur.Seconds())
+	}
+
+	// 写库期间树又长了（后台 span 恰好在这几百毫秒里 End）→ 再排一轮重发。
+	// 首发也一样要排：否则这个 span 既没进本次克隆，也没人再写第二次。
+	st.traceMu.Lock()
+	changed := st.treeGen != treeGen
+	st.traceMu.Unlock()
+	if changed {
+		r.scheduleRepublish(traceID, st)
+	}
 }
 
 func boolLabelO(b bool) string {

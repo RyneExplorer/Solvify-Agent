@@ -53,25 +53,50 @@ func InitPropagator() {
 //
 // 适用场景：HTTP 响应返回之后仍要继续跑的后台任务（异步生成会话摘要、抽取用户记忆等）。
 // 这类任务不能用请求的 ctx —— 响应一返回请求 ctx 就被取消，后台任务会被立刻打断；
-// 但也不能图省事写 context.Background()：那会把当前 SpanContext 一并丢掉，
-// 后台 span 失去父节点、各自成为独立根 trace。后果在自研页面上看不出来，
-// 一接三方平台就是 trace 列表里一批「孤儿 trace」，且拿不到用户/会话归属。
+// 但也不能图省事写 context.Background()：那会把 trace 上下文一并丢掉。
 //
-// 实现只搬 SpanContext，不搬 Done/Err/Deadline 通道，所以取消信号被真正切断，
-// 而父子关系与 traceID 保持不变。父 span 即使已经 End 也仍是合法 parent
-// （OTel 的父子关系在建 span 时确定，与父的 End 状态无关），因此本函数对
-// 「请求已结束、后台才开跑」的场景同样成立。
+// 本项目有两条并存的 trace 轨道，两边的身份都必须搬过去，只搬一半就会裂行：
+//
+//   - OTel 轨（SpanContext）：决定三方平台上的父子关系与 traceID；
+//   - 自研轨（traceIDKey / currentSpanKey / rootAttrsKey）：决定这条 trace 落在
+//     chat_traces 的哪一行、span 挂在哪棵树下、以及 user/session/message 归属。
+//
+// 漏掉自研轨的后果比「三方平台上的孤儿 trace」更直接：后台 span 会自己生成一个
+// 随机 traceID、按「无父根 span」登记，于是 EndSpan 时走 finalizeTrace 另外写一行
+// chat_traces。那一行拿不到完整的 rootAttrs，user_id / session_id 会落成 unknown，
+// 在前端列表里表现为一条和真正会话完全割裂的「孤儿 trace」。
+//
+// 实现要点：只搬「身份」，不搬 Done/Err/Deadline 通道，所以取消信号被真正切断，
+// 而两条轨道的父子关系与 traceID 全部保持不变。父 span 即使已经 End 也仍是合法 parent
+// （OTel 的父子关系在建 span 时确定，与父的 End 状态无关；自研轨的 currentSpanKey
+// 同样与 End 状态解耦），因此本函数对「请求已结束、后台才开跑」的场景同样成立。
+//
+// 注意：OTel SpanContext 无效时（OTelExporter=noop 的开发环境、或本就不在 trace 内），
+// 自研轨身份**必须照样保留**。若此时一起退化成 Background，本地开发环境同样会裂行，
+// 而开发环境恰恰是这类缺陷最常被观察到的地方。
 func DetachedTraceContext(ctx context.Context) context.Context {
 	if ctx == nil {
 		return context.Background()
 	}
-	sc := trace.SpanContextFromContext(ctx)
-	if !sc.IsValid() {
-		// 没有有效 span（noop provider 或本就不在 trace 内）时退化为 Background，
-		// 行为与改动前一致，不伪造任何 span 上下文。
-		return context.Background()
+	out := context.Background()
+
+	// 1) OTel 轨：只搬 SpanContext，Task / 取消 / 超时通道不带过去。
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		out = trace.ContextWithSpanContext(out, sc)
 	}
-	return trace.ContextWithSpanContext(context.Background(), sc)
+
+	// 2) 自研轨：traceID / 当前 span / 根属性，三个 key 一个都不能少。
+	//    语义分别见 recorder.go 的 traceIDKey、currentSpanKey、rootAttrsKey 注释。
+	if v := ctx.Value(traceIDKey); v != nil {
+		out = context.WithValue(out, traceIDKey, v)
+	}
+	if v := ctx.Value(currentSpanKey{}); v != nil {
+		out = context.WithValue(out, currentSpanKey{}, v)
+	}
+	if v := ctx.Value(rootAttrsKey); v != nil {
+		out = context.WithValue(out, rootAttrsKey, v)
+	}
+	return out
 }
 
 // InboundTraceInfo 描述入站请求携带的远程 trace 上下文，供中间件记属性与排查使用。
