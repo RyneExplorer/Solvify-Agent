@@ -125,6 +125,10 @@ type funcAnalysis struct {
 	writesOutside map[string]map[string]bool
 	// InTx 闭包内用到的所有仓库字段（含只读调用），用于「事务不感知仓库」检查
 	fieldsUsedInTx map[string]map[string]bool
+	// txCtxMisuse 记录「在 InTx 闭包内、却没把闭包收到的 ctx 传给仓库调用」的位置
+	txCtxMisuse []string
+	// txCtxChecked 累计已核对过 ctx 参数的「InTx 闭包内仓库调用」数，用于守卫非空转自证
+	txCtxChecked int
 }
 
 func newFuncAnalysis(key string, repoFields map[string]string) *funcAnalysis {
@@ -195,6 +199,84 @@ func insideInTx(parents map[ast.Node]ast.Node, n ast.Node) bool {
 		}
 	}
 	return false
+}
+
+// enclosingInTxFuncLit 返回包住该节点的**最内层** InTx 回调
+func enclosingInTxFuncLit(parents map[ast.Node]ast.Node, n ast.Node) (*ast.FuncLit, bool) {
+	for cur := parents[n]; cur != nil; cur = parents[cur] {
+		if fl, ok := cur.(*ast.FuncLit); ok && isInTxFuncLit(parents, fl) {
+			return fl, true
+		}
+	}
+	return nil, false
+}
+
+// inTxCtxParamName 取 InTx 回调的 ctx 参数名。
+//
+// 第二个返回值为 false 表示「拿不到可用的参数名」（首参未命名，或名字是 `_`）——
+// 这种写法结构上无法把事务 ctx 传下去，必须红灯：它跟「忘了传」是同一个缺陷。
+func inTxCtxParamName(fl *ast.FuncLit) (string, bool) {
+	ft := fl.Type
+	if ft == nil || ft.Params == nil || len(ft.Params.List) == 0 {
+		return "", false
+	}
+	p := ft.Params.List[0]
+	if len(p.Names) == 0 {
+		return "", false
+	}
+	name := p.Names[0].Name
+	if name == "_" || name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+// identTokens 收集表达式里出现的全部标识符名。
+//
+// 刻意按**词法边界**取词，不做子串匹配：否则 `otherCtx` 会因为「包含 ctx」而冒充
+// 事务 ctx，守卫就白设了。
+func identTokens(e ast.Expr) map[string]bool {
+	out := map[string]bool{}
+	ast.Inspect(e, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			out[id.Name] = true
+		}
+		return true
+	})
+	return out
+}
+
+// checkTxCtxArg 判断「InTx 闭包内的一次仓库调用」有没有把闭包收到的事务 ctx 传下去。
+//
+// 这是本组守卫最容易漏、也最容易被写回来的一条：insideInTx 只判断调用**词法上**在不在
+// InTx 闭包里，看不出传的是哪个 ctx。于是下面这种写法会以「写都在 InTx 内」的样子
+// 骗过全部检查——
+//
+//	s.txMgr.InTx(ctx, func(txCtx context.Context) error {
+//	    s.messageRepo.DeleteBySessionID(ctx, sessionID) // 外层 ctx：这次写根本没进事务
+//	    return s.sessionRepo.Delete(ctx, sessionID)     // 同样没进事务
+//	})
+//
+// ——而它正是 P1-7 要修的那个缺陷（两次写各自提交，中间失败留下永久不一致）。
+// 允许传派生 ctx（如 context.WithTimeout(txCtx, ...)），只要标识符出现在参数表达式里。
+func checkTxCtxArg(call *ast.CallExpr, fl *ast.FuncLit) (string, bool) {
+	param, ok := inTxCtxParamName(fl)
+	if !ok {
+		return "InTx 回调的首参数未命名或为 `_`，结构上无法把事务 ctx 传给仓库调用", false
+	}
+	if len(call.Args) == 0 {
+		// 该方法不收 ctx（事务不感知的仓库），由「事务不感知仓库不得进事务」那条检查负责
+		return "", true
+	}
+	toks := identTokens(call.Args[0])
+	if len(toks) == 0 || (len(toks) == 1 && toks["nil"]) {
+		// 首参不是 ctx 形态（字面量 / nil），不在本检查范围
+		return "", true
+	}
+	if !toks[param] {
+		return "仓库调用没有传 InTx 回调收到的 ctx（参数名 " + param + "），这次写会绕过事务", false
+	}
+	return "", true
 }
 
 // repoFieldsOf 收集该文件里「服务结构体的仓库字段」：字段名 → 仓库接口名
@@ -268,6 +350,15 @@ func analyzeFunc(decl *ast.FuncDecl, parents map[ast.Node]ast.Node, repoFields m
 		}
 		method := sel.Sel.Name
 		inTx := insideInTx(parents, call)
+		if inTx {
+			// 词法上在 InTx 里还不够：必须核对它传的是**闭包收到的那个 ctx**。
+			if fl, ok := enclosingInTxFuncLit(parents, call); ok {
+				a.txCtxChecked++
+				if msg, good := checkTxCtxArg(call, fl); !good {
+					a.txCtxMisuse = append(a.txCtxMisuse, fieldName+"."+method+"(): "+msg)
+				}
+			}
+		}
 		if isWriteMethod(method) {
 			if inTx {
 				addField(a.writesInTx, fieldName, method)
@@ -389,6 +480,49 @@ func TestServiceMultiRepositoryWritesShareOneTransaction(t *testing.T) {
 			"这些仓库的接口方法签名没有 ctx，即使放进 InTx 也会走自己的连接池、\n"+
 			"不会被回滚。要么给该接口的方法补上 ctx 参数并改用 dbFor，要么别把它放进事务。",
 			strings.Join(unawareInTx, "\n"))
+	}
+}
+
+// TestInTxCallbackWritesUseTheCallbackCtx 事务闭包里的每一次仓库调用，必须把闭包收到的 ctx 传下去。
+//
+// 为什么单独一条：TestServiceMultiRepositoryWritesShareOneTransaction 只判断写**词法上**
+// 在不在 InTx 闭包里（insideInTx），看不出传的是哪个 ctx。于是下面这种写法一路绿灯：
+//
+//	s.txMgr.InTx(ctx, func(txCtx context.Context) error {
+//	    s.messageRepo.DeleteBySessionID(ctx, sessionID) // 外层 ctx：这次写没进事务
+//	    return s.sessionRepo.Delete(ctx, sessionID)     // 同样没进事务
+//	})
+//
+// 编译通过、看起来「写都在 InTx 内」，实际两次写各自提交 —— 中间失败就留下永久不一致，
+// 正是 P1-7 要修的那类缺陷。这条检查把「fn 必须用它收到的 ctx」从注释变成红灯。
+func TestInTxCallbackWritesUseTheCallbackCtx(t *testing.T) {
+	facts := loadRepoFacts(t)
+	analyses := scanServicePackage(t, facts)
+
+	checked := 0
+	var violations []string
+	for _, key := range sortedAnalysisKeys(analyses) {
+		a := analyses[key]
+		checked += a.txCtxChecked
+		for _, v := range a.txCtxMisuse {
+			violations = append(violations, "  "+key+" → "+v)
+		}
+	}
+
+	// 自证非空转：已知生产代码里有 5 处 InTx（共 11 次闭包内仓库调用）。
+	// 检查数为 0 说明「InTx 回调」根本没被认出来，守卫会静默全绿。
+	if checked < 5 {
+		t.Fatalf("只在 InTx 闭包内核对了 %d 次仓库调用的 ctx 参数（期望 ≥5）——"+
+			"InTx 回调的识别规则很可能已被代码结构变化打破，守卫会静默失守", checked)
+	}
+	if len(violations) > 0 {
+		sort.Strings(violations)
+		t.Errorf("以下仓库调用在 InTx 闭包内、却没有使用闭包收到的事务 ctx：\n%s\n\n"+
+			"这些写会走仓库自己的连接池（dbFor 在 ctx 里找不到事务），即「已经进了 InTx，\n"+
+			"写却没有加入事务」——外层看起来原子，实际不会回滚。\n"+
+			"修法：把 InTx 回调的首参数命名并显式传下去，例如\n"+
+			"    s.txMgr.InTx(ctx, func(txCtx context.Context) error { ... s.repo.Write(txCtx, ...) ... })",
+			strings.Join(violations, "\n"))
 	}
 }
 

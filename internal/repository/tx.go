@@ -33,6 +33,8 @@ type TxManager interface {
 	// InTx 在单个数据库事务内执行 fn；fn 返回非 nil 错误则整体回滚。
 	//
 	// ⚠️ fn 必须使用它收到的 ctx（而不是外层 ctx），否则那个仓库操作不会进事务。
+	// 这条由 service 包的 TestInTxCallbackWritesUseTheCallbackCtx 守住 ——
+	// 「写词法上在闭包里」不等于「写进了事务」，传错 ctx 时编译通过、看起来也原子。
 	InTx(ctx context.Context, fn func(ctx context.Context) error) error
 }
 
