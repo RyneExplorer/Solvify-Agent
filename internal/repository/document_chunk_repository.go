@@ -21,7 +21,7 @@ func NewDocumentChunkRepository(db *gorm.DB) DocumentChunkRepository {
 // FindByID 根据 ID 查询当前用户的 chunk（含文档标题和知识库名称）
 func (r *documentChunkRepository) FindByID(ctx context.Context, userID, chunkID string) (ChunkDetail, bool, error) {
 	var row ChunkDetail
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Table("document_chunks dc").
 		Select("dc.id, dc.document_id, dc.knowledge_base_id, dc.content, dc.section_title, COALESCE(d.title, '') as document_title, COALESCE(kb.name, '') as knowledge_base_name").
 		Joins("LEFT JOIN documents d ON d.id = dc.document_id").
@@ -40,7 +40,7 @@ func (r *documentChunkRepository) SearchByKeyword(ctx context.Context, userID, q
 	keywordArray := buildKeywordArray(query)
 
 	var rows []DocumentSearchRow
-	err := r.db.WithContext(ctx).Raw(`
+	err := dbFor(ctx, r.db).Raw(`
 		SELECT dc.id, dc.knowledge_base_id, dc.document_id, COALESCE(d.title, '') as title, dc.content,
 			CASE
 				WHEN dc.content ILIKE ? THEN 1.0

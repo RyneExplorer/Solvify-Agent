@@ -22,7 +22,7 @@ func NewDocumentProcessingJobRepository(db *gorm.DB) DocumentProcessingJobReposi
 
 // CreateProcessJob 创建处理任务并更新文档状态
 func (r *documentProcessingJobRepository) CreateProcessJob(ctx context.Context, job *entity.DocumentProcessingJob, allowedDocumentStatuses []int, processingDocumentStatus int) (bool, error) {
-	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := dbFor(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		// 1. 先按允许状态抢占文档，避免重复触发处理任务
 		result := tx.Model(&entity.Document{}).
 			Where("id = ? AND user_id = ? AND status IN ?", job.DocumentID, job.UserID, allowedDocumentStatuses).
@@ -45,7 +45,7 @@ func (r *documentProcessingJobRepository) CreateProcessJob(ctx context.Context, 
 
 // MarkRunning 标记处理任务为运行中
 func (r *documentProcessingJobRepository) MarkRunning(ctx context.Context, userID, jobID string, pendingStatus, runningStatus int, startedAt time.Time) (bool, error) {
-	result := r.db.WithContext(ctx).
+	result := dbFor(ctx, r.db).
 		Model(&entity.DocumentProcessingJob{}).
 		Where("id = ? AND user_id = ? AND status = ?", jobID, userID, pendingStatus).
 		Updates(map[string]any{
@@ -61,7 +61,7 @@ func (r *documentProcessingJobRepository) MarkRunning(ctx context.Context, userI
 // ListByDocument 查询文档处理任务列表
 func (r *documentProcessingJobRepository) ListByDocument(ctx context.Context, userID, documentID string) ([]entity.DocumentProcessingJob, error) {
 	var items []entity.DocumentProcessingJob
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND document_id = ?", userID, documentID).
 		Order("created_at DESC").
 		Find(&items).Error
@@ -71,7 +71,7 @@ func (r *documentProcessingJobRepository) ListByDocument(ctx context.Context, us
 // FindByID 查询处理任务详情
 func (r *documentProcessingJobRepository) FindByID(ctx context.Context, userID, jobID string) (entity.DocumentProcessingJob, bool, error) {
 	var job entity.DocumentProcessingJob
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("id = ? AND user_id = ?", jobID, userID).
 		First(&job).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {

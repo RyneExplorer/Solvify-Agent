@@ -63,6 +63,7 @@ type documentService struct {
 	documentVersionRepo repository.DocumentVersionRepository
 	documentJobRepo     repository.DocumentProcessingJobRepository
 	storageQuotaRepo    repository.StorageQuotaRepository
+	txMgr               repository.TxManager
 	chunkRepo           repository.DocumentChunkRepository
 	chunkService        DocumentChunkServiceInterface
 	textExtractor       documentparser.TextExtractor
@@ -76,6 +77,7 @@ func NewDocumentServiceWithChunkService(
 	documentVersionRepo repository.DocumentVersionRepository,
 	documentJobRepo repository.DocumentProcessingJobRepository,
 	storageQuotaRepo repository.StorageQuotaRepository,
+	txMgr repository.TxManager,
 	chunkRepo repository.DocumentChunkRepository,
 	chunkService DocumentChunkServiceInterface,
 	textExtractor documentparser.TextExtractor,
@@ -87,6 +89,7 @@ func NewDocumentServiceWithChunkService(
 		documentVersionRepo: documentVersionRepo,
 		documentJobRepo:     documentJobRepo,
 		storageQuotaRepo:    storageQuotaRepo,
+		txMgr:               txMgr,
 		chunkRepo:           chunkRepo,
 		chunkService:        chunkService,
 		textExtractor:       textExtractor,
@@ -128,26 +131,41 @@ func (s *documentService) Upload(ctx context.Context, userID, kbID string, fileH
 		Status:          documentStatusUploaded,
 		ErrorMessage:    "",
 	}
-	if err := s.documentRepo.Create(ctx, &doc); err != nil {
+	// 3. 文档记录、配额、处理任务三者必须同生共死，否则中间失败会留下
+	//    「记录存在却没扣配额」或「记录存在却永远没有处理任务」的永久不一致。
+	//    ⚠️ 后台处理必须等事务提交后再派发（第 4 步）：在事务内就 `go` 出去，
+	//    goroutine 读不到尚未提交的任务行，会把文档直接判成「处理启动失败」。
+	var job entity.DocumentProcessingJob
+	err = s.txMgr.InTx(ctx, func(ctx context.Context) error {
+		if createErr := s.documentRepo.Create(ctx, &doc); createErr != nil {
+			return createErr
+		}
+		// 配额是上传业务的内部副作用，不单独开放写接口
+		if quotaErr := s.storageQuotaRepo.AddUsedStorage(ctx, userID, defaultMaxStorageBytes, fileHeader.Size); quotaErr != nil {
+			return quotaErr
+		}
+		created, createErr := s.createProcessJobRecord(ctx, doc, []int{documentStatusUploaded})
+		if createErr != nil {
+			return createErr
+		}
+		job = created
+		return nil
+	})
+	if err != nil {
+		// 事务已回滚；落盘的孤儿文件不属于事务范围，需要显式补偿
 		_ = os.Remove(storagePath)
 		return dto.UploadDocumentResponse{}, err
 	}
 
-	// 3. 配额是上传业务的内部副作用，不单独开放写接口
-	if err := s.storageQuotaRepo.AddUsedStorage(ctx, userID, defaultMaxStorageBytes, fileHeader.Size); err != nil {
-		return dto.UploadDocumentResponse{}, err
-	}
-
-	// 4. 上传完成后自动创建处理任务，用户无需再手动触发 process
-	job, err := s.createAsyncProcessJob(ctx, doc, []int{documentStatusUploaded})
-	if err != nil {
-		return dto.UploadDocumentResponse{}, err
-	}
 	doc.Status = documentStatusProcessing
 	logger.Info("文档上传完成，已创建处理任务", zap.String("file_name", doc.FileName),
 		zap.String("file_type", doc.FileType),
 		zap.Int64("file_size", doc.FileSize),
 	)
+
+	// 4. 事务已提交，此时启动后台处理才是安全的
+	s.dispatchProcessJob(doc, job.ID)
+
 	return dto.UploadDocumentResponse{
 		Document: documentResponse(doc),
 		Job:      documentProcessingJobResponse(job),
@@ -306,16 +324,22 @@ func (s *documentService) Process(ctx context.Context, userID, documentID string
 		return dto.DocumentProcessingJobResponse{}, apperrors.NewDefault(apperrors.CodeDocumentStatusInvalid)
 	}
 
-	job, err := s.createAsyncProcessJob(ctx, doc, []int{documentStatusUploaded, documentStatusFailed})
+	job, err := s.createProcessJobRecord(ctx, doc, []int{documentStatusUploaded, documentStatusFailed})
 	if err != nil {
 		return dto.DocumentProcessingJobResponse{}, err
 	}
 	logger.Info("手动触发文档处理任务", zap.String("file_type", doc.FileType))
+	// 这里只有一次写（CreateProcessJob 内部已是事务），落库后直接派发即可
+	s.dispatchProcessJob(doc, job.ID)
 	return documentProcessingJobResponse(job), nil
 }
 
-// createAsyncProcessJob 创建异步处理任务并启动后台处理
-func (s *documentService) createAsyncProcessJob(ctx context.Context, doc entity.Document, allowedDocumentStatuses []int) (entity.DocumentProcessingJob, error) {
+// createProcessJobRecord 创建处理任务记录（只落库，可以在事务内调用）
+//
+// ⚠️ 它**不**启动后台处理：后台任务要等事务提交后才能读到自己那一行，
+// 在事务内 `go` 出去会让它读到空、把文档误判成「任务启动失败」。
+// 派发请调用 dispatchProcessJob。
+func (s *documentService) createProcessJobRecord(ctx context.Context, doc entity.Document, allowedDocumentStatuses []int) (entity.DocumentProcessingJob, error) {
 	job := entity.DocumentProcessingJob{
 		ID:           uuid.NewString(),
 		UserID:       doc.UserID,
@@ -338,8 +362,12 @@ func (s *documentService) createAsyncProcessJob(ctx context.Context, doc entity.
 		zap.String("file_type", doc.FileType),
 		zap.Int64("file_size", doc.FileSize),
 	)
-	go s.runProcessJob(doc, job.ID)
 	return job, nil
+}
+
+// dispatchProcessJob 启动后台处理。**必须在事务提交之后调用**。
+func (s *documentService) dispatchProcessJob(doc entity.Document, jobID string) {
+	go s.runProcessJob(doc, jobID)
 }
 
 // runProcessJob 异步执行文档处理任务

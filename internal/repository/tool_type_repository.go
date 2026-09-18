@@ -18,15 +18,15 @@ func NewToolTypeRepository(db *gorm.DB) ToolTypeRepository {
 }
 
 func (r *toolTypeRepository) Create(ctx context.Context, toolType *entity.ToolType) error {
-	return r.db.WithContext(ctx).Create(toolType).Error
+	return dbFor(ctx, r.db).Create(toolType).Error
 }
 
 func (r *toolTypeRepository) Update(ctx context.Context, toolType *entity.ToolType) error {
-	return r.db.WithContext(ctx).Save(toolType).Error
+	return dbFor(ctx, r.db).Save(toolType).Error
 }
 
 func (r *toolTypeRepository) Delete(ctx context.Context, id string) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return dbFor(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Delete(&entity.UserToolConfig{}, "tool_type_id = ?", id).Error; err != nil {
 			return err
 		}
@@ -42,7 +42,7 @@ func (r *toolTypeRepository) Delete(ctx context.Context, id string) error {
 
 func (r *toolTypeRepository) GetByID(ctx context.Context, id string) (*entity.ToolType, error) {
 	var toolType entity.ToolType
-	err := r.db.WithContext(ctx).First(&toolType, "id = ?", id).Error
+	err := dbFor(ctx, r.db).First(&toolType, "id = ?", id).Error
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +51,7 @@ func (r *toolTypeRepository) GetByID(ctx context.Context, id string) (*entity.To
 
 func (r *toolTypeRepository) GetByKey(ctx context.Context, toolKey string) (*entity.ToolType, error) {
 	var toolType entity.ToolType
-	err := r.db.WithContext(ctx).First(&toolType, "tool_key = ?", toolKey).Error
+	err := dbFor(ctx, r.db).First(&toolType, "tool_key = ?", toolKey).Error
 	if err != nil {
 		return nil, err
 	}
@@ -60,19 +60,19 @@ func (r *toolTypeRepository) GetByKey(ctx context.Context, toolKey string) (*ent
 
 func (r *toolTypeRepository) List(ctx context.Context) ([]entity.ToolType, error) {
 	var toolTypes []entity.ToolType
-	err := r.db.WithContext(ctx).Order("name ASC").Find(&toolTypes).Error
+	err := dbFor(ctx, r.db).Order("name ASC").Find(&toolTypes).Error
 	return toolTypes, err
 }
 
 func (r *toolTypeRepository) ListEnabled(ctx context.Context) ([]entity.ToolType, error) {
 	var toolTypes []entity.ToolType
-	err := r.db.WithContext(ctx).Where("is_enabled = ?", true).Order("name ASC").Find(&toolTypes).Error
+	err := dbFor(ctx, r.db).Where("is_enabled = ?", true).Order("name ASC").Find(&toolTypes).Error
 	return toolTypes, err
 }
 
 func (r *toolTypeRepository) ExistsByKey(ctx context.Context, toolKey string) (bool, error) {
 	var count int64
-	err := r.db.WithContext(ctx).Model(&entity.ToolType{}).Where("tool_key = ?", toolKey).Count(&count).Error
+	err := dbFor(ctx, r.db).Model(&entity.ToolType{}).Where("tool_key = ?", toolKey).Count(&count).Error
 	return count > 0, err
 }
 
@@ -84,7 +84,7 @@ func (r *toolTypeRepository) GetProviderCounts(ctx context.Context) (map[string]
 	}
 	var results []result
 
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Model(&entity.ToolProvider{}).
 		Select("tool_type_id, count(*) as count").
 		Group("tool_type_id").

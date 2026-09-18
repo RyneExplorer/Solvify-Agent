@@ -24,7 +24,7 @@ func (r *userMemoryRepository) ListActive(ctx context.Context, userID string, li
 		limit = 10
 	}
 	var memories []entity.UserMemory
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND is_active = ?", userID, true).
 		Order("updated_at DESC").
 		Limit(limit).
@@ -34,12 +34,12 @@ func (r *userMemoryRepository) ListActive(ctx context.Context, userID string, li
 
 // Create 创建记忆
 func (r *userMemoryRepository) Create(ctx context.Context, memory *entity.UserMemory) error {
-	return r.db.WithContext(ctx).Create(memory).Error
+	return dbFor(ctx, r.db).Create(memory).Error
 }
 
 // Upsert 按内容去重更新
 func (r *userMemoryRepository) Upsert(ctx context.Context, memory *entity.UserMemory) error {
-	return r.db.WithContext(ctx).
+	return dbFor(ctx, r.db).
 		Where("user_id = ? AND content = ?", memory.UserID, memory.Content).
 		Assign(map[string]interface{}{
 			"memory_type":    memory.MemoryType,
@@ -52,7 +52,7 @@ func (r *userMemoryRepository) Upsert(ctx context.Context, memory *entity.UserMe
 
 // DeactivateByContent 停用某条记忆
 func (r *userMemoryRepository) DeactivateByContent(ctx context.Context, userID string, content string) error {
-	return r.db.WithContext(ctx).
+	return dbFor(ctx, r.db).
 		Model(&entity.UserMemory{}).
 		Where("user_id = ? AND content = ?", userID, content).
 		Update("is_active", false).Error

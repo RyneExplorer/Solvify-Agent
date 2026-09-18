@@ -34,13 +34,13 @@ func (r *observabilityRepository) CreateFeedback(ctx context.Context, fb *entity
 	if fb.CreatedAt.IsZero() {
 		fb.CreatedAt = time.Now()
 	}
-	return r.db.WithContext(ctx).Create(fb).Error
+	return dbFor(ctx, r.db).Create(fb).Error
 }
 
 // ListByMessage 按消息 ID 和用户 ID 查询反馈列表
 func (r *observabilityRepository) ListByMessage(ctx context.Context, messageID, userID string) ([]entity.MessageFeedback, error) {
 	var rows []entity.MessageFeedback
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("message_id = ? AND user_id = ?", messageID, userID).
 		Order("created_at DESC").
 		Find(&rows).Error
@@ -50,7 +50,7 @@ func (r *observabilityRepository) ListByMessage(ctx context.Context, messageID, 
 // ListByUser 分页查询指定用户的反馈列表
 func (r *observabilityRepository) ListByUser(ctx context.Context, userID string, offset, limit int) ([]entity.MessageFeedback, int64, error) {
 	var total int64
-	q := r.db.WithContext(ctx).Model(&entity.MessageFeedback{}).Where("user_id = ?", userID)
+	q := dbFor(ctx, r.db).Model(&entity.MessageFeedback{}).Where("user_id = ?", userID)
 	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
@@ -67,13 +67,13 @@ func (r *observabilityRepository) CreateChatTrace(ctx context.Context, trace *en
 	if trace.CreatedAt.IsZero() {
 		trace.CreatedAt = time.Now()
 	}
-	return r.db.WithContext(ctx).Create(trace).Error
+	return dbFor(ctx, r.db).Create(trace).Error
 }
 
 // FindByID 根据 ID 查询对话追踪记录
 func (r *observabilityRepository) FindByID(ctx context.Context, id string) (*entity.ChatTrace, error) {
 	var t entity.ChatTrace
-	err := r.db.WithContext(ctx).Where("id = ?", id).First(&t).Error
+	err := dbFor(ctx, r.db).Where("id = ?", id).First(&t).Error
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +83,7 @@ func (r *observabilityRepository) FindByID(ctx context.Context, id string) (*ent
 // ListBySession 按会话 ID 分页查询对话追踪记录
 func (r *observabilityRepository) ListBySession(ctx context.Context, sessionID, userID string, offset, limit int) ([]entity.ChatTrace, int64, error) {
 	var total int64
-	q := r.db.WithContext(ctx).Model(&entity.ChatTrace{}).
+	q := dbFor(ctx, r.db).Model(&entity.ChatTrace{}).
 		Where("session_id = ? AND user_id = ?", sessionID, userID)
 	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -98,7 +98,7 @@ func (r *observabilityRepository) ListBySession(ctx context.Context, sessionID, 
 // ListAll 分页查询全部对话追踪记录，支持按会话 ID 和状态过滤
 func (r *observabilityRepository) ListAll(ctx context.Context, sessionID string, status string, offset, limit int) ([]entity.ChatTrace, int64, error) {
 	var total int64
-	q := r.db.WithContext(ctx).Model(&entity.ChatTrace{})
+	q := dbFor(ctx, r.db).Model(&entity.ChatTrace{})
 	if sessionID != "" {
 		q = q.Where("session_id = ?", sessionID)
 	}
@@ -117,7 +117,7 @@ func (r *observabilityRepository) ListAll(ctx context.Context, sessionID string,
 
 // DeleteOlderThan 删除早于指定时间的对话追踪记录
 func (r *observabilityRepository) DeleteOlderThan(ctx context.Context, before time.Time) (int64, error) {
-	res := r.db.WithContext(ctx).Where("created_at < ?", before).Delete(&entity.ChatTrace{})
+	res := dbFor(ctx, r.db).Where("created_at < ?", before).Delete(&entity.ChatTrace{})
 	return res.RowsAffected, res.Error
 }
 
@@ -126,7 +126,7 @@ func (r *observabilityRepository) CreateAgentTask(ctx context.Context, task *ent
 	if task.ID == "" {
 		task.ID = uuid.New().String()
 	}
-	return r.db.WithContext(ctx).Create(task).Error
+	return dbFor(ctx, r.db).Create(task).Error
 }
 
 // AppendStep 追加 Agent 任务步骤记录
@@ -134,7 +134,7 @@ func (r *observabilityRepository) AppendStep(ctx context.Context, step *entity.A
 	if step.ID == "" {
 		step.ID = uuid.New().String()
 	}
-	return r.db.WithContext(ctx).Create(step).Error
+	return dbFor(ctx, r.db).Create(step).Error
 }
 
 // MarkEnded 标记 Agent 任务结束，写入状态、token 用量和费用等信息
@@ -156,14 +156,14 @@ func (r *observabilityRepository) MarkEnded(ctx context.Context, taskID string, 
 	if rating != nil {
 		updates["feedback_rating"] = *rating
 	}
-	return r.db.WithContext(ctx).Model(&entity.AgentTask{}).
+	return dbFor(ctx, r.db).Model(&entity.AgentTask{}).
 		Where("id = ?", taskID).Updates(updates).Error
 }
 
 // FindByTraceID 根据追踪 ID 查询 Agent 任务及其步骤列表
 func (r *observabilityRepository) FindByTraceID(ctx context.Context, traceID string) (*entity.AgentTask, []entity.AgentTaskStep, error) {
 	var task entity.AgentTask
-	err := r.db.WithContext(ctx).Where("trace_id = ?", traceID).First(&task).Error
+	err := dbFor(ctx, r.db).Where("trace_id = ?", traceID).First(&task).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil, nil
@@ -171,7 +171,7 @@ func (r *observabilityRepository) FindByTraceID(ctx context.Context, traceID str
 		return nil, nil, err
 	}
 	var steps []entity.AgentTaskStep
-	if err := r.db.WithContext(ctx).Where("task_id = ?", task.ID).Order("step_index ASC").Find(&steps).Error; err != nil {
+	if err := dbFor(ctx, r.db).Where("task_id = ?", task.ID).Order("step_index ASC").Find(&steps).Error; err != nil {
 		return &task, nil, err
 	}
 	return &task, steps, nil
@@ -220,7 +220,7 @@ func (r *observabilityRepository) WriteTraces(ctx context.Context, traces []*obs
 			CreatedAt:   time.Now(),
 		}
 		// 用 upsert 代替 Save：Save 在主键有值时只走 UPDATE，行不存在时静默失败（rows:0）
-		if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(row).Error; err != nil {
+		if err := dbFor(ctx, r.db).Clauses(clause.OnConflict{UpdateAll: true}).Create(row).Error; err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -249,7 +249,7 @@ func (r *observabilityRepository) WriteFeedbacks(ctx context.Context, fs []*obse
 			TraceID:   f.TraceID,
 			CreatedAt: f.CreatedAt,
 		}
-		if err := r.db.WithContext(ctx).Create(row).Error; err != nil {
+		if err := dbFor(ctx, r.db).Create(row).Error; err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -285,7 +285,7 @@ func (r *observabilityRepository) WriteAgentSteps(ctx context.Context, steps []*
 		if !endedAt.IsZero() {
 			row.EndedAt = &endedAt
 		}
-		if err := r.db.WithContext(ctx).Create(row).Error; err != nil {
+		if err := dbFor(ctx, r.db).Create(row).Error; err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}

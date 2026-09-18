@@ -18,20 +18,20 @@ func NewUserToolConfigRepository(db *gorm.DB) UserToolConfigRepository {
 }
 
 func (r *userToolConfigRepository) Create(ctx context.Context, config *entity.UserToolConfig) error {
-	return r.db.WithContext(ctx).Create(config).Error
+	return dbFor(ctx, r.db).Create(config).Error
 }
 
 func (r *userToolConfigRepository) Update(ctx context.Context, config *entity.UserToolConfig) error {
-	return r.db.WithContext(ctx).Save(config).Error
+	return dbFor(ctx, r.db).Save(config).Error
 }
 
 func (r *userToolConfigRepository) Delete(ctx context.Context, id string) error {
-	return r.db.WithContext(ctx).Delete(&entity.UserToolConfig{}, "id = ?", id).Error
+	return dbFor(ctx, r.db).Delete(&entity.UserToolConfig{}, "id = ?", id).Error
 }
 
 func (r *userToolConfigRepository) GetByID(ctx context.Context, id string) (*entity.UserToolConfig, error) {
 	var config entity.UserToolConfig
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Preload("ToolType").
 		Preload("ToolProvider").
 		First(&config, "id = ?", id).Error
@@ -43,7 +43,7 @@ func (r *userToolConfigRepository) GetByID(ctx context.Context, id string) (*ent
 
 func (r *userToolConfigRepository) GetByUserAndToolType(ctx context.Context, userID, toolTypeID string) (*entity.UserToolConfig, error) {
 	var config entity.UserToolConfig
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Preload("ToolType").
 		Preload("ToolProvider").
 		Where("user_id = ? AND tool_type_id = ?", userID, toolTypeID).
@@ -56,7 +56,7 @@ func (r *userToolConfigRepository) GetByUserAndToolType(ctx context.Context, use
 
 func (r *userToolConfigRepository) GetByUserAndProvider(ctx context.Context, userID, providerID string) (*entity.UserToolConfig, error) {
 	var config entity.UserToolConfig
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Preload("ToolType").
 		Preload("ToolProvider").
 		Where("user_id = ? AND provider_id = ?", userID, providerID).
@@ -68,7 +68,7 @@ func (r *userToolConfigRepository) GetByUserAndProvider(ctx context.Context, use
 }
 
 func (r *userToolConfigRepository) DisableOthersByToolType(ctx context.Context, userID, toolTypeID, exceptID string) error {
-	query := r.db.WithContext(ctx).
+	query := dbFor(ctx, r.db).
 		Model(&entity.UserToolConfig{}).
 		Where("user_id = ? AND tool_type_id = ?", userID, toolTypeID).
 		Where("is_enabled = ?", true)
@@ -80,7 +80,7 @@ func (r *userToolConfigRepository) DisableOthersByToolType(ctx context.Context, 
 
 func (r *userToolConfigRepository) ListByUserID(ctx context.Context, userID string) ([]entity.UserToolConfig, error) {
 	var configs []entity.UserToolConfig
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Preload("ToolType").
 		Preload("ToolProvider").
 		Where("user_id = ?", userID).
@@ -90,7 +90,7 @@ func (r *userToolConfigRepository) ListByUserID(ctx context.Context, userID stri
 
 func (r *userToolConfigRepository) ListEnabledByUserID(ctx context.Context, userID string) ([]entity.UserToolConfig, error) {
 	var configs []entity.UserToolConfig
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Preload("ToolType").
 		Preload("ToolProvider").
 		Where("user_id = ? AND is_enabled = ?", userID, true).

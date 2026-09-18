@@ -23,7 +23,7 @@ func NewSyncSourceRepository(db *gorm.DB) SyncSourceRepository {
 
 // Create 创建同步源并标记知识库来源
 func (r *syncSourceRepository) Create(ctx context.Context, source *entity.SyncSource, kbSourceType, kbSourcePlatform string) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return dbFor(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&entity.KnowledgeBase{}).
 			Where("id = ? AND user_id = ?", source.KnowledgeBaseID, source.UserID).
 			Updates(map[string]any{
@@ -39,7 +39,7 @@ func (r *syncSourceRepository) Create(ctx context.Context, source *entity.SyncSo
 // List 查询当前用户未删除同步源
 func (r *syncSourceRepository) List(ctx context.Context, userID string, deletedStatus int) ([]entity.SyncSource, error) {
 	var items []entity.SyncSource
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND status <> ?", userID, deletedStatus).
 		Order("created_at DESC").
 		Find(&items).Error
@@ -49,7 +49,7 @@ func (r *syncSourceRepository) List(ctx context.Context, userID string, deletedS
 // FindByID 查询同步源
 func (r *syncSourceRepository) FindByID(ctx context.Context, userID, sourceID string, deletedStatus int) (entity.SyncSource, bool, error) {
 	var source entity.SyncSource
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("id = ? AND user_id = ? AND status <> ?", sourceID, userID, deletedStatus).
 		First(&source).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -60,7 +60,7 @@ func (r *syncSourceRepository) FindByID(ctx context.Context, userID, sourceID st
 
 // Update 更新同步源基础配置
 func (r *syncSourceRepository) Update(ctx context.Context, source entity.SyncSource, deletedStatus int) (bool, error) {
-	result := r.db.WithContext(ctx).
+	result := dbFor(ctx, r.db).
 		Model(&entity.SyncSource{}).
 		Where("id = ? AND user_id = ? AND status <> ?", source.ID, source.UserID, deletedStatus).
 		Updates(map[string]any{
@@ -76,7 +76,7 @@ func (r *syncSourceRepository) Update(ctx context.Context, source entity.SyncSou
 
 // SoftDelete 软删除同步源
 func (r *syncSourceRepository) SoftDelete(ctx context.Context, userID, sourceID string, normalStatus, deletedStatus int, deletedAt time.Time) (bool, error) {
-	result := r.db.WithContext(ctx).
+	result := dbFor(ctx, r.db).
 		Model(&entity.SyncSource{}).
 		Where("id = ? AND user_id = ? AND status <> ?", sourceID, userID, deletedStatus).
 		Updates(map[string]any{
@@ -91,7 +91,7 @@ func (r *syncSourceRepository) SoftDelete(ctx context.Context, userID, sourceID 
 
 // MarkSyncResult 更新同步源最近同步结果
 func (r *syncSourceRepository) MarkSyncResult(ctx context.Context, userID, sourceID string, lastSyncAt *time.Time, errorMessage string) error {
-	return r.db.WithContext(ctx).
+	return dbFor(ctx, r.db).
 		Model(&entity.SyncSource{}).
 		Where("id = ? AND user_id = ?", sourceID, userID).
 		Updates(map[string]any{
@@ -112,12 +112,12 @@ func NewSyncJobRepository(db *gorm.DB) SyncJobRepository {
 
 // Create 创建同步任务
 func (r *syncJobRepository) Create(ctx context.Context, job *entity.SyncJob) error {
-	return r.db.WithContext(ctx).Create(job).Error
+	return dbFor(ctx, r.db).Create(job).Error
 }
 
 // MarkRunning 标记同步任务运行中
 func (r *syncJobRepository) MarkRunning(ctx context.Context, userID, jobID string, pendingStatus, runningStatus int, startedAt time.Time) (bool, error) {
-	result := r.db.WithContext(ctx).
+	result := dbFor(ctx, r.db).
 		Model(&entity.SyncJob{}).
 		Where("id = ? AND user_id = ? AND status = ?", jobID, userID, pendingStatus).
 		Updates(map[string]any{
@@ -132,7 +132,7 @@ func (r *syncJobRepository) MarkRunning(ctx context.Context, userID, jobID strin
 
 // Finish 完成同步任务
 func (r *syncJobRepository) Finish(ctx context.Context, userID, jobID string, status, totalCount, successCount, failedCount int, errorMessage string, finishedAt time.Time) error {
-	return r.db.WithContext(ctx).
+	return dbFor(ctx, r.db).
 		Model(&entity.SyncJob{}).
 		Where("id = ? AND user_id = ?", jobID, userID).
 		Updates(map[string]any{
@@ -148,7 +148,7 @@ func (r *syncJobRepository) Finish(ctx context.Context, userID, jobID string, st
 // ListBySource 查询同步源任务列表
 func (r *syncJobRepository) ListBySource(ctx context.Context, userID, sourceID string) ([]entity.SyncJob, error) {
 	var items []entity.SyncJob
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND sync_source_id = ?", userID, sourceID).
 		Order("created_at DESC").
 		Find(&items).Error
@@ -158,7 +158,7 @@ func (r *syncJobRepository) ListBySource(ctx context.Context, userID, sourceID s
 // FindByID 查询同步任务详情
 func (r *syncJobRepository) FindByID(ctx context.Context, userID, jobID string) (entity.SyncJob, bool, error) {
 	var job entity.SyncJob
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("id = ? AND user_id = ?", jobID, userID).
 		First(&job).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -179,7 +179,7 @@ func NewSyncItemRepository(db *gorm.DB) SyncItemRepository {
 
 // Upsert 创建或更新外部同步文件目录项
 func (r *syncItemRepository) Upsert(ctx context.Context, item entity.SyncItem) error {
-	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+	return dbFor(ctx, r.db).Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "user_id"},
 			{Name: "sync_source_id"},
@@ -203,7 +203,7 @@ func (r *syncItemRepository) Upsert(ctx context.Context, item entity.SyncItem) e
 
 // ResetDeletedDocumentLinks 清理已删除本地文档的同步关联
 func (r *syncItemRepository) ResetDeletedDocumentLinks(ctx context.Context, userID, sourceID string, pendingStatus, deletedDocumentStatus int) error {
-	return r.db.WithContext(ctx).
+	return dbFor(ctx, r.db).
 		Model(&entity.SyncItem{}).
 		Where("user_id = ? AND sync_source_id = ? AND local_document_id IS NOT NULL", userID, sourceID).
 		Where(`NOT EXISTS (
@@ -222,7 +222,7 @@ func (r *syncItemRepository) ResetDeletedDocumentLinks(ctx context.Context, user
 // ListBySource 查询同步源下外部文件目录项
 func (r *syncItemRepository) ListBySource(ctx context.Context, userID, sourceID string) ([]entity.SyncItem, error) {
 	var items []entity.SyncItem
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND sync_source_id = ?", userID, sourceID).
 		Order("item_type ASC, name ASC").
 		Find(&items).Error
@@ -232,7 +232,7 @@ func (r *syncItemRepository) ListBySource(ctx context.Context, userID, sourceID 
 // FindByID 查询外部文件目录项
 func (r *syncItemRepository) FindByID(ctx context.Context, userID, itemID string) (entity.SyncItem, bool, error) {
 	var item entity.SyncItem
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("id = ? AND user_id = ?", itemID, userID).
 		First(&item).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -243,7 +243,7 @@ func (r *syncItemRepository) FindByID(ctx context.Context, userID, itemID string
 
 // MarkImporting 标记外部文件目录项导入中
 func (r *syncItemRepository) MarkImporting(ctx context.Context, userID, itemID string, importingStatus int) (bool, error) {
-	result := r.db.WithContext(ctx).
+	result := dbFor(ctx, r.db).
 		Model(&entity.SyncItem{}).
 		Where("id = ? AND user_id = ?", itemID, userID).
 		Updates(map[string]any{
@@ -258,7 +258,7 @@ func (r *syncItemRepository) MarkImporting(ctx context.Context, userID, itemID s
 
 // MarkImported 标记外部文件目录项已导入
 func (r *syncItemRepository) MarkImported(ctx context.Context, userID, itemID, documentID string, importedStatus int) error {
-	return r.db.WithContext(ctx).
+	return dbFor(ctx, r.db).
 		Model(&entity.SyncItem{}).
 		Where("id = ? AND user_id = ?", itemID, userID).
 		Updates(map[string]any{
@@ -270,7 +270,7 @@ func (r *syncItemRepository) MarkImported(ctx context.Context, userID, itemID, d
 
 // MarkImportFailed 标记外部文件目录项导入失败
 func (r *syncItemRepository) MarkImportFailed(ctx context.Context, userID, itemID string, failedStatus int, errorMessage string) error {
-	return r.db.WithContext(ctx).
+	return dbFor(ctx, r.db).
 		Model(&entity.SyncItem{}).
 		Where("id = ? AND user_id = ?", itemID, userID).
 		Updates(map[string]any{
@@ -292,7 +292,7 @@ func NewSyncedDocumentRepository(db *gorm.DB) SyncedDocumentRepository {
 // FindByExternalID 查询外部同步文档
 func (r *syncedDocumentRepository) FindByExternalID(ctx context.Context, userID, sourceType, externalID string, deletedStatus int) (entity.Document, bool, error) {
 	var doc entity.Document
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND source_type = ? AND external_id = ? AND status <> ?", userID, sourceType, externalID, deletedStatus).
 		First(&doc).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -303,7 +303,7 @@ func (r *syncedDocumentRepository) FindByExternalID(ctx context.Context, userID,
 
 // SaveSyncedDocument 保存同步文档版本并替换分块
 func (r *syncedDocumentRepository) SaveSyncedDocument(ctx context.Context, doc entity.Document, version *entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus int, finishedAt time.Time) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return dbFor(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		var current entity.Document
 		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("user_id = ? AND source_type = ? AND external_id = ? AND status <> ?", doc.UserID, doc.SourceType, doc.ExternalID, 5).
@@ -386,7 +386,7 @@ func (r *syncedDocumentRepository) SaveSyncedDocument(ctx context.Context, doc e
 
 // SaveSyncedPlaceholder 保存暂不支持解析的同步文档记录
 func (r *syncedDocumentRepository) SaveSyncedPlaceholder(ctx context.Context, doc entity.Document, deletedStatus int) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return dbFor(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		var current entity.Document
 		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("user_id = ? AND source_type = ? AND external_id = ? AND status <> ?", doc.UserID, doc.SourceType, doc.ExternalID, deletedStatus).

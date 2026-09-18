@@ -44,6 +44,7 @@ type chatService struct {
 	prefSvc             UserPreferenceService
 	obs                 observability.Recorder
 	obsRepo             repository.ObservabilityRepo
+	txMgr               repository.TxManager
 	embedClient         *llm.EmbeddingClient
 }
 
@@ -54,6 +55,7 @@ type chatService struct {
 func NewChatService(
 	sessionRepo repository.ChatSessionRepo,
 	messageRepo repository.ChatMessageRepo,
+	txMgr repository.TxManager,
 	retriever rag.Retriever,
 	modelRepo repository.ModelRepo,
 	userModelConfigRepo repository.UserModelConfigRepo,
@@ -72,6 +74,7 @@ func NewChatService(
 	return &chatService{
 		sessionRepo:         sessionRepo,
 		messageRepo:         messageRepo,
+		txMgr:               txMgr,
 		retriever:           retriever,
 		einoRetriever:       rag.NewEinoRetrieverAdapter(retriever, defaultTopK),
 		modelRepo:           modelRepo,
@@ -271,13 +274,18 @@ func (s *chatService) DeleteSession(ctx context.Context, userID, sessionID strin
 	if err := s.validateSession(ctx, userID, sessionID); err != nil {
 		return err
 	}
-	if err := s.messageRepo.DeleteBySessionID(ctx, sessionID); err != nil {
-		return fmt.Errorf("删除会话消息失败: %w", err)
-	}
-	if err := s.sessionRepo.Delete(ctx, sessionID); err != nil {
-		return fmt.Errorf("删除会话失败: %w", err)
-	}
-	return nil
+	// 会话与其消息必须同生共死：两步分开写、中间失败就会留下「消息已删、会话还在」
+	// 的空壳 —— 用户看得见会话，点进去却是空的。两个仓库各自持有连接池，
+	// 只有 InTx 能让它们落进同一个事务。
+	return s.txMgr.InTx(ctx, func(ctx context.Context) error {
+		if err := s.messageRepo.DeleteBySessionID(ctx, sessionID); err != nil {
+			return fmt.Errorf("删除会话消息失败: %w", err)
+		}
+		if err := s.sessionRepo.Delete(ctx, sessionID); err != nil {
+			return fmt.Errorf("删除会话失败: %w", err)
+		}
+		return nil
+	})
 }
 
 // GetMessages 获取指定会话的消息列表

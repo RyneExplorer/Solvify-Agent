@@ -22,13 +22,13 @@ func NewChatMessageRepository(db *gorm.DB) ChatMessageRepo {
 
 // Create 创建聊天消息
 func (r *chatMessageRepository) Create(ctx context.Context, message *entity.ChatMessage) error {
-	return r.db.WithContext(ctx).Create(message).Error
+	return dbFor(ctx, r.db).Create(message).Error
 }
 
 // FindByID 按 ID 获取消息
 func (r *chatMessageRepository) FindByID(ctx context.Context, id string) (*entity.ChatMessage, error) {
 	var msg entity.ChatMessage
-	if err := r.db.WithContext(ctx).Where("id = ?", id).First(&msg).Error; err != nil {
+	if err := dbFor(ctx, r.db).Where("id = ?", id).First(&msg).Error; err != nil {
 		return nil, err
 	}
 	return &msg, nil
@@ -37,7 +37,7 @@ func (r *chatMessageRepository) FindByID(ctx context.Context, id string) (*entit
 // FindBySessionID 获取会话的所有消息
 func (r *chatMessageRepository) FindBySessionID(ctx context.Context, sessionID string) ([]entity.ChatMessage, error) {
 	var messages []entity.ChatMessage
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("session_id = ?", sessionID).
 		Order("created_at ASC").
 		Find(&messages).Error
@@ -49,7 +49,7 @@ func (r *chatMessageRepository) FindBySessionID(ctx context.Context, sessionID s
 // 对 50 轮以上长会话可减少 90%+ 的数据传输
 func (r *chatMessageRepository) FindBySessionIDForContext(ctx context.Context, sessionID string) ([]entity.ChatMessage, error) {
 	var messages []entity.ChatMessage
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Select("id, session_id, role, content, created_at").
 		Where("session_id = ?", sessionID).
 		Order("created_at ASC").
@@ -60,7 +60,7 @@ func (r *chatMessageRepository) FindBySessionIDForContext(ctx context.Context, s
 // FindRecent 获取会话的最近 N 条消息
 func (r *chatMessageRepository) FindRecent(ctx context.Context, sessionID string, limit int) ([]entity.ChatMessage, error) {
 	var messages []entity.ChatMessage
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("session_id = ?", sessionID).
 		Order("created_at DESC").
 		Limit(limit).
@@ -79,7 +79,7 @@ func (r *chatMessageRepository) FindRecent(ctx context.Context, sessionID string
 // 构建上下文只看 role+content，单条消息体积从 100KB 降到 ~100Byte
 func (r *chatMessageRepository) FindRecentForContext(ctx context.Context, sessionID string, limit int) ([]entity.ChatMessage, error) {
 	var messages []entity.ChatMessage
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Select("id, session_id, role, content, created_at").
 		Where("session_id = ?", sessionID).
 		Order("created_at DESC").
@@ -96,7 +96,7 @@ func (r *chatMessageRepository) FindRecentForContext(ctx context.Context, sessio
 
 // DeleteBySessionID 删除会话的所有消息
 func (r *chatMessageRepository) DeleteBySessionID(ctx context.Context, sessionID string) error {
-	return r.db.WithContext(ctx).Where("session_id = ?", sessionID).Delete(&entity.ChatMessage{}).Error
+	return dbFor(ctx, r.db).Where("session_id = ?", sessionID).Delete(&entity.ChatMessage{}).Error
 }
 
 // SearchRecentByKeywords 在指定会话中按关键词检索最近消息
@@ -112,12 +112,12 @@ func (r *chatMessageRepository) SearchRecentByKeywords(ctx context.Context, sess
 	// 错误写法：Where(session_id).Or(ILIKE)... → 实际 SQL 是 WHERE session_id = ? OR content ILIKE ?
 	//          会匹配到全库所有包含关键词的消息，再 ORDER BY + LIMIT，数据量上来必炸。
 	// 正确 SQL：WHERE session_id = ? AND (content ILIKE ? OR content ILIKE ? ...)
-	query := r.db.WithContext(ctx).Where("session_id = ?", sessionID)
+	query := dbFor(ctx, r.db).Where("session_id = ?", sessionID)
 
 	if len(keywords) == 1 {
 		query = query.Where("content ILIKE ?", "%"+keywords[0]+"%")
 	} else {
-		sub := r.db.Session(&gorm.Session{NewDB: true})
+		sub := dbFor(ctx, r.db).Session(&gorm.Session{NewDB: true})
 		for i, kw := range keywords {
 			if i == 0 {
 				sub = sub.Where("content ILIKE ?", "%"+kw+"%")
@@ -150,7 +150,7 @@ func (r *chatMessageRepository) SearchByKeyword(ctx context.Context, userID, que
 
 	keyword := "%" + query + "%"
 	var results []ChatMessageSearchRow
-	err := r.db.WithContext(ctx).Raw(`
+	err := dbFor(ctx, r.db).Raw(`
 		SELECT m.id, m.session_id, s.title as session_title, m.role, m.content, 1.0 AS score, m.created_at
 		FROM chat_messages m
 		JOIN chat_sessions s ON s.id = m.session_id
@@ -179,7 +179,7 @@ func (r *chatMessageRepository) SearchRecentByVector(ctx context.Context, sessio
 	embeddingStr := formatFloatVector(queryEmbedding)
 
 	var messages []entity.ChatMessage
-	err := r.db.WithContext(ctx).Raw(`
+	err := dbFor(ctx, r.db).Raw(`
 		SELECT id, session_id, role, content, model_id, search_mode, knowledge_base_ids, sources, metadata, embedding, created_at
 		FROM chat_messages
 		WHERE session_id = ?
@@ -219,7 +219,7 @@ func formatFloatVector(v []float32) string {
 
 // UpdateEmbedding 更新指定消息的向量表示
 func (r *chatMessageRepository) UpdateEmbedding(ctx context.Context, messageID string, embedding entity.FloatVector) error {
-	return r.db.WithContext(ctx).Model(&entity.ChatMessage{}).
+	return dbFor(ctx, r.db).Model(&entity.ChatMessage{}).
 		Where("id = ?", messageID).
 		Update("embedding", embedding).Error
 }
