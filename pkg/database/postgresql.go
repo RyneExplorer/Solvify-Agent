@@ -1,12 +1,15 @@
 package database
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.uber.org/zap"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -90,10 +93,13 @@ func enablePGVector(db *gorm.DB) error {
 // EnsurePGVectorIndex 检查并确保 document_chunks 表的 pgvector 向量索引存在。
 //
 // 逻辑：
-//  1. 查 pg_indexes 看 idx_document_chunks_embedding 是否已存在
-//  2. 不存在 → 自动创建 ivfflat 索引（lists=100, cosine, partial WHERE embedding IS NOT NULL）
-//  3. 存在但类型不是 ivfflat/hnsw → 打警告（可能失效或全表扫描）
-//  4. 表不存在或无 embedding 列 → 跳过（AutoMigrate 或 schema 会补上）
+//  0. 表不存在 / 无 embedding 列 → 跳过（AutoMigrate 或 schema 会补上）
+//  1. embedding 列是「无维度」的 vector → 直接给出可执行的修复语句并返回。
+//     无维度列建不了 ivfflat/hnsw，硬试只会每次启动刷一条 SQLSTATE 22023 的 WARN，
+//     而真正的解法（ALTER COLUMN ... TYPE vector(N)）必须由人执行，所以在这里一次说清。
+//  2. 查 pg_indexes 看 idx_document_chunks_embedding 是否已存在
+//  3. 不存在 → 自动创建 ivfflat 索引（lists=100, cosine, partial WHERE embedding IS NOT NULL）
+//  4. 存在但类型不是 ivfflat/hnsw → 打警告（可能失效或全表扫描）
 func EnsurePGVectorIndex(db *gorm.DB) error {
 	// 先检查表是否存在
 	var tableExists bool
@@ -119,6 +125,25 @@ func EnsurePGVectorIndex(db *gorm.DB) error {
 	}
 	if !colExists {
 		logger.Warn("[pgvector] document_chunks.embedding 列不存在，跳过向量索引检查")
+		return nil
+	}
+
+	// embedding 列必须是「带维度的 vector(N)」——这是建 ivfflat/hnsw 的前置条件。
+	// 无维度的 vector 列在 PostgreSQL 里合法，但任何索引方法都用不了它（SQLSTATE 22023）。
+	// 把前置条件提前判定，失败原因就不再需要靠猜：要么维度没定，要么是别的确证错误。
+	var formatted string
+	if err := db.Raw(`
+		SELECT format_type(a.atttypid, a.atttypmod)
+		FROM pg_attribute a
+		JOIN pg_class c ON c.oid = a.attrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = 'public' AND c.relname = 'document_chunks' AND a.attname = 'embedding'
+	`).Scan(&formatted).Error; err != nil {
+		return fmt.Errorf("查询 embedding 列类型失败: %w", err)
+	}
+	if vectorColumnHasNoDimension(formatted) {
+		logger.Warnf("[pgvector] document_chunks.embedding 是「无维度」的 %s，ivfflat/hnsw 都无法建立；%s",
+			formatted, vectorDimensionRemediation(db))
 		return nil
 	}
 
@@ -155,7 +180,14 @@ func EnsurePGVectorIndex(db *gorm.DB) error {
 		WHERE embedding IS NOT NULL
 	`).Error
 	if err != nil {
-		logger.Warnf("[pgvector] 自动创建 ivfflat 索引失败: %v（低流量环境可能需要先执行 VACUUM ANALYZE document_chunks）", err)
+		// ⚠️ 只按「已确证的错误类别」给建议，未归类的一律不给建议。
+		// 旧版对所有失败都附「低流量环境可能需要先执行 VACUUM ANALYZE document_chunks」，
+		// 而实际最常发生的 22023 是「列没有维度」——VACUUM 对它完全无效，只会把排查带偏。
+		if hint := pgIndexFailureHint(err); hint != "" {
+			logger.Warnf("[pgvector] 自动创建 ivfflat 索引失败: %v；%s", err, hint)
+		} else {
+			logger.Warnf("[pgvector] 自动创建 ivfflat 索引失败: %v（未归类的错误，请按原始 SQLSTATE 排查）", err)
+		}
 		return nil // 不阻塞启动，只是警告
 	}
 	logger.Info("[pgvector] 向量索引 idx_document_chunks_embedding 创建完成")
@@ -419,6 +451,62 @@ func EnsureChatTraceSchema(db *gorm.DB) error {
 	}
 	return nil
 }
+
+// vectorColumnHasNoDimension 判断 format_type 的输出是否是「无维度」的 vector 列。
+// pgvector 允许 vector 列不带维度修饰符，但这样的列无法建立 ivfflat/hnsw 索引，
+// PostgreSQL 会报 SQLSTATE 22023: column does not have dimensions。
+// 判据用「有没有维度修饰符」，而不是去猜列名或比对字符串常量。
+func vectorColumnHasNoDimension(formatted string) bool {
+	return strings.HasPrefix(formatted, "vector") && !strings.Contains(formatted, "(")
+}
+
+// vectorDimensionRemediation 给出一条可直接执行的修复语句。
+// 维度取自「库里真实存在的向量」（vector_dims），而不是配置或常量——
+// 这样提示里写出的数字永远与库中数据一致，不会因为改过模型而变成另一个猜测值。
+func vectorDimensionRemediation(db *gorm.DB) string {
+	var dim int
+	if err := db.Raw(
+		`SELECT vector_dims(embedding) FROM document_chunks WHERE embedding IS NOT NULL LIMIT 1`,
+	).Scan(&dim).Error; err != nil || dim <= 0 {
+		return "请确认向量模型维度后执行：ALTER TABLE document_chunks ALTER COLUMN embedding TYPE vector(<维度>)"
+	}
+	return fmt.Sprintf(
+		"执行 ALTER TABLE document_chunks ALTER COLUMN embedding TYPE vector(%d) 即可正常建立（VACUUM ANALYZE 对此无效）",
+		dim,
+	)
+}
+
+// pgIndexFailureHint 按 SQLSTATE 返回「已被证实」的处置建议。
+// 规则：只有能确证成因的错误才给建议，其余返回空串。
+// 报错信息宁可少说，也不能说错——说错的提示会把人往反方向带（见上面 22023 的历史）。
+// 证据：test1/sqlstate_probe.go 实测该错误是未包裹的 *pgconn.PgError，Code 可直接取到。
+func pgIndexFailureHint(err error) string {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return ""
+	}
+	switch {
+	// ⚠️ 22023 是「无效参数值」大类，不能只看码：pgvector 也用 22023 报其它参数错误
+	// （如 lists 越界、维度超过索引方法上限）。只看码就断言「列没有维度」，
+	// 等于重犯本函数要修的那个毛病——拿未确证的归因去指路。所以必须连 Message 一起核对。
+	case pgErr.Code == sqlstateInvalidParameterValue &&
+		strings.Contains(pgErr.Message, "does not have dimensions"):
+		return "该列是无维度的 vector，ivfflat/hnsw 都无法建立；需先用 ALTER COLUMN ... TYPE vector(<维度>) 固定维度"
+	case pgErr.Code == sqlstateInsufficientPrivilege: // 42501
+		return "当前数据库角色没有建索引权限，请改用表属主或超级用户执行"
+	case pgErr.Code == sqlstateUndefinedTable: // 42P01
+		return "目标表不存在，请先确认 schema 已完整应用"
+	default:
+		return ""
+	}
+}
+
+// PostgreSQL SQLSTATE（只列本文件用到的）。
+const (
+	sqlstateInvalidParameterValue = "22023" // 无效参数值（pgvector 建索引时的几类错误共用）
+	sqlstateInsufficientPrivilege = "42501" // 权限不足
+	sqlstateUndefinedTable        = "42P01" // 表不存在
+)
 
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchSubstring(s, substr)
