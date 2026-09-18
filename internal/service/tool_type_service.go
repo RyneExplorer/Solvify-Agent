@@ -16,11 +16,26 @@ import (
 
 type toolTypeService struct {
 	repo repository.ToolTypeRepository
+	// 删一个工具类型要连带删掉它的供应商和用户配置（三张表），且用户配置表带缓存，
+	// 只能经由 configRepo 删除——所以这三处写由本层编排、同处一个事务。
+	providerRepo repository.ToolProviderRepository
+	configRepo   repository.UserToolConfigRepository
+	txMgr        repository.TxManager
 }
 
 // NewToolTypeService 创建工具类型服务实例
-func NewToolTypeService(repo repository.ToolTypeRepository) ToolTypeService {
-	return &toolTypeService{repo: repo}
+func NewToolTypeService(
+	repo repository.ToolTypeRepository,
+	providerRepo repository.ToolProviderRepository,
+	configRepo repository.UserToolConfigRepository,
+	txMgr repository.TxManager,
+) ToolTypeService {
+	return &toolTypeService{
+		repo:         repo,
+		providerRepo: providerRepo,
+		configRepo:   configRepo,
+		txMgr:        txMgr,
+	}
 }
 
 func (s *toolTypeService) Create(ctx context.Context, req request.CreateToolTypeRequest) (*response.ToolTypeInfo, error) {
@@ -84,7 +99,26 @@ func (s *toolTypeService) Update(ctx context.Context, id string, req request.Upd
 }
 
 func (s *toolTypeService) Delete(ctx context.Context, id string) error {
-	return s.repo.Delete(ctx, id)
+	// 先确认存在，口径与 GetByID 一致（不存在 → 404，而不是把「查询失败」也说成不存在）。
+	// 放在事务外做，免得在事务里塞一次只读预检。
+	if _, err := s.repo.GetByID(ctx, id); err != nil {
+		return apperrors.NotFoundOrInternal(apperrors.CodeToolTypeNotFound, err)
+	}
+
+	// 三张表一起走：用户配置（带缓存，必须经由 configRepo 删）→ 供应商 → 工具类型本身。
+	// 任一步失败整体回滚，不留孤儿。
+	return s.txMgr.InTx(ctx, func(ctx context.Context) error {
+		if _, err := s.configRepo.DeleteByToolTypeID(ctx, id); err != nil {
+			return apperrors.WrapDefault(apperrors.CodeInternalError, err)
+		}
+		if err := s.providerRepo.DeleteByToolTypeID(ctx, id); err != nil {
+			return apperrors.WrapDefault(apperrors.CodeInternalError, err)
+		}
+		if err := s.repo.Delete(ctx, id); err != nil {
+			return apperrors.WrapDefault(apperrors.CodeInternalError, err)
+		}
+		return nil
+	})
 }
 
 func (s *toolTypeService) GetByID(ctx context.Context, id string) (*response.ToolTypeInfo, error) {

@@ -21,6 +21,10 @@ type toolProviderService struct {
 	repo     repository.ToolProviderRepository
 	typeRepo repository.ToolTypeRepository
 	registry tool.ProviderRegistry
+	// 删除供应商要连带删掉用户对它的配置，而那张表带缓存（tool:config:user:<uid>）——
+	// 所以级联必须经由 configRepo，且与删供应商同处一个事务。
+	configRepo repository.UserToolConfigRepository
+	txMgr      repository.TxManager
 }
 
 // NewToolProviderService 创建工具供应商服务实例
@@ -28,11 +32,15 @@ func NewToolProviderService(
 	repo repository.ToolProviderRepository,
 	typeRepo repository.ToolTypeRepository,
 	registry tool.ProviderRegistry,
+	configRepo repository.UserToolConfigRepository,
+	txMgr repository.TxManager,
 ) ToolProviderService {
 	return &toolProviderService{
-		repo:     repo,
-		typeRepo: typeRepo,
-		registry: registry,
+		repo:       repo,
+		typeRepo:   typeRepo,
+		registry:   registry,
+		configRepo: configRepo,
+		txMgr:      txMgr,
 	}
 }
 
@@ -165,7 +173,17 @@ func (s *toolProviderService) Delete(ctx context.Context, id string) error {
 		return apperrors.New(apperrors.CodeBadRequest, "系统预置供应商不支持删除")
 	}
 
-	return s.repo.Delete(ctx, id)
+	// 两处写必须同生共死：漏删用户配置会留下指向已删供应商的幽灵配置；
+	// 而用户配置表带缓存，所以它必须由 UserToolConfigRepository 来删（顺带失效缓存）。
+	return s.txMgr.InTx(ctx, func(ctx context.Context) error {
+		if _, err := s.configRepo.DeleteByProviderID(ctx, id); err != nil {
+			return apperrors.WrapDefault(apperrors.CodeInternalError, err)
+		}
+		if err := s.repo.Delete(ctx, id); err != nil {
+			return apperrors.WrapDefault(apperrors.CodeInternalError, err)
+		}
+		return nil
+	})
 }
 
 func (s *toolProviderService) GetByID(ctx context.Context, id string) (*response.ToolProviderInfo, error) {

@@ -507,8 +507,8 @@ func (a *App) initDependencies() {
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo, a.obsRecorder)
 	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.obsRecorder, obsRepo)
-	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo)
-	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry)
+	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo, toolProviderRepo, cachedUserToolConfigRepo, txMgr)
+	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry, cachedUserToolConfigRepo, txMgr)
 	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo, toolRegistry)
 	searchSvc := service.NewSearchService(chatMessageRepo, chunkRepo)
 

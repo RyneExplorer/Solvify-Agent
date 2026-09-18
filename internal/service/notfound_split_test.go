@@ -78,7 +78,8 @@ func TestToolTypeServiceGetByIDSplitsNotFoundFromQueryFailure(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			svc := NewToolTypeService(&fakeToolTypeRepo{getByIDErr: tc.repoErr})
+			// 本组用例只走 GetByID；级联依赖（供应商仓库 / 用户配置仓库 / 事务管理器）不参与。
+			svc := NewToolTypeService(&fakeToolTypeRepo{getByIDErr: tc.repoErr}, nil, nil, nil)
 
 			_, err := svc.GetByID(context.Background(), "t-1")
 			if err == nil {
@@ -102,7 +103,7 @@ func TestToolTypeServiceGetByIDSplitsNotFoundFromQueryFailure(t *testing.T) {
 
 // 对照组：查询成功时不应产生任何错误码 —— 防止上面的分流写成「总是报错」。
 func TestToolTypeServiceGetByIDSuccessPath(t *testing.T) {
-	svc := NewToolTypeService(&fakeToolTypeRepo{})
+	svc := NewToolTypeService(&fakeToolTypeRepo{}, nil, nil, nil)
 
 	info, err := svc.GetByID(context.Background(), "t-1")
 	if err != nil {

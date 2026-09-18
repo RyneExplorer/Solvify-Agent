@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"solvify-agent/internal/model/entity"
-	"solvify-agent/pkg/cache"
 	"solvify-agent/pkg/logger"
 )
 
@@ -15,13 +14,19 @@ import (
 //	- 按 userID 查已启用配置：key = "tool:config:user:{userID}"
 //	- 按 ID 查单条：key = "tool:config:id:{id}"
 //	- Create/Update/Delete → 清除对应用户缓存
+//
+// ⚠️ 本表还会被「级联删除」波及（删供应商 / 删工具类型时连带删用户配置），
+// 那些入口同样收在本层（DeleteByProviderID / DeleteByToolTypeID）。
+// 这是 P0-5 的收口：此前级联写在 tool_provider_repository / tool_type_repository 里，
+// 直删本表却不失效缓存，用户已启用的工具在被管理员删掉供应商后，仍会以「幽灵工具」
+// 形式出现，直到 10 分钟 TTL 过期。
 type cachedUserToolConfigRepository struct {
 	inner UserToolConfigRepository
-	cache *cache.RedisCache
+	cache cachePort
 }
 
 // NewCachedUserToolConfigRepository 创建带缓存的用户工具配置仓库
-func NewCachedUserToolConfigRepository(inner UserToolConfigRepository, c *cache.RedisCache) UserToolConfigRepository {
+func NewCachedUserToolConfigRepository(inner UserToolConfigRepository, c cachePort) UserToolConfigRepository {
 	return &cachedUserToolConfigRepository{inner: inner, cache: c}
 }
 
@@ -110,11 +115,41 @@ func (r *cachedUserToolConfigRepository) DisableOthersByToolType(ctx context.Con
 	return nil
 }
 
+// ========== 级联删除：删行与失效必须成对 ==========
+
+func (r *cachedUserToolConfigRepository) DeleteByProviderID(ctx context.Context, providerID string) ([]string, error) {
+	userIDs, err := r.inner.DeleteByProviderID(ctx, providerID)
+	if err != nil {
+		return nil, err
+	}
+	r.invalidateUsers(ctx, userIDs)
+	return userIDs, nil
+}
+
+func (r *cachedUserToolConfigRepository) DeleteByToolTypeID(ctx context.Context, toolTypeID string) ([]string, error) {
+	userIDs, err := r.inner.DeleteByToolTypeID(ctx, toolTypeID)
+	if err != nil {
+		return nil, err
+	}
+	r.invalidateUsers(ctx, userIDs)
+	return userIDs, nil
+}
+
 // ========== 缓存失效 ==========
 
 func (r *cachedUserToolConfigRepository) invalidateUser(ctx context.Context, userID string) {
 	key := fmt.Sprintf("user:%s", userID)
 	if err := r.cache.Delete(ctx, key); err != nil {
 		logger.Warnf("工具配置缓存清除失败: userID=%s, err=%v", userID, err)
+	}
+}
+
+// invalidateUsers 批量失效：级联删除一次会波及多个用户。
+//
+// 失效紧跟删行之后、不等事务提交。方向上是安全的：若事务最终回滚，只是白删了几个 key
+// （下次读会回填）；真正危险的是反方向——漏失效，那会留下脏值到 TTL 过期。
+func (r *cachedUserToolConfigRepository) invalidateUsers(ctx context.Context, userIDs []string) {
+	for _, userID := range userIDs {
+		r.invalidateUser(ctx, userID)
 	}
 }

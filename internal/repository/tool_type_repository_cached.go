@@ -2,22 +2,10 @@ package repository
 
 import (
 	"context"
-	"time"
 
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/pkg/logger"
 )
-
-// toolTypeCache 是本仓库用到的缓存能力子集。
-//
-// 抽成接口只为一个目的：让「写时失效」这件事可测。*cache.RedisCache 天然满足它
-// （app.go 的构造调用无需改动），测试则换成内存实现，从而在不依赖 Redis 的前提下
-// 断言「改名后旧 key 不再命中缓存」—— 这是本文件唯一真正值得回归的行为。
-type toolTypeCache interface {
-	Get(ctx context.Context, key string, dest any) (bool, error)
-	Set(ctx context.Context, key string, value any, ttl time.Duration) error
-	Delete(ctx context.Context, key string) error
-}
 
 // cachedToolTypeRepository 为 ToolTypeRepository 添加 Redis 缓存层
 //
@@ -30,11 +18,11 @@ type toolTypeCache interface {
 // 只要漏掉一个，被漏掉的那条就会一直返回脏值直到 TTL 过期（10 分钟）。
 type cachedToolTypeRepository struct {
 	inner ToolTypeRepository
-	cache toolTypeCache
+	cache cachePort
 }
 
 // NewCachedToolTypeRepository 创建带缓存的工具类型仓库
-func NewCachedToolTypeRepository(inner ToolTypeRepository, c toolTypeCache) ToolTypeRepository {
+func NewCachedToolTypeRepository(inner ToolTypeRepository, c cachePort) ToolTypeRepository {
 	return &cachedToolTypeRepository{inner: inner, cache: c}
 }
 

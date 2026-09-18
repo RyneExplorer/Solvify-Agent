@@ -5,18 +5,17 @@ import (
 	"fmt"
 
 	"solvify-agent/internal/model/entity"
-	"solvify-agent/pkg/cache"
 	"solvify-agent/pkg/logger"
 )
 
 // cachedUserModelConfigRepository 为 UserModelConfigRepo 添加 Redis 缓存层
 type cachedUserModelConfigRepository struct {
 	inner UserModelConfigRepo
-	cache *cache.RedisCache
+	cache cachePort
 }
 
 // NewCachedUserModelConfigRepository 创建带缓存的用户模型配置仓库
-func NewCachedUserModelConfigRepository(inner UserModelConfigRepo, c *cache.RedisCache) UserModelConfigRepo {
+func NewCachedUserModelConfigRepository(inner UserModelConfigRepo, c cachePort) UserModelConfigRepo {
 	return &cachedUserModelConfigRepository{inner: inner, cache: c}
 }
 
