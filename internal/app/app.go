@@ -14,7 +14,6 @@ import (
 
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/gin-gonic/gin"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
@@ -48,9 +47,10 @@ type App struct {
 	router       *api.Router
 	server       *http.Server
 
-	// 阶段 1.4：OTel / Prometheus 资源，由 App 负责生命周期管理
+	// 阶段 1.4：OTel 资源，由 App 负责生命周期管理
+	// （Prometheus Registry 不在这里：纯内存对象、没有待关闭的资源，
+	//   在 initDependencies 里建好后直接传给 Router 即可，不必再存一层。）
 	tracerShutdown func(context.Context) error
-	promRegistry   *prometheus.Registry
 
 	// checkpoint 过期清理后台任务的取消函数，由 App 负责生命周期管理
 	checkpointCleanupCancel context.CancelFunc
@@ -392,7 +392,6 @@ func (a *App) initDependencies() error {
 		}
 	}
 	promReg := observability.InitPrometheusRegistry(obsCfg)
-	a.promRegistry = promReg
 	logger.Infof("Prometheus Registry 已初始化")
 
 	// 阶段三：初始化可观测性 Recorder（DB Sink + 批量日志 Sink + 采样器 + PII）
@@ -537,7 +536,7 @@ func (a *App) initDependencies() error {
 		toolProviderService,
 		userToolConfigService,
 		prefSvc,
-		a.promRegistry, // 阶段 1.4：替换原 obsRecorder，/metrics 走 promhttp.Handler
+		promReg, // /metrics 走 promhttp.HandlerFor(promReg)；形参有类型，漏传/传错编译不过
 	)
 
 	return nil
