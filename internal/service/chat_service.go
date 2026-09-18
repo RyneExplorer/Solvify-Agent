@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	einoCompose "github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 
@@ -46,6 +48,11 @@ type chatService struct {
 	obsRepo             repository.ObservabilityRepo
 	txMgr               repository.TxManager
 	embedClient         *llm.EmbeddingClient
+
+	// quickGraph 快速模式检索链路：启动期 build + Compile 一次，请求期只注入 per-request
+	// 的 Graph Local State 与 ChatModel（见 chat_service_graph_quick.go 的 withGraphState /
+	// withGraphChatModel）。图结构静态，因此「编译失败」被前移到启动期，请求期不存在该路径。
+	quickGraph einoCompose.Runnable[*quickGraphInput, *schema.StreamReader[*schema.Message]]
 }
 
 // NewChatService 创建聊天业务服务。
@@ -66,17 +73,26 @@ func NewChatService(
 	prefSvc UserPreferenceService,
 	obs observability.Recorder,
 	obsRepo repository.ObservabilityRepo,
-) ChatServiceInterface {
+) (ChatServiceInterface, error) {
 	defaultTopK := 10
 	if cfg := config.Get(); cfg != nil && cfg.RAG.TopK > 0 {
 		defaultTopK = cfg.RAG.TopK
 	}
+	einoRetriever := rag.NewEinoRetrieverAdapter(retriever, defaultTopK)
+
+	// 快速模式的 Graph 在这里就编译好：装配错误只可能变成启动错误。
+	quickGraph, err := compileQuickGraph(einoRetriever, obs)
+	if err != nil {
+		return nil, fmt.Errorf("编译快速检索链路失败: %w", err)
+	}
+
 	return &chatService{
 		sessionRepo:         sessionRepo,
 		messageRepo:         messageRepo,
 		txMgr:               txMgr,
 		retriever:           retriever,
-		einoRetriever:       rag.NewEinoRetrieverAdapter(retriever, defaultTopK),
+		einoRetriever:       einoRetriever,
+		quickGraph:          quickGraph,
 		modelRepo:           modelRepo,
 		userModelConfigRepo: userModelConfigRepo,
 		userRepo:            userRepo,
@@ -86,7 +102,7 @@ func NewChatService(
 		prefSvc:             prefSvc,
 		obs:                 obs,
 		obsRepo:             obsRepo,
-	}
+	}, nil
 }
 
 // SendMessage 发送消息并获取流式响应

@@ -75,7 +75,9 @@ func (a *App) Initialize() error {
 	if err := a.initDatabase(); err != nil {
 		return err
 	}
-	a.initDependencies()
+	if err := a.initDependencies(); err != nil {
+		return err
+	}
 	a.initRouter()
 	a.initServer()
 	return nil
@@ -357,7 +359,7 @@ func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo rep
 }
 
 // initDependencies 初始化业务依赖并创建路由
-func (a *App) initDependencies() {
+func (a *App) initDependencies() error {
 	// 初始化 Repository
 	knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
 	documentRepo := repository.NewDocumentRepository(a.postgresqlDB)
@@ -506,7 +508,10 @@ func (a *App) initDependencies() {
 	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncItemRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, textExtractor, dingtalkClient, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo, a.obsRecorder)
-	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.obsRecorder, obsRepo)
+	chatSvc, err := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.obsRecorder, obsRepo)
+	if err != nil {
+		return fmt.Errorf("初始化聊天服务失败: %w", err)
+	}
 	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo, toolProviderRepo, cachedUserToolConfigRepo, txMgr)
 	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry, cachedUserToolConfigRepo, txMgr)
 	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo, toolRegistry)
@@ -534,6 +539,8 @@ func (a *App) initDependencies() {
 		prefSvc,
 		a.promRegistry, // 阶段 1.4：替换原 obsRecorder，/metrics 走 promhttp.Handler
 	)
+
+	return nil
 }
 
 // prewarmModelClients 启动时预创建所有已启用系统模型的 LLM 客户端

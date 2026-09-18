@@ -145,6 +145,12 @@ func (emptyRetriever) Retrieve(context.Context, rag.Query) (rag.Result, error) {
 func newQuickTestService(t *testing.T, upstreamURL string) (*chatService, *fakeChatMessageRepo) {
 	t.Helper()
 	msgRepo := newFakeChatMessageRepo()
+	einoRetriever := rag.NewEinoRetrieverAdapter(emptyRetriever{}, 10)
+	// 与生产路径同源：Graph 在「构造期」编译一次，请求期复用（见 compileQuickGraph）。
+	quickGraph, err := compileQuickGraph(einoRetriever, nil)
+	if err != nil {
+		t.Fatalf("编译快速检索链路失败: %v", err)
+	}
 	return &chatService{
 		messageRepo: msgRepo,
 		userModelConfigRepo: &fakeUserModelConfigRepo{cfg: &entity.UserModelConfig{
@@ -154,7 +160,8 @@ func newQuickTestService(t *testing.T, upstreamURL string) (*chatService, *fakeC
 			APIKey:           "test-key",
 			MaxContextLength: 8192,
 		}},
-		einoRetriever: rag.NewEinoRetrieverAdapter(emptyRetriever{}, 10),
+		einoRetriever: einoRetriever,
+		quickGraph:    quickGraph,
 	}, msgRepo
 }
 

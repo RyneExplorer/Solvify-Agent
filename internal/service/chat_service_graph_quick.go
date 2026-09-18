@@ -143,16 +143,25 @@ const (
 )
 
 // buildQuickGraph 构建 START → rewrite → retrieve → build_msgs → generate → END 流水线。
-// graphState 必须在 Invoke 前创建好并传入——它既是 eino compose 的 stateGenerator 返回值，
-// 也是 Invoke 返回后外部读取 RetrievedDocs 的唯一入口。
+//
+// 图结构是静态的（4 节点 + 5 条边），per-request 的变量只有两样：Graph Local State 和
+// ChatModel——两者都通过 ctx 注入（withGraphState / withGraphChatModel），所以本函数
+// 只在启动期跑一次，编译结果被所有请求并发复用。
+//
+// ⚠️ genState 里**不能闭包捕获任何具体的 state 实例**：那样编译一次就等于所有请求共用
+// 同一份 state，并发请求会互相串数据（旧实现每次请求都重新 build+Compile，靠「每次都是
+// 新闭包」掩盖了这个约束）。eino 每次 Run 都会用**本次 Invoke 的 ctx** 重新调用一次
+// stateGenerator（compose/graph.go 的 runCtx 闭包 ← graph_run.go:200 `ctx = r.runCtx(ctx)`），
+// 因此这里从 ctx 取本次请求的 state；取不到时给一个临时 state 兜底（Graph 被独立调用时）。
 func buildQuickGraph(
-	graphState *quickGraphState,
 	einoRetriever *rag.EinoRetrieverAdapter,
 ) (*einoCompose.Graph[*quickGraphInput, *schema.StreamReader[*schema.Message]], error) {
-	// genState 是 buildQuickGraph 的局部闭包，始终返回同一个 graphState 实例。
-	// eino compose 在 runCtx 里只是用 internalState 包装 graphState 指针，
-	// 所以 StatePostHandler 写入的字段和外部 graphState 是同一对象——Invoke 返回后还能读到。
-	genState := func(_ context.Context) *quickGraphState { return graphState }
+	genState := func(ctx context.Context) *quickGraphState {
+		if st, ok := graphStateFromContext(ctx); ok {
+			return st
+		}
+		return &quickGraphState{}
+	}
 
 	g := einoCompose.NewGraph[*quickGraphInput, *schema.StreamReader[*schema.Message]](
 		einoCompose.WithGenLocalState(genState),
@@ -685,6 +694,28 @@ func graphChatModelFromContext(ctx context.Context) (einoModel.BaseChatModel, bo
 	return cm, ok
 }
 
+// graphCtxStateKeyType 用作 context.WithValue 的 key，存放 per-request 的 Graph Local State。
+type graphCtxStateKeyType struct{}
+
+var graphCtxStateKey = graphCtxStateKeyType{}
+
+// withGraphState 把本次请求的 Graph Local State 注入 context。
+// 图编译一次之后 stateGenerator 每次都从 ctx 取 state，这里是唯一的写入点；
+// 它与 withGraphChatModel 一起构成「编译期固定结构 + 请求期注入依赖」的全部变量面。
+func withGraphState(ctx context.Context, st *quickGraphState) context.Context {
+	return context.WithValue(ctx, graphCtxStateKey, st)
+}
+
+// graphStateFromContext 从 context 取出 Graph Local State
+func graphStateFromContext(ctx context.Context) (*quickGraphState, bool) {
+	v := ctx.Value(graphCtxStateKey)
+	if v == nil {
+		return nil, false
+	}
+	st, ok := v.(*quickGraphState)
+	return st, ok
+}
+
 // processMessageGraphQuick 快速模式入口：QueryRewrite → Retrieve → BuildPrompt → Generate 四节点 Graph。
 func (s *chatService) processMessageGraphQuick(
 	ctx context.Context,
@@ -766,29 +797,24 @@ func (s *chatService) processMessageGraphQuick(
 	graphInput.PreKeywords = keywords
 	graphInput.PreSkipRetrieve = skipRetrieve
 
-	// 4) 提前创建 graphState：既是 eino stateGenerator 返回值，也是 Invoke 后外部读取 RetrievedDocs 的入口。
+	// 4) 提前创建 graphState：编译期注册的 stateGenerator 会从 ctx 取它；
+	//    Invoke 返回后也是从同一个对象读 RetrievedDocs。
 	graphState := &quickGraphState{}
 
-	// 5) 构建并编译 compose.Graph（内部已经 push error 事件）
-	sendProgressEvent(ctx, eventCh, "正在组装快速检索链路...")
+	// 5) 取启动期就编译好的 Graph——请求期只注入 state 与 ChatModel，不再 build/Compile。
+	//    装配错误因此在启动期就暴露，请求期结构上不可能再出现「编译失败」。
 	graphCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	runnable, err := compileQuickGraphLocal(ctx, graphState, s.einoRetriever, s.obs, eventCh)
-	if err != nil {
-		obsMarkError(ctx, s.obs, err)
-		return
-	}
-
-	// 6) 注入 per-request ChatModel
 	graphCtx = withGraphChatModel(graphCtx, chatModel)
+	graphCtx = withGraphState(graphCtx, graphState)
 
-	// 7) 生成助手消息 ID + 流式驱动 Graph 执行
+	// 6) 生成助手消息 ID + 流式驱动 Graph 执行
 	assistantMsgID := uuid.New().String()
 	obsAddRootAttrs(ctx, s.obs, observability.Attrs{"assistant_message_id": assistantMsgID})
 	eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "start", MessageID: assistantMsgID})
 
 	fullContent, err := runQuickStream(
-		graphCtx, runnable, graphInput,
+		graphCtx, s.quickGraph, graphInput,
 		eventCh, req.ModelID, assistantMsgID, s.obs,
 	)
 	if err != nil {
@@ -868,26 +894,24 @@ func buildQuickInput(
 	}
 }
 
-// compileQuickGraphLocal build + compile graph，失败时自动推 error 事件
-// graphState 在调用处提前创建好，此函数会把它传给 buildQuickGraph，使其成为 eino stateGenerator 的返回值。
-// 这样 Invoke 返回后外部直接读 graphState.RetrievedDocs 即可，不需要再从 context 里 ProcessState。
-func compileQuickGraphLocal(
-	ctx context.Context,
-	graphState *quickGraphState,
+// compileQuickGraph 在**启动期**构建并编译快速检索链路，返回可被所有请求并发复用的 Runnable。
+//
+// 这里没有 ctx / eventCh：装配期没有请求上下文可推事件，失败一律上抛给构造函数，由启动流程
+// 决定是否退出。于是「Graph 编译失败」在请求期**结构上不可能发生**——它要么在启动时就失败，
+// 要么根本不存在。（旧实现每次请求都 build + Compile，并把错误推成一张请求级 error 事件，
+// 同一个静态错误会在每一个请求上重复出现一次。）
+func compileQuickGraph(
 	einoRetriever *rag.EinoRetrieverAdapter,
 	obs observability.Recorder,
-	eventCh chan<- dto.StreamEvent,
 ) (einoCompose.Runnable[*quickGraphInput, *schema.StreamReader[*schema.Message]], error) {
-	g, err := buildQuickGraph(graphState, einoRetriever)
+	g, err := buildQuickGraph(einoRetriever)
 	if err != nil {
 		obsIncr(nil, obs, "chat_quick_graph_errors_total", map[string]string{"stage": "build_graph"}, 1)
-		sendErrorEvent(ctx, eventCh, err, "快速检索链路初始化失败")
 		return nil, err
 	}
 	r, err := g.Compile(nil, einoCompose.WithGraphName("quick_rag_pipeline"))
 	if err != nil {
 		obsIncr(nil, obs, "chat_quick_graph_errors_total", map[string]string{"stage": "compile_graph"}, 1)
-		sendErrorEvent(ctx, eventCh, err, "快速检索链路编译失败")
 		return nil, err
 	}
 	return r, nil
