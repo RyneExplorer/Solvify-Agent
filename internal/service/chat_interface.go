@@ -53,7 +53,7 @@ type TraceAgentStepResponse struct {
 	ToolResultSummary string `json:"tool_result_summary,omitempty"`
 	ToolStatus        string `json:"tool_status,omitempty"`
 	ToolError         string `json:"tool_error,omitempty"`
-	LatencyMs         int64  `json:"latency_ms,omitempty"`
+	LatencyMs         int64  `json:"latency_ms"`
 }
 
 // TraceResponse 单次追踪详情响应
@@ -69,7 +69,7 @@ type TraceResponse struct {
 	SearchMode   string                   `json:"search_mode,omitempty"`
 	SampleRate   float64                  `json:"sample_rate,omitempty"`
 	Sampled      bool                     `json:"sampled"`
-	DurationMs   int64                    `json:"duration_ms,omitempty"`
+	DurationMs   int64                    `json:"duration_ms"`
 	Status       string                   `json:"status,omitempty"`
 	Error        string                   `json:"error,omitempty"`
 	Attrs        any                      `json:"attrs,omitempty"`

@@ -23,7 +23,7 @@ type ChatTrace struct {
 	OTelTraceID string   `gorm:"column:otel_trace_id;index;type:varchar(32)" json:"otel_trace_id,omitempty"`
 	SampleRate float64   `gorm:"default:0" json:"sample_rate,omitempty"`
 	Sampled    bool      `gorm:"default:false" json:"sampled"`
-	DurationMs int64     `gorm:"default:0" json:"duration_ms,omitempty"`
+	DurationMs int64     `gorm:"default:0" json:"duration_ms"`
 	Status     string    `gorm:"type:varchar(32)" json:"status,omitempty"`
 	Error      string    `gorm:"type:text" json:"error,omitempty"`
 	Attrs      datatypes.JSON `gorm:"type:jsonb" json:"attrs,omitempty"`
@@ -67,7 +67,7 @@ type AgentTaskStep struct {
 	ToolResultSummary string    `gorm:"type:text" json:"tool_result_summary,omitempty"`
 	ToolStatus        string    `gorm:"type:varchar(32)" json:"tool_status,omitempty"`
 	ToolError         string    `gorm:"type:text" json:"tool_error,omitempty"`
-	LatencyMs         int64     `gorm:"default:0" json:"latency_ms,omitempty"`
+	LatencyMs         int64     `gorm:"default:0" json:"latency_ms"`
 	TokensDelta       int       `gorm:"default:0" json:"tokens_delta,omitempty"`
 	Attrs             datatypes.JSON `gorm:"type:jsonb" json:"attrs,omitempty"`
 }

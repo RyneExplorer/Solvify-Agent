@@ -2,6 +2,8 @@ package observability
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -65,13 +67,24 @@ func spanNamesIn(root *Span) []string {
 	return out
 }
 
-func hasSpanNamed(root *Span, name string) bool {
-	for _, n := range spanNamesIn(root) {
-		if n == name {
-			return true
+// findSpanNamed 深度查找第一个同名 span，找不到返回 nil。
+func findSpanNamed(root *Span, name string) *Span {
+	if root == nil {
+		return nil
+	}
+	if root.Name == name {
+		return root
+	}
+	for _, c := range root.Children {
+		if got := findSpanNamed(c, name); got != nil {
+			return got
 		}
 	}
-	return false
+	return nil
+}
+
+func hasSpanNamed(root *Span, name string) bool {
+	return findSpanNamed(root, name) != nil
 }
 
 // installNoopTracer 把全局 tracer 换成 noop，模拟 OTelExporter=noop 的开发环境
@@ -305,7 +318,51 @@ func TestBackgroundSpanEndingBeforeFlushStaysSingleRow(t *testing.T) {
 //
 // 采样率置 0 且不开启「错误必采」时首发不落库，重发也必须保持不落库 ——
 // 否则同一条 trace 会在两次写入之间「采样结果翻转」，行凭空冒出来。
+//
+// 这里必须用「无业务归属」的 trace：按 SampleRequest.Required 的语义，挂了 session / message
+// 的 chat trace 一律落库，那条路径上根本走不到采样率这一层（见
+// TestChatTraceKeptRegardlessOfSamplingRate）。无归属的形态就是纯 HTTP 噪声 ——
+// 登记根 http.request 自己结束，没有 rootAttrs 归属。
 func TestRepublishKeepsSamplingDecision(t *testing.T) {
+	installSDKTracer(t)
+
+	cfg := testObsConfig()
+	cfg.SamplingRate = 0
+	cfg.ErrorAlwaysSample = false
+	sink := &capturingDBSink{}
+	rec := NewRecorderWithDBSink(cfg, sink)
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = rec.Shutdown(c)
+	})
+
+	ctx, httpSpan := rec.StartSpan(context.Background(), "http.request", ComponentHTTPServer, nil)
+	baseCtx := DetachedTraceContext(ctx)
+	rec.EndSpan(ctx, httpSpan, SpanStatusOK, nil, nil)
+
+	time.Sleep(2 * traceRepublishDebounce)
+	if ids := sink.distinctTraceIDs(); len(ids) != 0 {
+		t.Fatalf("采样率为 0 的 HTTP 噪声不该落库，实际: %v", ids)
+	}
+
+	bgCtx, bgSpan := rec.StartSpan(baseCtx, "ctx.summarize", ComponentServiceContext, nil)
+	rec.EndSpan(bgCtx, bgSpan, SpanStatusOK, nil, nil)
+
+	time.Sleep(2 * traceRepublishDebounce)
+	if ids := sink.distinctTraceIDs(); len(ids) != 0 {
+		t.Errorf("重发不该翻转采样决定，实际: %v", ids)
+	}
+}
+
+// TestChatTraceKeptRegardlessOfSamplingRate 钉住「有业务归属的 trace 必留」这条规则。
+//
+// 为什么必须成立：chat 场景下 traceID 会先写进助手消息的 metadata.trace_id 返回给前端，
+// 采样丢弃等于对外承诺了一个在 chat_traces 里查不到详情的悬空 ID（前端点「追踪详情」查空）。
+// 所以采样率被拉到 0 时，chat trace 依然要落库。
+//
+// 回归价值：把 flushTraceState 传给采样器的 Required 去掉，本测试立刻变红。
+func TestChatTraceKeptRegardlessOfSamplingRate(t *testing.T) {
 	installSDKTracer(t)
 
 	cfg := testObsConfig()
@@ -322,14 +379,79 @@ func TestRepublishKeepsSamplingDecision(t *testing.T) {
 	ctx, _, chatSpan := chatChain(t, rec)
 	baseCtx := DetachedTraceContext(ctx)
 	rec.EndSpan(ctx, chatSpan, SpanStatusOK, nil, nil)
-	rec.FlushTrace(ctx, "u-1", "s-1", "m-1")
+	selfTraceID := rec.FlushTrace(ctx, "u-1", "s-1", "m-1")
+
+	if len(sink.tracesFor(selfTraceID)) == 0 {
+		t.Fatal("有业务归属的 chat trace 必须落库，实际一条都没有（前端拿到的 trace_id 会悬空）")
+	}
+
+	// 迟到的后台 span 再触发一次重发：仍然只有这一行，且归属与迟到子树都在
+	bgCtx, bgSpan := rec.StartSpan(baseCtx, "ctx.summarize", ComponentServiceContext, nil)
+	rec.EndSpan(bgCtx, bgSpan, SpanStatusOK, nil, nil)
+	time.Sleep(2 * traceRepublishDebounce)
+
+	if ids := sink.distinctTraceIDs(); len(ids) != 1 {
+		t.Errorf("迟到的后台 span 不该裂出第二行，实际: %v", ids)
+	}
+	all := sink.tracesFor(selfTraceID)
+	last := all[len(all)-1]
+	if !last.Sampled {
+		t.Error("落库的 chat trace 应当标记 Sampled=true（「是否落库」与「采样决定」必须一致）")
+	}
+	if last.UserID != "u-1" || last.SessionID != "s-1" {
+		t.Errorf("归属不该丢: user=%q session=%q", last.UserID, last.SessionID)
+	}
+	if !hasSpanNamed(last.Root, "ctx.summarize") {
+		t.Errorf("重发应把迟到 span 并回同一行，实际 span: %v", spanNamesIn(last.Root))
+	}
+}
+
+// TestRepublishKeepsOTelExported 钉住「双轨对齐结果首发即冻结」这条规则。
+//
+// 成因：重发发生在请求结束之后，ctx 是 Background，而 cloneSpan 刻意不搬运 otelSpan，
+// 于是 oTelExportedFor 现算必然得到 false；落库又是 upsert 整行覆盖，
+// 结果同一 trace 在运行中读到 otel_exported=true、事后读到 false ——
+// 而 collector 日志证明这些 span 真的导出了。
+//
+// 回归价值：去掉 traceState.otelExported 的复用，最后两条断言立刻变红。
+func TestRepublishKeepsOTelExported(t *testing.T) {
+	installSDKTracer(t)
+	// 没有真实 exporter 时 oTelExportedFor 直接短路成 false，这条路径就测不到了
+	installOTelExportActive(t, true)
+
+	sink := &capturingDBSink{}
+	rec := NewRecorderWithDBSink(testObsConfig(), sink)
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = rec.Shutdown(c)
+	})
+
+	ctx, _, chatSpan := chatChain(t, rec)
+	baseCtx := DetachedTraceContext(ctx)
+	rec.EndSpan(ctx, chatSpan, SpanStatusOK, nil, nil)
+	selfTraceID := rec.FlushTrace(ctx, "u-1", "s-1", "m-1")
+
+	first := sink.tracesFor(selfTraceID)
+	if len(first) == 0 {
+		t.Fatal("首发没落库，无法验证重发")
+	}
+	if !first[0].OTelExported || first[0].OTelTraceID == "" {
+		t.Fatalf("首发就该是「已导出且带回 OTel traceID」: exported=%v traceID=%q",
+			first[0].OTelExported, first[0].OTelTraceID)
+	}
 
 	bgCtx, bgSpan := rec.StartSpan(baseCtx, "ctx.summarize", ComponentServiceContext, nil)
 	rec.EndSpan(bgCtx, bgSpan, SpanStatusOK, nil, nil)
-
 	time.Sleep(2 * traceRepublishDebounce)
-	if ids := sink.distinctTraceIDs(); len(ids) != 0 {
-		t.Errorf("采样率为 0 时不该落库，重发也不该翻转决定，实际: %v", ids)
+
+	all := sink.tracesFor(selfTraceID)
+	last := all[len(all)-1]
+	if !last.OTelExported {
+		t.Error("重发把 otel_exported 翻转成了 false（upsert 会覆盖首发写下的真值）")
+	}
+	if last.OTelTraceID != first[0].OTelTraceID {
+		t.Errorf("重发丢了 otel_trace_id: 首发=%q 重发=%q", first[0].OTelTraceID, last.OTelTraceID)
 	}
 }
 
@@ -411,6 +533,199 @@ func TestEndingRegisteredRootAfterPublishDoesNotOverwriteTrace(t *testing.T) {
 	}
 	if !hasSpanNamed(last.Root, "chat.deep") {
 		t.Errorf("最终树里丢了 chat.deep，实际 span: %v", spanNamesIn(last.Root))
+	}
+}
+
+// TestPublishedTreeIsSelfConsistent 钉住「树是父子关系与时间区间的唯一来源」。
+//
+// 现场（当时 6/6 条 trace 都有）：
+//   - chat.request.children 里有 http.request，但 http.request.parent_id 为空 ——
+//     按 parent_id 重建会散成两棵树；
+//   - 时间上 http.request 先开始（gin 中间件建的），chat.request 后开始（WithTraceRoot 才拼出来），
+//     于是出现「根比子短」；
+//   - 更深一层：ChatModelGenerate 82ms / 子 eino.chat_model 4296ms（P1-3），
+//     以及后置任务比 chat.quick.graph 晚 4.91s 结束（P1-4）。
+//
+// 回归价值：去掉 flushTraceState 里的 stampParentIDs / envelopeTreeIntervals，对应断言各自变红。
+func TestPublishedTreeIsSelfConsistent(t *testing.T) {
+	installSDKTracer(t)
+
+	sink := &capturingDBSink{}
+	rec := newDualTrackRecorder(t, sink)
+
+	ctx, httpSpan, chatSpan := chatChain(t, rec)
+	rec.EndSpan(ctx, chatSpan, SpanStatusOK, nil, nil)
+	selfTraceID := rec.FlushTrace(ctx, "u-1", "s-1", "m-1")
+
+	all := sink.tracesFor(selfTraceID)
+	if len(all) == 0 {
+		t.Fatal("没落库")
+	}
+	root := all[0].Root
+	if root == nil {
+		t.Fatal("落库 trace 的 Root 为 nil")
+	}
+	if root.ParentID != "" {
+		t.Errorf("发布根不该有 parent_id，实际 %q", root.ParentID)
+	}
+
+	// 逐层断言两条：出现在谁的 children 里 → parent_id 指向谁；父的区间包住每一个子
+	var walk func(n *Span)
+	walk = func(n *Span) {
+		for _, c := range n.Children {
+			if c == nil {
+				continue
+			}
+			if c.ParentID != n.SpanID {
+				t.Errorf("span %q 挂在 %q 下，parent_id 却是 %q（按 parent_id 重建会散架）",
+					c.Name, n.Name, c.ParentID)
+			}
+			if c.StartAt.Before(n.StartAt) || c.EndAt.After(n.EndAt) {
+				t.Errorf("span %q 的区间 [%s, %s] 超出父 %q 的 [%s, %s]",
+					c.Name,
+					c.StartAt.Format("15:04:05.000"), c.EndAt.Format("15:04:05.000"),
+					n.Name,
+					n.StartAt.Format("15:04:05.000"), n.EndAt.Format("15:04:05.000"))
+			}
+			walk(c)
+		}
+	}
+	walk(root)
+
+	// http.request 是真实 HTTP 根，必须真的在树里（否则断言在空树上恒真）
+	if !hasSpanNamed(root, "http.request") {
+		t.Fatalf("树里没有 http.request，实际 span: %v", spanNamesIn(root))
+	}
+	if httpSpan.SpanID == "" {
+		t.Error("HTTP span 没有 SpanID，无法验证父子关系")
+	}
+}
+
+// TestPublishedDurationCoversStreamingChild 钉住 P1-3 的形状：
+// 图节点先 End、流式子 span 后 End，父的落库耗时必须覆盖子。
+//
+// 现场：ChatModelGenerate 是 InvokableLambda，eino 在「返回流对象」时就 OnEnd，
+// 真正的生成发生在流被消费阶段 —— 父 82ms / 子 eino.chat_model 4296ms（40~70 倍倒挂），
+// 前端耗时占比图因此得出「检索花了 6 秒、生成只花 0.1 秒」这个完全相反的结论。
+//
+// 回归价值：去掉 envelopeTreeIntervals 的调用，本测试立刻变红。
+func TestPublishedDurationCoversStreamingChild(t *testing.T) {
+	installSDKTracer(t)
+
+	sink := &capturingDBSink{}
+	rec := newDualTrackRecorder(t, sink)
+
+	ctx, _, chatSpan := chatChain(t, rec)
+	nodeCtx, nodeSpan := rec.StartSpan(ctx, "ChatModelGenerate", ComponentAgentEngine, nil)
+	rec.EndSpan(nodeCtx, nodeSpan, SpanStatusOK, nil, nil) // 父：返回流对象就结束了
+
+	modelCtx, modelSpan := rec.StartSpan(nodeCtx, "eino.chat_model", ComponentLLMClient, nil)
+	time.Sleep(30 * time.Millisecond) // 子：真正的生成还在继续
+	rec.EndSpan(modelCtx, modelSpan, SpanStatusOK, nil, nil)
+
+	rec.EndSpan(ctx, chatSpan, SpanStatusOK, nil, nil)
+	selfTraceID := rec.FlushTrace(ctx, "u-1", "s-1", "m-1")
+
+	all := sink.tracesFor(selfTraceID)
+	if len(all) == 0 {
+		t.Fatal("没落库")
+	}
+	node := findSpanNamed(all[0].Root, "ChatModelGenerate")
+	model := findSpanNamed(all[0].Root, "eino.chat_model")
+	if node == nil || model == nil {
+		t.Fatalf("树里缺节点: %v", spanNamesIn(all[0].Root))
+	}
+	if node.DurationMs < model.DurationMs {
+		t.Errorf("父 %q 耗时 %dms 小于子 %q 的 %dms（前端占比图会得出相反结论）",
+			node.Name, node.DurationMs, model.Name, model.DurationMs)
+	}
+	if node.EndAt.Before(model.EndAt) {
+		t.Errorf("父 %q 比子 %q 早结束: %s < %s",
+			node.Name, model.Name,
+			node.EndAt.Format("15:04:05.000"), model.EndAt.Format("15:04:05.000"))
+	}
+}
+
+// TestEndSpanIsIdempotentInSpanTree 钉住「一个 span 在 span_tree 里只能是一个节点」。
+//
+// 现场（真库取证，深度模式那一轮）：落库的 span_tree 里同一个 span_id 会在**同一个父节点**下
+// 出现 3 次 —— AfterToolCalls / CancelCheck / ToolNode / eino.lambda / eino.embedding 都是 ×3。
+// 判据是「同一父节点下重复」，所以不是「同名不同 span」，而是同一个 *Span 指针被 append 了多次。
+//
+// 成因：EndSpan 里 `span.parent.Children = append(..., span)` 没有幂等守卫，而 EndSpan
+// 「只会被调用一次」这个前提在本项目里并不成立 ——
+//   - 业务侧是「显式 End + defer 兜底 End」双保险（chat_service_mode.go / chat_service_graph_quick.go /
+//     context_service.go …）；
+//   - eino 侧同一个 state.span 可能被 OnEnd / OnError / OnEndWithStreamOutput 多条路径命中。
+//
+// 复用同一棵树的后果不只是「前端详情页重复显示节点」：节点总数与 OTel 侧对不上，
+// 任何「按 span 去重后统计」的分析都会把同一个节点算重。
+//
+// 回归价值：去掉 recorder.go 里的 containsSpan 守卫，本测试立刻变红。
+func TestEndSpanIsIdempotentInSpanTree(t *testing.T) {
+	installSDKTracer(t)
+
+	sink := &capturingDBSink{}
+	rec := newDualTrackRecorder(t, sink)
+
+	ctx, _, chatSpan := chatChain(t, rec)
+
+	// 模拟真实链路：同一个 span 被显式 End 一次，再被 defer 兜底 End 两次。
+	childCtx, child := rec.StartSpan(ctx, "ToolNode", ComponentAgentEngine, nil)
+	rec.EndSpan(childCtx, child, SpanStatusOK, nil, nil)
+	rec.EndSpan(childCtx, child, SpanStatusOK, nil, nil)
+	rec.EndSpan(childCtx, child, SpanStatusOK, nil, nil)
+
+	rec.EndSpan(ctx, chatSpan, SpanStatusOK, nil, nil)
+	selfTraceID := rec.FlushTrace(ctx, "u-1", "s-1", "m-1")
+
+	all := sink.tracesFor(selfTraceID)
+	if len(all) == 0 {
+		t.Fatal("没落库")
+	}
+	root := all[0].Root
+
+	// 判据一（与分析器 B 组一致）：整棵树里 span_id 必须唯一。
+	ids := map[string]int{}
+	var walk func(n *Span)
+	walk = func(n *Span) {
+		if n == nil {
+			return
+		}
+		ids[n.SpanID]++
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(root)
+
+	var dup []string
+	for id, c := range ids {
+		if c > 1 {
+			dup = append(dup, fmt.Sprintf("%s×%d", id, c))
+		}
+	}
+	if len(dup) > 0 {
+		sort.Strings(dup)
+		t.Errorf("span_tree 里同一个 span_id 出现多次（重复 EndSpan 被挂成多个节点）: %v\n整棵树的节点名: %v",
+			dup, spanNamesIn(root))
+	}
+
+	// 判据二（更贴近现场）：同一父节点下不该出现同一个 child 指针。
+	// 这条直接盯 append 本身，即使将来树的序列化方式变了也不会失效。
+	if chatSpan != nil {
+		seen := map[*Span]bool{}
+		for _, c := range chatSpan.Children {
+			if seen[c] {
+				t.Errorf("chat.deep 的 children 里同一个 span 挂了多次：name=%q span_id=%s，children=%v",
+					c.Name, c.SpanID, spanNamesIn(chatSpan))
+			}
+			seen[c] = true
+		}
+		if len(chatSpan.Children) != 1 {
+			t.Errorf("chat.deep 的 children 期望 1 个（ToolNode），实际 %d 个: %v",
+				len(chatSpan.Children), spanNamesIn(chatSpan))
+		}
 	}
 }
 

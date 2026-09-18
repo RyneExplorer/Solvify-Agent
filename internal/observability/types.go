@@ -69,6 +69,10 @@ type SpanEvent struct {
 //     但落库需要把 children 挂到 parent 上形成树。不能依赖 trace.SpanFromContext(ctx) 找 parent，
 //     因为 ctx 可能被 Eino InitCallbacks 重包装，拿回的是当前 span 自己。
 //   - OTel span 内部线程安全；落库前 finalizeTrace 单线程读写，不需要再加锁
+//   - DurationMs 等「可测量」字段刻意不带 omitempty：0 是合法的测量值（亚毫秒的 span
+//     用整数毫秒表达就是 0），而「字段不存在」的含义是「没采集到」，前端必须能区分这两者。
+//     同类字段（TraceResponse / AgentStep / ChatTrace 等）由
+//     internal/service/duration_ms_guard_test.go 的反射守卫统一兜住
 type Span struct {
 	TraceID    string       `json:"trace_id"`
 	SpanID     string       `json:"span_id"`
@@ -77,7 +81,7 @@ type Span struct {
 	Component  Component    `json:"component"`
 	StartAt    time.Time    `json:"start_at"`
 	EndAt      time.Time    `json:"end_at,omitempty"`
-	DurationMs int64        `json:"duration_ms,omitempty"`
+	DurationMs int64        `json:"duration_ms"`
 	Status     SpanStatus   `json:"status"`
 	Error      string       `json:"error,omitempty"`
 	Attrs      Attrs        `json:"attrs,omitempty"`
@@ -150,7 +154,7 @@ type AgentStep struct {
 	ToolResultSummary string    `json:"tool_result_summary,omitempty"`
 	ToolStatus        string    `json:"tool_status,omitempty"`
 	ToolError         string    `json:"tool_error,omitempty"`
-	LatencyMs         int64     `json:"latency_ms,omitempty"`
+	LatencyMs         int64     `json:"latency_ms"`
 	TokensDelta       int       `json:"tokens_delta,omitempty"`
 }
 

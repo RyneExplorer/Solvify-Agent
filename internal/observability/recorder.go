@@ -102,6 +102,12 @@ type traceState struct {
 	// sampled 是首发算出的采样决定。重发一律复用它 —— rollSample 用的是随机数，
 	// 重算会让同一条 trace 在两次写入之间采样结果翻转，甚至把已落库的行「重发成不写」。
 	sampled bool
+	// otelTraceID / otelExported 是首发时从真实 OTel span 上抄下来的「双轨对齐」结果，
+	// 与 sampled 同理首发即冻结。重发必须复用 —— 重发发生在请求结束之后，且 cloneSpan
+	// 刻意不搬运 otelSpan，现算只会得到空 traceID / false；而落库是 upsert 整行覆盖，
+	// 等于用「算不出来的假值」把首发写下的真值抹掉（同一 trace 运行中 true、事后 false）。
+	otelTraceID  string
+	otelExported bool
 	// snap 是首发时对 rootAttrs 的快照。重发发生在请求结束之后，那时的 ctx 早已回收，
 	// 只能靠快照拿 user / session / message 归属。
 	snap *rootAttrsSnapshot
@@ -240,6 +246,78 @@ func mergeChildRoot(root, prev *Span) {
 		if _, exists := root.Attrs[k]; !exists {
 			root.Attrs[k] = v
 		}
+	}
+}
+
+// stampParentIDs 把每个节点的 ParentID 从「它在树里的位置」重新派生，根一律不写。
+//
+// 为什么不能沿用 Span 创建时记下的 parent：创建时还不知道自己最终会被挂到哪。chat 场景的
+// 发布根是落库时才合成的 chat.request，而真实 HTTP 根 span 创建时根本没有父 —— 于是出现
+// 「http.request 出现在 chat.request.children 里、自己的 parent_id 却是空」：按 parent_id
+// 重建会散成两棵树，按 children 重建又和 parent_id 对不上。同名合并（两个 chat.request）
+// 时 prev 的子节点被整体上提一层，旧 parent_id 同样失效。
+// 所以父子关系只认树这一个来源，parent_id 是它的派生结果。
+func stampParentIDs(root *Span) {
+	if root == nil {
+		return
+	}
+	root.ParentID = "" // 根没有父，前端靠「没有 parent_id」识别树的入口
+	// 下面用内层闭包而不是递归调用自己：本函数的首件事是把入参的 ParentID 清空，
+	// 递归时每层都会再清一次 —— 刚写好的父 id 会被自己抹掉，而且看起来还「全绿」。
+	var walk func(n *Span)
+	walk = func(n *Span) {
+		for _, c := range n.Children {
+			if c == nil {
+				continue
+			}
+			c.ParentID = n.SpanID
+			walk(c)
+		}
+	}
+	walk(root)
+}
+
+// envelopeTreeIntervals 让每个节点的区间都包住它的整棵子树。
+//
+// 为什么不直接用测量值：父 span 的 EndAt 是「父自己那一刻结束」的时刻，有两种情况会让它
+// 比子 span 更早，而在数据上它们只表现为同一个形状 —— 父比子短：
+//
+//  1. Eino 图节点在「返回流对象」时就 OnEnd（如 ChatModelGenerate 是 InvokableLambda），
+//     真正的生成发生在后续流消费阶段：父 82ms / 子 eino.chat_model 4296ms，
+//     耗时占比图会得出「生成几乎不花时间」这个完全相反的结论；
+//  2. 会话摘要 / 记忆抽取这类后置任务在响应返回之后才跑完，根 span 比后代早结束 4.9s，
+//     于是 trace.duration_ms 严重低估端到端耗时。
+//
+// 而「父比子短」本身就是自相矛盾的：子 span 还在跑，说明父当时并没有真正结束。
+// 所以这里按树把父的区间扩到包住子树 —— 一条规则、无例外，前端占比图也才成立
+// （子永远不会超过根，不需要靠 clamp 掩盖）。
+//
+// 口径：duration_ms = 该 span 及其子树的总跨度，不是「独占耗时」。
+// 只在落库视图上做（改的是 flushTraceState 克隆出来的树）：OTel 轨的结束时刻是 SDK 按
+// 真实回调记下的，不动它，否则两条轨道会对同一个 span 给出两个不同的耗时。
+func envelopeTreeIntervals(n *Span) {
+	if n == nil {
+		return
+	}
+	start, end := n.StartAt, n.EndAt
+	for _, c := range n.Children {
+		if c == nil {
+			continue
+		}
+		// 后序：先把子树自己撑开，再把结果并进来，一层扩到底
+		envelopeTreeIntervals(c)
+		if !c.StartAt.IsZero() && (start.IsZero() || c.StartAt.Before(start)) {
+			start = c.StartAt
+		}
+		if c.EndAt.After(end) {
+			end = c.EndAt
+		}
+	}
+	n.StartAt = start
+	n.EndAt = end
+	// 从未结束过的 span（EndAt 为零值）保持原样，别算出一个负耗时
+	if !start.IsZero() && !end.IsZero() {
+		n.DurationMs = end.Sub(start).Milliseconds()
 	}
 }
 
@@ -613,6 +691,18 @@ func (r *defaultRecorder) AddEvent(ctx context.Context, span *Span, name string,
 	}
 }
 
+// containsSpan 判断 children 里是否已经挂过同一个 span。
+// 用指针相等判断：span 在树里是唯一节点，同一个指针的第二次挂载必然是重复 EndSpan，
+// 而不是「两个同名兄弟」（那种情况指针不同，仍会被正常挂上去）。
+func containsSpan(children []*Span, target *Span) bool {
+	for _, c := range children {
+		if c == target {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *defaultRecorder) EndSpan(ctx context.Context, span *Span, status SpanStatus, err error, attrs Attrs) {
 	if span == nil {
 		return
@@ -669,10 +759,18 @@ func (r *defaultRecorder) EndSpan(ctx context.Context, span *Span, status SpanSt
 		if span.parent.Children == nil {
 			span.parent.Children = []*Span{}
 		}
-		span.parent.Children = append(span.parent.Children, span)
-		if st != nil {
-			// 只有树真的变了才记代次：重发写完靠它判断有没有漏
-			st.treeGen++
+		// 幂等守卫：一个 span 在树里只能是「一个」节点。
+		// EndSpan 不是「只会被调用一次」的：业务侧普遍是「显式 End + defer 兜底 End」，
+		// eino 侧同一个 state.span 也可能被 OnEnd / OnError / OnEndWithStreamOutput 多条路径命中。
+		// 直接 append 会把同一个 *Span 指针挂进 Children 多次 —— 落库后 span_tree 里同一个
+		// span_id 在同一个父节点下出现多份（深度模式实测 ×3），前端 trace 详情重复显示节点、
+		// 节点总数与 OTel 侧对不上，且各处「按 span 去重」的分析/统计都会被算重。
+		if !containsSpan(span.parent.Children, span) {
+			span.parent.Children = append(span.parent.Children, span)
+			if st != nil {
+				// 只有树真的变了才记代次：重发写完靠它判断有没有漏
+				st.treeGen++
+			}
 		}
 	}
 	if st != nil {
@@ -1215,9 +1313,10 @@ func (r *defaultRecorder) publishTrace(ctx context.Context, traceID string, ra *
 
 // flushTraceState 把 traceState 里当前的 span 树写成一条 chat_traces 记录。
 //
-//	republish=false —— 首发：算采样决定、写 sink、记指标
+//	republish=false —— 首发：算采样决定与双轨对齐结果、写 sink、记指标
 //	republish=true  —— 迟到 span 触发的重发：只做 DB upsert（覆盖同一行），
-//	                   不重复写 sink / 记指标，也不重掷采样（见 traceState.sampled）
+//	                   不重复写 sink / 记指标，也不重掷采样、不重算双轨对齐结果
+//	                   （见 traceState.sampled 与 traceState.otelExported）
 //
 // 三点并发约束：
 //  1. flushMu 串行化首发与重发，避免乱序写入让更旧的树覆盖更新的树；
@@ -1234,10 +1333,21 @@ func (r *defaultRecorder) flushTraceState(ctx context.Context, traceID string, s
 	snap := st.snap
 	synthetic := st.synthetic
 	prevSampled := st.sampled
+	prevOTelTraceID := st.otelTraceID
+	prevOTelExported := st.otelExported
 	st.mu.Unlock()
 	if snap == nil {
 		snap = &rootAttrsSnapshot{}
 	}
+
+	// hasOwner 判断这条 trace 是否承载了业务归属（挂在某轮问答的 session / message 上），
+	// 有归属即必留（见 SampleRequest.Required）。
+	//
+	// 判据取自 snap（首发时对 rootAttrs 的快照），不能用下面那几个局部变量：
+	// 局部 sessionID / userID 到这里很快会被兜底成 "unknown"，拿它们判断会让健康检查、
+	// 列表轮询这类无归属 trace 也全部变成「必留」，采样率彻底失效。
+	// 归属的写入点只有 WithTraceRoot / FlushTrace 的入参，不存在第二个来源。
+	hasOwner := snap.sessionID != "" || snap.messageID != ""
 
 	st.traceMu.Lock()
 	var registeredRoot *Span
@@ -1260,10 +1370,27 @@ func (r *defaultRecorder) flushTraceState(ctx context.Context, traceID string, s
 		root = registeredRoot
 	}
 
+	// 树是唯一真相：父子关系与发布根的时间区间都从树形状派生，不再依赖各 span 创建时
+	// 各自记下的字段 —— 那两个来源在 chat 场景必然打架（见 stampParentIDs 注释）。
+	stampParentIDs(root)
+	envelopeTreeIntervals(root)
+
 	// 双轨对齐：OTel traceID 从保活的自研根上回捞（重发时 ctx 已经没有了），
 	// 拿不到再退回 ctx 里的 OTel span。
-	otelTraceID := oTelTraceIDFor(ctx, registeredRoot)
-	otelExported := oTelExportedFor(ctx, registeredRoot)
+	// 双轨对齐：OTel traceID 从保活的自研根上回捞（重发时 ctx 已经没有了），
+	// 拿不到再退回 ctx 里的 OTel span。
+	//
+	// 只首发计算、重发复用（见 traceState.otelExported）：重发的 ctx 是脱离请求的，
+	// 现算必然得到空值 / false，而写库是 upsert，会把整行覆盖回去。
+	var otelTraceID string
+	var otelExported bool
+	if republish {
+		otelTraceID = prevOTelTraceID
+		otelExported = prevOTelExported
+	} else {
+		otelTraceID = oTelTraceIDFor(ctx, registeredRoot)
+		otelExported = oTelExportedFor(ctx, registeredRoot)
+	}
 	root.OTelTraceID = otelTraceID
 
 	attrs := root.Attrs
@@ -1305,10 +1432,22 @@ func (r *defaultRecorder) flushTraceState(ctx context.Context, traceID string, s
 		// 这里刻意用 Load 而不是 LoadAndDelete：保活期内可能还有迟到 span 触发重发，
 		// 删掉会让「用户点赞强制保留」（RecordFeedback / ForceSampling）在重发时失效。
 		// 真正的清理交给保活到期后的 releaseTraceState。
-		sampled = r.sampler.ShouldSample(traceID, userID, hasErr, dur, false, decision)
+		sampled = r.sampler.ShouldSample(SampleRequest{
+			TraceID:  traceID,
+			UserID:   userID,
+			HasErr:   hasErr,
+			Duration: dur,
+			// 反馈必然发生在响应落库之后，首发时不可能有；用户的点赞走 traceDecide 里的
+			// ForceKeep，经上面的 decision 生效。
+			HasFeedback: false,
+			Decision:    decision,
+			Required:    hasOwner,
+		})
 	}
 	st.mu.Lock()
 	st.sampled = sampled
+	st.otelTraceID = otelTraceID
+	st.otelExported = otelExported
 	st.published = true
 	st.mu.Unlock()
 

@@ -146,7 +146,9 @@ email:
 observability:
   # ---- 自研追踪轨道（前端「追踪详情」页的数据源 chat_traces）----
   enabled: true                    # 总开关，关掉后 Recorder 退化为空实现
-  sampling_rate: 0.2               # 自研轨道采样率：决定一条 trace 是否落库
+  sampling_rate: 0.2               # 自研轨道采样率：只作用于「无业务归属」的 trace（健康检查、列表轮询
+                                   # 等噪声）。挂在某轮问答上的 trace 一律落库 —— 它的 trace_id 已随助手消息返回
+                                   # 给前端，采掉就成了查不到详情的悬空 ID。
   error_always_sample: true        # 出错请求强制采样（不受 sampling_rate 限制）
   slow_threshold_ms: 5000          # 慢请求阈值（毫秒），命中即强制采样
   feedback_always_sample: true     # 带用户反馈的请求强制采样
