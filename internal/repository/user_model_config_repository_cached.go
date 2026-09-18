@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"fmt"
 
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/pkg/logger"
@@ -27,7 +26,7 @@ func (r *cachedUserModelConfigRepository) Update(ctx context.Context, config *en
 	if err := r.inner.Update(ctx, config); err != nil {
 		return err
 	}
-	if err := r.cache.Delete(ctx, fmt.Sprintf("id:%s:%s", config.ID, config.UserID)); err != nil {
+	if err := r.cache.Delete(ctx, userModelConfigCacheKeyByID(config.ID, config.UserID)); err != nil {
 		logger.Warnf("用户模型配置缓存清除失败: %v", err)
 	}
 	return nil
@@ -37,14 +36,14 @@ func (r *cachedUserModelConfigRepository) Delete(ctx context.Context, id string,
 	if err := r.inner.Delete(ctx, id, userID); err != nil {
 		return err
 	}
-	if err := r.cache.Delete(ctx, fmt.Sprintf("id:%s:%s", id, userID)); err != nil {
+	if err := r.cache.Delete(ctx, userModelConfigCacheKeyByID(id, userID)); err != nil {
 		logger.Warnf("用户模型配置缓存清除失败: %v", err)
 	}
 	return nil
 }
 
 func (r *cachedUserModelConfigRepository) GetByID(ctx context.Context, id string, userID string) (*entity.UserModelConfig, error) {
-	key := fmt.Sprintf("id:%s:%s", id, userID)
+	key := userModelConfigCacheKeyByID(id, userID)
 	var config entity.UserModelConfig
 	if found, _ := r.cache.Get(ctx, key, &config); found {
 		return &config, nil

@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"fmt"
 
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/pkg/logger"
@@ -45,7 +44,7 @@ func (r *cachedUserToolConfigRepository) Update(ctx context.Context, config *ent
 		return err
 	}
 	r.invalidateUser(ctx, config.UserID)
-	_ = r.cache.Delete(ctx, "id:"+config.ID)
+	_ = r.cache.Delete(ctx, userToolConfigCacheKeyByID(config.ID))
 	return nil
 }
 
@@ -59,14 +58,14 @@ func (r *cachedUserToolConfigRepository) Delete(ctx context.Context, id string) 
 		return err
 	}
 	r.invalidateUser(ctx, config.UserID)
-	_ = r.cache.Delete(ctx, "id:"+id)
+	_ = r.cache.Delete(ctx, userToolConfigCacheKeyByID(id))
 	return nil
 }
 
 // ========== 读操作：cache-aside ==========
 
 func (r *cachedUserToolConfigRepository) GetByID(ctx context.Context, id string) (*entity.UserToolConfig, error) {
-	key := "id:" + id
+	key := userToolConfigCacheKeyByID(id)
 	var config entity.UserToolConfig
 	if found, _ := r.cache.Get(ctx, key, &config); found {
 		return &config, nil
@@ -80,7 +79,7 @@ func (r *cachedUserToolConfigRepository) GetByID(ctx context.Context, id string)
 }
 
 func (r *cachedUserToolConfigRepository) ListEnabledByUserID(ctx context.Context, userID string) ([]entity.UserToolConfig, error) {
-	key := fmt.Sprintf("user:%s", userID)
+	key := userToolConfigCacheKeyByUser(userID)
 	var configs []entity.UserToolConfig
 	if found, _ := r.cache.Get(ctx, key, &configs); found {
 		return configs, nil
@@ -138,7 +137,7 @@ func (r *cachedUserToolConfigRepository) DeleteByToolTypeID(ctx context.Context,
 // ========== 缓存失效 ==========
 
 func (r *cachedUserToolConfigRepository) invalidateUser(ctx context.Context, userID string) {
-	key := fmt.Sprintf("user:%s", userID)
+	key := userToolConfigCacheKeyByUser(userID)
 	if err := r.cache.Delete(ctx, key); err != nil {
 		logger.Warnf("工具配置缓存清除失败: userID=%s, err=%v", userID, err)
 	}

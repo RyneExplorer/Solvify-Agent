@@ -55,10 +55,10 @@ func (r *cachedToolTypeRepository) Update(ctx context.Context, toolType *entity.
 		return err
 	}
 
-	_ = r.cache.Delete(ctx, "id:"+toolType.ID)
-	_ = r.cache.Delete(ctx, "key:"+toolType.ToolKey)
+	_ = r.cache.Delete(ctx, toolTypeCacheKeyByID(toolType.ID))
+	_ = r.cache.Delete(ctx, toolTypeCacheKeyByToolKey(toolType.ToolKey))
 	if old.ToolKey != toolType.ToolKey {
-		_ = r.cache.Delete(ctx, "key:"+old.ToolKey)
+		_ = r.cache.Delete(ctx, toolTypeCacheKeyByToolKey(old.ToolKey))
 	}
 	return nil
 }
@@ -71,15 +71,15 @@ func (r *cachedToolTypeRepository) Delete(ctx context.Context, id string) error 
 	if err := r.inner.Delete(ctx, id); err != nil {
 		return err
 	}
-	_ = r.cache.Delete(ctx, "id:"+id)
-	_ = r.cache.Delete(ctx, "key:"+toolType.ToolKey)
+	_ = r.cache.Delete(ctx, toolTypeCacheKeyByID(id))
+	_ = r.cache.Delete(ctx, toolTypeCacheKeyByToolKey(toolType.ToolKey))
 	return nil
 }
 
 // ========== 读操作：cache-aside ==========
 
 func (r *cachedToolTypeRepository) GetByKey(ctx context.Context, toolKey string) (*entity.ToolType, error) {
-	key := "key:" + toolKey
+	key := toolTypeCacheKeyByToolKey(toolKey)
 	var tt entity.ToolType
 	if found, _ := r.cache.Get(ctx, key, &tt); found {
 		return &tt, nil
@@ -95,7 +95,7 @@ func (r *cachedToolTypeRepository) GetByKey(ctx context.Context, toolKey string)
 }
 
 func (r *cachedToolTypeRepository) GetByID(ctx context.Context, id string) (*entity.ToolType, error) {
-	key := "id:" + id
+	key := toolTypeCacheKeyByID(id)
 	var tt entity.ToolType
 	if found, _ := r.cache.Get(ctx, key, &tt); found {
 		return &tt, nil
