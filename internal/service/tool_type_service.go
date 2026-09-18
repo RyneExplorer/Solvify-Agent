@@ -57,7 +57,7 @@ func (s *toolTypeService) Create(ctx context.Context, req request.CreateToolType
 func (s *toolTypeService) Update(ctx context.Context, id string, req request.UpdateToolTypeRequest) (*response.ToolTypeInfo, error) {
 	toolType, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return nil, apperrors.NewDefault(apperrors.CodeToolTypeNotFound)
+		return nil, apperrors.NotFoundOrInternal(apperrors.CodeToolTypeNotFound, err)
 	}
 
 	if req.Name != nil {
@@ -90,7 +90,7 @@ func (s *toolTypeService) Delete(ctx context.Context, id string) error {
 func (s *toolTypeService) GetByID(ctx context.Context, id string) (*response.ToolTypeInfo, error) {
 	toolType, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return nil, apperrors.NewDefault(apperrors.CodeToolTypeNotFound)
+		return nil, apperrors.NotFoundOrInternal(apperrors.CodeToolTypeNotFound, err)
 	}
 	return s.toToolTypeInfo(toolType, 0), nil
 }

@@ -234,7 +234,7 @@ func (s *chatService) CreateSession(ctx context.Context, userID string, req requ
 func (s *chatService) GetSession(ctx context.Context, userID, sessionID string) (dto.SessionResponse, error) {
 	session, err := s.sessionRepo.FindByID(ctx, sessionID)
 	if err != nil {
-		return dto.SessionResponse{}, apperrors.NewDefault(apperrors.CodeSessionNotFound)
+		return dto.SessionResponse{}, apperrors.NotFoundOrInternal(apperrors.CodeSessionNotFound, err)
 	}
 	if session.UserID != userID {
 		return dto.SessionResponse{}, apperrors.NewDefault(apperrors.CodeSessionNotFound)
@@ -536,7 +536,7 @@ func (s *chatService) resolveClient(ctx context.Context, userID, modelID, modelT
 func (s *chatService) validateSession(ctx context.Context, userID, sessionID string) error {
 	session, err := s.sessionRepo.FindByID(ctx, sessionID)
 	if err != nil {
-		return apperrors.NewDefault(apperrors.CodeSessionNotFound)
+		return apperrors.NotFoundOrInternal(apperrors.CodeSessionNotFound, err)
 	}
 	if session.UserID != userID {
 		return apperrors.NewDefault(apperrors.CodeSessionNotFound)

@@ -67,7 +67,7 @@ func (s *adminSessionService) List(ctx context.Context, req *requestdto.AdminSes
 func (s *adminSessionService) Delete(ctx context.Context, sessionID string) error {
 	session, err := s.sessionRepo.FindByID(ctx, sessionID)
 	if err != nil {
-		return err
+		return apperrors.NotFoundOrInternal(apperrors.CodeSessionNotFound, err)
 	}
 	if session == nil {
 		return apperrors.New(apperrors.CodeSessionNotFound, "会话不存在")

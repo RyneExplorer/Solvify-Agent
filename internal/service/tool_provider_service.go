@@ -40,7 +40,7 @@ func (s *toolProviderService) Create(ctx context.Context, req request.CreateTool
 	// 检查工具类型是否存在
 	_, err := s.typeRepo.GetByID(ctx, req.ToolTypeID)
 	if err != nil {
-		return nil, apperrors.NewDefault(apperrors.CodeToolTypeNotFound)
+		return nil, apperrors.NotFoundOrInternal(apperrors.CodeToolTypeNotFound, err)
 	}
 
 	// 检查 provider_type 是否已注册
@@ -91,7 +91,7 @@ func (s *toolProviderService) Create(ctx context.Context, req request.CreateTool
 func (s *toolProviderService) Update(ctx context.Context, id string, req request.UpdateToolProviderRequest) (*response.ToolProviderInfo, error) {
 	provider, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return nil, apperrors.NewDefault(apperrors.CodeToolProviderNotFound)
+		return nil, apperrors.NotFoundOrInternal(apperrors.CodeToolProviderNotFound, err)
 	}
 
 	// 系统预置保护：不允许修改 provider_type 和 provider_config
@@ -157,7 +157,7 @@ func (s *toolProviderService) Update(ctx context.Context, id string, req request
 func (s *toolProviderService) Delete(ctx context.Context, id string) error {
 	provider, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return apperrors.NewDefault(apperrors.CodeToolProviderNotFound)
+		return apperrors.NotFoundOrInternal(apperrors.CodeToolProviderNotFound, err)
 	}
 
 	// 系统预置保护：不允许删除系统预置供应商
@@ -171,7 +171,7 @@ func (s *toolProviderService) Delete(ctx context.Context, id string) error {
 func (s *toolProviderService) GetByID(ctx context.Context, id string) (*response.ToolProviderInfo, error) {
 	provider, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return nil, apperrors.NewDefault(apperrors.CodeToolProviderNotFound)
+		return nil, apperrors.NotFoundOrInternal(apperrors.CodeToolProviderNotFound, err)
 	}
 	return s.toProviderInfo(provider), nil
 }
@@ -259,7 +259,7 @@ func (s *toolProviderService) Test(ctx context.Context, req request.TestToolRequ
 		// 用户测试场景：从数据库查询供应商配置
 		p, err := s.repo.GetByID(ctx, req.ProviderID)
 		if err != nil {
-			return nil, apperrors.NewDefault(apperrors.CodeToolProviderNotFound)
+			return nil, apperrors.NotFoundOrInternal(apperrors.CodeToolProviderNotFound, err)
 		}
 		if len(p.ProviderConfig) == 0 || string(p.ProviderConfig) == "null" {
 			return &response.TestResult{
