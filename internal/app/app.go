@@ -543,12 +543,17 @@ func (a *App) prewarmModelClients(modelRepo repository.ModelRepo) {
 		return
 	}
 
-	infos := make([]llm.SystemModelInfo, 0, len(models))
+	// 预热入参用与请求路径同一个结构（llm.ModelConfig），
+	// 而不是它的子集 —— 子集漏字段正是预热失效的原因（见 llm.PrewarmClients 注释）。
+	infos := make([]llm.ModelConfig, 0, len(models))
 	for _, m := range models {
-		infos = append(infos, llm.SystemModelInfo{
-			ModelID: m.ModelID,
-			BaseURL: m.BaseURL,
-			APIKey:  m.APIKey,
+		infos = append(infos, llm.ModelConfig{
+			Provider:         m.Provider,
+			ModelID:          m.ModelID,
+			BaseURL:          m.BaseURL,
+			APIKey:           m.APIKey,
+			Config:           m.Config,
+			MaxContextLength: m.MaxContextLength,
 		})
 	}
 	logger.Infof("预热模型客户端: 从数据库加载到 %d 个已启用系统模型", len(infos))
