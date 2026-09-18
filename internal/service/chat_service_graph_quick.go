@@ -46,14 +46,12 @@ type quickGraphInput struct {
 	// RetrievalBudget 检索上下文 token 预算（真 BPE）
 	RetrievalBudget int
 
-	// PreRewritten* Graph 执行前已算好的 Rewrite 结果，避免 Graph 内重复调 LLM
-	PreRewrittenQuery  string
-	PreIntent          string
-	PreKeywords        []string
-	PreSkipRetrieve    bool
-	PreNeedClarify     bool
-	PreClarifyQuestion string
-	PreClarifyOptions  []string
+	// PreRewrite Graph 外（processMessageGraphQuick）已经算好的改写结果。
+	// 它是「改写结果」在快速模式链路里的**唯一载体**：Rewrite 节点只读它、自己不再调 LLM，
+	// 所以「同一次改写」不会有第二个调用点，也不会出现 7 个平行字段各自赋值。
+	// nil 表示调用方没预跑改写——这属于编程错误，Rewrite 节点会直接报错，
+	// 而不是静默再补一次 LLM 调用（那正是旧实现白等一轮改写的来源）。
+	PreRewrite *rewriteResult
 }
 
 // quickGraphState Graph Local State，通过 ProcessState 读写。
@@ -82,7 +80,14 @@ const (
 	intentMeta     = "meta"     // 元问题（我的历史记录、你刚才说了什么）
 )
 
-// rewriteResult LLM 返回的 JSON 解析结果
+// rewriteResult 一次查询改写的完整产出：LLM 返回的 JSON 字段 + 本地推导的派生字段。
+//
+// 它是「改写结果」在快速模式链路里的唯一载体，只在两处之间传递：
+//   - 生产者 processMessageGraphQuick（算好后挂到 quickGraphInput.PreRewrite）
+//   - 消费者 quickRewriteFn（一次性写进 Graph Local State）
+//
+// 之所以收敛成一个结构体而不是 7 个平行字段：平行字段必须**成组、按序、在多个调用点**赋值，
+// 漏写一个不会编译报错、只会静默丢掉语义（「同一个东西有两个来源」的典型温床）。
 type rewriteResult struct {
 	Rewritten       string   `json:"rewritten"`
 	Intent          string   `json:"intent"`
@@ -90,6 +95,9 @@ type rewriteResult struct {
 	NeedClarify     bool     `json:"need_clarify"`
 	ClarifyQuestion string   `json:"clarify_question,omitempty"`
 	ClarifyOptions  []string `json:"clarify_options,omitempty"`
+
+	// SkipRetrieve 由 Intent / NeedClarify 本地推导，不是 LLM 字段（规则见 deriveSkipRetrieve）。
+	SkipRetrieve bool `json:"-"`
 }
 
 // rewriteMaxHistoryRounds 改写时拼入历史的最大轮数（每轮=user+assistant）
@@ -197,14 +205,18 @@ func addQuickRewriteNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamRe
 	)
 }
 
-// quickRewriteFn 节点 1 实现：查询改写 + 意图识别。
-// Graph 启动前 processMessageGraphQuick 已经预执行过 doRewriteWithLLM，
-// 所以正常路径走 PreRewrittenQuery 短路，直接把预计算结果写进 state。
-// 当 PreRewrittenQuery 为空时（Graph 被独立调用的防御性路径），同步调 LLM 改写。
+// quickRewriteFn 节点 1 实现：把**外部预跑好的**改写结果写进 Graph Local State，
+// 并规划双轨检索 query。
+//
+// 它自己不调 LLM —— 改写必须由 processMessageGraphQuick 在 Graph 外完成恰好一次
+// （调用点由 TestDoRewriteHasSingleCallSite 钉住）。这条约束换来两件事：
+//   - 「同一次改写」不会有两个调用点，也就不会出现「Graph 内又白等一轮 LLM」的成本；
+//   - PreRewrite 为空时直接报错（而不是静默补一次调用），调用方漏预跑会立刻暴露。
 func quickRewriteFn(ctx context.Context, input *quickGraphInput) (string, error) {
-	if input == nil {
+	if input == nil || input.PreRewrite == nil {
 		return "", apperrors.NewDefault(apperrors.CodeInvalidParam)
 	}
+	result := input.PreRewrite
 
 	if err := einoCompose.ProcessState(ctx, func(_ context.Context, state *quickGraphState) error {
 		state.Input = input
@@ -213,39 +225,18 @@ func quickRewriteFn(ctx context.Context, input *quickGraphInput) (string, error)
 		return "", err
 	}
 
-	var rewritten, intent string
-	var keywords []string
-	var skipRetrieve, needClarify bool
-	var clarifyQ string
-	var clarifyO []string
-
-	if input.PreRewrittenQuery != "" {
-		rewritten = input.PreRewrittenQuery
-		intent = input.PreIntent
-		keywords = input.PreKeywords
-		skipRetrieve = input.PreSkipRetrieve
-		needClarify = input.PreNeedClarify
-		clarifyQ = input.PreClarifyQuestion
-		clarifyO = input.PreClarifyOptions
-	} else {
-		// 防御性路径（Graph 被独立调用）：同样给 LLM 加硬超时，超时走本地 query。
-		llmCtx, cancel := context.WithTimeout(ctx, rewriteLLMTimeout)
-		defer cancel()
-		rewritten, intent, keywords, skipRetrieve, needClarify, clarifyQ, clarifyO = doRewriteWithLLM(llmCtx, input)
-	}
-
 	// 检索 query 双轨规划：本地规则，不依赖 LLM 结果是否可用。
 	// 向量侧吃「当前问题 + 最近几轮用户提问」，关键字侧吃「指代回填后的短句」。
-	queries := planQueriesFromInput(input, rewritten)
+	queries := planQueriesFromInput(input, result.Rewritten)
 
 	_ = einoCompose.ProcessState(ctx, func(_ context.Context, state *quickGraphState) error {
-		state.RewrittenQuery = rewritten
-		state.Intent = intent
-		state.Keywords = keywords
-		state.SkipRetrieve = skipRetrieve
-		state.NeedClarify = needClarify
-		state.ClarifyQuestion = clarifyQ
-		state.ClarifyOptions = clarifyO
+		state.RewrittenQuery = result.Rewritten
+		state.Intent = result.Intent
+		state.Keywords = result.Keywords
+		state.SkipRetrieve = result.SkipRetrieve
+		state.NeedClarify = result.NeedClarify
+		state.ClarifyQuestion = result.ClarifyQuestion
+		state.ClarifyOptions = result.ClarifyOptions
 		state.VectorQuery = queries.Vector
 		state.KeywordQuery = queries.Keyword
 		return nil
@@ -253,12 +244,12 @@ func quickRewriteFn(ctx context.Context, input *quickGraphInput) (string, error)
 
 	observability.SetSpanAttrs(ctx, observability.Attrs{
 		"original_query":  input.OriginalQuery,
-		"rewritten_query": rewritten,
+		"rewritten_query": result.Rewritten,
 		"vector_query":    queries.Vector,
 		"keyword_query":   queries.Keyword,
-		"intent":          intent,
-		"skip_retrieve":   fmt.Sprintf("%v", skipRetrieve),
-		"need_clarify":    fmt.Sprintf("%v", needClarify),
+		"intent":          result.Intent,
+		"skip_retrieve":   fmt.Sprintf("%v", result.SkipRetrieve),
+		"need_clarify":    fmt.Sprintf("%v", result.NeedClarify),
 	})
 
 	// 节点输出改为向量检索 query（Graph 边把它传给 Retrieve 节点）
@@ -314,8 +305,38 @@ var (
 	reMeta     = regexp.MustCompile(`(我的历史|聊天记录|你刚才说了什么|刚才说的什么|上一个问题|前一个问题|回顾对话|我们聊了什么|你还记得|之前说的)`)
 )
 
-// doRewriteWithLLM 调 LLM 做改写，失败时 fallback 原始 query。
-// 返回 (rewritten, intent, keywords, skipRetrieve, needClarify, clarifyQuestion, clarifyOptions)
+// deriveSkipRetrieve 判定「这次请求是否跳过知识库检索」，是全包唯一的规则来源。
+//
+// greeting/chitchat：无需知识库，直接闲聊
+// identity："你是谁/你能做什么"，System Prompt 里已定义，不需要检索
+// meta："我的历史记录/你刚才说了什么"，属于会话层，不走知识检索
+// needClarify：需要先追问用户，同样不检索
+//
+// 旧实现把这条规则写在两处（本地命中链路 + LLM 结果链路），其中一处漏掉 needClarify 分支
+// 不会报错、只表现为多跑一次检索，所以这里收敛成唯一的函数。
+func deriveSkipRetrieve(intent string, needClarify bool) bool {
+	switch intent {
+	case intentGreeting, intentChitchat, intentIdentity, intentMeta:
+		return true
+	}
+	return needClarify
+}
+
+// rewriteFallback 构造「本次改写无产出」时的兜底结果：回退到原问题 + 指定意图。
+// 所有失败/跳过路径都经它返回，这也是 doRewriteWithLLM 永不返回 nil 的实现依据。
+func rewriteFallback(input *quickGraphInput, intent string) *rewriteResult {
+	return &rewriteResult{
+		Rewritten:    input.OriginalQuery,
+		Intent:       intent,
+		SkipRetrieve: deriveSkipRetrieve(intent, false),
+	}
+}
+
+// doRewriteWithLLM 在 Graph 外做一次查询改写，失败/跳过时 fallback 原始 query。
+// 返回单一结构体 rewriteResult；**永不返回 nil**，调用方无需判空。
+//
+// ⚠️ 全包只允许有一个调用点（processMessageGraphQuick），由 TestDoRewriteHasSingleCallSite 钉住：
+// 第二个调用点意味着同一次改写要跑两遍，且 Graph 内那次是在请求的关键路径上白等。
 //
 // 优化：先本地快速意图匹配（0ms，覆盖问候/身份/闲聊/系统查询等常见场景），
 // 命中后直接返回，省掉 LLM 调用。本地没命中时再判一次「有没有必要调 LLM」：
@@ -323,13 +344,13 @@ var (
 //
 // 检索 query 已经与这里解耦（见 retrieval_query.go），所以即使本函数走本地短路，
 // 检索侧依然拿得到上下文相关的 query。
-func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) (string, string, []string, bool, bool, string, []string) {
+func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) *rewriteResult {
 	// ── Step 0: 本地快速意图匹配（0ms） ──
 	if localIntent, ok := matchLocalIntent(input.OriginalQuery); ok {
-		skip := localIntent == intentGreeting || localIntent == intentChitchat || localIntent == intentIdentity || localIntent == intentMeta
+		out := rewriteFallback(input, localIntent)
 		logger.Infof("[意图识别-本地] original=%q → intent=%s, skipRetrieve=%v, cost=0ms",
-			input.OriginalQuery, localIntent, skip)
-		return input.OriginalQuery, localIntent, nil, skip, false, "", nil
+			input.OriginalQuery, out.Intent, out.SkipRetrieve)
+		return out
 	}
 
 	// ── Step 1: 无指代 → 用本地默认意图，不调 LLM ──
@@ -343,14 +364,14 @@ func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) (string, stri
 	if !hasAnaphora(input.OriginalQuery) {
 		logger.Infof("[意图识别-跳过大模型] original=%q → intent=%s（无疑义词，检索 query 已由本地规划）cost=0ms",
 			input.OriginalQuery, intentQuestion)
-		return input.OriginalQuery, intentQuestion, nil, false, false, "", nil
+		return rewriteFallback(input, intentQuestion)
 	}
 
 	// ── Step 2: 有指代 → 调 LLM（消解指代是它不可替代的能力） ──
 	cm, ok := graphChatModelFromContext(ctx)
 	if !ok || cm == nil {
 		logger.Warnf("quickRewriteFn: context 中没有 ChatModel，跳过改写")
-		return input.OriginalQuery, intentQuestion, nil, false, false, "", nil
+		return rewriteFallback(input, intentQuestion)
 	}
 
 	// 2. 从 InputMsgs 提取最近几轮用户-助手历史（排除 system 和当前问题）
@@ -374,7 +395,7 @@ func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) (string, stri
 	msg, err := cm.Generate(ctx, msgs)
 	if err != nil || msg == nil || msg.Content == "" {
 		logger.Warnf("quickRewriteFn: LLM 改写失败/超时（%v），fallback 到原问题；检索 query 走本地实体回填", err)
-		return input.OriginalQuery, intentQuestion, nil, false, false, "", nil
+		return rewriteFallback(input, intentQuestion)
 	}
 
 	// 5. 解析 JSON 返回
@@ -387,7 +408,7 @@ func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) (string, stri
 
 	if err := json.Unmarshal([]byte(content), &result); err != nil {
 		logger.Warnf("quickRewriteFn: LLM 改写返回 JSON 解析失败，fallback 原始 query: err=%v, content=%s", err, content)
-		return input.OriginalQuery, intentQuestion, nil, false, false, "", nil
+		return rewriteFallback(input, intentQuestion)
 	}
 
 	// 6. 清洗 + 验证
@@ -398,22 +419,13 @@ func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) (string, stri
 		result.Intent = intentQuestion
 	}
 
-	// 7. 判定是否跳过检索
-	// greeting/chitchat → 无需知识库，直接闲聊
-	// identity → "你是谁/你能做什么"，System Prompt 里已定义，不需要检索
-	// meta → "我的历史记录/你刚才说了什么"，属于会话层，不走知识检索
-	skipRetrieve := result.Intent == intentGreeting ||
-		result.Intent == intentChitchat ||
-		result.Intent == intentIdentity ||
-		result.Intent == intentMeta
+	// 7. 澄清检查: need_clarify=true 且有 question 才生效
+	result.NeedClarify = result.NeedClarify && strings.TrimSpace(result.ClarifyQuestion) != ""
 
-	// 8. 澄清检查: need_clarify=true 且有 question 才生效
-	needClarify := result.NeedClarify && strings.TrimSpace(result.ClarifyQuestion) != ""
-	if needClarify {
-		skipRetrieve = true // 需要澄清时也跳过检索
-	}
+	// 8. 派生字段就地算好：跳过检索的规则只有 deriveSkipRetrieve 一处
+	result.SkipRetrieve = deriveSkipRetrieve(result.Intent, result.NeedClarify)
 
-	return result.Rewritten, result.Intent, result.Keywords, skipRetrieve, needClarify, result.ClarifyQuestion, result.ClarifyOptions
+	return &result
 }
 
 // isValidIntent 检查 LLM 返回的意图是否在合法枚举内
@@ -754,20 +766,22 @@ func (s *chatService) processMessageGraphQuick(
 	graphInput := buildQuickInput(req, userID, userMsgID, enhancedCtx, client)
 
 	// 3.5) 预执行 Rewrite + 澄清检查：needClarify=true 时短路返回，不浪费后续节点。
+	// 这里是**唯一**的改写调用点：Graph 内的 Rewrite 节点只负责把它的产出写进 state，
+	// 不再自己调 LLM（见 quickRewriteFn 的说明与 TestDoRewriteHasSingleCallSite）。
 	// 硬超时兜底：即使 LLM 卡住，最多等 rewriteLLMTimeout 就带着本地检索 query 继续。
 	rewriteCheckCtx := withGraphChatModel(ctx, chatModel)
 	rewriteCtx, cancelRewrite := context.WithTimeout(rewriteCheckCtx, rewriteLLMTimeout)
 	rewriteStart := time.Now()
-	rewritten, intent, keywords, skipRetrieve, needClarify, clarifyQuestion, clarifyOptions := doRewriteWithLLM(rewriteCtx, graphInput)
+	rw := doRewriteWithLLM(rewriteCtx, graphInput)
 	cancelRewrite()
 	logger.Infof("[意图识别] original=%q → intent=%s, skipRetrieve=%v, needClarify=%v, rewritten=%q, keywords=%v, cost=%dms",
-		req.Content, intent, skipRetrieve, needClarify, rewritten, keywords, time.Since(rewriteStart).Milliseconds())
+		req.Content, rw.Intent, rw.SkipRetrieve, rw.NeedClarify, rw.Rewritten, rw.Keywords, time.Since(rewriteStart).Milliseconds())
 
-	if needClarify {
+	if rw.NeedClarify {
 		// 存 PendingClarify 到 session
 		pendingData, _ := json.Marshal(entity.PendingClarifyData{
-			Question: clarifyQuestion,
-			Options:  clarifyOptions,
+			Question: rw.ClarifyQuestion,
+			Options:  rw.ClarifyOptions,
 			SetAt:    time.Now(),
 		})
 		if err := s.sessionRepo.SetPendingClarify(ctx, sessionID, pendingData); err != nil {
@@ -775,27 +789,24 @@ func (s *chatService) processMessageGraphQuick(
 		}
 		// 存一条 assistant 消息（追问），让历史自然串成 [user问题 → assistant追问 → user回答]
 		clarifyMsgID := uuid.New().String()
-		if err := s.saveAssistantMessage(ctx, sessionID, clarifyMsgID, clarifyQuestion, req, nil, nil); err != nil {
+		if err := s.saveAssistantMessage(ctx, sessionID, clarifyMsgID, rw.ClarifyQuestion, req, nil, nil); err != nil {
 			logger.Warnf("存储澄清追问消息失败: %v", err)
 		}
 		obsNow := time.Now()
 		eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "clarify", Clarify: &dto.ClarifyPayload{
-			Question: clarifyQuestion,
-			Options:  clarifyOptions,
+			Question: rw.ClarifyQuestion,
+			Options:  rw.ClarifyOptions,
 		}, Done: true})
 		obsEndSpan(ctx, s.obs, span, observability.SpanStatusOK, nil, observability.Attrs{
 			"need_clarify":   "true",
-			"clarify_intent": intent,
+			"clarify_intent": rw.Intent,
 			"clarify_ms":     fmt.Sprintf("%d", time.Since(obsNow).Milliseconds()),
 		})
 		return
 	}
 
-	// 不需要澄清 → 把 rewrite 结果填到 graphInput，让 Graph 内 Rewrite 节点快速复用
-	graphInput.PreRewrittenQuery = rewritten
-	graphInput.PreIntent = intent
-	graphInput.PreKeywords = keywords
-	graphInput.PreSkipRetrieve = skipRetrieve
+	// 不需要澄清 → 整个改写结果一次性挂到 graphInput（单一字段），Graph 内 Rewrite 节点直接复用
+	graphInput.PreRewrite = rw
 
 	// 4) 提前创建 graphState：编译期注册的 stateGenerator 会从 ctx 取它；
 	//    Invoke 返回后也是从同一个对象读 RetrievedDocs。

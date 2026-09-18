@@ -148,9 +148,8 @@ func TestQuickGraph_OneCompiledRunnableServesConcurrentRequestsWithIsolatedState
 				UserQuestionIndex: 0,
 				ModelName:         "cl100k_base",
 				RetrievalBudget:   2000,
-				// 预置改写结果 → 改写节点短路，不调 LLM，用例只考察 state/ChatModel 隔离。
-				PreRewrittenQuery: rewritten,
-				PreIntent:         intentQuestion,
+				// 预置改写结果 → 改写节点只读它、不调 LLM，用例只考察 state/ChatModel 隔离。
+				PreRewrite: &rewriteResult{Rewritten: rewritten, Intent: intentQuestion},
 			}
 
 			sr, err := runnable.Invoke(ctx, input)
@@ -333,8 +332,7 @@ func BenchmarkPerRequestCost(b *testing.B) {
 			UserQuestionIndex: 0,
 			ModelName:         "cl100k_base",
 			RetrievalBudget:   2000,
-			PreRewrittenQuery: "OSI 七层模型分别是什么",
-			PreIntent:         intentQuestion,
+			PreRewrite:        &rewriteResult{Rewritten: "OSI 七层模型分别是什么", Intent: intentQuestion},
 		}
 	}
 	runOnce := func(b *testing.B, runnable einoCompose.Runnable[*quickGraphInput, *schema.StreamReader[*schema.Message]]) {
