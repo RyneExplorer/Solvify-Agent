@@ -97,9 +97,9 @@ func enablePGVector(db *gorm.DB) error {
 //  1. embedding 列是「无维度」的 vector → 直接给出可执行的修复语句并返回。
 //     无维度列建不了 ivfflat/hnsw，硬试只会每次启动刷一条 SQLSTATE 22023 的 WARN，
 //     而真正的解法（ALTER COLUMN ... TYPE vector(N)）必须由人执行，所以在这里一次说清。
-//  2. 查 pg_indexes 看 idx_document_chunks_embedding 是否已存在
-//  3. 不存在 → 自动创建 ivfflat 索引（lists=100, cosine, partial WHERE embedding IS NOT NULL）
-//  4. 存在但类型不是 ivfflat/hnsw → 打警告（可能失效或全表扫描）
+//  2. 按「定义」而不是「名字」判断向量索引是否可用（见 ensureIndex）
+//  3. 不可用 → 创建 ivfflat 索引（lists=100, cosine, partial WHERE embedding IS NOT NULL）
+//  4. 同名但定义不同 → 打警告（不自动重建，重建会顶掉现有索引，需人工判断）
 func EnsurePGVectorIndex(db *gorm.DB) error {
 	// 先检查表是否存在
 	var tableExists bool
@@ -147,39 +147,8 @@ func EnsurePGVectorIndex(db *gorm.DB) error {
 		return nil
 	}
 
-	// 查询索引信息
-	type indexInfo struct {
-		IndexName string `gorm:"column:indexname"`
-		IndexType string `gorm:"column:indexdef"`
-	}
-	var existing []indexInfo
-	if err := db.Raw(
-		`SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'document_chunks' AND indexname = 'idx_document_chunks_embedding'`,
-	).Scan(&existing).Error; err != nil {
-		return fmt.Errorf("查询向量索引状态失败: %w", err)
-	}
-
-	if len(existing) > 0 {
-		idxDef := existing[0].IndexType
-		isValidType := contains(idxDef, "ivfflat") || contains(idxDef, "hnsw") || contains(idxDef, "pgvector")
-		if !isValidType {
-			logger.Warnf("[pgvector] 向量索引 idx_document_chunks_embedding 存在但类型异常，建议重建。当前定义: %s", idxDef)
-		} else {
-			logger.Infof("[pgvector] 向量索引 idx_document_chunks_embedding 已就绪: %s", idxDef)
-		}
-		return nil
-	}
-
-	// 自动创建 ivfflat 索引
-	logger.Info("[pgvector] 向量索引 idx_document_chunks_embedding 不存在，正在创建 ivfflat 索引...")
-	err := db.Exec(`
-		CREATE INDEX IF NOT EXISTS idx_document_chunks_embedding
-		ON document_chunks
-		USING ivfflat (embedding vector_cosine_ops)
-		WITH (lists = 100)
-		WHERE embedding IS NOT NULL
-	`).Error
-	if err != nil {
+	// 建索引：判据是「定义」而不是「名字」，缺了才建（见 ensureIndex）
+	if err := ensureIndex(db, pgVectorIndexSpec); err != nil {
 		// ⚠️ 只按「已确证的错误类别」给建议，未归类的一律不给建议。
 		// 旧版对所有失败都附「低流量环境可能需要先执行 VACUUM ANALYZE document_chunks」，
 		// 而实际最常发生的 22023 是「列没有维度」——VACUUM 对它完全无效，只会把排查带偏。
@@ -190,7 +159,6 @@ func EnsurePGVectorIndex(db *gorm.DB) error {
 		}
 		return nil // 不阻塞启动，只是警告
 	}
-	logger.Info("[pgvector] 向量索引 idx_document_chunks_embedding 创建完成")
 	return nil
 }
 
@@ -222,72 +190,21 @@ func EnsureKeywordsGINIndex(db *gorm.DB) error {
 		return nil
 	}
 
-	var exists bool
-	if err := db.Raw(
-		`SELECT EXISTS (
-			SELECT 1 FROM pg_indexes
-			WHERE tablename = 'document_chunks' AND indexname = 'idx_document_chunks_keywords'
-		)`,
-	).Scan(&exists).Error; err != nil {
-		return fmt.Errorf("查询 keywords GIN 索引状态失败: %w", err)
+	if err := ensureIndex(db, keywordsGINIndexSpec); err != nil {
+		logger.Warnf("[pgvector] keywords GIN 索引检查失败: %v", err)
 	}
-	if exists {
-		logger.Info("[pgvector] keywords GIN 索引 idx_document_chunks_keywords 已就绪")
-		return nil
-	}
-
-	logger.Info("[pgvector] keywords GIN 索引不存在，正在创建...")
-	err := db.Exec(`
-		CREATE INDEX IF NOT EXISTS idx_document_chunks_keywords
-		ON document_chunks
-		USING gin (keywords)
-		WHERE keywords IS NOT NULL
-	`).Error
-	if err != nil {
-		logger.Warnf("[pgvector] 自动创建 keywords GIN 索引失败: %v", err)
-		return nil
-	}
-	logger.Info("[pgvector] keywords GIN 索引 idx_document_chunks_keywords 创建完成")
 	return nil
 }
 
 // EnsureContextIndexes 检查并确保 RAG 上下文加载链路高频查询涉及的三张表有正确索引。
 // chat_messages 的 (session_id, created_at) 复合索引是 initContext → BuildContext 里 FindRecent / SearchRecentByKeywords 的核心加速。
 // chat_sessions 和 user_memories 同理，ListActive / FindByUserID 都是高频操作。
+// 索引的「名字与定义」统一声明在 index_guard.go，以 scripts/init_knowledge_schema.sql 为基准；
+// 是否存在按「定义」判断 —— 历史事故正是「同一件事两个来源各起一个名字」建出了两份。
 func EnsureContextIndexes(db *gorm.DB) error {
-	type ctxIndex struct {
-		table  string
-		index  string
-		sql    string
-	}
-	idxs := []ctxIndex{
-		{
-			table: "chat_messages", index: "idx_chat_messages_session_created",
-			sql: `CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created ON chat_messages (session_id, created_at DESC)`,
-		},
-		{
-			table: "chat_sessions", index: "idx_chat_sessions_user_status",
-			sql: `CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_status ON chat_sessions (user_id, status)`,
-		},
-		{
-			table: "user_memories", index: "idx_user_memories_user_active",
-			sql: `CREATE INDEX IF NOT EXISTS idx_user_memories_user_active ON user_memories (user_id, is_active) WHERE is_active = true`,
-		},
-	}
-	for _, it := range idxs {
-		var exists bool
-		if err := db.Raw(`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE tablename = ? AND indexname = ?)`, it.table, it.index).Scan(&exists).Error; err != nil {
-			logger.Warnf("[context] 查询索引状态失败 table=%s index=%s: %v", it.table, it.index, err)
-			continue
-		}
-		if exists {
-			continue
-		}
-		logger.Infof("[context] 创建索引 table=%s index=%s", it.table, it.index)
-		if err := db.Exec(it.sql).Error; err != nil {
-			logger.Warnf("[context] 自动创建索引失败 table=%s index=%s: %v", it.table, it.index, err)
-		} else {
-			logger.Infof("[context] 索引已就绪 index=%s", it.index)
+	for _, spec := range contextIndexSpecs {
+		if err := ensureIndex(db, spec); err != nil {
+			logger.Warnf("[context] 索引检查失败 table=%s index=%s: %v", spec.Table, spec.Name, err)
 		}
 	}
 	return nil
@@ -444,10 +361,9 @@ func EnsureChatTraceSchema(db *gorm.DB) error {
 	}
 
 	// 索引：按 OTel traceID 反查对话（在三方平台看到异常 trace 后回查本系统的业务信息）
-	if err := db.Exec(
-		"CREATE INDEX IF NOT EXISTS idx_chat_traces_otel_trace_id ON chat_traces (otel_trace_id)",
-	).Error; err != nil {
-		logger.Warnf("[trace] 创建 idx_chat_traces_otel_trace_id 失败: %v", err)
+	// 判据是「定义」而不是「名字」，免得与建库基线各建一份等价索引
+	if err := ensureIndex(db, chatTraceOTelIndexSpec); err != nil {
+		logger.Warnf("[trace] 索引 idx_chat_traces_otel_trace_id 检查失败: %v", err)
 	}
 	return nil
 }
@@ -507,16 +423,3 @@ const (
 	sqlstateInsufficientPrivilege = "42501" // 权限不足
 	sqlstateUndefinedTable        = "42P01" // 表不存在
 )
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchSubstring(s, substr)
-}
-
-func searchSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
