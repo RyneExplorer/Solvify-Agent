@@ -357,7 +357,7 @@ func TestHTTPTransportForwardsInboundTraceparentWithoutLocalExporter(t *testing.
 func TestParentBasedSamplerHonorsUnsampledUpstream(t *testing.T) {
 	installGlobalPropagator(t)
 	// 采样率刻意拉满（rate >= 1）：即使这样，也必须听上游的「不采样」决定。
-	rec := installGlobalSDKTracer(t, samplerFor(1.0))
+	rec := installGlobalSDKTracer(t, samplerFor(1.0, nil))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", nil)
 	req.Header.Set("traceparent", "00-"+upstreamTraceID+"-"+upstreamSpanID+"-00")
@@ -381,7 +381,7 @@ func TestParentBasedSamplerHonorsUnsampledUpstream(t *testing.T) {
 // TestSamplerForNeverSampleWithoutParent 守住另一侧：本地采样率为 0 且没有上游时，一条都不采。
 func TestSamplerForNeverSampleWithoutParent(t *testing.T) {
 	installGlobalPropagator(t)
-	rec := installGlobalSDKTracer(t, samplerFor(0))
+	rec := installGlobalSDKTracer(t, samplerFor(0, nil))
 
 	_, span := otel.Tracer(tracerName).Start(context.Background(), "http.request")
 	span.End()

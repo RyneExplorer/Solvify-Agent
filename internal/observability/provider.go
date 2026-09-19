@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -140,7 +141,10 @@ func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp
 			logger.Warnf("OTel resource 初始化失败: %v", resErr)
 		}
 
-		sampler := samplerFor(cfg.OTelSamplingRate)
+		sampler := samplerFor(cfg.OTelSamplingRate, cfg.OTelBizRoutes)
+		// 采样策略必须在启动日志里可见：otel_biz_routes 若因键名拼错而没绑上，
+		// 表现是「业务链路悄悄退回按采样率抽样」，从外部完全看不出来。
+		logger.Infof("OTel 采样策略: 业务路由必留=%v；其余按采样率 %v", cfg.OTelBizRoutes, cfg.OTelSamplingRate)
 
 		if exporter == nil {
 			globalTracerProvider = sdktrace.NewTracerProvider(
@@ -176,7 +180,16 @@ func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp
 //
 // 副作用：上游明确标记不采样时，即使本地采样率是 1 也不会记录。该信号由 http.request
 // span 的 otel.inbound_parent_sampled 属性暴露，避免「调了采样率却没有 span」无从排查。
-func samplerFor(rate float64) sdktrace.Sampler {
+//
+// 采样率只管「非业务路由」：命中 bizRoutes 的根 span 由 bizRouteSampler 无条件保留，
+// 那几条链路带完整的 RAG / LLM 子树，是排障和给客户看的对象。
+// 关键：这**不影响自研轨**。chat_traces 落不落库由 DefaultSampler 独立决定，
+// 凡是带 session / message 归属的 trace 一律必留（见 SampleRequest.Required），
+// 前端追踪页看到的链路一条不少 —— 这里只决定「往三方平台发多少」。
+// 两条轨道判据不同的原因：输入不同（OTel 侧头采样时只知道路由，session_id 要等
+// WithTraceRoot 才可知）、代价不同（三方按 trace 计费，本地库不花钱），所以是刻意
+// 分成两个粒度，而不是漏了收口。配置则统一来自 ObservabilityConfig 一个来源。
+func samplerFor(rate float64, bizRoutes []string) sdktrace.Sampler {
 	var rootSampler sdktrace.Sampler
 	switch {
 	case rate <= 0:
@@ -186,7 +199,66 @@ func samplerFor(rate float64) sdktrace.Sampler {
 	default:
 		rootSampler = sdktrace.TraceIDRatioBased(rate)
 	}
+	if len(bizRoutes) > 0 {
+		routes := make(map[string]struct{}, len(bizRoutes))
+		for _, r := range bizRoutes {
+			routes[r] = struct{}{}
+		}
+		rootSampler = bizRouteSampler{fallback: rootSampler, routes: routes}
+	}
 	return sdktrace.ParentBased(rootSampler)
+}
+
+// bizRouteSampler 让「业务路由」的根 span 无条件保留，其余交给 fallback 采样器。
+//
+// 为什么必须在根 span 上一次性决策，而不是每个 span 各判各的：OTel 的采样决定是整条
+// trace 共用的。按 span 单独判会出现「根被丢、子被留」的碎片，三方平台上就是一棵没有
+// 入口的树 —— 平台连它属于哪个请求都还原不出来，比整条不采更误导人。
+// 根定下 Decision 之后，子 span 由外层 ParentBased 一路继承。
+//
+// 为什么不必自己判断「有没有父」：本类型始终被 sdktrace.ParentBased 包着，而 ParentBased
+// 只在父 span 无效时才回调 root sampler（见 SDK trace/sampling.go）。也就是说它天然只会
+// 收到根 span。有远程父 span 时跟随上游决定、业务白名单不生效 —— 这是刻意的：
+// 跨服务链路要么整条留、要么整条丢，半截链路最误导人。
+//
+// 匹配用的是「精确相等」而不是前缀：所以配置里多写一条空串只会永远不命中，
+// 不会退化成通配（前缀匹配才会，实测那会把追踪页轮询噪声整个放回来，见 OTelBizRoutes）。
+type bizRouteSampler struct {
+	fallback sdktrace.Sampler
+	routes   map[string]struct{}
+}
+
+func (s bizRouteSampler) ShouldSample(p sdktrace.SamplingParameters) sdktrace.SamplingResult {
+	if route, ok := routeAttr(p.Attributes); ok {
+		if _, hit := s.routes[route]; hit {
+			// 刻意不掷骰子：业务链路必留的含义就是「与采样率无关」
+			return sdktrace.SamplingResult{Decision: sdktrace.RecordAndSample}
+		}
+	}
+	return s.fallback.ShouldSample(p)
+}
+
+func (s bizRouteSampler) Description() string {
+	return "BizRouteThen{" + s.fallback.Description() + "}"
+}
+
+// routeAttr 从 span 起始属性里取 HTTP 路由模板。
+//
+// 为什么只能读属性：Sampler 接口只拿得到 SamplingParameters，拿不到 gin.Context。
+// 好在 gin 中间件建 http.request span 时已把 route 放进 recAttrs，StartSpan 又用
+// trace.WithAttributes 交给 tracer.Start，SDK 会原样放进 SamplingParameters.Attributes
+// （见 SDK trace/tracer.go）。所以业务侧不需要额外打任何标记 —— route 本身就是
+// 「这个 span 属于哪条路由」的唯一声明，再补一个同义属性就变成两个来源了。
+//
+// 属性名与 gin_middleware.go 的 recAttrs["route"] 是同名契约，由
+// TestTraceMiddlewareRouteAttrReachesSampler 端到端守住（改一边会红）。
+func routeAttr(attrs []attribute.KeyValue) (string, bool) {
+	for _, kv := range attrs {
+		if string(kv.Key) == "route" && kv.Value.Type() == attribute.STRING {
+			return kv.Value.AsString(), true
+		}
+	}
+	return "", false
 }
 
 // otelExporterInitTimeout 是创建 OTLP exporter 的超时。

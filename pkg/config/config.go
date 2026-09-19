@@ -253,6 +253,19 @@ type ObservabilityConfig struct {
 	// {"x-byteapm-appkey": "xxx"}、{"Authorization": "Bearer <token>"}。
 	// 值属于敏感信息，只放本地配置或环境变量，不要提交进仓库。
 	OTelHeaders map[string]string `mapstructure:"otel_headers"`
+	// OTelBizRoutes 是「无条件保留」的业务路由模板列表：命中它的请求不受
+	// OTelSamplingRate 影响，一定导出到三方平台。
+	//
+	// 为什么判据是「路由模板」而不是「请求路径」：模板取自 gin 的 c.FullPath()，
+	// 形如 /api/v1/chat/sessions/:id/messages —— 同一条路由下不同 session id 会归一
+	// 成同一个值，配置里不会出现「每个 id 一条」的基数爆炸。
+	//
+	// 为什么必须精确相等、不能用前缀：实测噪声第一名是
+	// /api/v1/chat/sessions/:id/traces（追踪页自身轮询，占全部入口 span 的 29%），
+	// 它与业务路由 /api/v1/chat/sessions/:id/messages 共享前缀 /api/v1/chat/sessions
+	// —— 只要允许前缀匹配，一条配置就能把最大的噪声源放回来。
+	// 没有 route 属性的根 span（后台任务）不受影响，仍按 OTelSamplingRate 采样。
+	OTelBizRoutes []string `mapstructure:"otel_biz_routes"`
 }
 
 var globalConfig *Config
@@ -419,6 +432,17 @@ func Default() *Config {
 			OTelSamplingRate: 1.0,
 			// 默认明文，保持历史行为；接 SaaS 后端时置为 false 走 TLS
 			OTelInsecure: true,
+			// 业务链路必留：这三条是「带完整 RAG / LLM 子树、用户真正会去查」的写接口。
+			//
+			// 为什么不把列表接口一起留下：实测 3 天 634 条 HTTP 入口 span 里，
+			// 纯轮询类（追踪页 184 + 消息列表 55 + 会话列表 25 + 各类配置读取）
+			// 占了七成以上，它们子树浅、数量大，是三方平台「trace 列表被刷屏」的唯一成因。
+			// 留这三条即可把必留比例从 100% 压到约 22%，而问答链路一条不少。
+			OTelBizRoutes: []string{
+				"/api/v1/chat/sessions/:id/messages",
+				"/api/v1/documents/:id/reindex",
+				"/api/v1/chat/messages/:message_id/feedback",
+			},
 		},
 	}
 }
