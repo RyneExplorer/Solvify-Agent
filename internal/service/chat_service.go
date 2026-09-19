@@ -7,7 +7,6 @@ import (
 	"time"
 
 	einoCompose "github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 
@@ -49,10 +48,10 @@ type chatService struct {
 	txMgr               repository.TxManager
 	embedClient         *llm.EmbeddingClient
 
-	// quickGraph 快速模式检索链路：启动期 build + Compile 一次，请求期只注入 per-request
-	// 的 Graph Local State 与 ChatModel（见 chat_service_graph_quick.go 的 withGraphState /
-	// withGraphChatModel）。图结构静态，因此「编译失败」被前移到启动期，请求期不存在该路径。
-	quickGraph einoCompose.Runnable[*quickGraphInput, *schema.StreamReader[*schema.Message]]
+	// quickGraph 快速模式检索链路：启动期 build + Compile 一次，请求期只把请求级变量
+	// （ChatModel / 改写结果）装进 quickGraphInput 再 Invoke，不再经 context 注入。
+	// 图结构静态，因此「编译失败」被前移到启动期，请求期不存在该路径。
+	quickGraph einoCompose.Runnable[*quickGraphInput, *quickGraphOutput]
 }
 
 // NewChatService 创建聊天业务服务。

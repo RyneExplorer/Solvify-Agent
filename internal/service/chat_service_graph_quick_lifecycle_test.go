@@ -23,16 +23,19 @@ import (
 // ─── P1-2：快速模式 Graph「编译一次、请求期复用」的回归与结构守卫 ─────────────
 //
 // 背景：旧实现 `processMessageGraphQuick` 每个请求都 `buildQuickGraph` + `g.Compile(...)`。
-// 图结构是静态的（4 节点 + 5 条边），唯一 per-request 的是 Graph Local State 与 ChatModel。
-// 改成启动期编译一次之后，多出两个必须被钉住的约束：
+// 图结构是静态的（4 节点 + 5 条边），请求级变量（ChatModel / 改写结果）全部装在入参
+// quickGraphInput 里沿边传递。改成启动期编译一次之后，多出三个必须被钉住的约束：
 //
-//  1. genState **不能再闭包捕获具体 state 实例**——否则编译一次 = 所有请求共用一份 state，
-//     并发请求互相串数据（旧实现每次都是新闭包，恰好掩盖了这个约束）。
+//  1. 请求之间**不能有共享的可变对象**——编译产物被 N 个请求并发复用，任何跨请求共享的可变
+//     载体都会互相串数据。历史坑：Graph Local State 曾由 ctx 注入，一旦 stateGenerator 闭包
+//     捕获了某个具体的 state 实例，编译一次 = 所有请求共用一份 state。
+//     现在请求级数据只存在于「本次 Invoke 的入参」及其派生的载荷里，结构上没有共享物可串。
 //  2. 请求路径**不能再出现 build/Compile**——否则等于退回旧实现，白白多一份「同一静态错误
 //     在每个请求上重复一次」的错误路径。
+//  3. 请求级数据**不能再走 ctx / Graph Local State**——那是同一份数据的第二个来源。
 //
-// 下面两条用例分别钉这两个约束：一条用真实并发跑同一份 compiled Runnable 验隔离，
-// 一条用 AST 静态扫描验「编译只发生在构造期」。
+// 下面三条用例分别钉这三个约束：一条用真实并发跑同一份 compiled Runnable 验隔离，
+// 两条用 AST 静态扫描验「编译只发生在构造期」与「不得退回 ctx 通道」。
 
 // barrierRetriever 让 N 个并发请求都「卡」在检索节点上，等全部到齐再一起放行。
 // 这样并发重叠是**确定的**，而不是靠 racing 概率去撞——串数据的用例不会变成偶发绿灯。
@@ -80,11 +83,16 @@ func (m *staticChatModel) Stream(context.Context, []*schema.Message, ...einoMode
 var _ einoModel.BaseChatModel = (*staticChatModel)(nil)
 
 // drainStream 消费掉 Graph 输出的流，保证链路跑到底（不消费会让上游节点阻塞）。
-func drainStream(sr *schema.StreamReader[*schema.Message]) {
+func drainStream(sr *schema.StreamReader[*schema.Message]) string {
 	defer sr.Close()
+	var sb strings.Builder
 	for {
-		if _, err := sr.Recv(); err != nil {
-			return
+		msg, err := sr.Recv()
+		if err != nil {
+			return sb.String()
+		}
+		if msg != nil {
+			sb.WriteString(msg.Content)
 		}
 	}
 }
@@ -132,13 +140,11 @@ func TestQuickGraph_OneCompiledRunnableServesConcurrentRequestsWithIsolatedState
 			kb := fmt.Sprintf("kb-%d", i)
 			query := fmt.Sprintf("q-%d", i)
 			rewritten := fmt.Sprintf("rw-%d", i)
+			wantReply := "reply-" + kb
 
-			// per-request 的两个变量：state 与 ChatModel，都经 ctx 注入。
-			state := &quickGraphState{}
+			// 唯一的请求级变量就是入参本身：ChatModel 与改写结果都挂在它上面，不再经 ctx 注入。
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			ctx = withGraphState(ctx, state)
-			ctx = withGraphChatModel(ctx, &staticChatModel{reply: "reply-" + kb})
 
 			input := &quickGraphInput{
 				OriginalQuery:     query,
@@ -148,39 +154,34 @@ func TestQuickGraph_OneCompiledRunnableServesConcurrentRequestsWithIsolatedState
 				UserQuestionIndex: 0,
 				ModelName:         "cl100k_base",
 				RetrievalBudget:   2000,
-				// 预置改写结果 → 改写节点只读它、不调 LLM，用例只考察 state/ChatModel 隔离。
+				ChatModel:         &staticChatModel{reply: wantReply},
+				// 预置改写结果 → 改写节点只读它、不调 LLM，用例只考察请求级数据的隔离。
 				PreRewrite: &rewriteResult{Rewritten: rewritten, Intent: intentQuestion},
 			}
 
-			sr, err := runnable.Invoke(ctx, input)
+			out, err := runnable.Invoke(ctx, input)
 			if err != nil {
 				errs[i] = fmt.Errorf("Invoke 失败: %w", err)
 				return
 			}
-			if sr == nil {
-				errs[i] = fmt.Errorf("Invoke 返回 nil stream")
+			if out == nil || out.Stream == nil {
+				errs[i] = fmt.Errorf("Invoke 返回 nil 出参/流")
 				return
 			}
-			drainStream(sr)
+			got := drainStream(out.Stream)
 
-			if len(state.RetrievedDocs) != 1 {
-				errs[i] = fmt.Errorf("RetrievedDocs 数量=%d，期望 1（docs=%v）", len(state.RetrievedDocs), state.RetrievedDocs)
+			// 模型侧隔离：流式内容必须是自己那个 ChatModel 的回复。
+			if got != wantReply {
+				errs[i] = fmt.Errorf("流式内容=%q，期望 %q（ChatModel 被别的请求串了？）", got, wantReply)
 				return
 			}
-			if got, want := state.RetrievedDocs[0].Content, "doc-for-"+kb; got != want {
-				errs[i] = fmt.Errorf("state 被别的请求串了：RetrievedDocs[0].Content=%q，期望 %q", got, want)
+			// 检索侧隔离：docs 内容由自己的 KnowledgeBaseIDs 派生。
+			if len(out.Docs) != 1 {
+				errs[i] = fmt.Errorf("出参 docs 数量=%d，期望 1（docs=%v）", len(out.Docs), out.Docs)
 				return
 			}
-			if state.Input == nil || state.Input.OriginalQuery != query {
-				errs[i] = fmt.Errorf("state.Input 被别的请求串了：%+v", state.Input)
-				return
-			}
-			if state.RewrittenQuery != rewritten {
-				errs[i] = fmt.Errorf("state.RewrittenQuery=%q，期望 %q", state.RewrittenQuery, rewritten)
-				return
-			}
-			if state.KeywordQuery == "" || state.VectorQuery == "" {
-				errs[i] = fmt.Errorf("双轨 query 未写入 state：vector=%q keyword=%q", state.VectorQuery, state.KeywordQuery)
+			if gotDoc, want := out.Docs[0].Content, "doc-for-"+kb; gotDoc != want {
+				errs[i] = fmt.Errorf("docs 被别的请求串了：Content=%q，期望 %q", gotDoc, want)
 			}
 		}(i)
 	}
@@ -284,6 +285,66 @@ func TestQuickGraph_CompileHappensOnlyAtStartup(t *testing.T) {
 	}
 }
 
+// TestQuickGraph_NoContextDataChannel
+//
+// 结构守卫：快速模式 Graph 不得再把请求级数据塞进 context / Graph Local State。
+//
+// 背景：旧实现同时开了两条数据通道——一条走图的边，一条走 ctx 里的 Graph Local State；
+// 同一份数据（改写结果、检索 docs）在两条路上各存一份，不一致时不会报错，只会静默读到旧值。
+// 更糟的是 stateGenerator 取不到 state 时会造一个空 state 继续跑（eino 的 stateGenerator
+// 签名没有 error 出口），于是「注入漏了」表现为「下游拿到空数据」，而不是报错。
+//
+// 现在请求级数据只在 quickGraphInput → quickGraphPayload → quickGraphOutput 这条链上流动。
+// 把下面任何一个名字写回生产代码，这条用例都会变红。
+func TestQuickGraph_NoContextDataChannel(t *testing.T) {
+	banned := []string{
+		"ProcessState",
+		"WithGenLocalState",
+		"quickGraphState",
+		"withGraphState",
+		"graphStateFromContext",
+		"withGraphChatModel",
+		"graphChatModelFromContext",
+	}
+
+	fset := token.NewFileSet()
+	files := prodGoFileNames(t)
+	foundCarrier := false
+
+	for _, name := range files {
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("读取 %s 失败: %v", name, err)
+		}
+		if strings.Contains(string(src), "quickGraphPayload") {
+			foundCarrier = true
+		}
+
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("解析 %s 失败: %v", name, err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			for _, b := range banned {
+				if id.Name == b {
+					t.Errorf("%s 里出现 %s：请求级数据必须走 quickGraphInput/quickGraphPayload，"+
+						"不要再经 context 或 Graph Local State 传递（两条通道 = 同一份数据的第二个来源）", name, b)
+				}
+			}
+			return true
+		})
+	}
+
+	// 自证非空转：新载体必须真的存在，否则上面的扫描只是在比对一堆不存在的名字。
+	if !foundCarrier {
+		t.Fatal("守卫空转：生产代码里没找到 quickGraphPayload，说明扫描的文件集不对")
+	}
+}
+
 const (
 	// graphCompileOwnerFunc 唯一允许调用 buildQuickGraph / 执行 Compile 的函数。
 	graphCompileOwnerFunc = "compileQuickGraph"
@@ -332,18 +393,16 @@ func BenchmarkPerRequestCost(b *testing.B) {
 			UserQuestionIndex: 0,
 			ModelName:         "cl100k_base",
 			RetrievalBudget:   2000,
+			ChatModel:         &staticChatModel{reply: "ok"},
 			PreRewrite:        &rewriteResult{Rewritten: "OSI 七层模型分别是什么", Intent: intentQuestion},
 		}
 	}
-	runOnce := func(b *testing.B, runnable einoCompose.Runnable[*quickGraphInput, *schema.StreamReader[*schema.Message]]) {
-		state := &quickGraphState{}
-		ctx := withGraphState(context.Background(), state)
-		ctx = withGraphChatModel(ctx, &staticChatModel{reply: "ok"})
-		sr, err := runnable.Invoke(ctx, newInput())
+	runOnce := func(b *testing.B, runnable einoCompose.Runnable[*quickGraphInput, *quickGraphOutput]) {
+		out, err := runnable.Invoke(context.Background(), newInput())
 		if err != nil {
 			b.Fatalf("Invoke 失败: %v", err)
 		}
-		drainStream(sr)
+		drainStream(out.Stream)
 	}
 
 	b.Run("compile_and_invoke", func(b *testing.B) {
@@ -360,7 +419,7 @@ func BenchmarkPerRequestCost(b *testing.B) {
 	})
 
 	b.Run("invoke_only", func(b *testing.B) {
-		// 改动后的路径：Graph 只编译一次，请求期只注入 state/ChatModel 并执行。
+		// 改动后的路径：Graph 只编译一次，请求期只装请求级变量（入参）并执行。
 		adapter := rag.NewEinoRetrieverAdapter(emptyRetriever{}, 10)
 		runnable, err := compileQuickGraph(adapter, nil)
 		if err != nil {

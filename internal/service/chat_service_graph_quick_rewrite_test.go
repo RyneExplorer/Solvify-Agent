@@ -34,18 +34,22 @@ import (
 // 现在的结果：
 //   - 载体唯一 —— quickGraphInput.PreRewrite *rewriteResult；
 //   - 调用点唯一 —— doRewriteWithLLM 只被 processMessageGraphQuick 调用；
-//   - 派生规则唯一 —— 「是否跳过检索」只在 deriveSkipRetrieve 里定义一次。
+//   - 派生规则唯一 —— 「是否跳过检索」只在 deriveSkipRetrieve 里定义一次；
+//   - 传递路径唯一 —— 请求级数据只走 quickGraphInput → quickGraphPayload → quickGraphOutput，
+//     不再有「边」与「Graph Local State」两条通道。
 //
 // 下面 4 条守卫分别钉形状 / 历史名 / 调用点 / 返回值元数，2 条行为用例钉运行时语义。
 // 守卫挡得住「形状回退」，挡不住「字段接错」——所以两者都要有。
 
-// recordingChatModel 记录 LLM 被调用的方式：
+// recordingChatModel 记录 LLM 被调用的方式与收到的 prompt：
 //   - Generate 被调 → 说明「改写」在 Graph 内又跑了一遍（本批次要消灭的缺陷）；
-//   - Stream 被调 → 生成节点正常工作（生成走 Stream，改写走 Generate，两者可区分）。
+//   - Stream 被调 → 生成节点正常工作（生成走 Stream，改写走 Generate，两者可区分）；
+//   - streamMsgs → 拼装节点最终发给模型的消息，用来断言改写结果真的落进了 prompt。
 type recordingChatModel struct {
 	mu          sync.Mutex
 	genCalls    int
 	streamCalls int
+	streamMsgs  []*schema.Message
 }
 
 func (m *recordingChatModel) Generate(context.Context, []*schema.Message, ...einoModel.Option) (*schema.Message, error) {
@@ -55,9 +59,10 @@ func (m *recordingChatModel) Generate(context.Context, []*schema.Message, ...ein
 	return schema.AssistantMessage("generate-should-not-happen", nil), nil
 }
 
-func (m *recordingChatModel) Stream(context.Context, []*schema.Message, ...einoModel.Option) (*schema.StreamReader[*schema.Message], error) {
+func (m *recordingChatModel) Stream(_ context.Context, msgs []*schema.Message, _ ...einoModel.Option) (*schema.StreamReader[*schema.Message], error) {
 	m.mu.Lock()
 	m.streamCalls++
+	m.streamMsgs = msgs
 	m.mu.Unlock()
 	return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("ok", nil)}), nil
 }
@@ -66,6 +71,13 @@ func (m *recordingChatModel) counts() (gen, stream int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.genCalls, m.streamCalls
+}
+
+// prompt 返回 Stream 时收到的消息；生成节点没被调过则返回 nil。
+func (m *recordingChatModel) prompt() []*schema.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.streamMsgs
 }
 
 var _ einoModel.BaseChatModel = (*recordingChatModel)(nil)
@@ -114,13 +126,10 @@ func TestQuickRewriteNode_ReusesPrecomputedOutcomeWithoutCallingLLM(t *testing.T
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			state := &quickGraphState{}
 			model := &recordingChatModel{}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			ctx = withGraphState(ctx, state)
-			ctx = withGraphChatModel(ctx, model)
 
 			input := &quickGraphInput{
 				OriginalQuery:     "那个方案呢",
@@ -130,30 +139,33 @@ func TestQuickRewriteNode_ReusesPrecomputedOutcomeWithoutCallingLLM(t *testing.T
 				UserQuestionIndex: 0,
 				ModelName:         "cl100k_base",
 				RetrievalBudget:   2000,
+				ChatModel:         model,
 				PreRewrite:        tc.pre,
 			}
 
-			sr, err := runnable.Invoke(ctx, input)
+			out, err := runnable.Invoke(ctx, input)
 			if err != nil {
 				t.Fatalf("Invoke 失败: %v", err)
 			}
-			drainStream(sr)
+			if out == nil || out.Stream == nil {
+				t.Fatal("Invoke 返回 nil 出参/流")
+			}
+			drainStream(out.Stream)
 
-			if state.RewrittenQuery != tc.pre.Rewritten {
-				t.Errorf("state.RewrittenQuery=%q，期望 %q", state.RewrittenQuery, tc.pre.Rewritten)
+			// SkipRetrieve 有没有一路传到检索节点：false 必须真的查一次（拿到 1 条），true 一条都不查。
+			if len(out.Docs) != tc.wantDocs {
+				t.Errorf("出参 docs 数量=%d，期望 %d（SkipRetrieve 没有从预跑结果传到检索节点？）",
+					len(out.Docs), tc.wantDocs)
 			}
-			if state.Intent != tc.pre.Intent {
-				t.Errorf("state.Intent=%q，期望 %q（预跑结果的意图被丢了？）", state.Intent, tc.pre.Intent)
+
+			// 改写结果有没有真的进 prompt：拼装节点必须用它替换掉「用户问题」那一条消息。
+			lastUser := findLastMessageByRole(model.prompt(), "user")
+			if lastUser == nil {
+				t.Fatal("生成节点没有收到任何 user 消息")
 			}
-			if got, want := strings.Join(state.Keywords, ","), strings.Join(tc.pre.Keywords, ","); got != want {
-				t.Errorf("state.Keywords=%q，期望 %q", got, want)
-			}
-			if state.SkipRetrieve != tc.pre.SkipRetrieve {
-				t.Errorf("state.SkipRetrieve=%v，期望 %v", state.SkipRetrieve, tc.pre.SkipRetrieve)
-			}
-			if len(state.RetrievedDocs) != tc.wantDocs {
-				t.Errorf("RetrievedDocs 数量=%d，期望 %d（SkipRetrieve 没有一路传到检索节点？）",
-					len(state.RetrievedDocs), tc.wantDocs)
+			if lastUser.Content != tc.pre.Rewritten {
+				t.Errorf("prompt 里最后一条 user 消息=%q，期望改写结果 %q（改写结果没落到 prompt？）",
+					lastUser.Content, tc.pre.Rewritten)
 			}
 
 			gen, stream := model.counts()
@@ -179,13 +191,10 @@ func TestQuickRewriteNode_RejectsMissingPreRewrite(t *testing.T) {
 		t.Fatalf("compileQuickGraph 失败: %v", err)
 	}
 
-	state := &quickGraphState{}
 	model := &recordingChatModel{}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	ctx = withGraphState(ctx, state)
-	ctx = withGraphChatModel(ctx, model)
 
 	input := &quickGraphInput{
 		OriginalQuery:     "故意不设 PreRewrite",
@@ -195,17 +204,11 @@ func TestQuickRewriteNode_RejectsMissingPreRewrite(t *testing.T) {
 		UserQuestionIndex: 0,
 		ModelName:         "cl100k_base",
 		RetrievalBudget:   2000,
+		ChatModel:         model,
 	}
 
-	sr, err := runnable.Invoke(ctx, input)
-	if err == nil {
-		if sr != nil {
-			sr.Close()
-		}
+	if _, err := runnable.Invoke(ctx, input); err == nil {
 		t.Fatal("PreRewrite 为空时 Invoke 成功了，期望报错：改写结果必须由调用方预跑（见 quickRewriteFn）")
-	}
-	if sr != nil {
-		sr.Close()
 	}
 	if gen, _ := model.counts(); gen != 0 {
 		t.Errorf("PreRewrite 为空却触发了 %d 次改写式 LLM 调用，期望 0（应直接报错而不是补一次调用）", gen)

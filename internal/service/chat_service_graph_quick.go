@@ -15,6 +15,7 @@ import (
 	einoCompose "github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 
 	llmpkg "solvify-agent/internal/llm"
 	requestdto "solvify-agent/internal/model/dto/request"
@@ -29,7 +30,11 @@ import (
 	"solvify-agent/pkg/tokenutil"
 )
 
-// quickGraphInput 快速模式 Graph 入参，跨节点共享的上下文通过 Local State 传递。
+// quickGraphInput 快速模式 Graph 入参：一次请求内的全部共享上下文。
+//
+// 它是 Graph 的输入类型，沿边流到每个节点 —— 节点需要的东西**只能**从这里来（含 ChatModel）。
+// 旧实现把其中一部分（Graph Local State、ChatModel）塞进 context 再由节点取出来，
+// 于是同一份数据有了两条来源。现在只有一条。
 type quickGraphInput struct {
 	// OriginalQuery 用户原始问题
 	OriginalQuery string
@@ -46,6 +51,13 @@ type quickGraphInput struct {
 	// RetrievalBudget 检索上下文 token 预算（真 BPE）
 	RetrievalBudget int
 
+	// ChatModel 本次请求要用的对话模型。
+	//
+	// 图结构在启动期编译一次、被所有请求并发复用，所以「用哪个模型」只能是请求级数据，
+	// 必须随入参进来。旧实现把它塞进 context 再由节点取出来，取不到时只打一行 warn ——
+	// 属于「没接上也看不出来」：注入漏了表现为回答质量下降，而不是报错。
+	ChatModel einoModel.BaseChatModel
+
 	// PreRewrite Graph 外（processMessageGraphQuick）已经算好的改写结果。
 	// 它是「改写结果」在快速模式链路里的**唯一载体**：Rewrite 节点只读它、自己不再调 LLM，
 	// 所以「同一次改写」不会有第二个调用点，也不会出现 7 个平行字段各自赋值。
@@ -54,21 +66,41 @@ type quickGraphInput struct {
 	PreRewrite *rewriteResult
 }
 
-// quickGraphState Graph Local State，通过 ProcessState 读写。
-type quickGraphState struct {
-	Input           *quickGraphInput
-	RewrittenQuery  string   // 改写后的查询，供 BuildMsgs 替换用户消息使用
-	Intent          string   // greeting / chitchat / question / identity / meta
-	SkipRetrieve    bool     // Greeting/Chitchat 跳过知识库检索
-	NeedClarify     bool     // 意图不明确,需要用户澄清
-	ClarifyQuestion string   // 追问文本
-	ClarifyOptions  []string // 追问选项(可选)
-	Keywords        []string // 改写时提取的关键词，可用于日志/调试
+// quickGraphPayload 快速模式 Graph 内**唯一**的数据载体，沿边从一个节点流到下一个。
+//
+// 4 个节点串行，每个节点只写自己那一份字段，下游从同一个对象上读：
+//
+//	query_rewrite → VectorQuery / KeywordQuery
+//	retrieve      → Docs
+//	build_msgs    → Msgs
+//	generate      → 出参 quickGraphOutput
+//
+// 「谁负责写哪个字段」在类型上一眼可见，也不需要再往 context 里塞任何东西。
+// 旧实现把同一份数据分两条路走（一部分走边、一部分走 Graph Local State 经 ctx 取用），
+// 两条路一旦不一致不会报错，只会让下游读到半份旧值。
+type quickGraphPayload struct {
+	// Input 请求级上下文，全链路只读
+	Input *quickGraphInput
 	// VectorQuery 向量检索 query：当前问题 + 最近 1~2 轮用户提问（长 query）
 	VectorQuery string
 	// KeywordQuery 关键字检索 query：指代回填后的短句（关键字打分是命中率，分母=query 词项数）
-	KeywordQuery  string
-	RetrievedDocs []*schema.Document
+	KeywordQuery string
+	// Docs 检索结果；跳过检索或检索失败时为 nil
+	Docs []*schema.Document
+	// Msgs 最终发给模型的 prompt
+	Msgs []*schema.Message
+}
+
+// quickGraphOutput 快速模式 Graph 出参。
+//
+// 出参必须带上检索到的 docs：调用方要用它拼前端 sources，而「Invoke 之后还需要的东西」
+// 只有出参一个出口。旧实现把 docs 留在 Graph Local State 里再由调用方读回来，
+// 等于给同一份数据开了第二条通道 —— 也正是 docs 曾经必须依赖 ctx 才拿得到的原因。
+type quickGraphOutput struct {
+	// Stream 模型输出流，由调用方消费并关闭
+	Stream *schema.StreamReader[*schema.Message]
+	// Docs 本次命中的文档；跳过检索/检索失败时为空
+	Docs []*schema.Document
 }
 
 // 查询改写意图类型
@@ -84,7 +116,7 @@ const (
 //
 // 它是「改写结果」在快速模式链路里的唯一载体，只在两处之间传递：
 //   - 生产者 processMessageGraphQuick（算好后挂到 quickGraphInput.PreRewrite）
-//   - 消费者 quickRewriteFn（一次性写进 Graph Local State）
+//   - 消费者 quickRewriteFn（读它并规划双轨检索 query）
 //
 // 之所以收敛成一个结构体而不是 7 个平行字段：平行字段必须**成组、按序、在多个调用点**赋值，
 // 漏写一个不会编译报错、只会静默丢掉语义（「同一个东西有两个来源」的典型温床）。
@@ -152,28 +184,14 @@ const (
 
 // buildQuickGraph 构建 START → rewrite → retrieve → build_msgs → generate → END 流水线。
 //
-// 图结构是静态的（4 节点 + 5 条边），per-request 的变量只有两样：Graph Local State 和
-// ChatModel——两者都通过 ctx 注入（withGraphState / withGraphChatModel），所以本函数
-// 只在启动期跑一次，编译结果被所有请求并发复用。
-//
-// ⚠️ genState 里**不能闭包捕获任何具体的 state 实例**：那样编译一次就等于所有请求共用
-// 同一份 state，并发请求会互相串数据（旧实现每次请求都重新 build+Compile，靠「每次都是
-// 新闭包」掩盖了这个约束）。eino 每次 Run 都会用**本次 Invoke 的 ctx** 重新调用一次
-// stateGenerator（compose/graph.go 的 runCtx 闭包 ← graph_run.go:200 `ctx = r.runCtx(ctx)`），
-// 因此这里从 ctx 取本次请求的 state；取不到时给一个临时 state 兜底（Graph 被独立调用时）。
+// 图结构是静态的（4 节点 + 5 条边），请求级变量（ChatModel / 改写结果）全部装在入参
+// quickGraphInput 里沿边传递，节点之间不再通过 context 交换数据 ——
+// 所以本函数只在启动期跑一次，编译结果被所有请求并发复用，
+// 而「并发请求互相串数据」在结构上不可能发生（已经没有跨请求共享的可变对象可串）。
 func buildQuickGraph(
 	einoRetriever *rag.EinoRetrieverAdapter,
-) (*einoCompose.Graph[*quickGraphInput, *schema.StreamReader[*schema.Message]], error) {
-	genState := func(ctx context.Context) *quickGraphState {
-		if st, ok := graphStateFromContext(ctx); ok {
-			return st
-		}
-		return &quickGraphState{}
-	}
-
-	g := einoCompose.NewGraph[*quickGraphInput, *schema.StreamReader[*schema.Message]](
-		einoCompose.WithGenLocalState(genState),
-	)
+) (*einoCompose.Graph[*quickGraphInput, *quickGraphOutput], error) {
+	g := einoCompose.NewGraph[*quickGraphInput, *quickGraphOutput]()
 	if err := addQuickRewriteNode(g); err != nil {
 		return nil, wrapGraphErr("add rewrite node", err)
 	}
@@ -198,49 +216,28 @@ func wrapGraphErr(stage string, err error) error {
 }
 
 // addQuickRewriteNode 节点 1：QueryRewrite，调 LLM 做查询改写 + 意图识别。
-func addQuickRewriteNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamReader[*schema.Message]]) error {
+func addQuickRewriteNode(g *einoCompose.Graph[*quickGraphInput, *quickGraphOutput]) error {
 	return g.AddLambdaNode(graphQuickNodeRewrite,
 		einoCompose.InvokableLambda(quickRewriteFn),
 		einoCompose.WithNodeName("QueryRewrite"),
 	)
 }
 
-// quickRewriteFn 节点 1 实现：把**外部预跑好的**改写结果写进 Graph Local State，
-// 并规划双轨检索 query。
+// quickRewriteFn 节点 1 实现：消费**外部预跑好的**改写结果，并规划双轨检索 query。
 //
 // 它自己不调 LLM —— 改写必须由 processMessageGraphQuick 在 Graph 外完成恰好一次
 // （调用点由 TestDoRewriteHasSingleCallSite 钉住）。这条约束换来两件事：
 //   - 「同一次改写」不会有两个调用点，也就不会出现「Graph 内又白等一轮 LLM」的成本；
 //   - PreRewrite 为空时直接报错（而不是静默补一次调用），调用方漏预跑会立刻暴露。
-func quickRewriteFn(ctx context.Context, input *quickGraphInput) (string, error) {
+func quickRewriteFn(ctx context.Context, input *quickGraphInput) (*quickGraphPayload, error) {
 	if input == nil || input.PreRewrite == nil {
-		return "", apperrors.NewDefault(apperrors.CodeInvalidParam)
+		return nil, apperrors.NewDefault(apperrors.CodeInvalidParam)
 	}
 	result := input.PreRewrite
-
-	if err := einoCompose.ProcessState(ctx, func(_ context.Context, state *quickGraphState) error {
-		state.Input = input
-		return nil
-	}); err != nil {
-		return "", err
-	}
 
 	// 检索 query 双轨规划：本地规则，不依赖 LLM 结果是否可用。
 	// 向量侧吃「当前问题 + 最近几轮用户提问」，关键字侧吃「指代回填后的短句」。
 	queries := planQueriesFromInput(input, result.Rewritten)
-
-	_ = einoCompose.ProcessState(ctx, func(_ context.Context, state *quickGraphState) error {
-		state.RewrittenQuery = result.Rewritten
-		state.Intent = result.Intent
-		state.Keywords = result.Keywords
-		state.SkipRetrieve = result.SkipRetrieve
-		state.NeedClarify = result.NeedClarify
-		state.ClarifyQuestion = result.ClarifyQuestion
-		state.ClarifyOptions = result.ClarifyOptions
-		state.VectorQuery = queries.Vector
-		state.KeywordQuery = queries.Keyword
-		return nil
-	})
 
 	observability.SetSpanAttrs(ctx, observability.Attrs{
 		"original_query":  input.OriginalQuery,
@@ -252,13 +249,14 @@ func quickRewriteFn(ctx context.Context, input *quickGraphInput) (string, error)
 		"need_clarify":    fmt.Sprintf("%v", result.NeedClarify),
 	})
 
-	// 节点输出改为向量检索 query（Graph 边把它传给 Retrieve 节点）
-	return queries.Vector, nil
+	// 节点输出 = 载荷本身：query 挂上去，后面三个节点从同一个对象上读。
+	return &quickGraphPayload{
+		Input:        input,
+		VectorQuery:  queries.Vector,
+		KeywordQuery: queries.Keyword,
+	}, nil
 }
 
-// matchLocalIntent 本地快速意图匹配（纯正则 + 关键词，0ms）。
-// 返回 (intent, matched) —— matched=false 表示交给 LLM 判定。
-//
 // 覆盖四类场景：
 //
 //	greeting: 你好 / hi / 早上好 / 在吗
@@ -266,7 +264,6 @@ func quickRewriteFn(ctx context.Context, input *quickGraphInput) (string, error)
 //	chitchat: 今天星期几 / 讲个笑话 / 随便聊聊（含"今天/现在+时间查询"）
 //	meta:     我的历史 / 刚才说了什么
 //
-// 不命中时返回 ("", false)，交给 LLM 做更精细的意图判定。
 // localIntentRules 是本地意图规则表，顺序即优先级：命中即返回。
 // 新增规则只需在这里加一行，正则本身统一维护在下方 re* 变量里。
 var localIntentRules = []struct {
@@ -357,7 +354,7 @@ func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) *rewriteResul
 	// 依据（线上日志实测，36 个快速模式样本）：
 	//   - 23 次真调 LLM 中 18 次（78%）返回默认意图 question，等于白调；
 	//   - need_clarify 命中 0 次；
-	//   - keywords 字段下游从未消费（只写进 state.Keywords 打日志）。
+	//   - keywords 字段下游从未消费（只是打个日志）。
 	// 因此「无指代」时 LLM 没有不可替代的产出，直接判定为 question。
 	// 代价：本地正则漏掉的闲聊/元问题（约 22%）会多跑一次检索（p50≈1s），
 	// 但生成侧有完整 history，回答质量不受影响。
@@ -368,9 +365,9 @@ func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) *rewriteResul
 	}
 
 	// ── Step 2: 有指代 → 调 LLM（消解指代是它不可替代的能力） ──
-	cm, ok := graphChatModelFromContext(ctx)
-	if !ok || cm == nil {
-		logger.Warnf("quickRewriteFn: context 中没有 ChatModel，跳过改写")
+	cm := input.ChatModel
+	if cm == nil {
+		logger.Warnf("doRewriteWithLLM: 入参里没有 ChatModel，跳过改写")
 		return rewriteFallback(input, intentQuestion)
 	}
 
@@ -473,39 +470,37 @@ func buildRewriteHistory(msgs []*schema.Message, currentUserMsgIdx, maxRounds in
 }
 
 // addQuickRetrieveNode 节点 2：Retrieve
-// 用 LambdaNode 替代 AddRetrieverNode，在 Lambda 内部提前检查 SkipRetrieve / NeedClarify，
+// 用 LambdaNode 替代 AddRetrieverNode，在 Lambda 内部提前检查 SkipRetrieve，
 // 避免 EinoRetrieverAdapter 被实例化后才被 PostHandler 清空——那样知识库查询的开销已经花出去了。
 // QueryRewrite 已经同步完成，Retrieve 直接用改写后的 query（或原始 query）查一次即可，不再做并行改写等待。
 //
-// query 入参是「向量检索 query」（改写节点输出）；关键字检索 query 通过 retriever option 单独传入。
-func addQuickRetrieveNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamReader[*schema.Message]], einoRetriever *rag.EinoRetrieverAdapter) error {
+// 向量检索 query 取载荷的 VectorQuery；关键字检索 query 通过 retriever option 单独传入。
+func addQuickRetrieveNode(g *einoCompose.Graph[*quickGraphInput, *quickGraphOutput], einoRetriever *rag.EinoRetrieverAdapter) error {
 	return g.AddLambdaNode(graphQuickNodeRetrieve,
-		einoCompose.InvokableLambda(func(ctx context.Context, query string) ([]*schema.Document, error) {
-			var state *quickGraphState
-			if err := einoCompose.ProcessState(ctx, func(_ context.Context, s *quickGraphState) error {
-				state = s
-				return nil
-			}); err != nil || state == nil {
+		einoCompose.InvokableLambda(func(ctx context.Context, p *quickGraphPayload) (*quickGraphPayload, error) {
+			if p == nil || p.Input == nil {
 				return nil, apperrors.NewDefault(apperrors.CodeInternalError)
 			}
 
-			// 提前短路：Rewrite 阶段已判定不需要检索 → 不查知识库，直接返回空 docs
-			if state.SkipRetrieve || state.NeedClarify {
-				state.RetrievedDocs = nil
-				return nil, nil
+			// 提前短路：Rewrite 阶段已判定不需要检索 → 不查知识库，直接返回空 docs。
+			// 判据只看 SkipRetrieve：它已由 deriveSkipRetrieve 涵盖 needClarify，
+			// 而入口在 need_clarify 时已提前 return，这里再判一次是死条件。
+			if p.Input.PreRewrite.SkipRetrieve {
+				p.Docs = nil
+				return p, nil
 			}
 
 			// 构造 retriever.Option（KBIDs / UserID / TopK / 关键字侧短 query）
-			opts := buildRetrieverOpts(state.Input, state.KeywordQuery)
+			opts := buildRetrieverOpts(p.Input, p.KeywordQuery)
 
-			docs, err := einoRetriever.Retrieve(ctx, query, opts...)
+			docs, err := einoRetriever.Retrieve(ctx, p.VectorQuery, opts...)
 			if err != nil {
 				logger.Warnf("quickRetrieveFn: 检索失败，降级为空结果: %v", err)
-				state.RetrievedDocs = nil
-				return nil, nil
+				p.Docs = nil
+				return p, nil
 			}
-			state.RetrievedDocs = docs
-			return docs, nil
+			p.Docs = docs
+			return p, nil
 		}),
 		einoCompose.WithNodeName("KnowledgeRetrieve"),
 	)
@@ -534,7 +529,7 @@ func buildRetrieverOpts(input *quickGraphInput, keywordQuery string) []retriever
 
 // addQuickBuildMsgsNode 节点 3：BuildPromptMessages。
 // 从 State 拿 Input，在 userQuestionIndex 前插入检索上下文。
-func addQuickBuildMsgsNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamReader[*schema.Message]]) error {
+func addQuickBuildMsgsNode(g *einoCompose.Graph[*quickGraphInput, *quickGraphOutput]) error {
 	return g.AddLambdaNode(graphQuickNodeBuildMsgs,
 		einoCompose.InvokableLambda(quickBuildMsgsFn),
 		einoCompose.WithNodeName("BuildPromptMessages"),
@@ -542,31 +537,24 @@ func addQuickBuildMsgsNode(g *einoCompose.Graph[*quickGraphInput, *schema.Stream
 }
 
 // quickBuildMsgsFn 节点 3 实现：在用户问题前插入检索上下文块
-
-func quickBuildMsgsFn(ctx context.Context, docs []*schema.Document) ([]*schema.Message, error) {
-	var (
-		input          *quickGraphInput
-		rewrittenQuery string
-	)
-	if err := einoCompose.ProcessState(ctx, func(_ context.Context, state *quickGraphState) error {
-		input = state.Input
-		rewrittenQuery = state.RewrittenQuery
-		return nil
-	}); err != nil || input == nil {
+func quickBuildMsgsFn(_ context.Context, p *quickGraphPayload) (*quickGraphPayload, error) {
+	if p == nil || p.Input == nil {
 		return nil, apperrors.NewDefault(apperrors.CodeInternalError)
 	}
+	input := p.Input
 
-	// 用 RewrittenQuery 替换用户问题（如果有改写结果）
+	// 用改写结果替换用户问题。PreRewrite 由上游改写节点校验为非空，
+	// 且 rewriteFallback 保证 Rewritten 恒为非空串，这里只处理「与原问题相同」的情况。
 	questionContent := input.OriginalQuery
-	if rewrittenQuery != "" && rewrittenQuery != input.OriginalQuery {
-		questionContent = rewrittenQuery
+	if rw := input.PreRewrite.Rewritten; rw != "" && rw != input.OriginalQuery {
+		questionContent = rw
 	}
 
 	msgs := make([]*schema.Message, 0, len(input.InputMsgs)+2)
 	injected := false
 	for i, m := range input.InputMsgs {
-		if i == input.UserQuestionIndex && len(docs) > 0 {
-			block := buildDocsContextBlock(docs, input.RetrievalBudget, input.ModelName)
+		if i == input.UserQuestionIndex && len(p.Docs) > 0 {
+			block := buildDocsContextBlock(p.Docs, input.RetrievalBudget, input.ModelName)
 			msgs = append(msgs, schema.UserMessage(block))
 			injected = true
 		}
@@ -577,18 +565,19 @@ func quickBuildMsgsFn(ctx context.Context, docs []*schema.Document) ([]*schema.M
 			msgs = append(msgs, m)
 		}
 	}
-	if len(docs) > 0 && !injected {
+	if len(p.Docs) > 0 && !injected {
 		last := msgs[len(msgs)-1]
-		block := buildDocsContextBlock(docs, input.RetrievalBudget, input.ModelName)
+		block := buildDocsContextBlock(p.Docs, input.RetrievalBudget, input.ModelName)
 		msgs = append(append(msgs[:len(msgs)-1], schema.UserMessage(block)), last)
 	}
-	return msgs, nil
+	p.Msgs = msgs
+	return p, nil
 }
 
 // addQuickGenerateNode 节点 4：ChatModelGenerate。
 // 用 InvokableLambda 而非 StreamableLambda，因为返回值是 StreamReader 本身，
 // StreamableLambda 会推断 O 为流内元素 Message，和 END 期望的 StreamReader[Message] 类型不匹配。
-func addQuickGenerateNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamReader[*schema.Message]]) error {
+func addQuickGenerateNode(g *einoCompose.Graph[*quickGraphInput, *quickGraphOutput]) error {
 	return g.AddLambdaNode(graphQuickNodeGenerate,
 		einoCompose.InvokableLambda(quickGenerateFn),
 		einoCompose.WithNodeName("ChatModelGenerate"),
@@ -596,24 +585,17 @@ func addQuickGenerateNode(g *einoCompose.Graph[*quickGraphInput, *schema.StreamR
 }
 
 // quickGenerateFn 节点 4 实现：调用 ChatModel 流式生成回复
-func quickGenerateFn(ctx context.Context, msgs []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
-	var cm einoModel.BaseChatModel
-	var modelName string
-	if err := einoCompose.ProcessState(ctx, func(_ context.Context, state *quickGraphState) error {
-		if state.Input == nil {
-			return errors.New("nil input in state")
-		}
-		cm, _ = graphChatModelFromContext(ctx)
-		if state.Input != nil {
-			modelName = state.Input.ModelName
-		}
-		return nil
-	}); err != nil {
-		return nil, err
+func quickGenerateFn(ctx context.Context, p *quickGraphPayload) (*quickGraphOutput, error) {
+	if p == nil || p.Input == nil {
+		return nil, apperrors.NewDefault(apperrors.CodeInternalError)
 	}
+	cm := p.Input.ChatModel
 	if cm == nil {
 		return nil, apperrors.NewDefault(apperrors.CodeInternalError)
 	}
+	msgs := p.Msgs
+	modelName := p.Input.ModelName
+
 	// 写 Generate span 的输入 attrs
 	var (
 		promptTokensEst int
@@ -645,7 +627,8 @@ func quickGenerateFn(ctx context.Context, msgs []*schema.Message) (*schema.Strea
 	if err != nil {
 		return nil, err
 	}
-	return sr, nil
+	// docs 随出参带出去：调用方要用它拼 sources，这是「Invoke 之后还需要的东西」的唯一出口。
+	return &quickGraphOutput{Stream: sr, Docs: p.Docs}, nil
 }
 
 // findLastMessageByRole 找 msgs 中指定 role 的最后一条消息
@@ -669,7 +652,7 @@ func findFirstMessageByRole(msgs []*schema.Message, role string) *schema.Message
 }
 
 // registerQuickGraphEdges 按 4 节点流水线一次性注册 5 条边
-func registerQuickGraphEdges(g *einoCompose.Graph[*quickGraphInput, *schema.StreamReader[*schema.Message]]) error {
+func registerQuickGraphEdges(g *einoCompose.Graph[*quickGraphInput, *quickGraphOutput]) error {
 	edges := [][2]string{
 		{einoCompose.START, graphQuickNodeRewrite},
 		{graphQuickNodeRewrite, graphQuickNodeRetrieve},
@@ -683,49 +666,6 @@ func registerQuickGraphEdges(g *einoCompose.Graph[*quickGraphInput, *schema.Stre
 		}
 	}
 	return nil
-}
-
-// graphCtxChatModelKey 用作 context.WithValue 的 key，存放 per-request 的 ChatModel。
-type graphCtxChatModelKeyType struct{}
-
-var graphCtxChatModelKey = graphCtxChatModelKeyType{}
-
-// withGraphChatModel 把 ChatModel 注入 context
-func withGraphChatModel(ctx context.Context, cm einoModel.BaseChatModel) context.Context {
-	return context.WithValue(ctx, graphCtxChatModelKey, cm)
-}
-
-// graphChatModelFromContext 从 context 取出 ChatModel
-
-func graphChatModelFromContext(ctx context.Context) (einoModel.BaseChatModel, bool) {
-	v := ctx.Value(graphCtxChatModelKey)
-	if v == nil {
-		return nil, false
-	}
-	cm, ok := v.(einoModel.BaseChatModel)
-	return cm, ok
-}
-
-// graphCtxStateKeyType 用作 context.WithValue 的 key，存放 per-request 的 Graph Local State。
-type graphCtxStateKeyType struct{}
-
-var graphCtxStateKey = graphCtxStateKeyType{}
-
-// withGraphState 把本次请求的 Graph Local State 注入 context。
-// 图编译一次之后 stateGenerator 每次都从 ctx 取 state，这里是唯一的写入点；
-// 它与 withGraphChatModel 一起构成「编译期固定结构 + 请求期注入依赖」的全部变量面。
-func withGraphState(ctx context.Context, st *quickGraphState) context.Context {
-	return context.WithValue(ctx, graphCtxStateKey, st)
-}
-
-// graphStateFromContext 从 context 取出 Graph Local State
-func graphStateFromContext(ctx context.Context) (*quickGraphState, bool) {
-	v := ctx.Value(graphCtxStateKey)
-	if v == nil {
-		return nil, false
-	}
-	st, ok := v.(*quickGraphState)
-	return st, ok
 }
 
 // processMessageGraphQuick 快速模式入口：QueryRewrite → Retrieve → BuildPrompt → Generate 四节点 Graph。
@@ -762,15 +702,15 @@ func (s *chatService) processMessageGraphQuick(
 	chatModel := client.ChatModel()
 	obsObserve(ctx, s.obs, "chat_quick_graph_init_ctx_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t0).Seconds())
 
-	// 2~3) 组装 Graph Input：System Prompt / History / 模型名 / 检索预算
-	graphInput := buildQuickInput(req, userID, userMsgID, enhancedCtx, client)
+	// 2) 组装 Graph Input：System Prompt / History / 模型名 / 检索预算 / ChatModel
+	graphInput := buildQuickInput(req, userID, userMsgID, enhancedCtx, client, chatModel)
 
-	// 3.5) 预执行 Rewrite + 澄清检查：needClarify=true 时短路返回，不浪费后续节点。
-	// 这里是**唯一**的改写调用点：Graph 内的 Rewrite 节点只负责把它的产出写进 state，
+	// 3) 预执行 Rewrite + 澄清检查：needClarify=true 时短路返回，不浪费后续节点。
+	// 这里是**唯一**的改写调用点：Graph 内的 Rewrite 节点只负责消费它并规划检索 query，
 	// 不再自己调 LLM（见 quickRewriteFn 的说明与 TestDoRewriteHasSingleCallSite）。
 	// 硬超时兜底：即使 LLM 卡住，最多等 rewriteLLMTimeout 就带着本地检索 query 继续。
-	rewriteCheckCtx := withGraphChatModel(ctx, chatModel)
-	rewriteCtx, cancelRewrite := context.WithTimeout(rewriteCheckCtx, rewriteLLMTimeout)
+	// ChatModel 已在第 2 步挂到 graphInput 上，这里直接用它，不再经 context 传递。
+	rewriteCtx, cancelRewrite := context.WithTimeout(ctx, rewriteLLMTimeout)
 	rewriteStart := time.Now()
 	rw := doRewriteWithLLM(rewriteCtx, graphInput)
 	cancelRewrite()
@@ -789,42 +729,44 @@ func (s *chatService) processMessageGraphQuick(
 		}
 		// 存一条 assistant 消息（追问），让历史自然串成 [user问题 → assistant追问 → user回答]
 		clarifyMsgID := uuid.New().String()
-		if err := s.saveAssistantMessage(ctx, sessionID, clarifyMsgID, rw.ClarifyQuestion, req, nil, nil); err != nil {
+		// 追问消息同样要挂 trace_id：否则前端点开这条消息查不到链路（普通回答那条是挂的）。
+		var clarifyMeta datatypes.JSON
+		if traceID := observability.TraceIDFromContext(ctx); traceID != "" {
+			clarifyMeta = datatypes.JSON(mustMarshal(map[string]any{"trace_id": traceID}))
+		}
+		if err := s.saveAssistantMessage(ctx, sessionID, clarifyMsgID, rw.ClarifyQuestion, req, nil, clarifyMeta); err != nil {
 			logger.Warnf("存储澄清追问消息失败: %v", err)
 		}
-		obsNow := time.Now()
 		eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "clarify", Clarify: &dto.ClarifyPayload{
 			Question: rw.ClarifyQuestion,
 			Options:  rw.ClarifyOptions,
 		}, Done: true})
-		obsEndSpan(ctx, s.obs, span, observability.SpanStatusOK, nil, observability.Attrs{
+		// 这里只补属性、不结束 span：根 span 的结束统一由函数开头的 defer 收口。
+		// 手动再 End 一次会覆盖 defer 写的时长（EndSpan 不是幂等的）。
+		// clarify_ms 取「开始识别意图 → 追问事件已发出」的真实耗时。
+		observability.SetSpanAttrs(ctx, observability.Attrs{
 			"need_clarify":   "true",
 			"clarify_intent": rw.Intent,
-			"clarify_ms":     fmt.Sprintf("%d", time.Since(obsNow).Milliseconds()),
+			"clarify_ms":     fmt.Sprintf("%d", time.Since(rewriteStart).Milliseconds()),
 		})
 		return
 	}
 
-	// 不需要澄清 → 整个改写结果一次性挂到 graphInput（单一字段），Graph 内 Rewrite 节点直接复用
+	// 不需要澄清 → 整个改写结果一次性挂到 graphInput（单一字段），Graph 内 Rewrite 节点直接消费
 	graphInput.PreRewrite = rw
 
-	// 4) 提前创建 graphState：编译期注册的 stateGenerator 会从 ctx 取它；
-	//    Invoke 返回后也是从同一个对象读 RetrievedDocs。
-	graphState := &quickGraphState{}
-
-	// 5) 取启动期就编译好的 Graph——请求期只注入 state 与 ChatModel，不再 build/Compile。
+	// 4) 取启动期就编译好的 Graph——请求期只执行，不再 build/Compile，也不再往 ctx 里注入任何东西：
+	//    请求级变量全部在 graphInput 上（ChatModel / PreRewrite），节点之间靠载荷沿边传递。
 	//    装配错误因此在启动期就暴露，请求期结构上不可能再出现「编译失败」。
 	graphCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	graphCtx = withGraphChatModel(graphCtx, chatModel)
-	graphCtx = withGraphState(graphCtx, graphState)
 
-	// 6) 生成助手消息 ID + 流式驱动 Graph 执行
+	// 5) 生成助手消息 ID + 流式驱动 Graph 执行
 	assistantMsgID := uuid.New().String()
 	obsAddRootAttrs(ctx, s.obs, observability.Attrs{"assistant_message_id": assistantMsgID})
 	eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "start", MessageID: assistantMsgID})
 
-	fullContent, err := runQuickStream(
+	graphOut, fullContent, err := runQuickStream(
 		graphCtx, s.quickGraph, graphInput,
 		eventCh, req.ModelID, assistantMsgID, s.obs,
 	)
@@ -838,26 +780,27 @@ func (s *chatService) processMessageGraphQuick(
 	// 不拦的话这里会照发 done 并把空 assistant 消息落库，用户看到空白气泡，
 	// 且空消息进入后续 history 后会让该会话之后每一轮都失败 —— 一次空回答污染整条会话。
 	// 具体口径见 rejectEmptyAnswer（与深度模式共用）。
+	// runQuickStream 成功返回时 graphOut 必非 nil（见其说明），docs 直接从出参取 —— 它是唯一来源。
 	if rejectEmptyAnswer(ctx, eventCh, s.obs, "quick", sessionID, req.ModelID, assistantMsgID,
-		fullContent, fmt.Sprintf("retrievedDocs=%d", len(graphState.RetrievedDocs))) {
+		fullContent, fmt.Sprintf("retrievedDocs=%d", len(graphOut.Docs))) {
 		return
 	}
 
-	// 8) 直接从 graphState 读 RetrievedDocs（genState 返回的就是这个对象，Invoke 内部 StatePostHandler 写的就是它）
+	// 6) 出参里的 docs 就是本次命中的文档（来源唯一：载荷 → 出参，不再经过 context）
 	var (
 		sources   []dto.SourceInfo
 		docsCount int
 	)
-	if len(graphState.RetrievedDocs) > 0 {
-		sources = einoDocsToSourceInfos(graphState.RetrievedDocs)
-		docsCount = len(graphState.RetrievedDocs)
+	if len(graphOut.Docs) > 0 {
+		sources = einoDocsToSourceInfos(graphOut.Docs)
+		docsCount = len(graphOut.Docs)
 	}
 	obsAddRootAttrs(ctx, s.obs, observability.Attrs{
 		"assistant_chars": fmt.Sprintf("%d", len([]rune(fullContent))),
 		"retrieved_docs":  fmt.Sprintf("%d", docsCount),
 	})
 
-	// 8) 结束事件 + 异步落库 + 异步刷新摘要记忆
+	// 7) 结束事件 + 异步落库 + 异步刷新摘要记忆
 	s.emitDoneAndSave(ctx, eventCh, sessionID, assistantMsgID, fullContent, req, sources, nil, func(meta map[string]any) {
 		if s.obs != nil && meta != nil {
 			meta["trace_id"] = observability.TraceIDFromContext(ctx)
@@ -881,12 +824,13 @@ func startQuickSpan(ctx context.Context, obs observability.Recorder, sessionID, 
 	return newCtx, span
 }
 
-// buildQuickInput 组装 quickGraphInput：System Prompt / History / 预算 / 模型名
+// buildQuickInput 组装 quickGraphInput：System Prompt / History / 预算 / 模型名 / ChatModel
 func buildQuickInput(
 	req requestdto.SendMessageRequest,
 	userID, userMsgID string,
 	enhancedCtx *EnhancedContext,
 	client *llmpkg.OpenAIClient,
+	chatModel einoModel.BaseChatModel,
 ) *quickGraphInput {
 	history := excludeByMessageID(enhancedCtx.History, userMsgID)
 	pb := NewPromptBuilder(PromptModeQuick, quickModeAgentSystemPrompt, enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx).
@@ -902,10 +846,11 @@ func buildQuickInput(
 		UserQuestionIndex: len(inputMsgs) - 1,
 		ModelName:         client.ModelName(),
 		RetrievalBudget:   enhancedCtx.RetrievalBudget,
+		ChatModel:         chatModel,
 	}
 }
 
-// compileQuickGraph 在**启动期**构建并编译快速检索链路，返回可被所有请求并发复用的 Runnable。
+// compileQuickGraph 在启动期构建并编译快速检索链路，返回可被所有请求并发复用的 Runnable。
 //
 // 这里没有 ctx / eventCh：装配期没有请求上下文可推事件，失败一律上抛给构造函数，由启动流程
 // 决定是否退出。于是「Graph 编译失败」在请求期**结构上不可能发生**——它要么在启动时就失败，
@@ -914,7 +859,7 @@ func buildQuickInput(
 func compileQuickGraph(
 	einoRetriever *rag.EinoRetrieverAdapter,
 	obs observability.Recorder,
-) (einoCompose.Runnable[*quickGraphInput, *schema.StreamReader[*schema.Message]], error) {
+) (einoCompose.Runnable[*quickGraphInput, *quickGraphOutput], error) {
 	g, err := buildQuickGraph(einoRetriever)
 	if err != nil {
 		obsIncr(nil, obs, "chat_quick_graph_errors_total", map[string]string{"stage": "build_graph"}, 1)
@@ -928,29 +873,32 @@ func compileQuickGraph(
 	return r, nil
 }
 
-// runQuickStream 驱动 Graph 执行并消费流式输出
+// runQuickStream 驱动 Graph 执行并消费流式输出。
+// 成功返回时第一个返回值必非 nil，调用方可直接读它的 Docs；失败时第一个返回值为 nil。
 func runQuickStream(
 	graphCtx context.Context,
-	runnable einoCompose.Runnable[*quickGraphInput, *schema.StreamReader[*schema.Message]],
+	runnable einoCompose.Runnable[*quickGraphInput, *quickGraphOutput],
 	graphInput *quickGraphInput,
 	eventCh chan<- dto.StreamEvent,
 	modelID, assistantMsgID string,
 	obs observability.Recorder,
-) (string, error) {
+) (*quickGraphOutput, string, error) {
 	sendProgressEvent(graphCtx, eventCh, "正在执行快速检索链路...")
 	t0 := time.Now()
-	reader, invErr := runnable.Invoke(graphCtx, graphInput)
+	out, invErr := runnable.Invoke(graphCtx, graphInput)
 	obsObserve(graphCtx, obs, "chat_quick_graph_run_seconds", map[string]string{"model_id": modelID}, time.Since(t0).Seconds())
 	if invErr != nil {
 		sendErrorEvent(graphCtx, eventCh, invErr, "快速检索执行失败")
-		return "", invErr
+		return nil, "", invErr
 	}
-	if reader == nil {
-		sendErrorEvent(graphCtx, eventCh, fmt.Errorf("nil stream reader"), "快速检索未返回结果")
-		return "", fmt.Errorf("nil stream reader")
+	if out == nil || out.Stream == nil {
+		err := fmt.Errorf("nil stream reader")
+		sendErrorEvent(graphCtx, eventCh, err, "快速检索未返回结果")
+		return nil, "", err
 	}
-	defer reader.Close()
-	return consumeQuickGraphStream(graphCtx, reader, assistantMsgID, eventCh)
+	defer out.Stream.Close()
+	content, err := consumeQuickGraphStream(graphCtx, out.Stream, assistantMsgID, eventCh)
+	return out, content, err
 }
 
 // consumeQuickGraphStream 消费 ChatModel 输出的 StreamReader[*schema.Message]
