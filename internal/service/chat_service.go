@@ -549,10 +549,14 @@ func (s *chatService) resolveClient(ctx context.Context, userID, modelID, modelT
 		return nil, fmt.Errorf("不支持的模型类型: %s", modelType)
 	}
 
-	// 登记 modelID → 供应商：eino 回调的 CallbackInput.Config 不带 provider，
+	// 登记 modelID → 供应商：
+	// cfg.Provider 此时是「API 协议格式」（openai/anthropic），不是厂商名 ——
+	// 混用的后果是平台上所有模型都归到 openai，故先用 llm.ProviderLabel
+	// 从 base_url 还原真实服务方。
+	// eino 回调的 CallbackInput.Config 不带 provider，
 	// 而 gen_ai.provider.name 是三方追踪平台的必需属性，只能在这里（唯一解析模型配置的地方）登记一次，
 	// 之后由 observability 的 eino 回调按 model_id 反查。
-	observability.RegisterGenAIProvider(cfg.ModelID, cfg.Provider)
+	observability.RegisterGenAIProvider(cfg.ModelID, llm.ProviderLabel(cfg.ModelID, cfg.Provider, cfg.BaseURL))
 
 	return llm.NewClientFromModelConfig(ctx, cfg)
 }
