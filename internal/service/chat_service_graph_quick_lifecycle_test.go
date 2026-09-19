@@ -23,7 +23,7 @@ import (
 // ─── P1-2：快速模式 Graph「编译一次、请求期复用」的回归与结构守卫 ─────────────
 //
 // 背景：旧实现 `processMessageGraphQuick` 每个请求都 `buildQuickGraph` + `g.Compile(...)`。
-// 图结构是静态的（4 节点 + 5 条边），请求级变量（ChatModel / 改写结果）全部装在入参
+// 图结构是静态的（5 节点 + 5 条边 + 1 条分支），请求级变量（ChatModel）装在入参
 // quickGraphInput 里沿边传递。改成启动期编译一次之后，多出三个必须被钉住的约束：
 //
 //  1. 请求之间**不能有共享的可变对象**——编译产物被 N 个请求并发复用，任何跨请求共享的可变
@@ -139,7 +139,6 @@ func TestQuickGraph_OneCompiledRunnableServesConcurrentRequestsWithIsolatedState
 			defer wg.Done()
 			kb := fmt.Sprintf("kb-%d", i)
 			query := fmt.Sprintf("q-%d", i)
-			rewritten := fmt.Sprintf("rw-%d", i)
 			wantReply := "reply-" + kb
 
 			// 唯一的请求级变量就是入参本身：ChatModel 与改写结果都挂在它上面，不再经 ctx 注入。
@@ -155,8 +154,7 @@ func TestQuickGraph_OneCompiledRunnableServesConcurrentRequestsWithIsolatedState
 				ModelName:         "cl100k_base",
 				RetrievalBudget:   2000,
 				ChatModel:         &staticChatModel{reply: wantReply},
-				// 预置改写结果 → 改写节点只读它、不调 LLM，用例只考察请求级数据的隔离。
-				PreRewrite: &rewriteResult{Rewritten: rewritten, Intent: intentQuestion},
+				// query 里既没有本地意图也没有指代 → 改写节点不会调 LLM，用例只考察请求级数据的隔离。
 			}
 
 			out, err := runnable.Invoke(ctx, input)
@@ -394,7 +392,6 @@ func BenchmarkPerRequestCost(b *testing.B) {
 			ModelName:         "cl100k_base",
 			RetrievalBudget:   2000,
 			ChatModel:         &staticChatModel{reply: "ok"},
-			PreRewrite:        &rewriteResult{Rewritten: "OSI 七层模型分别是什么", Intent: intentQuestion},
 		}
 	}
 	runOnce := func(b *testing.B, runnable einoCompose.Runnable[*quickGraphInput, *quickGraphOutput]) {

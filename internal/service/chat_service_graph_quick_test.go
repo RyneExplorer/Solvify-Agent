@@ -1,7 +1,9 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -141,10 +143,50 @@ func (emptyRetriever) Retrieve(context.Context, rag.Query) (rag.Result, error) {
 	return rag.Result{}, nil
 }
 
+// fakeSessionRepo 只实现快速模式链路会用到的方法，其余经内嵌接口保留
+// （未实现的方法被调用会 panic —— 用例只走澄清路径，够用且不必写全）。
+type fakeSessionRepo struct {
+	repository.ChatSessionRepo
+	setCalls    int
+	pendingData []byte
+}
+
+func (f *fakeSessionRepo) SetPendingClarify(_ context.Context, _ string, data []byte) error {
+	f.setCalls++
+	f.pendingData = data
+	return nil
+}
+
+// newClarifyUpstream 起一个 OpenAI 兼容的假上游：**非流式**返回一段改写 JSON。
+// 快速模式的改写走 Generate（非流式），生成才走 Stream —— 这里只需要前者。
+func newClarifyUpstream(t *testing.T, rewriteJSON string) *httptest.Server {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		body, _ := json.Marshal(map[string]any{
+			"id":      "c1",
+			"object":  "chat.completion",
+			"created": 1,
+			"model":   "test-model",
+			"choices": []any{map[string]any{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": rewriteJSON},
+				"finish_reason": "stop",
+			}},
+		})
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // newQuickTestService 组装一个只依赖假上游的最小 chatService。
-func newQuickTestService(t *testing.T, upstreamURL string) (*chatService, *fakeChatMessageRepo) {
+func newQuickTestService(t *testing.T, upstreamURL string) (*chatService, *fakeChatMessageRepo, *fakeSessionRepo) {
 	t.Helper()
 	msgRepo := newFakeChatMessageRepo()
+	sessRepo := &fakeSessionRepo{}
 	einoRetriever := rag.NewEinoRetrieverAdapter(emptyRetriever{}, 10)
 	// 与生产路径同源：Graph 在「构造期」编译一次，请求期复用（见 compileQuickGraph）。
 	quickGraph, err := compileQuickGraph(einoRetriever, nil)
@@ -153,6 +195,7 @@ func newQuickTestService(t *testing.T, upstreamURL string) (*chatService, *fakeC
 	}
 	return &chatService{
 		messageRepo: msgRepo,
+		sessionRepo: sessRepo,
 		userModelConfigRepo: &fakeUserModelConfigRepo{cfg: &entity.UserModelConfig{
 			APIFormat:        "openai",
 			BaseURL:          upstreamURL,
@@ -162,7 +205,7 @@ func newQuickTestService(t *testing.T, upstreamURL string) (*chatService, *fakeC
 		}},
 		einoRetriever: einoRetriever,
 		quickGraph:    quickGraph,
-	}, msgRepo
+	}, msgRepo, sessRepo
 }
 
 func describeEvents(events []dto.StreamEvent) string {
@@ -180,7 +223,7 @@ func describeEvents(events []dto.StreamEvent) string {
 func TestProcessMessageGraphQuick_EmptyAnswerBecomesErrorNotBlankMessage(t *testing.T) {
 	ensureTestConfig(t)
 	upstream := newEmptyAnswerUpstream(t)
-	svc, msgRepo := newQuickTestService(t, upstream.URL)
+	svc, msgRepo, _ := newQuickTestService(t, upstream.URL)
 
 	req := requestdto.SendMessageRequest{
 		Content:          "OSI 七层模型分别是什么",
@@ -241,5 +284,92 @@ drain:
 	}
 	if !strings.Contains(gotErr.Title, "未返回内容") {
 		t.Errorf("error 事件标题=%q，期望包含「未返回内容」", gotErr.Title)
+	}
+}
+
+// TestProcessMessageGraphQuick_ClarifySendsClarifyWithoutStart
+//
+// 协议回归：澄清终态不该先给前端开一个回答气泡。
+//
+// 背景：旧实现里「要不要澄清」是图外判定的，所以 clarify 事件之前不可能有 start；
+// 改写搬进图内之后，判定点挪到了 Invoke 之后 —— 如果 start 仍按老位置先发出去，
+// 澄清请求就会先收到 start（前端据此记下 assistantId / 建回答块），再收到 clarify，
+// 多出一个永远不会有内容的空回答块（rejectEmptyAnswer 整套逻辑就是为了不让这种块出现）。
+//
+// 这里断言：事件序列里既没有 start 也没有 done，只有一条 clarify；
+// 且追问确实落了库（session 的 PendingClarify + 一条 assistant 追问消息）。
+func TestProcessMessageGraphQuick_ClarifySendsClarifyWithoutStart(t *testing.T) {
+	ensureTestConfig(t)
+
+	const clarifyQ = "你是要导出哪些数据？是单个知识库还是全部知识库？"
+	upstream := newClarifyUpstream(t,
+		`{"rewritten":"","intent":"question","keywords":[],"need_clarify":true,"clarify_question":"`+clarifyQ+`"`+
+			`,"clarify_options":["单个知识库","全部知识库"]}`)
+	svc, msgRepo, sessRepo := newQuickTestService(t, upstream.URL)
+
+	req := requestdto.SendMessageRequest{
+		// 含指代表达（「那个方案」）→ 改写节点才会真的调 LLM，从而拿到 need_clarify=true
+		Content:          "那个方案呢",
+		KnowledgeBaseIDs: []string{"11111111-1111-1111-1111-111111111111"},
+		SearchMode:       chatModeQuick,
+		ModelID:          "cfg-1",
+		ModelType:        "user",
+	}
+	eventCh := make(chan dto.StreamEvent, 100)
+
+	svc.processMessageGraphQuick(context.Background(), "user-1", "session-1", "umsg-1", req, eventCh)
+
+	var events []dto.StreamEvent
+	var clarifySeen int
+drain:
+	for {
+		select {
+		case ev := <-eventCh:
+			events = append(events, ev)
+			switch ev.Type {
+			case "start":
+				t.Errorf("澄清请求不该收到 start 事件（前端会据此开一个空的回答气泡）；实际事件=%s", describeEvents(events))
+			case "done":
+				t.Errorf("澄清请求不该收到 done 事件；实际事件=%s", describeEvents(events))
+			case "clarify":
+				clarifySeen++
+				if ev.Clarify == nil {
+					t.Error("clarify 事件的载荷为空")
+					continue
+				}
+				if ev.Clarify.Question != clarifyQ {
+					t.Errorf("追问文本=%q，期望 %q", ev.Clarify.Question, clarifyQ)
+				}
+				if len(ev.Clarify.Options) != 2 {
+					t.Errorf("追问选项=%v，期望 2 个", ev.Clarify.Options)
+				}
+				if !ev.Done {
+					t.Error("clarify 应为终态事件（Done=true）")
+				}
+			}
+		default:
+			break drain
+		}
+	}
+
+	if clarifySeen != 1 {
+		t.Fatalf("clarify 事件收到 %d 条，期望恰好 1 条；实际事件=%s", clarifySeen, describeEvents(events))
+	}
+
+	if sessRepo.setCalls != 1 {
+		t.Errorf("SetPendingClarify 调用 %d 次，期望 1", sessRepo.setCalls)
+	}
+	if !bytes.Contains(sessRepo.pendingData, []byte(clarifyQ)) {
+		t.Errorf("PendingClarify 里没有追问文本: %s", sessRepo.pendingData)
+	}
+
+	// 追问要落一条 assistant 消息：让历史自然串成 [user问题 → assistant追问 → user回答]
+	select {
+	case m := <-msgRepo.createdCh:
+		if m.Role != "assistant" || m.Content != clarifyQ {
+			t.Errorf("落库的追问消息不对: role=%s content=%q", m.Role, m.Content)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Error("追问消息没有落库")
 	}
 }

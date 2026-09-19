@@ -31,22 +31,25 @@ import (
 // 这类结构的缺陷是「静默」的：平行字段必须成组、按序、在多个调用点赋值，漏写一个不会编译报错，
 // 只表现为意图/关键词莫名丢失；第二个调用点也不会报错，只表现为请求关键路径上白等一轮 LLM。
 //
-// 现在的结果：
-//   - 载体唯一 —— quickGraphInput.PreRewrite *rewriteResult；
-//   - 调用点唯一 —— doRewriteWithLLM 只被 processMessageGraphQuick 调用；
+// 现在的结果（改写已搬进 Graph 内）：
+//   - 载体唯一 —— quickGraphPayload.Rewrite *rewriteResult；
+//   - 调用点唯一 —— doRewriteWithLLM 只被 Graph 的改写节点 quickRewriteFn 调用（图外不再预跑）；
 //   - 派生规则唯一 —— 「是否跳过检索」只在 deriveSkipRetrieve 里定义一次；
 //   - 传递路径唯一 —— 请求级数据只走 quickGraphInput → quickGraphPayload → quickGraphOutput，
 //     不再有「边」与「Graph Local State」两条通道。
 //
-// 下面 4 条守卫分别钉形状 / 历史名 / 调用点 / 返回值元数，2 条行为用例钉运行时语义。
+// 下面 4 条守卫分别钉形状 / 历史名 / 调用点 / 返回值元数，3 条行为用例钉运行时语义
+// （成本模型 / LLM 失败回退 / 澄清短路）。
 // 守卫挡得住「形状回退」，挡不住「字段接错」——所以两者都要有。
 
 // recordingChatModel 记录 LLM 被调用的方式与收到的 prompt：
 //   - Generate 被调 → 说明「改写」在 Graph 内又跑了一遍（本批次要消灭的缺陷）；
 //   - Stream 被调 → 生成节点正常工作（生成走 Stream，改写走 Generate，两者可区分）；
-//   - streamMsgs → 拼装节点最终发给模型的消息，用来断言改写结果真的落进了 prompt。
+//   - streamMsgs → 拼装节点最终发给模型的消息，用来断言改写结果真的落进了 prompt；
+//   - genReply → 指定 Generate 的返回内容，用来喂改写节点各种 LLM 产出（澄清 / 改写 / 垃圾）。
 type recordingChatModel struct {
 	mu          sync.Mutex
+	genReply    string
 	genCalls    int
 	streamCalls int
 	streamMsgs  []*schema.Message
@@ -55,8 +58,14 @@ type recordingChatModel struct {
 func (m *recordingChatModel) Generate(context.Context, []*schema.Message, ...einoModel.Option) (*schema.Message, error) {
 	m.mu.Lock()
 	m.genCalls++
+	reply := m.genReply
 	m.mu.Unlock()
-	return schema.AssistantMessage("generate-should-not-happen", nil), nil
+	if reply == "" {
+		// 默认回一段「明显不该出现」的文本：哪个用例没设 genReply 却调了 Generate，
+		// 会立刻在断言里暴露，而不是静默通过。
+		reply = "generate-should-not-happen"
+	}
+	return schema.AssistantMessage(reply, nil), nil
 }
 
 func (m *recordingChatModel) Stream(_ context.Context, msgs []*schema.Message, _ ...einoModel.Option) (*schema.StreamReader[*schema.Message], error) {
@@ -82,14 +91,16 @@ func (m *recordingChatModel) prompt() []*schema.Message {
 
 var _ einoModel.BaseChatModel = (*recordingChatModel)(nil)
 
-// TestQuickRewriteNode_ReusesPrecomputedOutcomeWithoutCallingLLM
+// TestQuickRewriteNode_CallsLLMOnlyForAnaphora
 //
-// 行为回归：Rewrite 节点只**消费**外部预跑的 rewriteResult——
-//   - state 的改写字段逐一对上结构体（钉住「有字段被漏搬」这一类静默丢语义）；
-//   - SkipRetrieve 仍是有载荷的开关（true 不检索、false 正常检索），
-//     说明它作为派生字段从预跑结果一路传到了检索节点；
-//   - 整个 Graph 执行期间 Generate 调用为 0（钉住「Graph 内又改写了一轮」）。
-func TestQuickRewriteNode_ReusesPrecomputedOutcomeWithoutCallingLLM(t *testing.T) {
+// 成本模型回归：改写节点自己决定「要不要调 LLM」，判据是「问题里有没有真指代」——
+//   - 本地意图命中（问候）→ 0 次 LLM，且 SkipRetrieve 传到检索节点后一条都不查；
+//   - 无疑义词 → 0 次 LLM（LLM 没有不可替代的产出），但仍照常检索；
+//   - 含指代 → 恰好 1 次 LLM，且改写结果真的替换进了 prompt（不是只被写进某个字段）。
+//
+// 旧实现有两个调用点（图外预跑一次 + 图内 PreRewrittenQuery 为空时又调一次），
+// 判据也散在两处；现在只由图内的改写节点判定并调用。
+func TestQuickRewriteNode_CallsLLMOnlyForAnaphora(t *testing.T) {
 	ensureTestConfig(t)
 
 	runnable, err := compileQuickGraph(rag.NewEinoRetrieverAdapter(&barrierRetriever{}, 10), nil)
@@ -97,50 +108,59 @@ func TestQuickRewriteNode_ReusesPrecomputedOutcomeWithoutCallingLLM(t *testing.T
 		t.Fatalf("compileQuickGraph 失败: %v", err)
 	}
 
+	const llmRewritten = "OSI 七层模型具体分为哪几层"
+
 	cases := []struct {
-		name     string
-		pre      *rewriteResult
-		wantDocs int
+		name       string
+		query      string
+		genReply   string
+		wantGen    int
+		wantDocs   int
+		wantPrompt string
 	}{
 		{
-			name: "skip_retrieve_true",
-			pre: &rewriteResult{
-				Rewritten:    "指代回填后的完整问题",
-				Intent:       intentChitchat,
-				Keywords:     []string{"k1", "k2"},
-				SkipRetrieve: true,
-			},
-			wantDocs: 0,
+			// 本地意图规则命中（0ms）：问候语既不该调 LLM，也不需要检索
+			name:       "本地意图命中_问候",
+			query:      "你好",
+			wantGen:    0,
+			wantDocs:   0,
+			wantPrompt: "你好",
 		},
 		{
-			name: "skip_retrieve_false",
-			pre: &rewriteResult{
-				Rewritten:    "指代回填后的完整问题",
-				Intent:       intentQuestion,
-				Keywords:     []string{"k1"},
-				SkipRetrieve: false,
-			},
-			wantDocs: 1,
+			// 无疑义词：LLM 没有不可替代的产出（线上实测 78% 只是确认默认意图），不调
+			name:       "无疑义词_不调LLM",
+			query:      "OSI 七层模型分别是什么",
+			wantGen:    0,
+			wantDocs:   1,
+			wantPrompt: "OSI 七层模型分别是什么",
+		},
+		{
+			// 含指代：消解指代是 LLM 唯一不可替代的能力 → 必须调，且改写结果要进 prompt
+			name:       "含指代_调LLM并采用改写结果",
+			query:      "那个方案呢",
+			genReply:   `{"rewritten":"` + llmRewritten + `","intent":"question","keywords":["osi"],"need_clarify":false}`,
+			wantGen:    1,
+			wantDocs:   1,
+			wantPrompt: llmRewritten,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			model := &recordingChatModel{}
+			model := &recordingChatModel{genReply: tc.genReply}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
 			input := &quickGraphInput{
-				OriginalQuery:     "那个方案呢",
+				OriginalQuery:     tc.query,
 				UserID:            "u-1",
 				KnowledgeBaseIDs:  []string{"kb-1"},
-				InputMsgs:         []*schema.Message{schema.UserMessage("那个方案呢")},
+				InputMsgs:         []*schema.Message{schema.UserMessage(tc.query)},
 				UserQuestionIndex: 0,
 				ModelName:         "cl100k_base",
 				RetrievalBudget:   2000,
 				ChatModel:         model,
-				PreRewrite:        tc.pre,
 			}
 
 			out, err := runnable.Invoke(ctx, input)
@@ -152,66 +172,159 @@ func TestQuickRewriteNode_ReusesPrecomputedOutcomeWithoutCallingLLM(t *testing.T
 			}
 			drainStream(out.Stream)
 
-			// SkipRetrieve 有没有一路传到检索节点：false 必须真的查一次（拿到 1 条），true 一条都不查。
+			// 成本模型：只有「含指代」才允许真的调一次 LLM 去改写
+			if gen, _ := model.counts(); gen != tc.wantGen {
+				t.Errorf("改写式 LLM 调用（Generate）=%d 次，期望 %d —— 改写节点只在含指代时才该调 LLM", gen, tc.wantGen)
+			}
+			// SkipRetrieve 有没有一路传到检索节点
 			if len(out.Docs) != tc.wantDocs {
-				t.Errorf("出参 docs 数量=%d，期望 %d（SkipRetrieve 没有从预跑结果传到检索节点？）",
+				t.Errorf("出参 docs 数量=%d，期望 %d（SkipRetrieve 没有从改写结果传到检索节点？）",
 					len(out.Docs), tc.wantDocs)
 			}
-
-			// 改写结果有没有真的进 prompt：拼装节点必须用它替换掉「用户问题」那一条消息。
+			// 改写结果有没有真的进 prompt（不是只被写进某个字段）
 			lastUser := findLastMessageByRole(model.prompt(), "user")
 			if lastUser == nil {
 				t.Fatal("生成节点没有收到任何 user 消息")
 			}
-			if lastUser.Content != tc.pre.Rewritten {
-				t.Errorf("prompt 里最后一条 user 消息=%q，期望改写结果 %q（改写结果没落到 prompt？）",
-					lastUser.Content, tc.pre.Rewritten)
+			if lastUser.Content != tc.wantPrompt {
+				t.Errorf("prompt 里最后一条 user 消息=%q，期望 %q", lastUser.Content, tc.wantPrompt)
 			}
-
-			gen, stream := model.counts()
-			if gen != 0 {
-				t.Errorf("Graph 内发生了 %d 次改写式 LLM 调用（Generate），期望 0：同一次改写出现了第二个调用点", gen)
-			}
-			if stream != 1 {
-				t.Errorf("生成节点 Stream 调用=%d，期望 1", stream)
+			// 正常路径必须给出回答流，而不是澄清
+			if out.Clarify != nil {
+				t.Errorf("本用例不该走澄清分支，却拿到 Clarify=%+v", out.Clarify)
 			}
 		})
 	}
 }
 
-// TestQuickRewriteNode_RejectsMissingPreRewrite
+// TestQuickRewriteNode_FallsBackToOriginalQueryOnLLMFailure
 //
-// 契约：Graph 入参必须带上预跑好的 rewriteResult。缺了它就是调用方漏掉「唯一调用点」，
-// 必须立刻报错——旧实现在这里会静默再调一次 LLM，正是「同一次改写两个调用点」的表现形式。
-func TestQuickRewriteNode_RejectsMissingPreRewrite(t *testing.T) {
+// 容错回归：含指代时确实调了 1 次 LLM，但模型返回的不是 JSON（不听话）——
+// 改写节点必须回退到原问题继续跑（不报错、也不额外补调一次），后面检索与生成照常。
+// 这是「改写失败不能拖垮整条链路」的运行时证据，也是 doRewriteWithLLM 永不返回 nil 的依据。
+func TestQuickRewriteNode_FallsBackToOriginalQueryOnLLMFailure(t *testing.T) {
 	ensureTestConfig(t)
 
-	runnable, err := compileQuickGraph(rag.NewEinoRetrieverAdapter(emptyRetriever{}, 10), nil)
+	runnable, err := compileQuickGraph(rag.NewEinoRetrieverAdapter(&barrierRetriever{}, 10), nil)
 	if err != nil {
 		t.Fatalf("compileQuickGraph 失败: %v", err)
 	}
 
-	model := &recordingChatModel{}
+	model := &recordingChatModel{genReply: "这不是 JSON，模型今天不想好好说话"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	input := &quickGraphInput{
-		OriginalQuery:     "故意不设 PreRewrite",
+		OriginalQuery:     "那个方案呢",
 		UserID:            "u-1",
 		KnowledgeBaseIDs:  []string{"kb-1"},
-		InputMsgs:         []*schema.Message{schema.UserMessage("故意不设 PreRewrite")},
+		InputMsgs:         []*schema.Message{schema.UserMessage("那个方案呢")},
 		UserQuestionIndex: 0,
 		ModelName:         "cl100k_base",
 		RetrievalBudget:   2000,
 		ChatModel:         model,
 	}
 
-	if _, err := runnable.Invoke(ctx, input); err == nil {
-		t.Fatal("PreRewrite 为空时 Invoke 成功了，期望报错：改写结果必须由调用方预跑（见 quickRewriteFn）")
+	out, err := runnable.Invoke(ctx, input)
+	if err != nil {
+		t.Fatalf("LLM 返回垃圾时应 fallback 继续跑，而不是让整条链路失败: %v", err)
 	}
-	if gen, _ := model.counts(); gen != 0 {
-		t.Errorf("PreRewrite 为空却触发了 %d 次改写式 LLM 调用，期望 0（应直接报错而不是补一次调用）", gen)
+	if out == nil || out.Stream == nil {
+		t.Fatal("Invoke 返回 nil 出参/流")
+	}
+	drainStream(out.Stream)
+
+	if gen, _ := model.counts(); gen != 1 {
+		t.Errorf("Generate 调用=%d 次，期望 1（含指代应尝试一次改写）", gen)
+	}
+	// fallback 落到原问题 + question 意图 → 仍然检索
+	if len(out.Docs) != 1 {
+		t.Errorf("出参 docs 数量=%d，期望 1（fallback 后仍应检索）", len(out.Docs))
+	}
+	lastUser := findLastMessageByRole(model.prompt(), "user")
+	if lastUser == nil || lastUser.Content != "那个方案呢" {
+		t.Errorf("prompt 里最后一条 user 消息=%v，期望回退到原问题", lastUser)
+	}
+}
+
+// forbidRetriever 一旦被调用就让用例失败，用于断言「这条分支不该走到检索」。
+type forbidRetriever struct{ t *testing.T }
+
+func (f *forbidRetriever) Retrieve(context.Context, rag.Query) (rag.Result, error) {
+	f.t.Error("检索节点被调用了，但本轮应该在改写之后就分叉到 clarify_end")
+	return rag.Result{}, nil
+}
+
+// TestQuickClarifyBranch_ShortCircuitsRetrieveAndGenerate
+//
+// 行为回归：改写判定 need_clarify=true 时，本轮只该走到 clarify_end——
+//   - 出参给的是 Clarify（追问文本 + 选项 + 意图），不是回答流；
+//   - 检索节点一次都没被调（不能白花一次知识库查询）；
+//   - 生成节点一次都没被调（不能白花一整轮 LLM）。
+//
+// 这三条正是「把澄清判定放进图里、作为一个真分支」换来的东西：
+// 旧实现靠图外提前 return 达到同样效果，但那条捷径与图内的分叉点是两份定义。
+func TestQuickClarifyBranch_ShortCircuitsRetrieveAndGenerate(t *testing.T) {
+	ensureTestConfig(t)
+
+	const clarifyQ = "你是要导出哪些数据？是单个知识库还是全部知识库？"
+	forbid := &forbidRetriever{t: t}
+	runnable, err := compileQuickGraph(rag.NewEinoRetrieverAdapter(forbid, 10), nil)
+	if err != nil {
+		t.Fatalf("compileQuickGraph 失败: %v", err)
+	}
+
+	model := &recordingChatModel{genReply: `{"rewritten":"","intent":"question","keywords":[],"need_clarify":true,` +
+		`"clarify_question":"` + clarifyQ + `","clarify_options":["单个知识库","全部知识库"]}`}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	input := &quickGraphInput{
+		// 含指代表达 → 改写节点才会真的调 LLM，从而拿到 need_clarify=true
+		OriginalQuery:     "那个方案呢",
+		UserID:            "u-1",
+		KnowledgeBaseIDs:  []string{"kb-1"},
+		InputMsgs:         []*schema.Message{schema.UserMessage("那个方案呢")},
+		UserQuestionIndex: 0,
+		ModelName:         "cl100k_base",
+		RetrievalBudget:   2000,
+		ChatModel:         model,
+	}
+
+	out, err := runnable.Invoke(ctx, input)
+	if err != nil {
+		t.Fatalf("Invoke 失败: %v", err)
+	}
+	if out == nil {
+		t.Fatal("Invoke 返回 nil 出参")
+	}
+
+	if out.Clarify == nil {
+		t.Fatalf("期望走澄清分支，实际 Clarify=nil（出参=%+v）", out)
+	}
+	if out.Clarify.Question != clarifyQ {
+		t.Errorf("追问文本=%q，期望 %q", out.Clarify.Question, clarifyQ)
+	}
+	if len(out.Clarify.Options) != 2 {
+		t.Errorf("追问选项=%v，期望 2 个", out.Clarify.Options)
+	}
+	// 不变式：澄清与回答流互斥
+	if out.Stream != nil {
+		out.Stream.Close()
+		t.Error("澄清路径不该同时给出回答流（quickGraphOutput 的不变式被破坏）")
+	}
+	if len(out.Docs) != 0 {
+		t.Errorf("澄清路径不该有检索结果，实际 %d 条", len(out.Docs))
+	}
+
+	gen, stream := model.counts()
+	if gen != 1 {
+		t.Errorf("Generate 调用=%d 次，期望 1（改写那一次）", gen)
+	}
+	if stream != 0 {
+		t.Errorf("生成节点 Stream 调用=%d 次，期望 0 —— 澄清分支不该走到生成", stream)
 	}
 }
 
@@ -220,8 +333,8 @@ func TestQuickRewriteNode_RejectsMissingPreRewrite(t *testing.T) {
 // graphFileForGuard 供守卫解析的目标文件：改写链路全部集中在这一个文件里。
 const graphFileForGuard = "chat_service_graph_quick.go"
 
-// rewriteOwnerFunc 唯一允许调用 doRewriteWithLLM 的函数（请求入口，Graph 外）。
-const rewriteOwnerFunc = "processMessageGraphQuick"
+// rewriteOwnerFunc 唯一允许调用 doRewriteWithLLM 的函数（Graph 的改写节点）。
+const rewriteOwnerFunc = "quickRewriteFn"
 
 // prodGoFileNames 返回包内生产代码（排除 _test.go）的文件名，已排序。
 func prodGoFileNames(t *testing.T) []string {
@@ -287,21 +400,37 @@ func findStructType(t *testing.T, file, typeName string) (*ast.StructType, *toke
 // 形状守卫：quickGraphInput 里「传递改写结果」的字段必须恰好一个，且类型是 *rewriteResult。
 // 一旦有人把它拆回多个 Pre* 平行字段，这条用例立刻变红。
 func TestRewriteOutcomeIsCarriedByOneField(t *testing.T) {
-	st, fset := findStructType(t, graphFileForGuard, "quickGraphInput")
-
-	var preFields []string
-	for _, fld := range st.Fields.List {
+	// ① 生产侧：Graph 入参不得再携带改写结果（改写已搬进图内，图外不再预跑）
+	in, fset := findStructType(t, graphFileForGuard, "quickGraphInput")
+	var staleCarriers []string
+	for _, fld := range in.Fields.List {
 		for _, n := range fld.Names {
 			if strings.HasPrefix(n.Name, "Pre") {
-				preFields = append(preFields, n.Name+" "+typeString(fset, fld.Type))
+				staleCarriers = append(staleCarriers, n.Name+" "+typeString(fset, fld.Type))
 			}
 		}
 	}
+	if len(staleCarriers) != 0 {
+		t.Errorf("quickGraphInput 里仍有 Pre* 字段 %v。\n"+
+			"改写已经搬进 Graph（quickRewriteFn 自己调 doRewriteWithLLM），图外不再预跑 —— "+
+			"改写结果只能由 quickGraphPayload.Rewrite 一个字段承载。", staleCarriers)
+	}
 
-	if len(preFields) != 1 || preFields[0] != "PreRewrite *rewriteResult" {
-		t.Errorf("quickGraphInput 里承载改写结果的字段 = %v，期望恰好一个 [PreRewrite *rewriteResult]。\n"+
+	// ② 传递侧：载荷里恰好一个字段承载改写结果，且类型是 *rewriteResult
+	pl, pfset := findStructType(t, graphFileForGuard, "quickGraphPayload")
+	var carriers []string
+	for _, fld := range pl.Fields.List {
+		if typeString(pfset, fld.Type) != "*rewriteResult" {
+			continue
+		}
+		for _, n := range fld.Names {
+			carriers = append(carriers, n.Name)
+		}
+	}
+	if len(carriers) != 1 || carriers[0] != "Rewrite" {
+		t.Errorf("quickGraphPayload 里承载改写结果的字段 = %v，期望恰好一个 [Rewrite]。\n"+
 			"平行字段必须成组、按序、在多个调用点赋值，漏写一个不会编译报错、只会静默丢语义——"+
-			"新增改写产出请加进 rewriteResult 结构体，不要再开平行字段。", preFields)
+			"新增改写产出请加进 rewriteResult 结构体，不要再开平行字段。", carriers)
 	}
 }
 
