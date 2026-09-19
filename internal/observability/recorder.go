@@ -437,15 +437,43 @@ func CurrentSpanFromContext(ctx context.Context) *Span {
 	if !otelSpan.IsRecording() {
 		return nil
 	}
-	if s, ok := spanByOtel.Load(otelSpan); ok {
+	if s, ok := spanByOtel.Load(spanKeyOf(otelSpan)); ok {
 		return s.(*Span)
 	}
 	return nil
 }
 
-// spanByOtel 把 OTel span 指针关联到项目自研 Span。
-// key 是 trace.Span 接口（指针），value 是 *Span。
+// otelSpanKey 是 spanByOtel 的键：OTel 的 traceID + spanID。
+//
+// 两个字段都是定长数组（[16]byte / [8]byte），所以本结构体可比较、可哈希 ——
+// 这正是它存在的理由，详见 spanByOtel 的注释。
+type otelSpanKey struct {
+	traceID trace.TraceID
+	spanID  trace.SpanID
+}
+
+// spanKeyOf 从任意 OTel span 算出它的键。
+// 对 nonRecordingSpan 同样安全：SpanContext 一直可读，本函数也只做值拷贝。
+func spanKeyOf(s trace.Span) otelSpanKey {
+	sc := s.SpanContext()
+	return otelSpanKey{traceID: sc.TraceID(), spanID: sc.SpanID()}
+}
+
+// spanByOtel 把 OTel span 关联到项目自研 Span，供 CurrentSpanFromContext 的兜底路径反查。
 // StartSpan 写入，EndSpan 删除（避免内存泄漏）。
+//
+// key 是 otelSpanKey，不是 trace.Span 接口值本身。为什么不能用后者：
+// 采样决定为「丢弃」时，SDK 返回的是 sdk/trace.nonRecordingSpan —— 一个值类型，
+// 它内嵌的 SpanContext 里的 TraceState 是 slice，属于「类型上不可哈希」。
+// 拿它调 sync.Map 的 Store / Delete 会直接 panic: hash of unhashable type，
+// 而 Delete 同样要算哈希，所以只给 Store 加守卫是挡不住的（漏了 Delete 照样崩）。
+// 换成两个定长数组做键，可哈希就由类型系统保证，不再依赖调用方记得加守卫。
+//
+// 为什么用 TraceID+SpanID 而不是 span 指针：SpanContext 在 span 结束后保持不变，
+// 于是 EndSpan 侧能算出与 StartSpan 完全相同的键；数组键也不需要解引用或担心复用。
+//
+// 注意：OTelExporter=noop 时所有 noop span 的键都是零值、会互相覆盖 ——
+// 但兜底路径先判 IsRecording()，noop span 恒为 false，永远不会读到这个键。
 var spanByOtel sync.Map
 
 // SetSpanAttrs 在 ctx 对应的当前 span 上直接追加/覆盖 attrs。
@@ -656,7 +684,7 @@ func (r *defaultRecorder) StartSpan(ctx context.Context, name string, component 
 	}
 
 	// 关联 OTel span 到自研 Span，CurrentSpanFromContext 兜底路径用
-	spanByOtel.Store(otelSpan, s)
+	spanByOtel.Store(spanKeyOf(otelSpan), s)
 
 	// ctx 携带自研 Span 引用：子 span 的 parent 查找与 CurrentSpanFromContext 走这里，
 	// 与 span 的 End 状态解耦（见上方 parent 查找注释）。
@@ -742,7 +770,7 @@ func (r *defaultRecorder) EndSpan(ctx context.Context, span *Span, status SpanSt
 		}
 		span.otelSpan.End(trace.WithTimestamp(span.EndAt))
 		// 清理 spanByOtel 关联，避免内存泄漏
-		spanByOtel.Delete(span.otelSpan)
+		spanByOtel.Delete(spanKeyOf(span.otelSpan))
 	}
 
 	// 落库 parent-child：用 StartSpan 时存的 parent 引用挂接 children。

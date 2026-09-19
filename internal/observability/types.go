@@ -105,7 +105,8 @@ type Span struct {
 	otelSpan trace.Span `json:"-"`
 
 	// parent 落库用：指向父 Span，EndSpan 时把当前 span append 到 parent.Children。
-	// StartSpan 时从入参 ctx 的 spanByOtel 查找 parent 并存入。
+	// StartSpan 时从入参 ctx 的 currentSpanKey 取父 span（与 span 的 End 状态解耦），
+	// spanByOtel 只是 CurrentSpanFromContext 的兜底反查，不参与建树。
 	// json:"-" 避免序列化循环。
 	parent *Span `json:"-"`
 }
