@@ -388,27 +388,23 @@ const kbTriggerText = computed(() => {
     .join(', ')
 })
 
-function calcPos(trigger: HTMLElement, panelHeight: number, panelWidth: number) {
+// 统一下拉面板定位：在触发器上方弹出，并基于实际渲染高度计算，避免估算不准导致面板悬空
+function positionPanelAbove(trigger: HTMLElement | undefined, panel: HTMLElement | undefined, panelWidth: number) {
+  if (!trigger || !panel) return { top: 0, left: 0 }
   const rect = trigger.getBoundingClientRect()
+  const height = panel.offsetHeight
+  const width = panel.offsetWidth || panelWidth
   return {
-    top: rect.top - panelHeight - 8,
-    left: Math.min(rect.left, window.innerWidth - panelWidth - 8),
+    top: Math.max(8, rect.top - height - 8),
+    left: Math.min(rect.left, window.innerWidth - width - 8),
   }
-}
-
-function estimatePanelHeight(itemCount: number, itemHeight: number, headerHeight: number) {
-  return headerHeight + itemCount * itemHeight
 }
 
 async function toggleKbDropdown() {
   showKbDropdown.value = !showKbDropdown.value
   if (showKbDropdown.value) {
     await nextTick()
-    if (kbDropdownRef.value) {
-      const count = 2 + filteredKBs.value.length
-      const height = estimatePanelHeight(count, 36, 90)
-      kbPanelPos.value = calcPos(kbDropdownRef.value, Math.min(height, 330), 288)
-    }
+    kbPanelPos.value = positionPanelAbove(kbDropdownRef.value, kbPanelRef.value, 288)
   }
 }
 
@@ -416,10 +412,7 @@ async function toggleSearchDropdown() {
   showSearchDropdown.value = !showSearchDropdown.value
   if (showSearchDropdown.value) {
     await nextTick()
-    if (searchDropdownRef.value) {
-      const height = estimatePanelHeight(searchOptions.length, 36, 8)
-      searchPanelPos.value = calcPos(searchDropdownRef.value, height, 160)
-    }
+    searchPanelPos.value = positionPanelAbove(searchDropdownRef.value, searchPanelRef.value, 160)
   }
 }
 
@@ -427,11 +420,7 @@ async function toggleModelDropdown() {
   showModelDropdown.value = !showModelDropdown.value
   if (showModelDropdown.value) {
     await nextTick()
-    if (modelDropdownRef.value) {
-      const count = sysOpts.value.length + userOpts.value.length + (sysOpts.value.length ? 1 : 0) + (userOpts.value.length ? 1 : 0)
-      const height = estimatePanelHeight(count, 36, 8)
-      modelPanelPos.value = calcPos(modelDropdownRef.value, Math.min(height, 268), 192)
-    }
+    modelPanelPos.value = positionPanelAbove(modelDropdownRef.value, modelPanelRef.value, 192)
   }
 }
 
@@ -467,11 +456,7 @@ async function toggleMCPDropdown() {
   showMCPDropdown.value = !showMCPDropdown.value
   if (showMCPDropdown.value) {
     await nextTick()
-    if (mcpDropdownRef.value) {
-      const count = mcpOpts.value.length + 4
-      const height = estimatePanelHeight(count, 36, 120)
-      mcpPanelPos.value = calcPos(mcpDropdownRef.value, Math.min(height, 400), 288)
-    }
+    mcpPanelPos.value = positionPanelAbove(mcpDropdownRef.value, mcpPanelRef.value, 288)
   }
 }
 
