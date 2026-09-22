@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	einoCompose "github.com/cloudwego/eino/compose"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 
@@ -44,13 +45,23 @@ type chatService struct {
 	prefSvc             UserPreferenceService
 	obs                 observability.Recorder
 	obsRepo             repository.ObservabilityRepo
+	txMgr               repository.TxManager
 	embedClient         *llm.EmbeddingClient
+
+	// quickGraph 快速模式检索链路：启动期 build + Compile 一次，请求期只把请求级变量
+	// （ChatModel / 改写结果）装进 quickGraphInput 再 Invoke，不再经 context 注入。
+	// 图结构静态，因此「编译失败」被前移到启动期，请求期不存在该路径。
+	quickGraph einoCompose.Runnable[*quickGraphInput, *quickGraphOutput]
 }
 
-// NewChatService 创建聊天业务服务
+// NewChatService 创建聊天业务服务。
+//
+// 依赖全部显式声明：旧版本把 obs/obsRepo 塞在 extra ...interface{} 里再靠类型 switch
+// 分派，漏传或传错类型都不会报错，只会在运行时静默丢链路（s.obs == nil）。
 func NewChatService(
 	sessionRepo repository.ChatSessionRepo,
 	messageRepo repository.ChatMessageRepo,
+	txMgr repository.TxManager,
 	retriever rag.Retriever,
 	modelRepo repository.ModelRepo,
 	userModelConfigRepo repository.UserModelConfigRepo,
@@ -59,17 +70,28 @@ func NewChatService(
 	agentEngine *agent.Engine,
 	contextSvc ContextServiceInterface,
 	prefSvc UserPreferenceService,
-	extra ...interface{},
-) ChatServiceInterface {
+	obs observability.Recorder,
+	obsRepo repository.ObservabilityRepo,
+) (ChatServiceInterface, error) {
 	defaultTopK := 10
 	if cfg := config.Get(); cfg != nil && cfg.RAG.TopK > 0 {
 		defaultTopK = cfg.RAG.TopK
 	}
-	s := &chatService{
+	einoRetriever := rag.NewEinoRetrieverAdapter(retriever, defaultTopK)
+
+	// 快速模式的 Graph 在这里就编译好：装配错误只可能变成启动错误。
+	quickGraph, err := compileQuickGraph(einoRetriever, obs)
+	if err != nil {
+		return nil, fmt.Errorf("编译快速检索链路失败: %w", err)
+	}
+
+	return &chatService{
 		sessionRepo:         sessionRepo,
 		messageRepo:         messageRepo,
+		txMgr:               txMgr,
 		retriever:           retriever,
-		einoRetriever:       rag.NewEinoRetrieverAdapter(retriever, defaultTopK),
+		einoRetriever:       einoRetriever,
+		quickGraph:          quickGraph,
 		modelRepo:           modelRepo,
 		userModelConfigRepo: userModelConfigRepo,
 		userRepo:            userRepo,
@@ -77,22 +99,9 @@ func NewChatService(
 		agentEngine:         agentEngine,
 		contextSvc:          contextSvc,
 		prefSvc:             prefSvc,
-	}
-	for _, it := range extra {
-		switch v := it.(type) {
-		case observability.Recorder:
-			s.obs = v
-		case repository.ObservabilityRepo:
-			s.obsRepo = v
-		}
-	}
-	return s
-}
-
-// SetObservability 注入可观测性记录器和仓储
-func (s *chatService) SetObservability(obs observability.Recorder, repo repository.ObservabilityRepo) {
-	s.obs = obs
-	s.obsRepo = repo
+		obs:                 obs,
+		obsRepo:             obsRepo,
+	}, nil
 }
 
 // SendMessage 发送消息并获取流式响应
@@ -193,7 +202,9 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 
 // updateUserLastModel 更新用户上次使用的模型（缓存比对策略）
 func (s *chatService) updateUserLastModel(ctx context.Context, userID, modelID string) {
-	cacheKey := "user:model:" + userID
+	// key 只需用户维度：userCache 实例已带 "user:model:" 前缀，
+	// 这里再拼一次会变成 user:model:user:model:<userID>
+	cacheKey := userID
 
 	// 1. 从缓存获取上次使用的模型
 	var cachedModelID string
@@ -241,7 +252,7 @@ func (s *chatService) CreateSession(ctx context.Context, userID string, req requ
 func (s *chatService) GetSession(ctx context.Context, userID, sessionID string) (dto.SessionResponse, error) {
 	session, err := s.sessionRepo.FindByID(ctx, sessionID)
 	if err != nil {
-		return dto.SessionResponse{}, apperrors.NewDefault(apperrors.CodeSessionNotFound)
+		return dto.SessionResponse{}, apperrors.NotFoundOrInternal(apperrors.CodeSessionNotFound, err)
 	}
 	if session.UserID != userID {
 		return dto.SessionResponse{}, apperrors.NewDefault(apperrors.CodeSessionNotFound)
@@ -278,13 +289,18 @@ func (s *chatService) DeleteSession(ctx context.Context, userID, sessionID strin
 	if err := s.validateSession(ctx, userID, sessionID); err != nil {
 		return err
 	}
-	if err := s.messageRepo.DeleteBySessionID(ctx, sessionID); err != nil {
-		return fmt.Errorf("删除会话消息失败: %w", err)
-	}
-	if err := s.sessionRepo.Delete(ctx, sessionID); err != nil {
-		return fmt.Errorf("删除会话失败: %w", err)
-	}
-	return nil
+	// 会话与其消息必须同生共死：两步分开写、中间失败就会留下「消息已删、会话还在」
+	// 的空壳 —— 用户看得见会话，点进去却是空的。两个仓库各自持有连接池，
+	// 只有 InTx 能让它们落进同一个事务。
+	return s.txMgr.InTx(ctx, func(ctx context.Context) error {
+		if err := s.messageRepo.DeleteBySessionID(ctx, sessionID); err != nil {
+			return fmt.Errorf("删除会话消息失败: %w", err)
+		}
+		if err := s.sessionRepo.Delete(ctx, sessionID); err != nil {
+			return fmt.Errorf("删除会话失败: %w", err)
+		}
+		return nil
+	})
 }
 
 // GetMessages 获取指定会话的消息列表
@@ -498,19 +514,6 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 	return client, enhancedCtx, nil
 }
 
-// loadUserContext 加载用户基本信息，失败时返回空上下文（不阻断主流程）
-func (s *chatService) loadUserContext(ctx context.Context, userID string) UserContext {
-	if s.userRepo == nil || userID == "" {
-		return NewUserContext(entity.User{})
-	}
-	user, err := s.userRepo.FindByID(userID)
-	if err != nil {
-		logger.Warnf("加载用户信息失败, userID=%s: %v", userID, err)
-		return NewUserContext(entity.User{})
-	}
-	return NewUserContext(*user)
-}
-
 // resolveClient 根据模型配置解析 LLM 客户端
 func (s *chatService) resolveClient(ctx context.Context, userID, modelID, modelType string) (*llm.OpenAIClient, error) {
 	var cfg llm.ModelConfig
@@ -545,13 +548,22 @@ func (s *chatService) resolveClient(ctx context.Context, userID, modelID, modelT
 		return nil, fmt.Errorf("不支持的模型类型: %s", modelType)
 	}
 
+	// 登记 modelID → 供应商：
+	// cfg.Provider 此时是「API 协议格式」（openai/anthropic），不是厂商名 ——
+	// 混用的后果是平台上所有模型都归到 openai，故先用 llm.ProviderLabel
+	// 从 base_url 还原真实服务方。
+	// eino 回调的 CallbackInput.Config 不带 provider，
+	// 而 gen_ai.provider.name 是三方追踪平台的必需属性，只能在这里（唯一解析模型配置的地方）登记一次，
+	// 之后由 observability 的 eino 回调按 model_id 反查。
+	observability.RegisterGenAIProvider(cfg.ModelID, llm.ProviderLabel(cfg.ModelID, cfg.Provider, cfg.BaseURL))
+
 	return llm.NewClientFromModelConfig(ctx, cfg)
 }
 
 func (s *chatService) validateSession(ctx context.Context, userID, sessionID string) error {
 	session, err := s.sessionRepo.FindByID(ctx, sessionID)
 	if err != nil {
-		return apperrors.NewDefault(apperrors.CodeSessionNotFound)
+		return apperrors.NotFoundOrInternal(apperrors.CodeSessionNotFound, err)
 	}
 	if session.UserID != userID {
 		return apperrors.NewDefault(apperrors.CodeSessionNotFound)

@@ -74,6 +74,8 @@ export interface SendMessageRequest {
   search_mode: string
   model_id: string
   model_type: string
+  /** 用户启用的 MCP 工具配置 ID 列表（可多选，空表示使用全部已启用的） */
+  mcp_user_config_ids?: string[]
 }
 
 // ── SSE Stream Event ──

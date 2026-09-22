@@ -17,19 +17,20 @@ func (s *chatService) buildTraceResponse(t *entity.ChatTrace, includeAgentDetail
 		return TraceResponse{}
 	}
 	resp := TraceResponse{
-		ID:         t.ID,
-		RequestID:  t.RequestID,
-		UserID:     t.UserID,
-		SessionID:  t.SessionID,
-		SearchMode: extractSearchMode(t.Attrs),
-		SampleRate: t.SampleRate,
-		Sampled:    t.Sampled,
-		DurationMs: t.DurationMs,
-		Status:     t.Status,
-		Error:      t.Error,
-		Attrs:      t.Attrs,
-		SpanTree:   t.SpanTree,
-		CreatedAt:  t.CreatedAt.Format("2006-01-02 15:04:05"),
+		ID:          t.ID,
+		RequestID:   t.RequestID,
+		UserID:      t.UserID,
+		SessionID:   t.SessionID,
+		OTelTraceID: t.OTelTraceID,
+		SearchMode:  extractSearchMode(t.Attrs),
+		SampleRate:  t.SampleRate,
+		Sampled:     t.Sampled,
+		DurationMs:  t.DurationMs,
+		Status:      t.Status,
+		Error:       t.Error,
+		Attrs:       t.Attrs,
+		SpanTree:    t.SpanTree,
+		CreatedAt:   t.CreatedAt.Format("2006-01-02 15:04:05"),
 	}
 	if !includeAgentDetail || s.obsRepo == nil {
 		return resp

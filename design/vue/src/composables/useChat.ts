@@ -5,9 +5,11 @@ import { marked } from 'marked'
 import * as chatApi from '@/api/chat'
 import * as modelApi from '@/api/model'
 import * as authApi from '@/api/auth'
+import * as toolApi from '@/api/tool'
 import { request } from '@/api/client'
 import type { ChatSession, FeedbackRequest, PendingApproval } from '@/types/chat'
 import type { StreamEvent } from '@/types/chat'
+import type { ToolTemplate, UserToolConfigInfo } from '@/types/tool'
 
 // ── UI 展示用的本地类型 ──
 
@@ -102,6 +104,31 @@ export function useChat() {
   const selectedKBs = ref<string[]>([])
   const searchMode = ref<'quick' | 'smart-reasoning'>('quick')
 
+  // ── MCP 工具（用户启用后可在对话级选择） ──
+  const mcpToolTemplates = ref<ToolTemplate[]>([])
+  const mcpUserConfigs = ref<UserToolConfigInfo[]>([])
+  const mcpLoading = ref(true)
+  const MCP_SELECTION_KEY = 'solvify:mcp-selection'
+  /** 对话级选中的 MCP user config ids（空=使用全部已启用） */
+  const selectedMCPConfigIds = ref<string[]>([])
+
+  /** 用户已启用的 MCP 服务器列表（用于选择器展示） */
+  const enabledMCPOptions = computed<{ id: string; name: string; description: string }[]>(() => {
+    const template = mcpToolTemplates.value.find(t => t.tool_key === 'mcp')
+    const providers = template?.providers ?? []
+    const rows: { id: string; name: string; description: string }[] = []
+    for (const c of mcpUserConfigs.value) {
+      if (c.tool_type_key !== 'mcp' || !c.is_enabled) continue
+      const provider = providers.find(p => p.id === c.provider_id)
+      rows.push({
+        id: c.id,
+        name: c.display_name || provider?.name || c.provider_name || c.provider_id,
+        description: provider?.description || '',
+      })
+    }
+    return rows
+  })
+
   // ── 中断控制 ──
   let abortController: AbortController | null = null
 
@@ -125,11 +152,13 @@ export function useChat() {
   // ── 初始化 ──
   async function init() {
     try {
-      const [modelsRes, userModelsRes, kbRes, profileRes] = await Promise.all([
+      const [modelsRes, userModelsRes, kbRes, profileRes, toolTmplRes, userToolConfigRes] = await Promise.all([
         modelApi.listModels().catch(() => null),
         modelApi.listUserModelConfigs().catch(() => null),
         request<{ data: unknown }>('/knowledge-bases').catch(() => null),
         authApi.getProfile().catch(() => null),
+        toolApi.listToolTemplates().catch(() => null),
+        toolApi.listUserToolConfigs().catch(() => null),
       ])
 
       const opts: ModelOption[] = []
@@ -166,11 +195,42 @@ export function useChat() {
         }
         selectedKBs.value = knowledgeBases.value.map(k => k.id)
       }
+
+      // MCP 数据
+      if (toolTmplRes?.code === 0 && Array.isArray(toolTmplRes.data)) {
+        mcpToolTemplates.value = toolTmplRes.data
+      }
+      if (userToolConfigRes?.code === 0) {
+        mcpUserConfigs.value = userToolConfigRes.data?.configs ?? []
+      }
+      // 从 localStorage 恢复上次的 MCP 选择（若持久化的 ID 均仍存在则用；否则回退空=全部）
+      try {
+        const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(MCP_SELECTION_KEY) : null
+        if (saved) {
+          const parsed = JSON.parse(saved) as string[]
+          if (Array.isArray(parsed) && parsed.length) {
+            const availableIds = new Set(enabledMCPOptions.value.map(o => o.id))
+            const valid = parsed.filter(x => availableIds.has(x))
+            if (valid.length) selectedMCPConfigIds.value = valid
+          }
+        }
+      } catch { /* 解析失败静默忽略 */ }
       connected.value = true
     } catch {
       connected.value = false
+    } finally {
+      mcpLoading.value = false
     }
   }
+
+  // MCP 选择变化 → 写入 localStorage 持久化
+  watch(selectedMCPConfigIds, (v) => {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(MCP_SELECTION_KEY, JSON.stringify(v ?? []))
+      }
+    } catch { /* 忽略写入失败 */ }
+  }, { deep: false })
 
   // ── 会话操作 ──
   // 加载会话列表
@@ -348,6 +408,7 @@ export function useChat() {
       model_type: modelOpt?.modelType ?? 'system',
       search_mode: searchMode.value,
       knowledge_base_ids: selectedKBs.value.length ? selectedKBs.value : knowledgeBases.value.map(k => k.id),
+      mcp_user_config_ids: selectedMCPConfigIds.value.length ? selectedMCPConfigIds.value : undefined,
     }, abortController.signal)
 
     const traceId = reader._meta?.trace_id
@@ -812,6 +873,9 @@ export function useChat() {
 
   return {
     sessions,
+    selectedMCPConfigIds,
+    enabledMCPOptions,
+    mcpLoading,
     activeSessionId,
     activeSession,
     messages,

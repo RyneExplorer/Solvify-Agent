@@ -11,11 +11,17 @@ import (
 
 	"solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/tool"
+	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // runWithRunner 用 adk.Runner 执行 Agent，产出 AgentEvent 并转换到 eventCh。
 // 首次执行调 runner.Run，带 ResumeData 时调 runner.ResumeWithParams。
+//
+// 事件一律经 pkg/eventch 投递：ctx 取消（客户端断连、请求超时）时丢弃而非阻塞。
+// 否则 eventCh 写满后本函数会永久卡在发送上，连带下面的 checkpoint 清理与 DB 连接
+// 一起泄漏，且每次断连都新增一份（审查报告 P0-1）。
 func (e *Engine) runWithRunner(
 	ctx context.Context,
 	runner *adk.Runner,
@@ -25,8 +31,6 @@ func (e *Engine) runWithRunner(
 	ksTool *tool.KnowledgeSearchTool,
 	toolDescMap map[string]string,
 	eventCh chan<- Event,
-	tracker *agentStepTracker,
-	taskID string,
 ) {
 	var (
 		iter *adk.AsyncIterator[*adk.AgentEvent]
@@ -41,7 +45,7 @@ func (e *Engine) runWithRunner(
 		})
 		if err != nil {
 			logger.Errorf("[Agent] ResumeWithParams 失败: %v", err)
-			eventCh <- Event{
+			eventch.Send(ctx, eventCh, Event{
 				Type:      EventError,
 				Title:     "恢复执行失败",
 				Detail:    "无法从中断点恢复，请重新发起深度模式请求",
@@ -49,7 +53,7 @@ func (e *Engine) runWithRunner(
 				Status:    "error",
 				Retryable: false,
 				Done:      true,
-			}
+			})
 			return
 		}
 	} else {
@@ -72,7 +76,7 @@ func (e *Engine) runWithRunner(
 			}
 			logger.Errorf("[Agent] Runner 事件错误: %v", agentEvent.Err)
 			if isToolChoiceUnsupportedError(agentEvent.Err.Error()) {
-				eventCh <- Event{
+				eventch.Send(ctx, eventCh, Event{
 					Type:      EventError,
 					Title:     "当前模型不支持工具调用",
 					Detail:    "该模型不支持工具调用功能，无法使用联网搜索、天气查询等工具。建议切换到支持工具调用的模型（如通义千问、智谱清言、DeepSeek 等），或使用快速模式。",
@@ -80,10 +84,10 @@ func (e *Engine) runWithRunner(
 					Status:    "error",
 					Retryable: false,
 					Done:      true,
-				}
+				})
 				return
 			}
-			eventCh <- Event{
+			eventch.Send(ctx, eventCh, Event{
 				Type:      EventError,
 				Title:     "深度推理失败",
 				Detail:    "深度思考模式执行异常，请重试或使用快速模式",
@@ -91,7 +95,7 @@ func (e *Engine) runWithRunner(
 				Status:    "error",
 				Retryable: true,
 				Done:      true,
-			}
+			})
 			return
 		}
 
@@ -109,12 +113,12 @@ func (e *Engine) runWithRunner(
 						infoStr = s
 					}
 				}
-				logger.Infof("[Agent] 执行中断: checkpointID=%s, interruptID=%s, info=%s", checkpointID, interruptID, truncateStr(infoStr, 200))
+				logger.Infof("[Agent] 执行中断: checkpointID=%s, interruptID=%s, info=%s", checkpointID, interruptID, strutil.Truncate(infoStr, 200))
 
 				infoType, infoData := parseInterruptInfo(infoStr)
 
 				if infoType == "clarify" {
-					eventCh <- Event{
+					eventch.Send(ctx, eventCh, Event{
 						Type:            EventInterrupt,
 						Title:           "需要澄清",
 						Detail:          getString(infoData, "question"),
@@ -127,24 +131,24 @@ func (e *Engine) runWithRunner(
 						ClarifyOptions:  getStringSlice(infoData, "options"),
 						ClarifyContext:  getString(infoData, "context"),
 						Done:            true,
-					}
+					})
 				} else {
 					// danger 或未知类型 → 按审批处理
 					message := getString(infoData, "message")
 					if message == "" {
 						message = formatInterruptInfo(infoStr)
 					}
-					eventCh <- Event{
+					eventch.Send(ctx, eventCh, Event{
 						Type:          EventInterrupt,
 						Title:         "需要人工确认",
-						Detail:        truncateStr(message, 256),
+						Detail:        strutil.Truncate(message, 256),
 						Status:        "interrupt",
 						Error:         interruptID,
 						CheckpointID:  checkpointID,
 						InterruptID:   interruptID,
 						InterruptInfo: infoData,
 						Done:          true,
-					}
+					})
 				}
 				return
 			}
@@ -172,36 +176,51 @@ func (e *Engine) runWithRunner(
 		e.handleMessage(ctx, msg, mv.Role, mv.ToolName, toolDescMap, &fullAnswer, eventCh)
 	}
 
+	// 取一次来源快照：同一轮可能并行跑多个 knowledge_search，工具侧的收集结果由
+	// Sources() 在互斥锁下复制（审查报告 P0-4）；快照也让下面的兜底与来源收集
+	// 读到同一份一致视图，而不是各读一次可能已被改写的内部切片。
+	var collected []tool.SourceDocument
+	if ksTool != nil {
+		collected = ksTool.Sources()
+	}
+
 	// ── 兜底：没拿到 ToolCalls 也没拿到最终答案，但 KB 有结果 ──
-	if strings.TrimSpace(fullAnswer.String()) == "" && ksTool != nil && len(ksTool.CollectedSources) > 0 {
-		fallback := buildFallbackAnswer(ksTool.CollectedSources)
+	if strings.TrimSpace(fullAnswer.String()) == "" && len(collected) > 0 {
+		fallback := buildFallbackAnswer(collected)
 		fullAnswer.WriteString(fallback)
-		eventCh <- Event{Type: EventAnswer, Content: fallback}
+		eventch.Send(ctx, eventCh, Event{Type: EventAnswer, Content: fallback})
 	}
 
 	// ── 收集 Sources ──
 	var sources []response.SourceInfo
-	if ksTool != nil {
-		sources = collectSources(ksTool.CollectedSources)
+	if len(collected) > 0 {
+		sources = collectSources(collected)
 	}
 
 	if strings.TrimSpace(fullAnswer.String()) != "" {
-		eventCh <- Event{Type: EventThinking, Title: "正在生成答案", Status: "success"}
+		eventch.Send(ctx, eventCh, Event{Type: EventThinking, Title: "正在生成答案", Status: "success"})
 	}
 	if len(sources) > 0 {
-		eventCh <- Event{Type: EventSources, Sources: sources}
+		eventch.Send(ctx, eventCh, Event{Type: EventSources, Sources: sources})
 	}
 
-	// observability
-	if tracker != nil && taskID != "" && e.obs != nil {
-		// Runner 已经在内部处理了完整的 step tracker，这里兜底留空即可
+	// 清理本次运行产生的 checkpoint 字节行：
+	// Eino 框架不会在恢复完成后自动删除 CheckPointStore 中的记录（Delete 是可选接口，框架从不主动调用），
+	// 若不清理，agent_checkpoints 会无限堆积。恢复执行成功后这里主动删除，避免泄漏。
+	// 仅在正常完成（到达 EventDone）时清理：interrupt / error 早返回路径需要保留 checkpoint 供后续恢复。
+	if e.checkpointRepo != nil && checkpointID != "" {
+		if dErr := e.checkpointRepo.Delete(ctx, checkpointID); dErr != nil {
+			logger.Warnf("[Agent] 删除 checkpoint 字节失败（不阻塞）: checkpointID=%s, err=%v", checkpointID, dErr)
+		} else {
+			logger.Infof("[Agent] 已删除 checkpoint 字节: checkpointID=%s", checkpointID)
+		}
 	}
 
-	eventCh <- Event{
+	eventch.Send(ctx, eventCh, Event{
 		Type:    EventDone,
 		Content: fullAnswer.String(),
 		Sources: sources,
-	}
+	})
 }
 
 func (e *Engine) consumeMessageStream(
@@ -247,22 +266,22 @@ func (e *Engine) consumeMessageStream(
 				for _, tc := range msg.ToolCalls {
 					if tc.Function.Name != "" {
 						toolCallName = tc.Function.Name
-						eventCh <- Event{
+						eventch.Send(ctx, eventCh, Event{
 							Type:   EventToolCall,
 							Title:  "调用工具",
-							Detail: truncateStr(tc.Function.Arguments, 200),
+							Detail: strutil.Truncate(tc.Function.Arguments, 200),
 							Status: "running",
-						}
+						})
 						toolCallPending = true
 					}
 				}
 				if strings.TrimSpace(msg.Content) != "" {
-					eventCh <- Event{
+					eventch.Send(ctx, eventCh, Event{
 						Type:   EventThinking,
 						Title:  "深度推理中",
-						Detail: truncateStr(msg.Content, 200),
+						Detail: strutil.Truncate(msg.Content, 200),
 						Status: "running",
-					}
+					})
 				}
 				continue
 			}
@@ -270,7 +289,7 @@ func (e *Engine) consumeMessageStream(
 			// 最终答案
 			if msg.Content != "" {
 				fullAnswer.WriteString(msg.Content)
-				eventCh <- Event{Type: EventAnswer, Content: msg.Content}
+				eventch.Send(ctx, eventCh, Event{Type: EventAnswer, Content: msg.Content})
 			}
 			continue
 		}
@@ -278,13 +297,13 @@ func (e *Engine) consumeMessageStream(
 		// Role=Tool 完整结果
 		if mv.Role == schema.Tool && msg.Content != "" {
 			title, detail, _ := formatToolEnd(toolCallName, &einoTool.CallbackOutput{Response: msg.Content}, toolDescMap)
-			eventCh <- Event{
+			eventch.Send(ctx, eventCh, Event{
 				Type:       EventToolResult,
 				Title:      title,
 				Detail:     detail,
 				Status:     "success",
 				ToolResult: msg.Content,
-			}
+			})
 			toolCallPending = false
 		}
 	}
@@ -307,38 +326,38 @@ func (e *Engine) handleMessage(
 					continue
 				}
 				title, detail := formatToolStart(tc.Function.Name, extractQueryFromArgs(tc.Function.Arguments), nil, toolDescMap)
-				eventCh <- Event{
+				eventch.Send(ctx, eventCh, Event{
 					Type:   EventToolCall,
 					Title:  title,
 					Detail: detail,
 					Status: "running",
-				}
+				})
 			}
 			if strings.TrimSpace(msg.Content) != "" {
-				eventCh <- Event{
+				eventch.Send(ctx, eventCh, Event{
 					Type:   EventThinking,
 					Title:  "深度推理中",
-					Detail: truncateStr(msg.Content, 200),
+					Detail: strutil.Truncate(msg.Content, 200),
 					Status: "running",
-				}
+				})
 			}
 			return
 		}
 		if msg.Content != "" {
 			fullAnswer.WriteString(msg.Content)
-			eventCh <- Event{Type: EventAnswer, Content: msg.Content}
+			eventch.Send(ctx, eventCh, Event{Type: EventAnswer, Content: msg.Content})
 		}
 
 	case schema.Tool:
 		if msg.Content != "" {
 			title, detail, _ := formatToolEnd(toolName, &einoTool.CallbackOutput{Response: msg.Content}, toolDescMap)
-			eventCh <- Event{
+			eventch.Send(ctx, eventCh, Event{
 				Type:       EventToolResult,
 				Title:      title,
 				Detail:     detail,
 				Status:     "success",
 				ToolResult: msg.Content,
-			}
+			})
 		}
 	}
 }
@@ -369,38 +388,46 @@ func mapKeys(m map[string]any) []string {
 	return out
 }
 
-// collectSources 从 KnowledgeSearchTool.CollectedSources 转换成 response.SourceInfo
+// collectSources 从 KnowledgeSearchTool.CollectedSources 转换成 response.SourceInfo。
+//
+// 分组口径与 chat_service_mapper.go 的 groupDocumentsToSources 保持一致，两条关键规则：
+//  1. 按 DocumentID 分组，不按 Title。同一份文档通常会命中多个 chunk 需要并成一条来源；
+//     但不同文档完全可能同名（附件默认标题、重名文件），按 Title 分组会把两份不同文档
+//     并成一条，并让后者的 chunk 挂到前者的 documentID 上 —— 前端点击引用会跳到错的文档。
+//  2. 用 docOrder 记录首次出现顺序。直接遍历 map 会打乱来源顺序，而该顺序即检索的
+//     相似度顺序，打乱后用户每次看到的引用列表顺序都不一样。
 func collectSources(sources []tool.SourceDocument) []response.SourceInfo {
 	if len(sources) == 0 {
 		return nil
 	}
-	type docInfo struct {
-		documentID      string
-		knowledgeBaseID string
-		chunks          []response.ChunkSource
-	}
-	docMap := make(map[string]*docInfo)
+
+	docMap := make(map[string]*response.SourceInfo, len(sources))
+	docOrder := make([]string, 0, len(sources))
 	for _, src := range sources {
-		if _, exists := docMap[src.Title]; !exists {
-			docMap[src.Title] = &docInfo{
-				documentID:      src.DocumentID,
-				knowledgeBaseID: src.KnowledgeBaseID,
+		info, exists := docMap[src.DocumentID]
+		if !exists {
+			info = &response.SourceInfo{
+				DocumentID:      src.DocumentID,
+				KnowledgeBaseID: src.KnowledgeBaseID,
+				Title:           src.Title,
 			}
+			docMap[src.DocumentID] = info
+			docOrder = append(docOrder, src.DocumentID)
 		}
-		docMap[src.Title].chunks = append(docMap[src.Title].chunks, response.ChunkSource{
+		info.Chunks = append(info.Chunks, response.ChunkSource{
 			ID:      src.ID,
 			Content: src.Content,
 			Score:   src.Score,
 		})
+		// 文档级 score 取命中的最高分 chunk：来源列表按该分值展示相关度
+		if src.Score > info.Score {
+			info.Score = src.Score
+		}
 	}
-	result := make([]response.SourceInfo, 0, len(docMap))
-	for title, info := range docMap {
-		result = append(result, response.SourceInfo{
-			DocumentID:      info.documentID,
-			KnowledgeBaseID: info.knowledgeBaseID,
-			Title:           title,
-			Chunks:          info.chunks,
-		})
+
+	result := make([]response.SourceInfo, 0, len(docOrder))
+	for _, docID := range docOrder {
+		result = append(result, *docMap[docID])
 	}
 	return result
 }

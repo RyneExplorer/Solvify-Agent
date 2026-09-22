@@ -12,8 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"solvify-agent/internal/observability"
 	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // HTTPProvider 通用 HTTP 供应商
@@ -27,14 +29,17 @@ func NewHTTPProvider() *HTTPProvider {
 	proxyFunc := func(req *http.Request) (*url.URL, error) {
 		return nil, nil
 	}
+	// 出站追踪：工具调用的目标 URL 来自配置/用户输入，是最需要留痕的一类外部调用，
+	// client span 上的 server.address 能直接回答「这个工具到底打到了哪个域名」。
+	transport := &http.Transport{
+		Proxy:               proxyFunc,
+		TLSHandshakeTimeout: 10 * time.Second,
+		DisableKeepAlives:   false,
+	}
 	return &HTTPProvider{
 		client: &http.Client{
-			Timeout: 15 * time.Second,
-			Transport: &http.Transport{
-				Proxy:               proxyFunc,
-				TLSHandshakeTimeout: 10 * time.Second,
-				DisableKeepAlives:   false,
-			},
+			Timeout:   15 * time.Second,
+			Transport: observability.HTTPTransport(transport),
 		},
 	}
 }
@@ -150,7 +155,7 @@ func (p *HTTPProvider) Execute(ctx context.Context, config *tool.ExecuteConfig) 
 		zap.String("url", url),
 		zap.Int("status", resp.StatusCode),
 		zap.Int("result_length", len(result)),
-		zap.String("result_preview", truncate(result, 2000)))
+		zap.String("result_preview", strutil.Truncate(result, 2000)))
 
 	return result, err
 }
@@ -409,11 +414,4 @@ func base64Encode(s string) string {
 	}
 
 	return string(result)
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }

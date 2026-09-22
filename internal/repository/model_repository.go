@@ -20,23 +20,23 @@ func NewModelRepository(db *gorm.DB) ModelRepo {
 
 // Create 创建系统模型
 func (r *modelRepository) Create(ctx context.Context, model *entity.Model) error {
-	return r.db.WithContext(ctx).Create(model).Error
+	return dbFor(ctx, r.db).Create(model).Error
 }
 
 // Update 更新系统模型
 func (r *modelRepository) Update(ctx context.Context, model *entity.Model) error {
-	return r.db.WithContext(ctx).Save(model).Error
+	return dbFor(ctx, r.db).Save(model).Error
 }
 
 // Delete 删除系统模型
 func (r *modelRepository) Delete(ctx context.Context, id string) error {
-	return r.db.WithContext(ctx).Delete(&entity.Model{}, "id = ?", id).Error
+	return dbFor(ctx, r.db).Delete(&entity.Model{}, "id = ?", id).Error
 }
 
 // List 获取所有启用的系统模型
 func (r *modelRepository) List(ctx context.Context) ([]entity.Model, error) {
 	var models []entity.Model
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("is_enabled = ?", true).
 		Order("name ASC").
 		Find(&models).Error
@@ -46,7 +46,7 @@ func (r *modelRepository) List(ctx context.Context) ([]entity.Model, error) {
 // GetByID 根据 ID 获取模型
 func (r *modelRepository) GetByID(ctx context.Context, id string) (*entity.Model, error) {
 	var model entity.Model
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("id = ?", id).
 		First(&model).Error
 	if err != nil {
@@ -58,7 +58,7 @@ func (r *modelRepository) GetByID(ctx context.Context, id string) (*entity.Model
 // ExistsByModelID 检查 model_id 是否已存在
 func (r *modelRepository) ExistsByModelID(ctx context.Context, modelID string, excludeID string) (bool, error) {
 	var count int64
-	query := r.db.WithContext(ctx).Model(&entity.Model{}).Where("model_id = ?", modelID)
+	query := dbFor(ctx, r.db).Model(&entity.Model{}).Where("model_id = ?", modelID)
 	if excludeID != "" {
 		query = query.Where("id != ?", excludeID)
 	}

@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -29,6 +32,17 @@ var (
 
 	tracerInitOnce sync.Once
 	promInitOnce   sync.Once
+
+	// otelExportActive 标记 OTel SDK 是否挂了真实 SpanExporter（InitTracerProvider 里设置）。
+	//
+	// 为什么需要这个标志：SpanContext 合法 != 这条 trace 真的会被导出。
+	//   - OTelExporter=noop 时 exporter == nil，TracerProvider 没有 SpanProcessor，
+	//     但 tracer.Start 照样生成合法 SpanContext（有 traceID），三方平台却查不到任何数据
+	//   - 采样率 < 1 时 OTel 可能整条 trace 丢弃，同样查不到
+	//   - 反过来，自研 track 只关心自己的采样率，会把 Trace 写进 chat_traces
+	// 所以「三方平台到底有没有」= otelExportActive && SpanContext.IsSampled()，
+	// 由 Trace.OTelExported 对外表达。开发环境默认 noop，这个标志恒为 false。
+	otelExportActive atomic.Bool
 )
 
 // promMetrics 集中持有所有 Prometheus 指标变量。
@@ -102,6 +116,10 @@ type promMetrics struct {
 // InitTracerProvider 初始化 OTel TracerProvider，启动早期调一次。
 func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp trace.TracerProvider, shutdown func(context.Context) error, err error) {
 	tracerInitOnce.Do(func() {
+		// 传播器必须先装好，且与 exporter 无关：
+		// 无论后面走 noop / stdout / otlp，出站注入与入站提取的语义都要一致。
+		InitPropagator()
+
 		var exporter sdktrace.SpanExporter
 		exporter, err = buildOTelExporter(ctx, cfg)
 		if err != nil {
@@ -109,6 +127,8 @@ func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp
 			err = nil
 			exporter = nil
 		}
+		// 记录「是否真有 exporter 消费 span」，供 Trace.OTelExported 判断三方平台有无数据。
+		otelExportActive.Store(exporter != nil)
 
 		// Resource 描述服务身份
 		res, resErr := resource.New(ctx,
@@ -121,13 +141,10 @@ func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp
 			logger.Warnf("OTel resource 初始化失败: %v", resErr)
 		}
 
-		// 头采样
-		sampler := sdktrace.TraceIDRatioBased(cfg.OTelSamplingRate)
-		if cfg.OTelSamplingRate <= 0 {
-			sampler = sdktrace.NeverSample()
-		} else if cfg.OTelSamplingRate >= 1 {
-			sampler = sdktrace.AlwaysSample()
-		}
+		sampler := samplerFor(cfg.OTelSamplingRate, cfg.OTelBizRoutes)
+		// 采样策略必须在启动日志里可见：otel_biz_routes 若因键名拼错而没绑上，
+		// 表现是「业务链路悄悄退回按采样率抽样」，从外部完全看不出来。
+		logger.Infof("OTel 采样策略: 业务路由必留=%v；其余按采样率 %v", cfg.OTelBizRoutes, cfg.OTelSamplingRate)
 
 		if exporter == nil {
 			globalTracerProvider = sdktrace.NewTracerProvider(
@@ -141,7 +158,7 @@ func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp
 				sdktrace.WithBatcher(exporter, sdktrace.WithBatchTimeout(200*time.Millisecond)),
 			)
 		}
-		globalTracer = globalTracerProvider.Tracer("solvify-agent")
+		globalTracer = globalTracerProvider.Tracer(tracerName)
 		otel.SetTracerProvider(globalTracerProvider)
 	})
 
@@ -153,6 +170,101 @@ func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp
 	return globalTracerProvider, globalTracerProvider.Shutdown, nil
 }
 
+// samplerFor 按本地采样率构造采样器：root span 按本地采样率决定，子 span 跟随父 span。
+//
+// 为什么外层必须包 ParentBased，而不是直接用 TraceIDRatioBased：
+// 后者不看父 span，独立按本地采样率掷骰子。上游已经决定丢弃这条 trace，本地仍可能
+// 采到并单独上报，三方平台上就会出现只有本服务半截 span 的孤儿 trace —— 比不采样更
+// 误导人。ParentBased 的语义是「ctx 里有远程父 span 就跟随它的决定，没有才用 root
+// sampler」，这才是跨服务追踪需要的一致性。
+//
+// 副作用：上游明确标记不采样时，即使本地采样率是 1 也不会记录。该信号由 http.request
+// span 的 otel.inbound_parent_sampled 属性暴露，避免「调了采样率却没有 span」无从排查。
+//
+// 采样率只管「非业务路由」：命中 bizRoutes 的根 span 由 bizRouteSampler 无条件保留，
+// 那几条链路带完整的 RAG / LLM 子树，是排障和给客户看的对象。
+// 关键：这**不影响自研轨**。chat_traces 落不落库由 DefaultSampler 独立决定，
+// 凡是带 session / message 归属的 trace 一律必留（见 SampleRequest.Required），
+// 前端追踪页看到的链路一条不少 —— 这里只决定「往三方平台发多少」。
+// 两条轨道判据不同的原因：输入不同（OTel 侧头采样时只知道路由，session_id 要等
+// WithTraceRoot 才可知）、代价不同（三方按 trace 计费，本地库不花钱），所以是刻意
+// 分成两个粒度，而不是漏了收口。配置则统一来自 ObservabilityConfig 一个来源。
+func samplerFor(rate float64, bizRoutes []string) sdktrace.Sampler {
+	var rootSampler sdktrace.Sampler
+	switch {
+	case rate <= 0:
+		rootSampler = sdktrace.NeverSample()
+	case rate >= 1:
+		rootSampler = sdktrace.AlwaysSample()
+	default:
+		rootSampler = sdktrace.TraceIDRatioBased(rate)
+	}
+	if len(bizRoutes) > 0 {
+		routes := make(map[string]struct{}, len(bizRoutes))
+		for _, r := range bizRoutes {
+			routes[r] = struct{}{}
+		}
+		rootSampler = bizRouteSampler{fallback: rootSampler, routes: routes}
+	}
+	return sdktrace.ParentBased(rootSampler)
+}
+
+// bizRouteSampler 让「业务路由」的根 span 无条件保留，其余交给 fallback 采样器。
+//
+// 为什么必须在根 span 上一次性决策，而不是每个 span 各判各的：OTel 的采样决定是整条
+// trace 共用的。按 span 单独判会出现「根被丢、子被留」的碎片，三方平台上就是一棵没有
+// 入口的树 —— 平台连它属于哪个请求都还原不出来，比整条不采更误导人。
+// 根定下 Decision 之后，子 span 由外层 ParentBased 一路继承。
+//
+// 为什么不必自己判断「有没有父」：本类型始终被 sdktrace.ParentBased 包着，而 ParentBased
+// 只在父 span 无效时才回调 root sampler（见 SDK trace/sampling.go）。也就是说它天然只会
+// 收到根 span。有远程父 span 时跟随上游决定、业务白名单不生效 —— 这是刻意的：
+// 跨服务链路要么整条留、要么整条丢，半截链路最误导人。
+//
+// 匹配用的是「精确相等」而不是前缀：所以配置里多写一条空串只会永远不命中，
+// 不会退化成通配（前缀匹配才会，实测那会把追踪页轮询噪声整个放回来，见 OTelBizRoutes）。
+type bizRouteSampler struct {
+	fallback sdktrace.Sampler
+	routes   map[string]struct{}
+}
+
+func (s bizRouteSampler) ShouldSample(p sdktrace.SamplingParameters) sdktrace.SamplingResult {
+	if route, ok := routeAttr(p.Attributes); ok {
+		if _, hit := s.routes[route]; hit {
+			// 刻意不掷骰子：业务链路必留的含义就是「与采样率无关」
+			return sdktrace.SamplingResult{Decision: sdktrace.RecordAndSample}
+		}
+	}
+	return s.fallback.ShouldSample(p)
+}
+
+func (s bizRouteSampler) Description() string {
+	return "BizRouteThen{" + s.fallback.Description() + "}"
+}
+
+// routeAttr 从 span 起始属性里取 HTTP 路由模板。
+//
+// 为什么只能读属性：Sampler 接口只拿得到 SamplingParameters，拿不到 gin.Context。
+// 好在 gin 中间件建 http.request span 时已把 route 放进 recAttrs，StartSpan 又用
+// trace.WithAttributes 交给 tracer.Start，SDK 会原样放进 SamplingParameters.Attributes
+// （见 SDK trace/tracer.go）。所以业务侧不需要额外打任何标记 —— route 本身就是
+// 「这个 span 属于哪条路由」的唯一声明，再补一个同义属性就变成两个来源了。
+//
+// 属性名与 gin_middleware.go 的 recAttrs["route"] 是同名契约，由
+// TestTraceMiddlewareRouteAttrReachesSampler 端到端守住（改一边会红）。
+func routeAttr(attrs []attribute.KeyValue) (string, bool) {
+	for _, kv := range attrs {
+		if string(kv.Key) == "route" && kv.Value.Type() == attribute.STRING {
+			return kv.Value.AsString(), true
+		}
+	}
+	return "", false
+}
+
+// otelExporterInitTimeout 是创建 OTLP exporter 的超时。
+// 注意 grpc.NewClient 是惰性建连，这里超时只覆盖 exporter 自身初始化，不覆盖真实导出。
+const otelExporterInitTimeout = 5 * time.Second
+
 // buildOTelExporter 根据 config 构造对应的 SpanExporter
 func buildOTelExporter(ctx context.Context, cfg config.ObservabilityConfig) (sdktrace.SpanExporter, error) {
 	switch cfg.OTelExporter {
@@ -162,20 +274,53 @@ func buildOTelExporter(ctx context.Context, cfg config.ObservabilityConfig) (sdk
 		// stdouttrace 把 span 以 JSON 形式打印到 stdout，开发期调试用
 		return stdouttrace.New(stdouttrace.WithPrettyPrint())
 	case "otlp":
-		// 生产期走 OTLP gRPC 推到 Collector（默认 endpoint localhost:4317）
-		ctxWithTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+		// 生产期走 OTLP gRPC 推到 Collector 或三方追踪服务端
+		ctxWithTimeout, cancel := context.WithTimeout(ctx, otelExporterInitTimeout)
 		defer cancel()
-		exp, err := otlptracegrpc.New(ctxWithTimeout,
-			otlptracegrpc.WithEndpoint(cfg.OTelOTLPEndpoint),
-			otlptracegrpc.WithInsecure(),
-		)
+
+		opts := make([]otlptracegrpc.Option, 0, 3)
+		// endpoint 为空时不传，交由 OTLP SDK 的默认值或标准
+		// OTEL_EXPORTER_OTLP_ENDPOINT 环境变量决定
+		if cfg.OTelOTLPEndpoint != "" {
+			opts = append(opts, otlptracegrpc.WithEndpoint(cfg.OTelOTLPEndpoint))
+		}
+		// 鉴权头（Authorization / x-byteapm-appkey 等）。为空时不传，
+		// 这样标准 OTEL_EXPORTER_OTLP_HEADERS 环境变量仍能生效
+		if len(cfg.OTelHeaders) > 0 {
+			opts = append(opts, otlptracegrpc.WithHeaders(cfg.OTelHeaders))
+		}
+		// 传输安全：只有显式要求明文时才调 WithInsecure。
+		// WithInsecure 是在 SDK 读完标准 OTEL_EXPORTER_OTLP_* 环境变量之后再应用的，
+		// 无条件调用会把 env 里配好的 https endpoint 悄悄降级成明文。
+		// 不传任何传输凭据选项时，OTLP SDK 默认使用宿主机根证书走 TLS。
+		if cfg.OTelInsecure {
+			opts = append(opts, otlptracegrpc.WithInsecure())
+		}
+
+		exp, err := otlptracegrpc.New(ctxWithTimeout, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("OTLP exporter 创建失败: %w", err)
 		}
+		logger.Infof("OTLP exporter 已创建: endpoint=%q insecure=%v 鉴权头=%v",
+			cfg.OTelOTLPEndpoint, cfg.OTelInsecure, otelHeaderKeys(cfg.OTelHeaders))
 		return exp, nil
 	default:
 		return nil, errors.New("unknown otel_exporter: " + cfg.OTelExporter)
 	}
+}
+
+// otelHeaderKeys 返回鉴权头的键名（按字典序），仅用于日志输出。
+// 绝不返回键值：OTelHeaders 里放的通常是 API Key 或 Token。
+func otelHeaderKeys(headers map[string]string) []string {
+	if len(headers) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(headers))
+	for k := range headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // InitPrometheusRegistry 初始化独立的 Prometheus Registry + 所有指标变量。

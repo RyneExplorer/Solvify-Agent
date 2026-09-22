@@ -1,6 +1,6 @@
 import { request } from './client'
 import type { ModelInfo, ModelTestResult } from '@/types/model'
-import type { ToolTypeInfo, ToolProviderInfo } from '@/types/tool'
+import type { ToolTypeInfo, ToolProviderInfo, ToolTestResult, MCPServerInfo } from '@/types/tool'
 import type { AdminUser } from '@/types/auth'
 import type { AdminSession, MetricsSnapshot, TraceSummary, ChatTraceDetail } from '@/types/chat'
 
@@ -195,21 +195,46 @@ export function adminDeleteToolProvider(toolTypeId: string, providerId: string) 
   })
 }
 
-// 测试工具连通性
+// 列出已注册的供应商类型（http, mcp, custom 等）
+export function adminListProviderTypes() {
+  return request<string[]>('/admin/provider-types')
+}
+
+// 测试工具连通性（MCP 场景返回工具清单；传 provider_id 时后端会持久化 MCP 工具清单）
 export function adminTestTool(data: {
   provider_type: string
+  provider_id?: string
   provider_config?: Record<string, unknown>
   user_config?: Record<string, unknown>
   admin_config?: Record<string, unknown>
   tool_input?: Record<string, unknown>
 }) {
-  return request<{
-    success: boolean
-    message: string
-    error?: string
-    response_time_ms: number
-    details?: string
-  }>('/admin/tools/test', { method: 'POST', body: data })
+  return request<ToolTestResult>('/admin/tools/test', { method: 'POST', body: data })
+}
+
+// 探测 MCP 供应商的工具清单（只拉取 tools/list，不做工具调用）；传 provider_id 时后端持久化
+export function adminProbeTool(data: {
+  provider_type: string
+  provider_id?: string
+  provider_config?: Record<string, unknown>
+  admin_config?: Record<string, unknown>
+}) {
+  return request<ToolTestResult>('/admin/tools/test/probe', { method: 'POST', body: data })
+}
+
+// 列出全部 MCP 供应商（含所属工具类型信息）
+export function adminListMCPServers() {
+  return request<{ servers: MCPServerInfo[] }>('/admin/mcp-servers')
+}
+
+// 删除 MCP 供应商；所属工具类型若变空且非 mcp 容器，级联删除空壳类型
+export function adminDeleteMCPServer(providerId: string) {
+  return request<null>(`/admin/mcp-servers/${providerId}`, { method: 'DELETE' })
+}
+
+// 清理所有无供应商的非容器工具类型，返回删除数量
+export function adminCleanupEmptyToolTypes() {
+  return request<{ deleted: number }>('/admin/tool-types/cleanup-empty', { method: 'POST' })
 }
 
 // ── 会话管理 ──

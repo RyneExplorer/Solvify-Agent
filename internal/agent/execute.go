@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -17,9 +15,10 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"solvify-agent/internal/model/entity"
-	"solvify-agent/internal/observability"
 	"solvify-agent/internal/tool"
+	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // Execute 启动 Agent 执行流程，通过事件通道异步返回推理结果
@@ -32,22 +31,6 @@ func (e *Engine) Execute(ctx context.Context, req Request, chatModel model.ToolC
 	}()
 
 	return eventCh, nil
-}
-
-type agentStepTracker struct {
-	mu          sync.Mutex
-	stepIdx     int
-	pendingByID map[string]*agentStepPending
-	closed      bool
-}
-
-type agentStepPending struct {
-	StepIndex       int
-	TaskID          string
-	ThinkingSummary string
-	ToolName        string
-	ToolInputMasked string
-	StartedAt       time.Time
 }
 
 // isInternalToolName 判断工具名是否为内置工具
@@ -63,33 +46,22 @@ func (e *Engine) isInternalToolName(name string) bool {
 
 func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.ToolCallingChatModel, eventCh chan<- Event) {
 	obsOk := e.obs != nil
-	var tracker *agentStepTracker
-	taskID := ""
 	if obsOk {
-		taskID = observability.TraceIDFromContext(ctx)
-		if taskID == "" {
-			taskID = randomStr16()
-		}
-		tracker = &agentStepTracker{
-			pendingByID: make(map[string]*agentStepPending),
-		}
 		e.obs.Incr(ctx, "agent_engine_runs_total", nil, 1)
 	}
 
 	// ── 构建工具列表：内置 registry + 用户配置 ──
+	// 深度模式会先调用 EstimateToolsTokens 预构建工具集并写入 ctx，
+	// 这里优先复用；若没有预构建结果（如快速模式/直接调用）才现场构建。
+	// 不复用的话，一次请求会构建两遍工具，冷启动时会重复拉起 MCP Server 子进程。
+	sorted := e.sortedInternalTools()
 	var allTools []einoTool.BaseTool
-
-	// 内置工具按 Order 排序后逐个 Build
-	sorted := make([]internalToolRegistryEntry, len(e.internalTools))
-	copy(sorted, e.internalTools)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Order < sorted[j].Order })
-	for _, entry := range sorted {
-		allTools = append(allTools, entry.Build(ctx, req.UserID, req.KnowledgeBaseIDs))
+	if bundle, ok := prebuiltToolsFromContext(ctx); ok && len(bundle.Tools) > 0 {
+		allTools = bundle.Tools
+		logger.Debugf("[Agent] 复用预构建工具集: tools=%d, tokens=%d", len(bundle.Tools), bundle.TotalTokens)
+	} else {
+		allTools = e.buildTools(ctx, sorted, req.UserID, req.KnowledgeBaseIDs, req.UserToolConfigIDs...)
 	}
-
-	// 用户配置的工具
-	userTools := e.toolFactory.CreateAgentTools(ctx, req.UserID)
-	allTools = append(allTools, userTools...)
 
 	// ── 工具统计 + 日志 ──
 	toolDescMap := make(map[string]string, len(allTools))
@@ -104,7 +76,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 			userToolsN++
 		}
 		toolDescMap[info.Name] = info.Desc
-		logger.Infof("[Agent]   工具: name=%s, desc=%s", info.Name, truncateStr(info.Desc, 80))
+		logger.Infof("[Agent]   工具: name=%s, desc=%s", info.Name, strutil.Truncate(info.Desc, 80))
 	}
 	logger.Infof("[Agent] userID=%s, 工具总数=%d (内置=%d + 用户工具=%d)",
 		req.UserID, len(allTools), len(e.internalTools), userToolsN)
@@ -128,7 +100,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	} else {
 		systemPromptFinal = baseSystemPrompt
 	}
-	logger.Infof("[Agent] SystemPrompt (前400字符): %s", truncateStr(systemPromptFinal, 400))
+	logger.Infof("[Agent] SystemPrompt (前400字符): %s", strutil.Truncate(systemPromptFinal, 400))
 
 	inputMessages := buildInputMessages(req.Query, req.History)
 
@@ -152,20 +124,20 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 			var tmp map[string]any
 			if err := sonic.UnmarshalString(arguments, &tmp); err != nil {
 				logger.Warnf("[Agent] ToolArgumentsHandler: %s 参数 JSON 解析失败，已降级为空对象: raw=%q, err=%v",
-					toolName, truncateStr(arguments, 200), err)
+					toolName, strutil.Truncate(arguments, 200), err)
 				return "{}", nil
 			}
 			return arguments, nil
 		},
 
 		UnknownToolsHandler: func(ctx context.Context, name, input string) (string, error) {
-			logger.Warnf("[Agent] UnknownToolsHandler: LLM 调用了不存在的工具 %q，参数=%s", name, truncateStr(input, 200))
+			logger.Warnf("[Agent] UnknownToolsHandler: LLM 调用了不存在的工具 %q，参数=%s", name, strutil.Truncate(input, 200))
 			return fmt.Sprintf("⚠️ 工具 %q 不存在，可用工具请查看系统提示。请检查工具名拼写后重试。", name), nil
 		},
 	}
 	// ── 注入中间件：危险工具审批 + 澄清追问 ──
 	var middlewares []compose.ToolMiddleware
-	if dangerousNames := e.dangerousToolNames(); len(dangerousNames) > 0 {
+	if dangerousNames := e.dangerousToolNames(ctx, allTools); len(dangerousNames) > 0 {
 		middlewares = append(middlewares, compose.ToolMiddleware{Invokable: buildDangerousToolMiddleware(dangerousNames)})
 		logger.Infof("[Agent] 已注入危险工具审批中间件: %v", dangerousNames)
 	}
@@ -192,7 +164,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 		if obsOk {
 			e.obs.Incr(ctx, "agent_engine_errors_total", map[string]string{"stage": "init"}, 1)
 		}
-		eventCh <- Event{
+		eventch.Send(ctx, eventCh, Event{
 			Type:      EventError,
 			Title:     "深度模式启动失败",
 			Detail:    "请尝试切换到快速模式，或稍后重试",
@@ -200,7 +172,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 			Status:    "error",
 			Retryable: true,
 			Done:      true,
-		}
+		})
 		return
 	}
 
@@ -219,7 +191,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	})
 
 	// ── 执行：首次 Run 或带 ResumeData 的 Resume ──
-	e.runWithRunner(ctx, runner, checkpointID, inputMessages, req, ksToolForStream, toolDescMap, eventCh, tracker, taskID)
+	e.runWithRunner(ctx, runner, checkpointID, inputMessages, req, ksToolForStream, toolDescMap, eventCh)
 }
 
 func randomStr(n int) string {
@@ -233,8 +205,7 @@ func randomStr(n int) string {
 	return string(buf)
 }
 
-func randomStr16() string { return randomStr(16) }
-func randomStr8() string  { return randomStr(8) }
+func randomStr8() string { return randomStr(8) }
 
 func buildInputMessages(query string, history []entity.ChatMessage) []*schema.Message {
 	msgs := make([]*schema.Message, 0, len(history)+1)
@@ -250,13 +221,6 @@ func buildInputMessages(query string, history []entity.ChatMessage) []*schema.Me
 
 	msgs = append(msgs, schema.UserMessage(query))
 	return msgs
-}
-
-func truncateStr(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }
 
 func extractQueryFromArgs(args string) string {

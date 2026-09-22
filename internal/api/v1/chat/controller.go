@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"solvify-agent/internal/api/v1/shared"
 	"solvify-agent/internal/middleware"
 	requestdto "solvify-agent/internal/model/dto/request"
 	"solvify-agent/internal/service"
@@ -48,7 +49,7 @@ func (ctrl *Controller) CreateSession(c *gin.Context) {
 }
 
 func (ctrl *Controller) GetSession(c *gin.Context) {
-	userID, sessionID, ok := ctrl.userAndSessionID(c)
+	userID, sessionID, ok := shared.UserAndUUIDParam(c, "id", "会话")
 	if !ok {
 		return
 	}
@@ -75,7 +76,7 @@ func (ctrl *Controller) ListSessions(c *gin.Context) {
 }
 
 func (ctrl *Controller) UpdateSession(c *gin.Context) {
-	userID, sessionID, ok := ctrl.userAndSessionID(c)
+	userID, sessionID, ok := shared.UserAndUUIDParam(c, "id", "会话")
 	if !ok {
 		return
 	}
@@ -94,7 +95,7 @@ func (ctrl *Controller) UpdateSession(c *gin.Context) {
 }
 
 func (ctrl *Controller) DeleteSession(c *gin.Context) {
-	userID, sessionID, ok := ctrl.userAndSessionID(c)
+	userID, sessionID, ok := shared.UserAndUUIDParam(c, "id", "会话")
 	if !ok {
 		return
 	}
@@ -107,7 +108,7 @@ func (ctrl *Controller) DeleteSession(c *gin.Context) {
 }
 
 func (ctrl *Controller) SendMessage(c *gin.Context) {
-	userID, sessionID, ok := ctrl.userAndSessionID(c)
+	userID, sessionID, ok := shared.UserAndUUIDParam(c, "id", "会话")
 	if !ok {
 		return
 	}
@@ -151,7 +152,7 @@ func (ctrl *Controller) SendMessage(c *gin.Context) {
 }
 
 func (ctrl *Controller) GetMessages(c *gin.Context) {
-	userID, sessionID, ok := ctrl.userAndSessionID(c)
+	userID, sessionID, ok := shared.UserAndUUIDParam(c, "id", "会话")
 	if !ok {
 		return
 	}
@@ -219,7 +220,7 @@ func (ctrl *Controller) GetTrace(c *gin.Context) {
 }
 
 func (ctrl *Controller) ListSessionTraces(c *gin.Context) {
-	userID, sessionID, ok := ctrl.userAndSessionID(c)
+	userID, sessionID, ok := shared.UserAndUUIDParam(c, "id", "会话")
 	if !ok {
 		return
 	}
@@ -288,9 +289,8 @@ func (ctrl *Controller) AdminListSessions(c *gin.Context) {
 }
 
 func (ctrl *Controller) AdminDeleteSession(c *gin.Context) {
-	sessionID := c.Param("id")
-	if !middleware.IsUUID(sessionID) {
-		response.BadRequest(c, "会话 ID 格式错误")
+	sessionID, ok := shared.UUIDParam(c, "id", "会话")
+	if !ok {
 		return
 	}
 
@@ -317,19 +317,6 @@ func (ctrl *Controller) AdminCleanupSessions(c *gin.Context) {
 	}
 
 	response.Success(c, gin.H{"deleted": deleted})
-}
-
-func (ctrl *Controller) userAndSessionID(c *gin.Context) (string, string, bool) {
-	userID, ok := middleware.CurrentUserID(c)
-	if !ok {
-		return "", "", false
-	}
-	sessionID := c.Param("id")
-	if !middleware.IsUUID(sessionID) {
-		response.BadRequest(c, "会话 ID 格式错误")
-		return "", "", false
-	}
-	return userID, sessionID, true
 }
 
 func listParams(c *gin.Context, defaultOffset, defaultLimit int) (int, int) {

@@ -169,26 +169,113 @@
             </Transition>
           </Teleport>
         </div>
+
+        <!-- MCP 服务器加载中骨架 -->
+        <div v-if="mcpLoading && !mcpOptions.length" class="flex items-center px-2.5" title="MCP 服务器加载中...">
+          <div class="h-6 w-20 bg-slate-100 rounded-md animate-pulse" />
+        </div>
+        <!-- MCP 服务器（仅当有可用 MCP 时显示） -->
+        <div v-else-if="mcpOptions.length" class="relative" ref="mcpDropdownRef">
+          <button @click="toggleMCPDropdown" class="tool-trigger" :class="{ 'opacity-60': loading }" :disabled="loading">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"/></svg>
+            <span :title="mcpTooltip">{{ mcpLabel }}</span>
+            <svg class="w-3 h-3 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </button>
+
+          <Teleport to="body">
+            <Transition name="kb-fade">
+              <div
+                v-if="showMCPDropdown"
+                ref="mcpPanelRef"
+                class="fixed bg-white border border-slate-200 rounded-xl shadow-xl z-[100] overflow-hidden"
+                :style="{ top: mcpPanelPos.top + 'px', left: mcpPanelPos.left + 'px', width: '288px' }"
+              >
+                <div class="px-4 py-3 border-b border-slate-100">
+                  <div class="text-sm font-semibold text-slate-900">MCP 服务器</div>
+                  <div class="text-xs text-slate-400 mt-0.5">勾选要在本次对话启用的服务器；全部不勾选=使用全部</div>
+                </div>
+                <!-- 搜索框：≥ 7 台时显示 -->
+                <div v-if="showMCPSearch" class="px-3 py-2 border-b border-slate-100">
+                  <div class="flex items-center gap-1.5 px-2 py-1.5 bg-slate-50 rounded-lg border border-slate-200 focus-within:border-emerald-400 focus-within:bg-white transition-colors">
+                    <svg class="w-3.5 h-3.5 text-slate-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                    <input
+                      v-model="mcpSearch"
+                      type="text"
+                      placeholder="搜索 MCP 名称或描述..."
+                      class="flex-1 bg-transparent outline-none text-xs text-slate-700 placeholder:text-slate-400"
+                    />
+                    <button v-if="mcpSearch" @click="mcpSearch = ''" class="text-slate-400 hover:text-slate-600 shrink-0">
+                      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="px-3 py-2 border-b border-slate-100 flex items-center gap-2">
+                  <button
+                    @click="selectAllMCP"
+                    :class="[
+                      'text-xs px-2 py-1 rounded-md border border-slate-200 transition-colors',
+                      localMCPIds.length === mcpOpts.length && mcpOpts.length > 0 ? 'bg-emerald-50 text-emerald-600' : 'text-slate-500 hover:bg-slate-50'
+                    ]"
+                  >全选</button>
+                  <button
+                    @click="clearMCP"
+                    :class="[
+                      'text-xs px-2 py-1 rounded-md border border-slate-200 transition-colors',
+                      localMCPIds.length === 0 ? 'bg-emerald-50 text-emerald-600' : 'text-slate-500 hover:bg-slate-50'
+                    ]"
+                  >清空(=全部)</button>
+                </div>
+                <div class="max-h-[260px] overflow-y-auto py-1">
+                  <div v-if="filteredMCPOpts.length === 0" class="px-4 py-6 text-center text-xs text-slate-400">
+                    {{ mcpSearch ? '没有匹配的 MCP 服务器' : '暂无可用 MCP 服务器' }}
+                  </div>
+                  <div
+                    v-for="o in filteredMCPOpts"
+                    :key="o.id"
+                    @click="toggleMCPOne(o.id)"
+                    class="px-4 py-2 cursor-pointer hover:bg-slate-50"
+                  >
+                    <div class="flex items-start gap-2.5">
+                      <span
+                        class="w-4 h-4 mt-0.5 rounded flex items-center justify-center shrink-0 transition-colors"
+                        :class="localMCPIds.includes(o.id) ? 'bg-emerald-500' : 'border border-slate-300'"
+                      >
+                        <svg v-if="localMCPIds.includes(o.id)" class="w-2.5 h-2.5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg>
+                      </span>
+                      <div class="flex-1 min-w-0">
+                        <div :class="['text-sm truncate', localMCPIds.includes(o.id) ? 'text-emerald-600 font-medium' : 'text-slate-700']">{{ o.name }}</div>
+                        <div v-if="o.description" class="text-xs text-slate-400 mt-0.5 truncate">{{ o.description }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </Transition>
+          </Teleport>
+        </div>
       </div>
 
       <button v-if="loading" @click="$emit('stop')"
         class="w-9 h-9 rounded-full flex items-center justify-center transition-all bg-red-500 hover:bg-red-600 text-white shadow-md" title="停止生成">
         <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
       </button>
-      <button v-else @click="$emit('send')" :disabled="!input.trim()"
-        class="w-9 h-9 rounded-full flex items-center justify-center transition-all"
-        :class="input.trim() ? 'bg-slate-800 hover:bg-slate-700 text-white shadow-md' : 'bg-slate-100 text-slate-300 cursor-not-allowed'">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>
-      </button>
+      <template v-else>
+        <button @click="$emit('send')" :disabled="!input.trim()"
+          class="w-9 h-9 rounded-full flex items-center justify-center transition-all"
+          :class="input.trim() ? 'bg-slate-800 hover:bg-slate-700 text-white shadow-md' : 'bg-slate-100 text-slate-300 cursor-not-allowed'">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>
+        </button>
+      </template>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 
 interface KbItem { id: string; name: string; document_count?: number }
 interface ModelItem { id: string; name: string; modelType: 'system' | 'user' }
+interface MCPOption { id: string; name: string; description: string }
 
 const props = defineProps<{
   input: string
@@ -199,6 +286,9 @@ const props = defineProps<{
   knowledgeBases: KbItem[]
   selectedKBs: string[]
   modelOptions: ModelItem[]
+  mcpOptions?: MCPOption[]
+  selectedMCPIds?: string[]
+  mcpLoading?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -208,26 +298,65 @@ const emit = defineEmits<{
   (e: 'stop'): void
   (e: 'toggleKb', id: string): void
   (e: 'toggleSearchMode', v: 'quick' | 'smart-reasoning'): void
+  (e: 'update:selectedMcpIds', v: string[]): void
 }>()
 
 const kbDropdownRef = ref<HTMLDivElement>()
 const searchDropdownRef = ref<HTMLDivElement>()
 const modelDropdownRef = ref<HTMLDivElement>()
+const mcpDropdownRef = ref<HTMLDivElement>()
 const kbPanelRef = ref<HTMLDivElement>()
 const searchPanelRef = ref<HTMLDivElement>()
 const modelPanelRef = ref<HTMLDivElement>()
+const mcpPanelRef = ref<HTMLDivElement>()
 
 const showKbDropdown = ref(false)
 const showSearchDropdown = ref(false)
 const showModelDropdown = ref(false)
+const showMCPDropdown = ref(false)
 const kbSearch = ref('')
+const mcpSearch = ref('')
 
 const kbPanelPos = ref({ top: 0, left: 0 })
 const searchPanelPos = ref({ top: 0, left: 0 })
 const modelPanelPos = ref({ top: 0, left: 0 })
+const mcpPanelPos = ref({ top: 0, left: 0 })
+
+// 本地副本：父组件 selectedMCPIds 变化时同步（含初始化）；本地操作后再 emit
+const localMCPIds = ref<string[]>([])
+watch(() => props.selectedMCPIds, (v) => { localMCPIds.value = [...(v ?? [])] }, { immediate: true, deep: false })
+// 关闭下拉时清空搜索关键字
+watch(showMCPDropdown, (open) => { if (!open) mcpSearch.value = '' })
+// 当用户未启用任何 MCP 时，mcpOptions 为空，不显示
 
 const sysOpts = computed(() => props.modelOptions.filter(m => m.modelType === 'system'))
 const userOpts = computed(() => props.modelOptions.filter(m => m.modelType === 'user'))
+const mcpOpts = computed(() => props.mcpOptions ?? [])
+const showMCPSearch = computed(() => mcpOpts.value.length >= 7)
+const filteredMCPOpts = computed(() => {
+  const kw = mcpSearch.value.trim().toLowerCase()
+  if (!kw) return mcpOpts.value
+  return mcpOpts.value.filter(o =>
+    o.name.toLowerCase().includes(kw) ||
+    (o.description ?? '').toLowerCase().includes(kw),
+  )
+})
+// 发送按钮旁边 / trigger 的 tooltip：列出当前生效的 MCP 名称
+const mcpTooltip = computed(() => {
+  if (!mcpOpts.value.length) return ''
+  const total = mcpOpts.value.length
+  if (!localMCPIds.value.length) return `使用全部 ${total} 台 MCP：\n${mcpOpts.value.map(o => '· ' + o.name).join('\n')}`
+  const names = mcpOpts.value.filter(o => localMCPIds.value.includes(o.id)).map(o => o.name)
+  return `已选择 ${names.length}/${total} 台 MCP：\n${names.map(n => '· ' + n).join('\n')}`
+})
+
+const mcpLabel = computed(() => {
+  if (!mcpOpts.value.length) return 'MCP 服务器'
+  if (!localMCPIds.value.length) return '全部 MCP'
+  const names = mcpOpts.value.filter(o => localMCPIds.value.includes(o.id)).map(o => o.name)
+  if (names.length <= 2) return names.join('、') || '选择 MCP'
+  return `${names[0]} +${names.length - 1}`
+})
 
 const searchOptions: { value: 'quick' | 'smart-reasoning'; label: string }[] = [
   { value: 'quick', label: '快速检索' },
@@ -259,27 +388,23 @@ const kbTriggerText = computed(() => {
     .join(', ')
 })
 
-function calcPos(trigger: HTMLElement, panelHeight: number, panelWidth: number) {
+// 统一下拉面板定位：在触发器上方弹出，并基于实际渲染高度计算，避免估算不准导致面板悬空
+function positionPanelAbove(trigger: HTMLElement | undefined, panel: HTMLElement | undefined, panelWidth: number) {
+  if (!trigger || !panel) return { top: 0, left: 0 }
   const rect = trigger.getBoundingClientRect()
+  const height = panel.offsetHeight
+  const width = panel.offsetWidth || panelWidth
   return {
-    top: rect.top - panelHeight - 8,
-    left: Math.min(rect.left, window.innerWidth - panelWidth - 8),
+    top: Math.max(8, rect.top - height - 8),
+    left: Math.min(rect.left, window.innerWidth - width - 8),
   }
-}
-
-function estimatePanelHeight(itemCount: number, itemHeight: number, headerHeight: number) {
-  return headerHeight + itemCount * itemHeight
 }
 
 async function toggleKbDropdown() {
   showKbDropdown.value = !showKbDropdown.value
   if (showKbDropdown.value) {
     await nextTick()
-    if (kbDropdownRef.value) {
-      const count = 2 + filteredKBs.value.length
-      const height = estimatePanelHeight(count, 36, 90)
-      kbPanelPos.value = calcPos(kbDropdownRef.value, Math.min(height, 330), 288)
-    }
+    kbPanelPos.value = positionPanelAbove(kbDropdownRef.value, kbPanelRef.value, 288)
   }
 }
 
@@ -287,10 +412,7 @@ async function toggleSearchDropdown() {
   showSearchDropdown.value = !showSearchDropdown.value
   if (showSearchDropdown.value) {
     await nextTick()
-    if (searchDropdownRef.value) {
-      const height = estimatePanelHeight(searchOptions.length, 36, 8)
-      searchPanelPos.value = calcPos(searchDropdownRef.value, height, 160)
-    }
+    searchPanelPos.value = positionPanelAbove(searchDropdownRef.value, searchPanelRef.value, 160)
   }
 }
 
@@ -298,11 +420,7 @@ async function toggleModelDropdown() {
   showModelDropdown.value = !showModelDropdown.value
   if (showModelDropdown.value) {
     await nextTick()
-    if (modelDropdownRef.value) {
-      const count = sysOpts.value.length + userOpts.value.length + (sysOpts.value.length ? 1 : 0) + (userOpts.value.length ? 1 : 0)
-      const height = estimatePanelHeight(count, 36, 8)
-      modelPanelPos.value = calcPos(modelDropdownRef.value, Math.min(height, 268), 192)
-    }
+    modelPanelPos.value = positionPanelAbove(modelDropdownRef.value, modelPanelRef.value, 192)
   }
 }
 
@@ -334,11 +452,39 @@ function selectModel(val: string) {
   showModelDropdown.value = false
 }
 
+async function toggleMCPDropdown() {
+  showMCPDropdown.value = !showMCPDropdown.value
+  if (showMCPDropdown.value) {
+    await nextTick()
+    mcpPanelPos.value = positionPanelAbove(mcpDropdownRef.value, mcpPanelRef.value, 288)
+  }
+}
+
+function toggleMCPOne(id: string) {
+  const idx = localMCPIds.value.indexOf(id)
+  if (idx >= 0) localMCPIds.value.splice(idx, 1)
+  else localMCPIds.value.push(id)
+  emit('update:selectedMcpIds', [...localMCPIds.value])
+}
+
+function selectAllMCP() {
+  localMCPIds.value = [...mcpOpts.value.map(o => o.id)]
+  emit('update:selectedMcpIds', [...localMCPIds.value])
+  showMCPDropdown.value = false
+}
+
+function clearMCP() {
+  localMCPIds.value = []
+  emit('update:selectedMcpIds', [])
+  showMCPDropdown.value = false
+}
+
 function onDocClick(e: MouseEvent) {
   const target = e.target as Node
   const insideKb = kbDropdownRef.value?.contains(target) || kbPanelRef.value?.contains(target)
   const insideSearch = searchDropdownRef.value?.contains(target) || searchPanelRef.value?.contains(target)
   const insideModel = modelDropdownRef.value?.contains(target) || modelPanelRef.value?.contains(target)
+  const insideMCP = mcpDropdownRef.value?.contains(target) || mcpPanelRef.value?.contains(target)
 
   if (!insideKb) {
     showKbDropdown.value = false
@@ -346,6 +492,7 @@ function onDocClick(e: MouseEvent) {
   }
   if (!insideSearch) showSearchDropdown.value = false
   if (!insideModel) showModelDropdown.value = false
+  if (!insideMCP) showMCPDropdown.value = false
 }
 
 onMounted(() => document.addEventListener('click', onDocClick))

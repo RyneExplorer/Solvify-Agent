@@ -18,4 +18,6 @@ type SendMessageRequest struct {
 	SearchMode       string   `json:"search_mode" binding:"required,oneof=quick smart-reasoning"`
 	ModelID          string   `json:"model_id" binding:"required"`
 	ModelType        string   `json:"model_type" binding:"required,oneof=system user"`
+	// MCPUserConfigIDs 用户侧 MCP 工具配置 ID 白名单；为空时使用该用户全部已启用的工具
+	MCPUserConfigIDs []string `json:"mcp_user_config_ids,omitempty"`
 }

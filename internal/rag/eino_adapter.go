@@ -39,6 +39,8 @@ type implOptions struct {
 	KnowledgeBaseIDs []string
 	// UserID 附加到检索请求的用户标识（用于后续权限/埋点）
 	UserID string
+	// KeywordQuery 关键字检索专用的 query。为空时关键字侧回退用公共 query。
+	KeywordQuery string
 }
 
 // WithKnowledgeBaseIDs 指定检索时的知识库范围。配合 EinoRetrieverAdapter 使用。
@@ -55,8 +57,18 @@ func WithUserID(uid string) retriever.Option {
 	})
 }
 
+// WithKeywordQuery 为关键字侧单独指定 query，与公共 query（向量侧）分离。
+// 典型用法：公共 query 是「原问题 + 最近几轮用户提问」的长 query，关键字侧传
+// 「实体回填后的短 query」—— 关键字打分是命中率（分母 = query 词项数），
+// 长 query 会把所有候选分数一起压低。
+func WithKeywordQuery(q string) retriever.Option {
+	return retriever.WrapImplSpecificOptFn(func(o *implOptions) {
+		o.KeywordQuery = q
+	})
+}
+
 // EinoRetrieverAdapter 把项目内自研的 rag.Retriever 包装成 eino 的
-// components/retriever.Retriever 接口。现有 HybridRetriever/VectorRetriever
+// components/retriever.Retriever 接口。现有 HybridRetriever 及其装饰器链
 // 等内部检索逻辑完全不变，仅做输入/输出格式对齐，使上游（eino Graph、Agent、
 // 可观测性 callback）能按 eino 统一组件标准接入。
 type EinoRetrieverAdapter struct {
@@ -120,6 +132,9 @@ func (a *EinoRetrieverAdapter) Retrieve(ctx context.Context, query string, opts 
 	if query != "" {
 		inAttrs["query"] = query
 	}
+	if impl.KeywordQuery != "" && impl.KeywordQuery != query {
+		inAttrs["keyword_query"] = impl.KeywordQuery
+	}
 	if len(impl.KnowledgeBaseIDs) > 0 {
 		inAttrs["kb_n"] = len(impl.KnowledgeBaseIDs)
 		if preview := joinIDsPreview(impl.KnowledgeBaseIDs, 5); preview != "" {
@@ -133,6 +148,7 @@ func (a *EinoRetrieverAdapter) Retrieve(ctx context.Context, query string, opts 
 
 	bizQuery := Query{
 		Question:         query,
+		KeywordQuery:     impl.KeywordQuery,
 		TopK:             topK,
 		KnowledgeBaseIDs: append([]string(nil), impl.KnowledgeBaseIDs...),
 		UserID:           impl.UserID,

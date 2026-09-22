@@ -26,7 +26,7 @@ func (r *agentCheckpointRepository) Save(ctx context.Context, checkpointID, sess
 		Checkpoint: data,
 		ExpiredAt:  expiredAt,
 	}
-	return r.db.WithContext(ctx).
+	return dbFor(ctx, r.db).
 		Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "id"}},
 			DoUpdates: clause.AssignmentColumns([]string{"checkpoint", "session_id", "expired_at", "updated_at"}),
@@ -36,7 +36,7 @@ func (r *agentCheckpointRepository) Save(ctx context.Context, checkpointID, sess
 
 func (r *agentCheckpointRepository) Find(ctx context.Context, checkpointID string) ([]byte, bool, error) {
 	var cp entity.AgentCheckpoint
-	err := r.db.WithContext(ctx).Where("id = ?", checkpointID).First(&cp).Error
+	err := dbFor(ctx, r.db).Where("id = ?", checkpointID).First(&cp).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, false, nil
@@ -47,15 +47,15 @@ func (r *agentCheckpointRepository) Find(ctx context.Context, checkpointID strin
 }
 
 func (r *agentCheckpointRepository) Delete(ctx context.Context, checkpointID string) error {
-	return r.db.WithContext(ctx).Where("id = ?", checkpointID).Delete(&entity.AgentCheckpoint{}).Error
+	return dbFor(ctx, r.db).Where("id = ?", checkpointID).Delete(&entity.AgentCheckpoint{}).Error
 }
 
 func (r *agentCheckpointRepository) DeleteBySessionID(ctx context.Context, sessionID string) error {
-	return r.db.WithContext(ctx).Where("session_id = ?", sessionID).Delete(&entity.AgentCheckpoint{}).Error
+	return dbFor(ctx, r.db).Where("session_id = ?", sessionID).Delete(&entity.AgentCheckpoint{}).Error
 }
 
 func (r *agentCheckpointRepository) DeleteExpired(ctx context.Context, now time.Time) (int64, error) {
-	res := r.db.WithContext(ctx).
+	res := dbFor(ctx, r.db).
 		Where("expired_at IS NOT NULL AND expired_at < ?", now).
 		Delete(&entity.AgentCheckpoint{})
 	return res.RowsAffected, res.Error

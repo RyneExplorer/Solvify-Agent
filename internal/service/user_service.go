@@ -84,7 +84,9 @@ func (s *userService) GetUserByID(id string) (*entity.User, error) {
 
 	// cache-aside：last_model 优先走缓存，避免 DB 写入延迟导致读到旧值
 	if s.userCache != nil {
-		cacheKey := "user:model:" + id
+		// key 只需用户维度：userCache 实例已带 "user:model:" 前缀，
+		// 这里再拼一次会变成 user:model:user:model:<id>
+		cacheKey := id
 		var cachedModelID string
 		found, cacheErr := s.userCache.Get(context.Background(), cacheKey, &cachedModelID)
 		if cacheErr != nil {

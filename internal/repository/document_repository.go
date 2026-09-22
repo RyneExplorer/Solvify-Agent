@@ -22,7 +22,7 @@ func NewDocumentRepository(db *gorm.DB) DocumentRepository {
 
 // Create 创建文档记录
 func (r *documentRepository) Create(ctx context.Context, doc *entity.Document) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return dbFor(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(doc).Error; err != nil {
 			return err
 		}
@@ -38,7 +38,7 @@ func (r *documentRepository) Create(ctx context.Context, doc *entity.Document) e
 // ListByKnowledgeBase 查询知识库下未删除文档
 func (r *documentRepository) ListByKnowledgeBase(ctx context.Context, userID, kbID string, deletedStatus int) ([]entity.Document, error) {
 	var items []entity.Document
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND knowledge_base_id = ? AND status <> ?", userID, kbID, deletedStatus).
 		Order("created_at DESC").
 		Find(&items).Error
@@ -52,7 +52,7 @@ func (r *documentRepository) ListWithChunkCount(ctx context.Context, userID, kbI
 		ChunkCount int `gorm:"column:chunk_count"`
 	}
 
-	err := r.db.WithContext(ctx).Raw(`
+	err := dbFor(ctx, r.db).Raw(`
 		SELECT d.*, COALESCE(COUNT(dc.id), 0) as chunk_count
 		FROM documents d
 		LEFT JOIN document_chunks dc ON dc.document_id = d.id
@@ -88,7 +88,7 @@ func (r *documentRepository) ListWithChunkCount(ctx context.Context, userID, kbI
 // FindByID 查询当前用户未删除文档
 func (r *documentRepository) FindByID(ctx context.Context, userID, documentID string, deletedStatus int) (entity.Document, bool, error) {
 	var doc entity.Document
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("id = ? AND user_id = ? AND status <> ?", documentID, userID, deletedStatus).
 		First(&doc).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -100,7 +100,7 @@ func (r *documentRepository) FindByID(ctx context.Context, userID, documentID st
 // ExistsFileName 判断知识库下是否存在同名未删除文档
 func (r *documentRepository) ExistsFileName(ctx context.Context, userID, kbID, fileName string, deletedStatus int) (bool, error) {
 	var count int64
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Model(&entity.Document{}).
 		Where("user_id = ? AND knowledge_base_id = ? AND file_name = ? AND status <> ?", userID, kbID, fileName, deletedStatus).
 		Count(&count).Error
@@ -109,7 +109,7 @@ func (r *documentRepository) ExistsFileName(ctx context.Context, userID, kbID, f
 
 // SoftDelete 软删除文档
 func (r *documentRepository) SoftDelete(ctx context.Context, userID, documentID string, deletedStatus, pendingImportStatus int, deletedAt, expiredAt time.Time) (bool, error) {
-	result := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	result := dbFor(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		var doc entity.Document
 		if err := tx.Where("id = ? AND user_id = ? AND status <> ?", documentID, userID, deletedStatus).First(&doc).Error; err != nil {
 			return err
@@ -147,7 +147,7 @@ func (r *documentRepository) SoftDelete(ctx context.Context, userID, documentID 
 
 // SaveProcessResult 保存文档处理成功结果
 func (r *documentRepository) SaveProcessResult(ctx context.Context, doc entity.Document, jobID string, version *entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus, successJobStatus int, finishedAt time.Time) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return dbFor(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(version).Error; err != nil {
 			return err
 		}
@@ -183,7 +183,7 @@ func (r *documentRepository) SaveProcessResult(ctx context.Context, doc entity.D
 
 // MarkProcessFailed 标记文档处理失败
 func (r *documentRepository) MarkProcessFailed(ctx context.Context, userID, documentID, jobID string, failedDocumentStatus, failedJobStatus int, errorMessage string, finishedAt time.Time) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return dbFor(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&entity.Document{}).
 			Where("id = ? AND user_id = ?", documentID, userID).
 			Updates(map[string]any{

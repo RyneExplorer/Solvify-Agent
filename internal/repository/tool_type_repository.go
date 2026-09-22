@@ -18,31 +18,26 @@ func NewToolTypeRepository(db *gorm.DB) ToolTypeRepository {
 }
 
 func (r *toolTypeRepository) Create(ctx context.Context, toolType *entity.ToolType) error {
-	return r.db.WithContext(ctx).Create(toolType).Error
+	return dbFor(ctx, r.db).Create(toolType).Error
 }
 
 func (r *toolTypeRepository) Update(ctx context.Context, toolType *entity.ToolType) error {
-	return r.db.WithContext(ctx).Save(toolType).Error
+	return dbFor(ctx, r.db).Save(toolType).Error
 }
 
+// Delete 只删 tool_types 自己这一行。
+//
+// 此前它在一个事务里连删 user_tool_configs + tool_providers + tool_types 三张表，其中
+// user_tool_configs 带缓存却没有跟着失效（审查报告 P0-5）。级联删除已上移到
+// tool_type_service.Delete：由 service 用同一个事务编排三处写，写用户配置表的那一步
+// 必须经由 UserToolConfigRepository（唯一会失效缓存的地方）。
 func (r *toolTypeRepository) Delete(ctx context.Context, id string) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Delete(&entity.UserToolConfig{}, "tool_type_id = ?", id).Error; err != nil {
-			return err
-		}
-		if err := tx.Delete(&entity.ToolProvider{}, "tool_type_id = ?", id).Error; err != nil {
-			return err
-		}
-		if err := tx.Delete(&entity.ToolType{}, "id = ?", id).Error; err != nil {
-			return err
-		}
-		return nil
-	})
+	return dbFor(ctx, r.db).Delete(&entity.ToolType{}, "id = ?", id).Error
 }
 
 func (r *toolTypeRepository) GetByID(ctx context.Context, id string) (*entity.ToolType, error) {
 	var toolType entity.ToolType
-	err := r.db.WithContext(ctx).First(&toolType, "id = ?", id).Error
+	err := dbFor(ctx, r.db).First(&toolType, "id = ?", id).Error
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +46,7 @@ func (r *toolTypeRepository) GetByID(ctx context.Context, id string) (*entity.To
 
 func (r *toolTypeRepository) GetByKey(ctx context.Context, toolKey string) (*entity.ToolType, error) {
 	var toolType entity.ToolType
-	err := r.db.WithContext(ctx).First(&toolType, "tool_key = ?", toolKey).Error
+	err := dbFor(ctx, r.db).First(&toolType, "tool_key = ?", toolKey).Error
 	if err != nil {
 		return nil, err
 	}
@@ -60,19 +55,19 @@ func (r *toolTypeRepository) GetByKey(ctx context.Context, toolKey string) (*ent
 
 func (r *toolTypeRepository) List(ctx context.Context) ([]entity.ToolType, error) {
 	var toolTypes []entity.ToolType
-	err := r.db.WithContext(ctx).Order("name ASC").Find(&toolTypes).Error
+	err := dbFor(ctx, r.db).Order("name ASC").Find(&toolTypes).Error
 	return toolTypes, err
 }
 
 func (r *toolTypeRepository) ListEnabled(ctx context.Context) ([]entity.ToolType, error) {
 	var toolTypes []entity.ToolType
-	err := r.db.WithContext(ctx).Where("is_enabled = ?", true).Order("name ASC").Find(&toolTypes).Error
+	err := dbFor(ctx, r.db).Where("is_enabled = ?", true).Order("name ASC").Find(&toolTypes).Error
 	return toolTypes, err
 }
 
 func (r *toolTypeRepository) ExistsByKey(ctx context.Context, toolKey string) (bool, error) {
 	var count int64
-	err := r.db.WithContext(ctx).Model(&entity.ToolType{}).Where("tool_key = ?", toolKey).Count(&count).Error
+	err := dbFor(ctx, r.db).Model(&entity.ToolType{}).Where("tool_key = ?", toolKey).Count(&count).Error
 	return count > 0, err
 }
 
@@ -84,7 +79,7 @@ func (r *toolTypeRepository) GetProviderCounts(ctx context.Context) (map[string]
 	}
 	var results []result
 
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Model(&entity.ToolProvider{}).
 		Select("tool_type_id, count(*) as count").
 		Group("tool_type_id").

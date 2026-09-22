@@ -45,14 +45,20 @@ func buildReActSystemPrompt(ctx context.Context, allTools []einoTool.BaseTool, i
 		}
 		sb.WriteString(fmt.Sprintf("- **%s**: %s%s\n", entry.Name, desc, label))
 	}
-	// 用户配置的外部工具
+	// 用户配置的外部工具（含 MCP）
+	dynDangerous := false
 	for _, td := range allDescs {
 		if !internalNames[td.Name] {
 			desc := td.Desc
 			if desc == "" {
 				desc = "用户配置的外部工具"
 			}
-			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", td.Name, desc))
+			label := ""
+			if isDangerousDynamicTool(td.Name) {
+				label = " ⚠️ 危险 · 执行前需人工审批"
+				dynDangerous = true
+			}
+			sb.WriteString(fmt.Sprintf("- **%s**: %s%s\n", td.Name, desc, label))
 		}
 	}
 	sb.WriteString("\n")
@@ -70,8 +76,8 @@ func buildReActSystemPrompt(ctx context.Context, allTools []einoTool.BaseTool, i
 	sb.WriteString("6. **强制收敛**：达到最大推理轮次或用完工具次数时，立即总结已有信息给出最终答案。禁止再规划'下一步应该'、'我还需要'等思考性输出\n")
 	sb.WriteString("7. **答案分层**：有 ToolCalls 的轮次 Message.Content 只写 1-2 句简短推理（不会展示给用户）；只有 ToolCalls 为空的轮次才是完整、可读、面向最终用户的答案正文\n")
 
-	// 危险工具补充说明
-	hasDangerous := false
+	// 危险工具补充说明（含按名称识别出的 MCP 高危工具）
+	hasDangerous := dynDangerous
 	for _, entry := range internalSorted {
 		if entry.Dangerous {
 			hasDangerous = true
@@ -79,7 +85,7 @@ func buildReActSystemPrompt(ctx context.Context, allTools []einoTool.BaseTool, i
 		}
 	}
 	if hasDangerous {
-		sb.WriteString("8. **危险工具审批**：delete_document 等危险工具会在执行前暂停并等待用户审批，调用后流程中断，用户确认后自动继续\n")
+		sb.WriteString("8. **危险工具审批**：delete_document 以及 MCP 提供的写文件、编辑、移动、删除类工具会在执行前暂停并等待用户审批，调用后流程中断，用户确认后自动继续\n")
 		sb.WriteString("   - ⚠️ **目标不明确先反问**：当用户说'删除那个文档'、'清理一下'、'把上面的删了'这类模糊指令，且从对话历史无法唯一确定目标时，**绝对不能编造参数调用工具**。先调用 ask_clarify 反问用户明确目标（例如：'你要删除的是《压力 - 07/13 16:03》那个文档吗？还是另一个？'）\n")
 		sb.WriteString("   - ⚠️ **禁止猜测参数**：document_id 等关键参数必须来自可靠来源（用户明确提供、get_document_info 工具查询结果、历史对话中已确认的 ID）。严禁从模糊描述或'看起来像是'的文本中猜测或编造\n")
 		sb.WriteString("   - 调用危险工具时务必在参数里写清楚目标和原因，便于用户决策\n")

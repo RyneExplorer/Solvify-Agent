@@ -69,6 +69,10 @@ type SpanEvent struct {
 //     但落库需要把 children 挂到 parent 上形成树。不能依赖 trace.SpanFromContext(ctx) 找 parent，
 //     因为 ctx 可能被 Eino InitCallbacks 重包装，拿回的是当前 span 自己。
 //   - OTel span 内部线程安全；落库前 finalizeTrace 单线程读写，不需要再加锁
+//   - DurationMs 等「可测量」字段刻意不带 omitempty：0 是合法的测量值（亚毫秒的 span
+//     用整数毫秒表达就是 0），而「字段不存在」的含义是「没采集到」，前端必须能区分这两者。
+//     同类字段（TraceResponse / AgentStep / ChatTrace 等）由
+//     internal/service/duration_ms_guard_test.go 的反射守卫统一兜住
 type Span struct {
 	TraceID    string       `json:"trace_id"`
 	SpanID     string       `json:"span_id"`
@@ -77,19 +81,32 @@ type Span struct {
 	Component  Component    `json:"component"`
 	StartAt    time.Time    `json:"start_at"`
 	EndAt      time.Time    `json:"end_at,omitempty"`
-	DurationMs int64        `json:"duration_ms,omitempty"`
+	DurationMs int64        `json:"duration_ms"`
 	Status     SpanStatus   `json:"status"`
 	Error      string       `json:"error,omitempty"`
 	Attrs      Attrs        `json:"attrs,omitempty"`
 	Events     []*SpanEvent `json:"events,omitempty"`
 	Children   []*Span      `json:"children,omitempty"`
 
+	// OTelTraceID / OTelSpanID 是「双轨 traceID 对齐」字段，即 OTel SDK 为同一个 span
+	// 生成的十六进制 ID，与上面的自研 TraceID / SpanID 是两套完全独立的 ID：
+	//   - TraceID / SpanID：自研轨道，randomHex 生成，chat_traces.id 与落库 parent_id 用它
+	//   - OTelTraceID / OTelSpanID：OTel 轨道，三方追踪平台（ByteAPM / Jaeger / Tempo 等）按它检索
+	// 把后者记下来，DB 里的一条 trace 才能映射回三方平台上的同一条链路（chat_traces.otel_trace_id）。
+	//
+	// 注意：SpanContext 合法 != 三方平台查得到。OTelExporter=noop 时 TracerProvider 照样生成
+	// 合法 SpanContext（这里照样有值），但没有任何 SpanProcessor 消费；采样率 < 1 时整条 trace
+	// 还可能被丢弃。「三方是否真的有」由 Trace.OTelExported 表达，不要用本字段是否为空来判断。
+	OTelTraceID string `json:"otel_trace_id,omitempty"`
+	OTelSpanID  string `json:"otel_span_id,omitempty"`
+
 	// otelSpan 运行时持有 OTel span，用于调 SetAttributes / End / AddEvent。
 	// 落库时 json:"-" 忽略，避免 marshal 循环或暴露内部对象。
 	otelSpan trace.Span `json:"-"`
 
 	// parent 落库用：指向父 Span，EndSpan 时把当前 span append 到 parent.Children。
-	// StartSpan 时从入参 ctx 的 spanByOtel 查找 parent 并存入。
+	// StartSpan 时从入参 ctx 的 currentSpanKey 取父 span（与 span 的 End 状态解耦），
+	// spanByOtel 只是 CurrentSpanFromContext 的兜底反查，不参与建树。
 	// json:"-" 避免序列化循环。
 	parent *Span `json:"-"`
 }
@@ -103,6 +120,14 @@ type Trace struct {
 	Root       *Span   `json:"root"`
 	SampleRate float64 `json:"sample_rate,omitempty"`
 	Sampled    bool    `json:"sampled"`
+
+	// OTelTraceID 是自研 ID 对应的 OTel traceID（双轨对齐，落 chat_traces.otel_trace_id）。
+	// 为空表示这条 trace 没走 OTel 轨道：recorder 未启用，或 ctx 里压根没有 OTel span。
+	OTelTraceID string `json:"otel_trace_id,omitempty"`
+	// OTelExported 表示这条 trace 是否「真的会出现在三方追踪平台上」。
+	// OTelTraceID 非空但本字段为 false，说明只做到了本地关联（ID 一致可写日志串查），
+	// 三方平台没有这条数据 —— 前端不要给出点进去是空白的跳转按钮。
+	OTelExported bool `json:"otel_exported,omitempty"`
 }
 
 // Feedback 表示用户对消息的反馈。
@@ -130,7 +155,7 @@ type AgentStep struct {
 	ToolResultSummary string    `json:"tool_result_summary,omitempty"`
 	ToolStatus        string    `json:"tool_status,omitempty"`
 	ToolError         string    `json:"tool_error,omitempty"`
-	LatencyMs         int64     `json:"latency_ms,omitempty"`
+	LatencyMs         int64     `json:"latency_ms"`
 	TokensDelta       int       `json:"tokens_delta,omitempty"`
 }
 

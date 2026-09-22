@@ -32,7 +32,9 @@ type ToolProviderInfo struct {
 	ProviderConfig json.RawMessage `json:"provider_config"`
 	AdminConfig    json.RawMessage `json:"admin_config"`
 	RateLimit      json.RawMessage `json:"rate_limit"`
+	MCPToolManifest json.RawMessage `json:"mcp_tool_manifest"`
 	IsEnabled      bool            `json:"is_enabled"`
+	IsSystem       bool            `json:"is_system"` // 是否系统预置（系统预置不可删除）
 	DisplayOrder   int             `json:"display_order"`
 }
 

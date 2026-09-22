@@ -15,13 +15,15 @@ import (
 type adminSessionService struct {
 	sessionRepo repository.ChatSessionRepo
 	messageRepo repository.ChatMessageRepo
+	txMgr       repository.TxManager
 }
 
 // NewAdminSessionService 创建管理员会话服务
-func NewAdminSessionService(sessionRepo repository.ChatSessionRepo, messageRepo repository.ChatMessageRepo) AdminSessionServiceInterface {
+func NewAdminSessionService(sessionRepo repository.ChatSessionRepo, messageRepo repository.ChatMessageRepo, txMgr repository.TxManager) AdminSessionServiceInterface {
 	return &adminSessionService{
 		sessionRepo: sessionRepo,
 		messageRepo: messageRepo,
+		txMgr:       txMgr,
 	}
 }
 
@@ -67,16 +69,19 @@ func (s *adminSessionService) List(ctx context.Context, req *requestdto.AdminSes
 func (s *adminSessionService) Delete(ctx context.Context, sessionID string) error {
 	session, err := s.sessionRepo.FindByID(ctx, sessionID)
 	if err != nil {
-		return err
+		return apperrors.NotFoundOrInternal(apperrors.CodeSessionNotFound, err)
 	}
 	if session == nil {
 		return apperrors.New(apperrors.CodeSessionNotFound, "会话不存在")
 	}
 
-	if err := s.messageRepo.DeleteBySessionID(ctx, sessionID); err != nil {
-		return err
-	}
-	return s.sessionRepo.Delete(ctx, sessionID)
+	// 会话与其消息必须同生共死，否则第二步失败会留下「消息已删、会话还在」的空壳
+	return s.txMgr.InTx(ctx, func(ctx context.Context) error {
+		if err := s.messageRepo.DeleteBySessionID(ctx, sessionID); err != nil {
+			return err
+		}
+		return s.sessionRepo.Delete(ctx, sessionID)
+	})
 }
 
 // CleanupExpired 清理过期会话，返回删除数量

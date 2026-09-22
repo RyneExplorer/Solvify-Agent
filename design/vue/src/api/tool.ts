@@ -5,6 +5,7 @@ import type {
   CreateUserToolConfigRequest,
   UpdateUserToolConfigRequest,
   ListUserToolConfigsResponse,
+  ToolTestResult,
 } from '@/types/tool'
 
 // ── Tool Templates (combined type + providers) ──
@@ -54,4 +55,12 @@ export function testUserToolConfig(data: {
     response_time_ms: number
     details?: string
   }>('/user/tool-configs/test', { method: 'POST', body: data })
+}
+
+// 探测 MCP 服务器工具清单（不执行工具；后端会刷新该服务器的工具缓存）
+export function probeUserMCP(providerId: string) {
+  return request<ToolTestResult>('/user/tools/mcp/probe', {
+    method: 'POST',
+    body: { provider_type: 'mcp', provider_id: providerId },
+  })
 }

@@ -136,3 +136,64 @@ email:
   port: 465
   username: ""
   password: ""
+
+# 可观测性配置（自研 trace 轨道 + OpenTelemetry 三方导出）
+#
+# 整段都可以不写：不写时全部走 pkg/config 里的 Default()，取值与本文件标注的默认值一致。
+# 之所以还是列出来，是因为要接三方追踪平台时必须改这里的 otel_* 几项，
+# 而 mapstructure 对拼错的键名是**静默忽略**的（配了等于没配，服务照常启动），
+# 有这份显式模板才好对照。pkg/config 里有一条测试会严格校验本段键名与结构体一致。
+observability:
+  # ---- 自研追踪轨道（前端「追踪详情」页的数据源 chat_traces）----
+  enabled: true                    # 总开关，关掉后 Recorder 退化为空实现
+  sampling_rate: 0.2               # 自研轨道采样率：只作用于「无业务归属」的 trace（健康检查、列表轮询
+                                   # 等噪声）。挂在某轮问答上的 trace 一律落库 —— 它的 trace_id 已随助手消息返回
+                                   # 给前端，采掉就成了查不到详情的悬空 ID。
+  error_always_sample: true        # 出错请求强制采样（不受 sampling_rate 限制）
+  slow_threshold_ms: 5000          # 慢请求阈值（毫秒），命中即强制采样
+  feedback_always_sample: true     # 带用户反馈的请求强制采样
+  trace_table_enabled: true        # 是否把 trace 落库到 chat_traces
+  export_log_enabled: true         # 是否额外打一份日志形态的 trace（生产建议关）
+  metrics_format: json
+  sink_buffer_size: 1024           # 异步 Sink 缓冲条数，满了会丢新记录，不要设太小
+  sink_batch_size: 50
+  sink_flush_interval_ms: 200
+  pii_content_max_chars: 200       # 字符串属性的截断长度（防 PII 外泄 + 防 span_tree 过大）
+                                   # 注意：对所有字符串属性生效，所以不要把 JSON 塞进属性
+                                   # （会被截成非法 JSON），这也是没做 gen_ai.input/output.messages 的原因
+  pii_mask_secret: true            # 对疑似密钥的取值打码
+  feedback_enabled: true
+  whitelist_user_ids: []           # 白名单用户 UUID：命中则强制全采样（填 UUID，不是用户名）
+  max_cardinality_labels: 500
+
+  # ---- OpenTelemetry 导出（三方链路追踪平台的唯一出口）----
+  # noop   = 不导出，开发期默认值
+  # stdout = 把 span 以 JSON 打到控制台，本地调试看 span 长什么样
+  # otlp   = 通过 OTLP gRPC 推给 Collector 或三方追踪服务端
+  otel_exporter: noop
+  # otlp gRPC 地址。本机/边车 Collector 一般是 "localhost:4317"；
+  # 三方 SaaS 后端通常不带 scheme（例如 "otlp.example.com:4317"）
+  otel_otlp_endpoint: "localhost:4317"
+  otel_service_name: "solvify-agent"   # 平台按它区分服务，多环境建议带后缀
+  # OTel 轨道采样率 0~1，1 = 全采样。与上面的 sampling_rate 是两套独立采样：
+  # 上面管「是否写 chat_traces」，这里管「是否上报给三方平台」。
+  # 采样器是 ParentBased：请求带上游 traceparent 时跟随上游的采样决定，
+  # 本值只对「本服务是链路起点」的请求生效。
+  otel_sampling_rate: 1.0
+  # true  = 明文 gRPC（本机 Jaeger / 内网边车 Collector）
+  # false = 走 TLS（三方 SaaS 后端通常要 false）
+  otel_insecure: true
+  # 附加到每次 OTLP 请求上的鉴权 metadata。
+  # 值属于敏感信息 —— 只放本地 config.yaml 或环境变量 OTEL_HEADERS，不要提交进仓库。
+  # 示例：
+  #   Authorization: "Basic <base64(public_key:secret_key)>"
+  #   x-byteapm-appkey: "<appkey>"
+  #   Authorization: "Bearer <token>"
+  otel_headers: {}
+  #
+  # 接三方平台的最小改动示例（本地 config.yaml 里这样写即可，其余项保持默认）：
+  #   otel_exporter: otlp
+  #   otel_otlp_endpoint: "otlp.example.com:4317"
+  #   otel_insecure: false
+  #   otel_headers:
+  #     Authorization: "Basic <base64(public_key:secret_key)>"

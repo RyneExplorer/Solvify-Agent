@@ -14,7 +14,6 @@ import (
 
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/gin-gonic/gin"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
@@ -36,6 +35,7 @@ import (
 	"solvify-agent/pkg/database"
 	"solvify-agent/pkg/documentparser"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // App 是全局应用结构体，集中持有配置、基础设施和路由实例
@@ -47,9 +47,16 @@ type App struct {
 	router       *api.Router
 	server       *http.Server
 
-	// 阶段 1.4：OTel / Prometheus 资源，由 App 负责生命周期管理
+	// 阶段 1.4：OTel 资源，由 App 负责生命周期管理
+	// （Prometheus Registry 不在这里：纯内存对象、没有待关闭的资源，
+	//   在 initDependencies 里建好后直接传给 Router 即可，不必再存一层。）
 	tracerShutdown func(context.Context) error
-	promRegistry   *prometheus.Registry
+
+	// checkpoint 过期清理后台任务的取消函数，由 App 负责生命周期管理
+	checkpointCleanupCancel context.CancelFunc
+
+	// MCP 客户端连接池，由 App 负责生命周期管理
+	mcpClientPool *providers.MCPClientPool
 }
 
 // NewApp 创建应用实例
@@ -68,7 +75,9 @@ func (a *App) Initialize() error {
 	if err := a.initDatabase(); err != nil {
 		return err
 	}
-	a.initDependencies()
+	if err := a.initDependencies(); err != nil {
+		return err
+	}
 	a.initRouter()
 	a.initServer()
 	return nil
@@ -152,6 +161,17 @@ func (a *App) initDatabase() error {
 		logger.Warnf("message_feedback schema 补齐异常（不阻塞启动）: %v", err)
 	}
 
+	// tool_providers 表 schema 补齐（新增 is_system 列，区分系统预置与管理员自定义 MCP 供应商）
+	if err := database.EnsureToolProviderSchema(postgresqlDB); err != nil {
+		logger.Warnf("tool_providers schema 补齐异常（不阻塞启动）: %v", err)
+	}
+
+	// chat_traces 表 schema 补齐（双轨 traceID 对齐新增 otel_trace_id 列 + 索引，
+	// 缺列会让 GORM INSERT 报 column does not exist，导致所有 trace 落库失败）
+	if err := database.EnsureChatTraceSchema(postgresqlDB); err != nil {
+		logger.Warnf("chat_traces schema 补齐异常（不阻塞启动）: %v", err)
+	}
+
 	// Redis 缓存连接
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
 	if err != nil {
@@ -159,14 +179,6 @@ func (a *App) initDatabase() error {
 		return fmt.Errorf("初始化 Redis 失败: %w", err)
 	}
 	a.redis = redisClient
-	return nil
-}
-
-// ensureStorageQuotaUniqueIndex 确保存储配额用户唯一索引存在
-func (a *App) ensureStorageQuotaUniqueIndex(db *gorm.DB) error {
-	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS storage_quotas_user_unique ON storage_quotas(user_id)").Error; err != nil {
-		return fmt.Errorf("创建存储配额用户唯一索引失败: %w", err)
-	}
 	return nil
 }
 
@@ -189,6 +201,8 @@ func (a *App) initEmbedding() rag.EmbeddingFunc {
 	if err != nil {
 		logger.Fatal("初始化 Embedding 客户端失败", zap.Error(err))
 	}
+	// 同 chat 的 LLM：登记 modelID → 供应商，供 eino 回调补 gen_ai.provider.name
+	observability.RegisterGenAIProvider(a.cfg.Embedding.Model, a.cfg.Embedding.Provider)
 
 	redisCache := cache.New(a.redis, "emb:", embeddingRedisTTL)
 	var inMem sync.Map // map[string][]float64
@@ -216,7 +230,7 @@ func (a *App) initEmbedding() rag.EmbeddingFunc {
 			}
 
 			// 层级 3：调 API
-			logger.Infof("[Embedding] 全缓存未命中: key=%s text=%q, 调用 API...", cacheKey[:8], truncateText(text, 60))
+			logger.Infof("[Embedding] 全缓存未命中: key=%s text=%q, 调用 API...", cacheKey[:8], strutil.Truncate(text, 60))
 			vec, err := embeddingClient.Embed(ctx, text)
 			if err != nil {
 				logger.Errorf("[Embedding] API 调用失败: %v", err)
@@ -260,14 +274,6 @@ func (a *App) initEmbedding() rag.EmbeddingFunc {
 			return nil, ctx.Err()
 		}
 	}
-}
-
-func truncateText(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "..."
 }
 
 // initRetriever 初始化 RAG 检索器（混合检索 + 可选装饰器链）
@@ -353,7 +359,7 @@ func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo rep
 }
 
 // initDependencies 初始化业务依赖并创建路由
-func (a *App) initDependencies() {
+func (a *App) initDependencies() error {
 	// 初始化 Repository
 	knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
 	documentRepo := repository.NewDocumentRepository(a.postgresqlDB)
@@ -386,7 +392,6 @@ func (a *App) initDependencies() {
 		}
 	}
 	promReg := observability.InitPrometheusRegistry(obsCfg)
-	a.promRegistry = promReg
 	logger.Infof("Prometheus Registry 已初始化")
 
 	// 阶段三：初始化可观测性 Recorder（DB Sink + 批量日志 Sink + 采样器 + PII）
@@ -403,8 +408,11 @@ func (a *App) initDependencies() {
 
 	// 模型配置缓存（10 分钟 TTL）
 	modelCache := cache.New(a.redis, "model:", 10*time.Minute)
+	// 用户模型配置是另一份数据，单独命名空间，避免与系统模型共用实例导致 key 归属混乱
+	userModelConfigCache := cache.New(a.redis, "user:model:config:", 10*time.Minute)
 	modelRepo := repository.NewCachedModelRepository(repository.NewModelRepository(a.postgresqlDB), modelCache)
-	userModelConfigRepo := repository.NewCachedUserModelConfigRepository(repository.NewUserModelConfigRepository(a.postgresqlDB), modelCache)
+	userModelConfigRepo := repository.NewCachedUserModelConfigRepository(repository.NewUserModelConfigRepository(a.postgresqlDB), userModelConfigCache)
+	txMgr := repository.NewTxManager(a.postgresqlDB)
 	chatSessionRepo := repository.NewChatSessionRepository(a.postgresqlDB)
 	chatMessageRepo := repository.NewChatMessageRepository(a.postgresqlDB)
 	memoryRepo := repository.NewUserMemoryRepository(a.postgresqlDB)
@@ -428,8 +436,16 @@ func (a *App) initDependencies() {
 	// 初始化工具 Provider 注册表——注册通用 Provider 类型
 	toolRegistry := tool.NewProviderRegistry()
 	toolRegistry.Register("http", providers.NewHTTPProvider()) // 通用 HTTP Provider
+
+	// MCP Provider：一个 MCP Server 可提供多个工具（一对多映射）
+	a.mcpClientPool = providers.NewMCPClientPool()
+	toolRegistry.Register("mcp", providers.NewMCPProvider(a.mcpClientPool))
+
 	// ToolFactory——Agent 引擎从 DB/Redis 加载用户配置的工具
 	toolFactory := tool.NewFactory(toolRegistry, cachedUserToolConfigRepo, cachedToolTypeRepo)
+
+	// 加载系统预置 MCP 服务器（从 config.yaml 同步到数据库）
+	a.loadSystemMCPServersWithTimeout()
 
 	// Chunk Repository（文档分块查询）
 	chunkRepo := repository.NewDocumentChunkRepository(a.postgresqlDB)
@@ -440,11 +456,39 @@ func (a *App) initDependencies() {
 	// 注入 DB 版 CheckPointStore 所需的 AgentCheckpointRepo
 	ai.AgentEngine.WithCheckpointRepo(agentCheckpointRepo)
 
+	// 启动 checkpoint 过期清理后台任务：定期删除 agent_checkpoints 中超过 TTL 的行。
+	// Eino 框架不自动调用 CheckPointStore.Delete（Delete 是可选接口），原 DeleteExpired 是死代码（无调用方）。
+	// 这里起 Ticker 周期性清理，与 runWithRunner 恢复成功后即时删除互补，彻底堵住 checkpoint 字节泄漏。
+	{
+		cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+		a.checkpointCleanupCancel = cleanupCancel
+		const cleanupInterval = time.Hour
+		go func() {
+			ticker := time.NewTicker(cleanupInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-cleanupCtx.Done():
+					logger.Info("checkpoint 过期清理任务已停止")
+					return
+				case <-ticker.C:
+					n, dErr := agentCheckpointRepo.DeleteExpired(cleanupCtx, time.Now())
+					if dErr != nil {
+						logger.Warnf("[CheckpointCleanup] 删除过期 checkpoint 失败: %v", dErr)
+					} else if n > 0 {
+						logger.Infof("[CheckpointCleanup] 已清理 %d 条过期 checkpoint", n)
+					}
+				}
+			}
+		}()
+		logger.Infof("checkpoint 过期清理任务已启动: interval=%v", cleanupInterval)
+	}
+
 	// 初始化 Service
 	prefSvc := service.NewUserPreferenceService(userPreferenceRepo)
 	userSvc := service.NewUserService(userRepo, prefSvc, userModelCache)
 	adminUserSvc := service.NewAdminUserService(userRepo)
-	adminSessionSvc := service.NewAdminSessionService(chatSessionRepo, chatMessageRepo)
+	adminSessionSvc := service.NewAdminSessionService(chatSessionRepo, chatMessageRepo, txMgr)
 	authSvc := service.NewAuthService(userRepo, userSvc, a.redis)
 	modelService := service.NewModelService(modelRepo)
 	userModelConfigService := service.NewUserModelConfigService(userModelConfigRepo)
@@ -456,16 +500,19 @@ func (a *App) initDependencies() {
 		ScriptPath:     a.cfg.DocumentParser.ScriptPath,
 		TimeoutSeconds: a.cfg.DocumentParser.TimeoutSeconds,
 	})
-	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentVersionRepo, documentJobRepo, storageQuotaRepo, documentChunkSvc, textExtractor, "data/uploads")
+	documentSvc := service.NewDocumentServiceWithChunkService(knowledgeBaseRepo, documentRepo, documentVersionRepo, documentJobRepo, storageQuotaRepo, txMgr, chunkRepo, documentChunkSvc, textExtractor, "data/uploads")
 	dingtalkClient := dingtalk.NewClient(a.cfg.DingTalk)
 	dingtalkStateCache := cache.New(a.redis, "dingtalk:oauth:state:", 10*time.Minute)
 	dingtalkSvc := service.NewDingTalkService(a.cfg.DingTalk, dingtalkBindingRepo, dingtalkStateCache, dingtalkClient)
 	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncItemRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, textExtractor, dingtalkClient, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
 	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo, a.obsRecorder)
-	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.obsRecorder, obsRepo)
-	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo)
-	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry)
+	chatSvc, err := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.obsRecorder, obsRepo)
+	if err != nil {
+		return fmt.Errorf("初始化聊天服务失败: %w", err)
+	}
+	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo, toolProviderRepo, cachedUserToolConfigRepo, txMgr)
+	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry, cachedUserToolConfigRepo, txMgr)
 	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo, toolRegistry)
 	searchSvc := service.NewSearchService(chatMessageRepo, chunkRepo)
 
@@ -485,13 +532,14 @@ func (a *App) initDependencies() {
 		chatSvc,
 		syncSvc,
 		dingtalkSvc,
-		chunkRepo,
 		toolTypeService,
 		toolProviderService,
 		userToolConfigService,
 		prefSvc,
-		a.promRegistry, // 阶段 1.4：替换原 obsRecorder，/metrics 走 promhttp.Handler
+		promReg, // /metrics 走 promhttp.HandlerFor(promReg)；形参有类型，漏传/传错编译不过
 	)
+
+	return nil
 }
 
 // prewarmModelClients 启动时预创建所有已启用系统模型的 LLM 客户端
@@ -502,12 +550,17 @@ func (a *App) prewarmModelClients(modelRepo repository.ModelRepo) {
 		return
 	}
 
-	infos := make([]llm.SystemModelInfo, 0, len(models))
+	// 预热入参用与请求路径同一个结构（llm.ModelConfig），
+	// 而不是它的子集 —— 子集漏字段正是预热失效的原因（见 llm.PrewarmClients 注释）。
+	infos := make([]llm.ModelConfig, 0, len(models))
 	for _, m := range models {
-		infos = append(infos, llm.SystemModelInfo{
-			ModelID: m.ModelID,
-			BaseURL: m.BaseURL,
-			APIKey:  m.APIKey,
+		infos = append(infos, llm.ModelConfig{
+			Provider:         m.Provider,
+			ModelID:          m.ModelID,
+			BaseURL:          m.BaseURL,
+			APIKey:           m.APIKey,
+			Config:           m.Config,
+			MaxContextLength: m.MaxContextLength,
 		})
 	}
 	logger.Infof("预热模型客户端: 从数据库加载到 %d 个已启用系统模型", len(infos))
@@ -581,6 +634,18 @@ func (a *App) gracefulShutdown() {
 		if err := database.CloseRedis(a.redis); err != nil {
 			logger.Error("Redis 连接关闭失败", zap.Error(err))
 		}
+	}
+
+	// 关闭 MCP 客户端连接池（清理 stdio 子进程等资源）
+	if a.mcpClientPool != nil {
+		if err := a.mcpClientPool.Close(); err != nil {
+			logger.Errorf("MCP 客户端连接池关闭失败: %v", err)
+		}
+	}
+
+	// 停止 checkpoint 过期清理后台任务
+	if a.checkpointCleanupCancel != nil {
+		a.checkpointCleanupCancel()
 	}
 
 	logger.Info("HTTP 服务已停止")

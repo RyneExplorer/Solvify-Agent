@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"solvify-agent/pkg/strutil"
 )
 
 // PIISanitizer 负责对文本和 attrs 做 PII 脱敏与截断。
@@ -13,10 +15,10 @@ type PIISanitizer struct {
 }
 
 var (
-	emailRe           = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
-	phoneRe           = regexp.MustCompile(`(1[3-9]\d)(\d{4})(\d{4})|(\d{3})(\d{4})(\d{4})`)
-	secretHeaderRe    = regexp.MustCompile(`(?i)(Authorization|Bearer|Api-Key|X-API-Key|X-Auth-Token|Proxy-Authorization)[:=]\s*[^\s,;"']+`)
-	skKeyRe           = regexp.MustCompile(`(?i)(sk-|pk-|token|apikey|api_key|secret)[^ \t\n\r]{0,4}[=: ]\s*[A-Za-z0-9_\-]{8,}`)
+	emailRe        = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
+	phoneRe        = regexp.MustCompile(`(1[3-9]\d)(\d{4})(\d{4})|(\d{3})(\d{4})(\d{4})`)
+	secretHeaderRe = regexp.MustCompile(`(?i)(Authorization|Bearer|Api-Key|X-API-Key|X-Auth-Token|Proxy-Authorization)[:=]\s*[^\s,;"']+`)
+	skKeyRe        = regexp.MustCompile(`(?i)(sk-|pk-|token|apikey|api_key|secret)[^ \t\n\r]{0,4}[=: ]\s*[A-Za-z0-9_\-]{8,}`)
 )
 
 // NewPIISanitizer 构造 PIISanitizer。
@@ -30,7 +32,7 @@ func NewPIISanitizer(contentMaxChars int, maskSecret bool) *PIISanitizer {
 // SanitizeString 对字符串做 PII 脱敏并按字符数截断。
 func (s *PIISanitizer) SanitizeString(text string) string {
 	if s == nil {
-		return truncateRunes(text, 200)
+		return strutil.TruncateWith(text, 200, strutil.EllipsisChar)
 	}
 	out := text
 	if s.MaskSecret {
@@ -39,7 +41,7 @@ func (s *PIISanitizer) SanitizeString(text string) string {
 	}
 	out = emailRe.ReplaceAllStringFunc(out, maskEmail)
 	out = phoneRe.ReplaceAllStringFunc(out, maskPhone)
-	out = truncateRunes(out, s.ContentMaxChars)
+	out = strutil.TruncateWith(out, s.ContentMaxChars, strutil.EllipsisChar)
 	return out
 }
 
@@ -82,20 +84,6 @@ func (s *PIISanitizer) sanitizeValue(v any) any {
 	default:
 		return v
 	}
-}
-
-func truncateRunes(s string, max int) string {
-	if max <= 0 || s == "" {
-		return ""
-	}
-	if utf8.RuneCountInString(s) <= max {
-		return s
-	}
-	r := []rune(s)
-	if max > len(r) {
-		max = len(r)
-	}
-	return string(r[:max]) + "…"
 }
 
 func maskEmail(s string) string {
@@ -165,7 +153,7 @@ func max(a, b int) int {
 // short_preview（工具名列表/last_user_msg_preview）= 200。
 func (s *PIISanitizer) TruncatePreview(text string, maxRunes int) string {
 	if s == nil {
-		return truncateRunes(text, 300)
+		return strutil.TruncateWith(text, 300, strutil.EllipsisChar)
 	}
 	if maxRunes <= 0 {
 		maxRunes = 200
@@ -178,7 +166,7 @@ func (s *PIISanitizer) TruncatePreview(text string, maxRunes int) string {
 	if total <= maxRunes {
 		return masked
 	}
-	head := truncateRunes(masked, maxRunes)
+	head := strutil.TruncateWith(masked, maxRunes, strutil.EllipsisChar)
 	// head 末尾自带 "…"，去掉再拼接统一尾标。
 	head = strings.TrimRight(head, "…")
 	return head + "…(+" + itoa(total-maxRunes) + " chars)"

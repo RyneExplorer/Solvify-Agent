@@ -21,7 +21,7 @@ func NewSummaryRepository(db *gorm.DB) SummaryRepo {
 // GetBySessionID 获取会话摘要
 func (r *summaryRepository) GetBySessionID(ctx context.Context, sessionID string) (*entity.ChatSummary, error) {
 	var summary entity.ChatSummary
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("session_id = ?", sessionID).
 		First(&summary).Error
 	if err == gorm.ErrRecordNotFound {
@@ -35,7 +35,7 @@ func (r *summaryRepository) GetBySessionID(ctx context.Context, sessionID string
 
 // Upsert 更新或创建摘要
 func (r *summaryRepository) Upsert(ctx context.Context, summary *entity.ChatSummary) error {
-	return r.db.WithContext(ctx).
+	return dbFor(ctx, r.db).
 		Where("session_id = ?", summary.SessionID).
 		Assign(map[string]interface{}{
 			"summary":         summary.Summary,

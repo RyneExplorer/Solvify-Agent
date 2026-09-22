@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 type userIDKey struct{}
@@ -128,6 +129,29 @@ func (w *responseRecorder) Size() int {
 	return w.size
 }
 
+// traceExemptPaths 是不产生 trace 的路径：集群探针与指标抓取端点。
+//
+// 为什么必须豁免：这类路径会被高频拉取（K8s liveness + readiness 按 10s 间隔
+// 约 1.7 万次/天），而三方可观测平台的计费单位是「trace + observation」——
+// 一次健康检查约 2 units，免费档 50k units/月 约 1.5 天就会被打满；
+// 即便不计费，trace 列表也会被单 span 的健康检查刷屏，平台失去排障价值。
+//
+// 只豁免 span，不豁免 Prometheus 指标：指标在进程内聚合、不产生外部成本，
+// 而探针的延迟与失败率恰恰是运维需要长期观察的信号。
+var traceExemptPaths = map[string]struct{}{
+	"/health":  {},
+	"/readyz":  {},
+	"/livez":   {},
+	"/metrics": {},
+}
+
+// isTraceExemptPath 判断路径是否不建 trace。按 URL 路径精确匹配：
+// 不能用 c.FullPath()=="" 当判据 —— 那语义是「未匹配到路由」，会把 404 也放进来。
+func isTraceExemptPath(path string) bool {
+	_, exempt := traceExemptPaths[path]
+	return exempt
+}
+
 // TraceMiddleware 给每个 HTTP 请求打 OTel 根 span + 记录 Prometheus HTTP 指标。
 type TraceMiddleware struct {
 	Recorder Recorder
@@ -157,6 +181,13 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 				ctx = SetUserID(ctx, s)
 			}
 		}
+
+		// 入站 trace 上下文提取：必须放在下面 StartSpan("http.request") 之前。
+		// 提取到的远程 span 会成为 http.request 的父节点，本次请求于是复用上游的
+		// traceID，跨服务链路才能串成同一条 trace。上游没接 OTel（不带 traceparent）时
+		// 这里是空操作，行为与改动前完全一致：HTTP 入口依旧是根 span。
+		ctx, inboundTrace := ExtractRemoteContext(ctx, c.Request.Header)
+
 		c.Request = c.Request.WithContext(ctx)
 
 		route := c.FullPath()
@@ -168,6 +199,11 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 		}
 		method := c.Request.Method
 
+		// 探针 / 抓取端点不建 trace（详见 traceExemptPaths 注释）。
+		// 判断放在这里而不是 Handler 最开头：豁免路径仍要保留 X-Request-ID、
+		// Prometheus 指标与 panic 兜底，只是不产生会外发到三方平台的 span。
+		traceEnabled := !isTraceExemptPath(c.Request.URL.Path)
+
 		// 在途请求 Gauge
 		metrics := GlobalMetrics()
 		if metrics != nil && metrics.HTTPRequestInflight != nil {
@@ -177,7 +213,7 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 
 		start := time.Now()
 		var span *Span
-		if m.Recorder != nil {
+		if m.Recorder != nil && traceEnabled {
 			recAttrs := Attrs{
 				"method":     method,
 				"path":       c.Request.URL.Path,
@@ -190,7 +226,20 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 					recAttrs["user_id"] = s
 				}
 			}
-			_, span = m.Recorder.StartSpan(ctx, "http.request", ComponentHTTPServer, recAttrs)
+			// 只在真有入站父 span 时才记这几个属性，避免「没有上游」被误读成
+			// 「上游要求不采样」（那时 Sampled 也是 false，两者必须靠 Present 区分）。
+			// 排查链路断裂 / 采样被上游掐掉时，先看这几个属性。
+			if inboundTrace.Present {
+				recAttrs["otel.inbound_trace_id"] = inboundTrace.TraceID
+				recAttrs["otel.inbound_parent_span_id"] = inboundTrace.SpanID
+				recAttrs["otel.inbound_parent_sampled"] = inboundTrace.Sampled
+			}
+			// 必须接收 StartSpan 返回的 ctx 并写回请求：它携带 traceID、当前 span 引用
+			// 和 OTel span。丢掉的后果是下游（chat → eino 组件）找不到父 span，各自新建根
+			// span —— OTel 侧同一个 HTTP 请求被拆成两棵互不相关的 trace，三方追踪平台
+			// 看不到父子关系；响应头 X-Trace-ID 也会是空值。
+			ctx, span = m.Recorder.StartSpan(ctx, "http.request", ComponentHTTPServer, recAttrs)
+			c.Request = c.Request.WithContext(ctx)
 		}
 
 		rec := &responseRecorder{ResponseWriter: c.Writer, body: bytes.NewBuffer(nil)}
@@ -204,8 +253,8 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 				if span != nil && m.Recorder != nil {
 					m.Recorder.AddEvent(ctx, span, "panic", Attrs{
 						"panic_type":  fmt.Sprintf("%T", err),
-						"panic_value": truncateForEvent(fmt.Sprintf("%v", err)),
-						"stack":       truncateForEvent(stackStr),
+						"panic_value": strutil.TruncateWith(fmt.Sprintf("%v", err), eventMaxRunes, strutil.EllipsisChar),
+						"stack":       strutil.TruncateWith(stackStr, eventMaxRunes, strutil.EllipsisChar),
 					})
 				}
 				if m.Recorder != nil {
@@ -232,17 +281,20 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 
 		dur := time.Since(start)
 		status := rec.Status()
-		c.Writer.Header().Set("X-Trace-ID", TraceIDFromContext(c.Request.Context()))
+		// 豁免路径不产生 traceID，不写空响应头；有 trace 的请求行为不变。
+		if tid := TraceIDFromContext(c.Request.Context()); tid != "" {
+			c.Writer.Header().Set("X-Trace-ID", tid)
+		}
 		statusGrp := statusGroup(status)
 		if span != nil && m.Recorder != nil {
 			attrs := Attrs{
 				"status":       status,
-				"bytes":         rec.Size(),
-				"errors":        len(c.Errors),
-				"status_group":  statusGrp,
+				"bytes":        rec.Size(),
+				"errors":       len(c.Errors),
+				"status_group": statusGrp,
 			}
 			if len(c.Errors) > 0 {
-				attrs["last_error"] = truncateForEvent(c.Errors.Last().Error())
+				attrs["last_error"] = strutil.TruncateWith(c.Errors.Last().Error(), eventMaxRunes, strutil.EllipsisChar)
 			}
 			endStatus := SpanStatusOK
 			var recErr error
@@ -262,7 +314,7 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 			m.Recorder.Incr(c.Request.Context(), "http_request_total", map[string]string{
 				"method":       method,
 				"route":        route,
-				"status_group":  statusGrp,
+				"status_group": statusGrp,
 			}, 1)
 			m.Recorder.Observe(c.Request.Context(), "http_request_duration_seconds", map[string]string{
 				"method": method,
@@ -279,13 +331,9 @@ func (m *TraceMiddleware) Handler() gin.HandlerFunc {
 	}
 }
 
-func truncateForEvent(s string) string {
-	const max = 512
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "…"
-}
+// eventMaxRunes 事件属性中长文本（panic 值、调用栈、错误信息）的截断上限，
+// 按字符数而非字节数计，避免中文被切成乱码。
+const eventMaxRunes = 512
 
 func statusGroup(status int) string {
 	switch {

@@ -52,6 +52,27 @@ func componentLabel(comp string) string {
 	return strings.ToLower(comp)
 }
 
+// genAIOperationName 把 eino 组件类型映射成 gen_ai.operation.name 取值。
+// 三方追踪平台靠这个属性判断 span 属于 LLM 调用、工具执行还是检索，必须显式给出。
+// 返回空字符串表示该组件类型没有合适的 gen_ai 操作名，调用方跳过该属性。
+func genAIOperationName(comp components.Component) string {
+	switch comp {
+	case components.ComponentOfChatModel, components.ComponentOfAgenticModel:
+		return genAIOpChat
+	case components.ComponentOfTool:
+		return genAIOpExecuteTool
+	case components.ComponentOfRetriever:
+		return genAIOpRetrieval
+	case components.ComponentOfEmbedding:
+		return genAIOpEmbeddings
+	case adk.ComponentOfAgent, adk.ComponentOfAgenticAgent:
+		return genAIOpInvokeAgent
+	case "Graph", "Chain", "Workflow":
+		return genAIOpInvokeFlow
+	}
+	return ""
+}
+
 type einoSpanKey struct{}
 
 // einoSpanState 跨 OnStart→OnEnd/OnError/OnStreamEnd 传递 span 引用。
@@ -100,6 +121,9 @@ func einoOnStart(rec Recorder) func(ctx context.Context, info *callbacks.RunInfo
 			"eino_name": info.Name,
 			"eino_type": info.Type,
 		}
+		if op := genAIOperationName(info.Component); op != "" {
+			attrs[AttrGenAIOperationName] = op
+		}
 		// 按 component 提取细粒度 attrs
 		switch info.Component {
 		case components.ComponentOfChatModel, components.ComponentOfAgenticModel:
@@ -107,7 +131,7 @@ func einoOnStart(rec Recorder) func(ctx context.Context, info *callbacks.RunInfo
 		case components.ComponentOfRetriever:
 			mergeRetrieverStartAttrs(attrs, input, rec)
 		case components.ComponentOfTool:
-			mergeToolStartAttrs(attrs, input, rec)
+			mergeToolStartAttrs(attrs, input, info, rec)
 		case components.ComponentOfEmbedding:
 			mergeEmbeddingStartAttrs(attrs, input, rec)
 		}
@@ -143,18 +167,26 @@ func mergeChatModelStartAttrs(attrs Attrs, input callbacks.CallbackInput, rec Re
 	if mi.Config != nil {
 		if mi.Config.Model != "" {
 			attrs["model_id"] = mi.Config.Model
+			attrs[AttrGenAIRequestModel] = mi.Config.Model
+			if provider := genAIProviderFor(mi.Config.Model); provider != "" {
+				attrs[AttrGenAIProviderName] = provider
+			}
 		}
 		if mi.Config.Temperature != 0 {
 			attrs["temperature"] = mi.Config.Temperature
+			attrs[AttrGenAIRequestTemperature] = mi.Config.Temperature
 		}
 		if mi.Config.MaxTokens > 0 {
 			attrs["max_tokens"] = mi.Config.MaxTokens
+			attrs[AttrGenAIRequestMaxTokens] = mi.Config.MaxTokens
 		}
 		if mi.Config.TopP > 0 {
 			attrs["top_p"] = mi.Config.TopP
+			attrs[AttrGenAIRequestTopP] = mi.Config.TopP
 		}
 		if len(mi.Config.Stop) > 0 {
 			attrs["stop"] = rec.PreviewAttr(joinShortList(mi.Config.Stop, 5), 200)
+			attrs[AttrGenAIRequestStopSequences] = mi.Config.Stop
 		}
 	}
 	attrs["role_counter"] = countMessageRoles(mi.Messages)
@@ -173,21 +205,33 @@ func mergeRetrieverStartAttrs(attrs Attrs, input callbacks.CallbackInput, rec Re
 		attrs["score_threshold"] = *ri.ScoreThreshold
 	}
 	if ri.Query != "" {
-		attrs["query"] = rec.PreviewAttr(ri.Query, 300)
+		// gen_ai.retrieval.query.text 让三方平台把 span 渲染成「检索」卡片并显示检索词
+		query := rec.PreviewAttr(ri.Query, 300)
+		attrs["query"] = query
+		attrs[AttrGenAIRetrievalQueryText] = query
 	}
 	if ri.Filter != "" {
 		attrs["filter"] = rec.PreviewAttr(ri.Filter, 200)
 	}
 }
 
-func mergeToolStartAttrs(attrs Attrs, input callbacks.CallbackInput, rec Recorder) {
+func mergeToolStartAttrs(attrs Attrs, input callbacks.CallbackInput, info *callbacks.RunInfo, rec Recorder) {
+	// eino 的工具名在 RunInfo.Name 上（工具作为节点执行时就是工具名），
+	// gen_ai.tool.name 是三方平台渲染工具卡片的必需属性。
+	if info != nil && info.Name != "" {
+		attrs[AttrGenAIToolName] = info.Name
+	}
+	attrs[AttrGenAIToolType] = "function"
+
 	ti := tool.ConvCallbackInput(input)
 	if ti == nil {
 		return
 	}
 	attrs["args_len"] = len(ti.ArgumentsInJSON)
 	if ti.ArgumentsInJSON != "" {
-		attrs["args_preview"] = rec.PreviewAttr(ti.ArgumentsInJSON, 300)
+		preview := rec.PreviewAttr(ti.ArgumentsInJSON, 300)
+		attrs["args_preview"] = preview
+		attrs[AttrGenAIToolCallArguments] = preview
 	}
 }
 
@@ -199,6 +243,10 @@ func mergeEmbeddingStartAttrs(attrs Attrs, input callbacks.CallbackInput, rec Re
 	attrs["texts_n"] = len(ei.Texts)
 	if ei.Config != nil && ei.Config.Model != "" {
 		attrs["model_id"] = ei.Config.Model
+		attrs[AttrGenAIRequestModel] = ei.Config.Model
+		if provider := genAIProviderFor(ei.Config.Model); provider != "" {
+			attrs[AttrGenAIProviderName] = provider
+		}
 	}
 	if len(ei.Texts) > 0 {
 		attrs["first_text_preview"] = rec.PreviewAttr(ei.Texts[0], 300)
@@ -283,6 +331,9 @@ func mergeChatModelEndAttrs(attrs Attrs, output callbacks.CallbackOutput, rec Re
 	}
 	attrs["has_tool_calls"] = len(mo.Message.ToolCalls) > 0
 	attrs["role"] = string(mo.Message.Role)
+	if mo.Message.ResponseMeta != nil && mo.Message.ResponseMeta.FinishReason != "" {
+		attrs[AttrGenAIResponseFinishReasons] = []string{mo.Message.ResponseMeta.FinishReason}
+	}
 	if mo.Message.Content != "" {
 		attrs["reply_preview"] = rec.PreviewAttr(mo.Message.Content, 500)
 	}
@@ -291,21 +342,9 @@ func mergeChatModelEndAttrs(attrs Attrs, output callbacks.CallbackOutput, rec Re
 			joinShortList(extractToolCallNames(mo.Message.ToolCalls), 5), 200,
 		)
 	}
-	var prompt, completion, total int
 	modelID := ""
 	if mo.TokenUsage != nil {
-		prompt = mo.TokenUsage.PromptTokens
-		completion = mo.TokenUsage.CompletionTokens
-		total = mo.TokenUsage.TotalTokens
-		attrs["prompt_tokens"] = prompt
-		attrs["completion_tokens"] = completion
-		attrs["total_tokens"] = total
-		if mo.TokenUsage.PromptTokenDetails.CachedTokens > 0 {
-			attrs["cached_tokens"] = mo.TokenUsage.PromptTokenDetails.CachedTokens
-		}
-		if mo.TokenUsage.CompletionTokensDetails.ReasoningTokens > 0 {
-			attrs["reasoning_tokens"] = mo.TokenUsage.CompletionTokensDetails.ReasoningTokens
-		}
+		mergeTokenUsageAttrs(attrs, mo.TokenUsage)
 	}
 	if mo.Config != nil {
 		modelID = mo.Config.Model
@@ -314,8 +353,33 @@ func mergeChatModelEndAttrs(attrs Attrs, output callbacks.CallbackOutput, rec Re
 	if modelID != "" {
 		llmLabels["model_id"] = modelID
 		attrs["model_id"] = modelID
+		attrs[AttrGenAIResponseModel] = modelID
 	}
 	return llmLabels
+}
+
+// mergeTokenUsageAttrs 把 token 用量同时写进本项目 attrs 和 gen_ai 语义约定 attrs。
+//
+// 两套名字并存的原因：本项目前端读的是 prompt_tokens / completion_tokens（chat_traces.span_tree），
+// 三方追踪平台读的是 gen_ai.usage.input_tokens / output_tokens，都不能省。
+// 入参 usage 为 nil 时不做任何事（部分模型实现不返回用量）。
+func mergeTokenUsageAttrs(attrs Attrs, usage *model.TokenUsage) {
+	if usage == nil {
+		return
+	}
+	attrs["prompt_tokens"] = usage.PromptTokens
+	attrs["completion_tokens"] = usage.CompletionTokens
+	attrs["total_tokens"] = usage.TotalTokens
+	attrs[AttrGenAIUsageInputTokens] = usage.PromptTokens
+	attrs[AttrGenAIUsageOutputTokens] = usage.CompletionTokens
+	if usage.PromptTokenDetails.CachedTokens > 0 {
+		attrs["cached_tokens"] = usage.PromptTokenDetails.CachedTokens
+		attrs[AttrGenAIUsageCacheReadTokens] = usage.PromptTokenDetails.CachedTokens
+	}
+	if usage.CompletionTokensDetails.ReasoningTokens > 0 {
+		attrs["reasoning_tokens"] = usage.CompletionTokensDetails.ReasoningTokens
+		attrs[AttrGenAIUsageReasoningTokens] = usage.CompletionTokensDetails.ReasoningTokens
+	}
 }
 
 // observeLLMTokens 从 attrs 取 token 用量并观察对应 histogram
@@ -382,7 +446,9 @@ func mergeToolEndAttrs(attrs Attrs, output callbacks.CallbackOutput, info *callb
 			attrs["tool_output_parts_n"] = len(to.ToolOutput.Parts)
 		}
 		if to.Response != "" {
-			attrs["response_preview"] = rec.PreviewAttr(to.Response, 500)
+			preview := rec.PreviewAttr(to.Response, 500)
+			attrs["response_preview"] = preview
+			attrs[AttrGenAIToolCallResult] = preview
 		}
 	}
 	return withToolNameLabels(baseLabels, info.Name)
@@ -394,15 +460,23 @@ func mergeEmbeddingEndAttrs(attrs Attrs, output callbacks.CallbackOutput, baseLa
 		return cloneLabels(baseLabels)
 	}
 	attrs["embeddings_n"] = len(eo.Embeddings)
-	modelID := ""
+	// 向量维度取第一条 embedding 的长度（eino 的 CallbackOutput 不带 dimension 配置）
+	if len(eo.Embeddings) > 0 {
+		attrs[AttrGenAIEmbeddingsDimensionCount] = len(eo.Embeddings[0])
+	}
+	// embedding 的 TokenUsage 是另一个类型（embedding.TokenUsage），且只有输入侧用量，
+	// 不存在 completion/output tokens，所以不走 mergeTokenUsageAttrs。
 	if eo.TokenUsage != nil {
 		attrs["prompt_tokens"] = eo.TokenUsage.PromptTokens
 		attrs["total_tokens"] = eo.TokenUsage.TotalTokens
+		attrs[AttrGenAIUsageInputTokens] = eo.TokenUsage.PromptTokens
 	}
+	modelID := ""
 	if eo.Config != nil {
 		modelID = eo.Config.Model
 		if modelID != "" {
 			attrs["model_id"] = modelID
+			attrs[AttrGenAIResponseModel] = modelID
 		}
 	}
 	el := cloneLabels(baseLabels)
@@ -438,10 +512,14 @@ func einoOnError(rec Recorder) func(ctx context.Context, info *callbacks.RunInfo
 			rec.Incr(ctx, "eino_agent_errors_total", labels, 1)
 		}
 
-		endSpanIfPresent(rec, ctx, state, Attrs{
+		errAttrs := Attrs{
 			"eino_name": info.Name,
 			"eino_type": info.Type,
-		}, SpanStatusError, err)
+		}
+		if op := genAIOperationName(info.Component); op != "" {
+			errAttrs[AttrGenAIOperationName] = op
+		}
+		endSpanIfPresent(rec, ctx, state, errAttrs, SpanStatusError, err)
 		return ctx
 	}
 }
@@ -454,45 +532,111 @@ func einoOnStreamStart(ctx context.Context, info *callbacks.RunInfo, input *sche
 }
 
 // einoOnStreamEnd 流式输出结束后补 EndSpan。
+//
+// 流式路径 eino 只触发 OnEndWithStreamOutput、不触发 OnEnd（见 eino-ext 的
+// ChatModel.Stream 实现），所以 token 用量 / finish_reason / 响应模型这些「结束态」
+// 信息只能在读完流之后自己聚合 —— 否则主链路（快速模式、深度模式都是流式）的
+// gen_ai.usage.* 永远是空的，三方平台上的 LLM 卡片看不到任何成本数据。
+//
+// 关于并发：eino 会给每个 handler 一份独立的流副本
+// （internal/callbacks.OnWithStreamHandle 里调 output.Copy(n)），所以这里可以放心
+// 把整条流读完。但 StreamReader 是 read-once 的，这条副本只能有一个消费者 ——
+// 聚合和 Close 都必须在同一个 goroutine 里做完，不能再另外起 goroutine 去 drain，
+// 否则两个 goroutine 会把 chunk 抢散，聚合出的用量是错的。
 func einoOnStreamEnd(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
-	if output != nil {
-		go safeDrainAndCloseReader(output)
-	}
 	if info == nil {
+		if output != nil {
+			go safeDrainAndCloseReader(output)
+		}
 		return ctx
 	}
 	state, _ := ctx.Value(einoSpanKey{}).(*einoSpanState)
 	if state == nil || state.span == nil {
+		if output != nil {
+			go safeDrainAndCloseReader(output)
+		}
 		return ctx
 	}
 	// 异步等 reader 读完再 EndSpan，让 span 覆盖到最后一个 token
 	go func() {
 		defer func() { _ = recover() }()
+		var (
+			usage        *model.TokenUsage
+			respModel    string
+			finishReason string
+		)
 		if output != nil {
 			for {
-				if _, err := output.Recv(); err != nil {
+				chunk, err := output.Recv()
+				if err != nil {
 					break
 				}
+				mo := model.ConvCallbackOutput(chunk)
+				if mo == nil {
+					continue
+				}
+				if mo.TokenUsage != nil {
+					usage = mo.TokenUsage
+				}
+				if mo.Config != nil && mo.Config.Model != "" {
+					respModel = mo.Config.Model
+				}
+				if mo.Message != nil && mo.Message.ResponseMeta != nil && mo.Message.ResponseMeta.FinishReason != "" {
+					finishReason = mo.Message.ResponseMeta.FinishReason
+				}
 			}
+			// 必须 Close：eino 明确要求每个 handler 关掉自己那份副本，
+			// 不关的话原始流无法释放，整条链路会泄漏 goroutine / 内存。
+			output.Close()
 		}
+
 		rec := RecorderFromContext(ctx)
 		if rec == nil {
 			return
 		}
 		dur := time.Since(state.startAt)
+		attrs := Attrs{
+			"streaming":            true,
+			"duration_ms":          strconv.FormatInt(dur.Milliseconds(), 10),
+			"eino_name":            info.Name,
+			"eino_type":            info.Type,
+			"eino_comp":            string(info.Component),
+			AttrGenAIRequestStream: true,
+		}
+		if op := genAIOperationName(info.Component); op != "" {
+			attrs[AttrGenAIOperationName] = op
+		}
+		if finishReason != "" {
+			attrs[AttrGenAIResponseFinishReasons] = []string{finishReason}
+		}
+		if respModel != "" {
+			attrs[AttrGenAIResponseModel] = respModel
+		}
+		mergeTokenUsageAttrs(attrs, usage)
+
+		rec.EndSpan(ctx, state.span, SpanStatusOK, nil, attrs)
+
 		labels := map[string]string{"component": componentLabel(string(info.Component))}
 		if info.Name != "" {
 			labels["name"] = info.Name
 		}
-		rec.EndSpan(ctx, state.span, SpanStatusOK, nil, Attrs{
-			"streaming":   true,
-			"duration_ms":  strconv.FormatInt(dur.Milliseconds(), 10),
-			"eino_name":    info.Name,
-			"eino_type":    info.Type,
-			"eino_comp":    string(info.Component),
-		})
 		rec.Incr(ctx, "eino_stream_end_total", labels, 1)
 		rec.Observe(ctx, "eino_stream_end_seconds", labels, dur.Seconds())
+
+		// 流式 ChatModel 走不到 einoOnEnd，LLM 的请求数 / 耗时 / token 指标要在这里补，
+		// 否则 /metrics 上的 eino_llm_* 只统计到非流式调用（少数），流式主链路全是 0。
+		// 两处不会重复计数：ChatModel.Stream 只触发 OnEndWithStreamOutput，
+		// ChatModel.Generate 只触发 OnEnd，同一次调用只会命中一边。
+		if info.Component == components.ComponentOfChatModel || info.Component == components.ComponentOfAgenticModel {
+			llmLabels := cloneLabels(labels)
+			if respModel != "" {
+				llmLabels["model_id"] = respModel
+			}
+			rec.Incr(ctx, "eino_llm_requests_total", llmLabels, 1)
+			rec.Incr(ctx, "eino_llm_stream_requests_total", llmLabels, 1)
+			rec.Observe(ctx, "eino_llm_duration_seconds", llmLabels, dur.Seconds())
+			observeLLMTokens(rec, llmLabels, attrs)
+		}
 	}()
 	return ctx
 }

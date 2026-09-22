@@ -22,13 +22,13 @@ func NewChatSessionRepository(db *gorm.DB) ChatSessionRepo {
 
 // Create 创建聊天会话
 func (r *chatSessionRepository) Create(ctx context.Context, session *entity.ChatSession) error {
-	return r.db.WithContext(ctx).Create(session).Error
+	return dbFor(ctx, r.db).Create(session).Error
 }
 
 // FindByID 根据 ID 获取聊天会话
 func (r *chatSessionRepository) FindByID(ctx context.Context, id string) (*entity.ChatSession, error) {
 	var session entity.ChatSession
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("id = ?", id).
 		First(&session).Error
 	if err != nil {
@@ -40,7 +40,7 @@ func (r *chatSessionRepository) FindByID(ctx context.Context, id string) (*entit
 // ListByUserID 获取用户的所有聊天会话
 func (r *chatSessionRepository) ListByUserID(ctx context.Context, userID string) ([]entity.ChatSession, error) {
 	var sessions []entity.ChatSession
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("user_id = ?", userID).
 		Order("updated_at DESC").
 		Find(&sessions).Error
@@ -49,7 +49,7 @@ func (r *chatSessionRepository) ListByUserID(ctx context.Context, userID string)
 
 // UpdateTitle 更新会话标题
 func (r *chatSessionRepository) UpdateTitle(ctx context.Context, id string, title string) error {
-	return r.db.WithContext(ctx).
+	return dbFor(ctx, r.db).
 		Model(&entity.ChatSession{}).
 		Where("id = ?", id).
 		Update("title", title).Error
@@ -57,12 +57,12 @@ func (r *chatSessionRepository) UpdateTitle(ctx context.Context, id string, titl
 
 // Delete 删除会话
 func (r *chatSessionRepository) Delete(ctx context.Context, id string) error {
-	return r.db.WithContext(ctx).Where("id = ?", id).Delete(&entity.ChatSession{}).Error
+	return dbFor(ctx, r.db).Where("id = ?", id).Delete(&entity.ChatSession{}).Error
 }
 
 // AdminList 管理员分页查询会话列表
 func (r *chatSessionRepository) AdminList(ctx context.Context, offset, limit int, keyword, status string) ([]AdminSessionRow, int64, error) {
-	base := r.db.WithContext(ctx).Table("chat_sessions as s").
+	base := dbFor(ctx, r.db).Table("chat_sessions as s").
 		Select("s.*, u.username, COUNT(m.id) as message_count").
 		Joins("JOIN users u ON s.user_id = u.id").
 		Joins("LEFT JOIN chat_messages m ON s.id = m.session_id")
@@ -94,32 +94,32 @@ func (r *chatSessionRepository) AdminList(ctx context.Context, offset, limit int
 // ListExpired 返回指定时间之前未更新的会话 ID 列表
 func (r *chatSessionRepository) ListExpired(ctx context.Context, before time.Time) ([]string, error) {
 	var ids []string
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Model(&entity.ChatSession{}).
 		Where("updated_at < ?", before).
 		Pluck("id", &ids).Error
 	return ids, err
 }
 func (r *chatSessionRepository) SetPendingClarify(ctx context.Context, id string, data []byte) error {
-	return r.db.WithContext(ctx).Model(&entity.ChatSession{}).
+	return dbFor(ctx, r.db).Model(&entity.ChatSession{}).
 		Where("id = ?", id).
 		Update("pending_clarify", datatypes.JSON(data)).Error
 }
 
 func (r *chatSessionRepository) ClearPendingClarify(ctx context.Context, id string) error {
-	return r.db.WithContext(ctx).Model(&entity.ChatSession{}).
+	return dbFor(ctx, r.db).Model(&entity.ChatSession{}).
 		Where("id = ?", id).
 		Update("pending_clarify", datatypes.JSON("{}")).Error
 }
 
 func (r *chatSessionRepository) SetPendingCheckpoint(ctx context.Context, id string, data []byte) error {
-	return r.db.WithContext(ctx).Model(&entity.ChatSession{}).
+	return dbFor(ctx, r.db).Model(&entity.ChatSession{}).
 		Where("id = ?", id).
 		Update("pending_checkpoint", datatypes.JSON(data)).Error
 }
 
 func (r *chatSessionRepository) ClearPendingCheckpoint(ctx context.Context, id string) error {
-	return r.db.WithContext(ctx).Model(&entity.ChatSession{}).
+	return dbFor(ctx, r.db).Model(&entity.ChatSession{}).
 		Where("id = ?", id).
 		Update("pending_checkpoint", datatypes.JSON("{}")).Error
 }

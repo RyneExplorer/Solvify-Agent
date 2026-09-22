@@ -2,21 +2,19 @@ package repository
 
 import (
 	"context"
-	"fmt"
 
 	"solvify-agent/internal/model/entity"
-	"solvify-agent/pkg/cache"
 	"solvify-agent/pkg/logger"
 )
 
 // cachedModelRepository 为 ModelRepo 添加 Redis 缓存层
 type cachedModelRepository struct {
 	inner ModelRepo
-	cache *cache.RedisCache
+	cache cachePort
 }
 
 // NewCachedModelRepository 创建带缓存的模型仓库
-func NewCachedModelRepository(inner ModelRepo, c *cache.RedisCache) ModelRepo {
+func NewCachedModelRepository(inner ModelRepo, c cachePort) ModelRepo {
 	return &cachedModelRepository{inner: inner, cache: c}
 }
 
@@ -30,7 +28,7 @@ func (r *cachedModelRepository) Update(ctx context.Context, model *entity.Model)
 	if err := r.inner.Update(ctx, model); err != nil {
 		return err
 	}
-	if err := r.cache.Delete(ctx, "id:"+model.ID); err != nil {
+	if err := r.cache.Delete(ctx, modelCacheKeyByID(model.ID)); err != nil {
 		logger.Warnf("模型缓存清除失败: %v", err)
 	}
 	return nil
@@ -41,7 +39,7 @@ func (r *cachedModelRepository) Delete(ctx context.Context, id string) error {
 	if err := r.inner.Delete(ctx, id); err != nil {
 		return err
 	}
-	if err := r.cache.Delete(ctx, "id:"+id); err != nil {
+	if err := r.cache.Delete(ctx, modelCacheKeyByID(id)); err != nil {
 		logger.Warnf("模型缓存清除失败: %v", err)
 	}
 	return nil
@@ -54,7 +52,7 @@ func (r *cachedModelRepository) List(ctx context.Context) ([]entity.Model, error
 
 // GetByID 根据 ID 获取模型，优先读取缓存
 func (r *cachedModelRepository) GetByID(ctx context.Context, id string) (*entity.Model, error) {
-	key := fmt.Sprintf("id:%s", id)
+	key := modelCacheKeyByID(id)
 	var model entity.Model
 	if found, _ := r.cache.Get(ctx, key, &model); found {
 		return &model, nil

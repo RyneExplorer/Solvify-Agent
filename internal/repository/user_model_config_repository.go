@@ -22,17 +22,17 @@ func NewUserModelConfigRepository(db *gorm.DB) UserModelConfigRepo {
 
 // Create 创建用户模型配置
 func (r *userModelConfigRepository) Create(ctx context.Context, config *entity.UserModelConfig) error {
-	return r.db.WithContext(ctx).Create(config).Error
+	return dbFor(ctx, r.db).Create(config).Error
 }
 
 // Update 更新用户模型配置
 func (r *userModelConfigRepository) Update(ctx context.Context, config *entity.UserModelConfig) error {
-	return r.db.WithContext(ctx).Save(config).Error
+	return dbFor(ctx, r.db).Save(config).Error
 }
 
 // Delete 删除用户模型配置（软删除或硬删除）
 func (r *userModelConfigRepository) Delete(ctx context.Context, id string, userID string) error {
-	return r.db.WithContext(ctx).
+	return dbFor(ctx, r.db).
 		Where("id = ? AND user_id = ?", id, userID).
 		Delete(&entity.UserModelConfig{}).Error
 }
@@ -40,7 +40,7 @@ func (r *userModelConfigRepository) Delete(ctx context.Context, id string, userI
 // GetByID 根据 ID 和用户 ID 获取配置；找不到返回业务错误 CodeModelConfigNotFound
 func (r *userModelConfigRepository) GetByID(ctx context.Context, id string, userID string) (*entity.UserModelConfig, error) {
 	var config entity.UserModelConfig
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("id = ? AND user_id = ?", id, userID).
 		First(&config).Error
 	if err != nil {
@@ -55,7 +55,7 @@ func (r *userModelConfigRepository) GetByID(ctx context.Context, id string, user
 // ListByUserID 获取用户所有模型配置
 func (r *userModelConfigRepository) ListByUserID(ctx context.Context, userID string) ([]entity.UserModelConfig, error) {
 	var configs []entity.UserModelConfig
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("user_id = ?", userID).
 		Order("display_name ASC").
 		Find(&configs).Error
@@ -65,7 +65,7 @@ func (r *userModelConfigRepository) ListByUserID(ctx context.Context, userID str
 // ExistsByModelID 检查用户的 model_id 是否已存在
 func (r *userModelConfigRepository) ExistsByModelID(ctx context.Context, userID string, modelID string, excludeID string) (bool, error) {
 	var count int64
-	query := r.db.WithContext(ctx).Model(&entity.UserModelConfig{}).
+	query := dbFor(ctx, r.db).Model(&entity.UserModelConfig{}).
 		Where("user_id = ? AND model_id = ?", userID, modelID)
 	if excludeID != "" {
 		query = query.Where("id != ?", excludeID)

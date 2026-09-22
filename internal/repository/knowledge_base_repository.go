@@ -22,13 +22,13 @@ func NewKnowledgeBaseRepository(db *gorm.DB) KnowledgeBaseRepository {
 
 // Create 创建知识库记录
 func (r *knowledgeBaseRepository) Create(ctx context.Context, kb *entity.KnowledgeBase) error {
-	return r.db.WithContext(ctx).Create(kb).Error
+	return dbFor(ctx, r.db).Create(kb).Error
 }
 
 // ExistsName 判断当前用户是否存在同名正常知识库
 func (r *knowledgeBaseRepository) ExistsName(ctx context.Context, userID, name string, normalStatus int) (bool, error) {
 	var count int64
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Model(&entity.KnowledgeBase{}).
 		Where("user_id = ? AND name = ? AND status = ?", userID, name, normalStatus).
 		Count(&count).Error
@@ -38,7 +38,7 @@ func (r *knowledgeBaseRepository) ExistsName(ctx context.Context, userID, name s
 // ListNormal 查询当前用户正常状态的知识库
 func (r *knowledgeBaseRepository) ListNormal(ctx context.Context, userID string, status int) ([]entity.KnowledgeBase, error) {
 	var items []entity.KnowledgeBase
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND status = ?", userID, status).
 		Order("created_at DESC").
 		Find(&items).Error
@@ -48,7 +48,7 @@ func (r *knowledgeBaseRepository) ListNormal(ctx context.Context, userID string,
 // FindNormal 查询当前用户正常状态的知识库
 func (r *knowledgeBaseRepository) FindNormal(ctx context.Context, userID, kbID string, status int) (entity.KnowledgeBase, bool, error) {
 	var kb entity.KnowledgeBase
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("id = ? AND user_id = ? AND status = ?", kbID, userID, status).
 		First(&kb).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -59,7 +59,7 @@ func (r *knowledgeBaseRepository) FindNormal(ctx context.Context, userID, kbID s
 
 // UpdateBasic 更新知识库基础信息
 func (r *knowledgeBaseRepository) UpdateBasic(ctx context.Context, userID, kbID string, status int, name, category, description string) (bool, error) {
-	result := r.db.WithContext(ctx).
+	result := dbFor(ctx, r.db).
 		Model(&entity.KnowledgeBase{}).
 		Where("id = ? AND user_id = ? AND status = ?", kbID, userID, status).
 		Updates(map[string]any{
@@ -75,7 +75,7 @@ func (r *knowledgeBaseRepository) UpdateBasic(ctx context.Context, userID, kbID 
 
 // SoftDelete 软删除知识库
 func (r *knowledgeBaseRepository) SoftDelete(ctx context.Context, userID, kbID string, normalStatus, deletedStatus int, deletedAt, expiredAt time.Time) (bool, error) {
-	result := r.db.WithContext(ctx).
+	result := dbFor(ctx, r.db).
 		Model(&entity.KnowledgeBase{}).
 		Where("id = ? AND user_id = ? AND status = ?", kbID, userID, normalStatus).
 		Updates(map[string]any{
@@ -92,7 +92,7 @@ func (r *knowledgeBaseRepository) SoftDelete(ctx context.Context, userID, kbID s
 // CountDocuments 统计知识库文档数
 func (r *knowledgeBaseRepository) CountDocuments(ctx context.Context, userID, kbID string, deletedStatus int) (int64, error) {
 	var count int64
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Table("documents").
 		Where("user_id = ? AND knowledge_base_id = ? AND status <> ?", userID, kbID, deletedStatus).
 		Count(&count).Error
@@ -102,7 +102,7 @@ func (r *knowledgeBaseRepository) CountDocuments(ctx context.Context, userID, kb
 // SumDocumentStorage 统计知识库文档存储大小
 func (r *knowledgeBaseRepository) SumDocumentStorage(ctx context.Context, userID, kbID string, deletedStatus int) (int64, error) {
 	var storageBytes int64
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Table("documents").
 		Select("COALESCE(SUM(file_size), 0)").
 		Where("user_id = ? AND knowledge_base_id = ? AND status <> ?", userID, kbID, deletedStatus).
@@ -113,7 +113,7 @@ func (r *knowledgeBaseRepository) SumDocumentStorage(ctx context.Context, userID
 // CountRetrievableChunks 统计知识库可检索分块数
 func (r *knowledgeBaseRepository) CountRetrievableChunks(ctx context.Context, userID, kbID string) (int64, error) {
 	var count int64
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Table("document_chunks").
 		Where("user_id = ? AND knowledge_base_id = ?", userID, kbID).
 		Count(&count).Error

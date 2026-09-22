@@ -3,6 +3,7 @@ package knowledgebase
 import (
 	"github.com/gin-gonic/gin"
 
+	"solvify-agent/internal/api/v1/shared"
 	"solvify-agent/internal/middleware"
 	requestdto "solvify-agent/internal/model/dto/request"
 	"solvify-agent/internal/service"
@@ -57,7 +58,7 @@ func (ctrl *Controller) List(c *gin.Context) {
 
 // Detail 查询知识库详情
 func (ctrl *Controller) Detail(c *gin.Context) {
-	userID, kbID, ok := ctrl.userAndKnowledgeBaseID(c)
+	userID, kbID, ok := shared.UserAndUUIDParam(c, "id", "知识库")
 	if !ok {
 		return
 	}
@@ -72,7 +73,7 @@ func (ctrl *Controller) Detail(c *gin.Context) {
 
 // Update 更新知识库基础信息
 func (ctrl *Controller) Update(c *gin.Context) {
-	userID, kbID, ok := ctrl.userAndKnowledgeBaseID(c)
+	userID, kbID, ok := shared.UserAndUUIDParam(c, "id", "知识库")
 	if !ok {
 		return
 	}
@@ -93,7 +94,7 @@ func (ctrl *Controller) Update(c *gin.Context) {
 
 // Delete 软删除知识库
 func (ctrl *Controller) Delete(c *gin.Context) {
-	userID, kbID, ok := ctrl.userAndKnowledgeBaseID(c)
+	userID, kbID, ok := shared.UserAndUUIDParam(c, "id", "知识库")
 	if !ok {
 		return
 	}
@@ -107,7 +108,7 @@ func (ctrl *Controller) Delete(c *gin.Context) {
 
 // Stats 查询知识库统计
 func (ctrl *Controller) Stats(c *gin.Context) {
-	userID, kbID, ok := ctrl.userAndKnowledgeBaseID(c)
+	userID, kbID, ok := shared.UserAndUUIDParam(c, "id", "知识库")
 	if !ok {
 		return
 	}
@@ -118,19 +119,4 @@ func (ctrl *Controller) Stats(c *gin.Context) {
 		return
 	}
 	response.Success(c, output)
-}
-
-// userAndKnowledgeBaseID 读取当前用户和知识库 ID
-func (ctrl *Controller) userAndKnowledgeBaseID(c *gin.Context) (string, string, bool) {
-	userID, ok := middleware.CurrentUserID(c)
-	if !ok {
-		return "", "", false
-	}
-
-	kbID := c.Param("id")
-	if !middleware.IsUUID(kbID) {
-		response.BadRequest(c, "知识库 ID 格式错误")
-		return "", "", false
-	}
-	return userID, kbID, true
 }

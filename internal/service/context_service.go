@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -12,59 +11,43 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
-	"solvify-agent/internal/llm"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/observability"
+	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/logger"
-	"solvify-agent/pkg/stopwords"
 	"solvify-agent/pkg/tokenutil"
 )
 
-// tokenRegexp 用于切分中英文关键词的正则
-var tokenRegexp = regexp.MustCompile(`[\x{4e00}-\x{9fff}]+|[a-zA-Z0-9]+`)
 // contextService 上下文管理服务实现
-
 type contextService struct {
 	messageRepo repository.ChatMessageRepo
 	memoryRepo  repository.UserMemoryRepo
 	summaryRepo repository.SummaryRepo
 	obs         observability.Recorder
-	embedClient *llm.EmbeddingClient
-// NewContextService 创建上下文管理服务
 }
 
+// NewContextService 创建上下文管理服务。
+// obs 由可变参数改为显式参数：变参形式漏传（或传 nil）时不会报错，
+// 只会在运行时静默失去上下文构建的链路埋点。
 func NewContextService(
 	messageRepo repository.ChatMessageRepo,
 	memoryRepo repository.UserMemoryRepo,
 	summaryRepo repository.SummaryRepo,
-	obs ...observability.Recorder,
+	obs observability.Recorder,
 ) ContextServiceInterface {
-	s := &contextService{
+	return &contextService{
 		messageRepo: messageRepo,
 		memoryRepo:  memoryRepo,
 		summaryRepo: summaryRepo,
+		obs:         obs,
 	}
-	if len(obs) > 0 && obs[0] != nil {
-		s.obs = obs[0]
-	}
-	return s
-}
-
-// SetObservability 注入可观测性记录器
-func (s *contextService) SetObservability(obs observability.Recorder) {
-	s.obs = obs
-}
-// SetEmbedClient 注入向量客户端，用于语义相关历史检索
-func (s *contextService) SetEmbedClient(client *llm.EmbeddingClient) {
-	s.embedClient = client
 }
 
 // BuildContext 构建增强后的对话上下文
 func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, currentQuery string, cfg BuildContextConfig, chatModel model.BaseChatModel) (*EnhancedContext, error) {
-	obsOk := s.obs != nil
 	var span *observability.Span
-	if obsOk {
+	if s.obs != nil {
 		// 接住 StartSpan 返回的 newCtx：后面 messageRepo/SummaryRepo 再开子 span 时能正确找到 ctx.build 当 parent。
 		// 之前写成 _, span = StartSpan(ctx, …)，newCtx 被丢了，上下文子链只能靠 span.parent 碰巧挂到根。
 		ctx, span = s.obs.StartSpan(ctx, "ctx.build", observability.ComponentServiceContext, observability.Attrs{
@@ -72,9 +55,7 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 			"has_query":  fmt.Sprintf("%t", currentQuery != ""),
 		})
 		defer func() {
-			if span != nil {
-				s.obs.EndSpan(ctx, span, observability.SpanStatusOK, nil, nil)
-			}
+			obsEndSpan(ctx, s.obs, span, observability.SpanStatusOK, nil, nil)
 		}()
 	}
 	if cfg.MaxTokens <= 0 {
@@ -170,7 +151,7 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 	history = truncateHistoryByTokens(history, cfg.MaxTokens, cfg.ModelName)
 	memories = truncateMemoriesByTokens(memories, cfg.MemoryBudget, cfg.ModelName)
 
-	if obsOk && span != nil {
+	if span != nil {
 		if span.Attrs == nil {
 			span.Attrs = observability.Attrs{}
 		}
@@ -187,8 +168,8 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 		RetrievalBudget: cfg.RetrievalBudget,
 	}, nil
 }
-// SummarizeSession 对会话生成或更新摘要
 
+// SummarizeSession 对会话生成或更新摘要
 func (s *contextService) SummarizeSession(ctx context.Context, sessionID string, chatModel model.BaseChatModel) (summary *entity.ChatSummary, retErr error) {
 	if s == nil {
 		return nil, nil
@@ -210,20 +191,17 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 		ctx = context.Background()
 	}
 
-	obsOk := s.obs != nil
 	var span *observability.Span
-	if obsOk {
+	if s.obs != nil {
 		ctx, span = s.obs.StartSpan(ctx, "ctx.summarize", observability.ComponentServiceContext, observability.Attrs{"session_id": sessionID})
 		defer func() {
-			if span != nil {
-				status := observability.SpanStatusOK
-				var errVal error
-				if retErr != nil {
-					status = observability.SpanStatusError
-					errVal = retErr
-				}
-				s.obs.EndSpan(ctx, span, status, errVal, nil)
+			status := observability.SpanStatusOK
+			var errVal error
+			if retErr != nil {
+				status = observability.SpanStatusError
+				errVal = retErr
 			}
+			obsEndSpan(ctx, s.obs, span, status, errVal, nil)
 		}()
 	}
 	messages, err := s.messageRepo.FindBySessionIDForContext(ctx, sessionID)
@@ -270,9 +248,7 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 	dialogue := buildDialogueText(summaryMessages)
 	summaryText, err := s.generateSummary(ctx, chatModel, dialogue, existing)
 	if err != nil {
-		if obsOk {
-			s.obs.Incr(ctx, "ctx_summary_errors_total", nil, 1)
-		}
+		obsIncr(ctx, s.obs, "ctx_summary_errors_total", nil, 1)
 		return nil, fmt.Errorf("生成摘要失败: %w", err)
 	}
 
@@ -294,14 +270,12 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 	if err := s.summaryRepo.Upsert(ctx, newSummary); err != nil {
 		return nil, fmt.Errorf("保存摘要失败: %w", err)
 	}
-	if obsOk {
-		s.obs.Incr(ctx, "ctx_summary_updates_total", nil, 1)
-	}
+	obsIncr(ctx, s.obs, "ctx_summary_updates_total", nil, 1)
 
 	return newSummary, nil
-// ExtractMemories 从消息中提取用户长期记忆
 }
 
+// ExtractMemories 从消息中提取用户长期记忆
 func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID string, messages []entity.ChatMessage, chatModel model.BaseChatModel) (memories []entity.UserMemory, retErr error) {
 	if s == nil {
 		return nil, nil
@@ -323,23 +297,20 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 		ctx = context.Background()
 	}
 
-	obsOk := s.obs != nil
 	var span *observability.Span
-	if obsOk {
+	if s.obs != nil {
 		ctx, span = s.obs.StartSpan(ctx, "ctx.extract_memories", observability.ComponentServiceContext, observability.Attrs{
 			"user_id": userID,
 			"msgs_n":  fmt.Sprintf("%d", len(messages)),
 		})
 		defer func() {
-			if span != nil {
-				status := observability.SpanStatusOK
-				var errVal error
-				if retErr != nil {
-					status = observability.SpanStatusError
-					errVal = retErr
-				}
-				s.obs.EndSpan(ctx, span, status, errVal, nil)
+			status := observability.SpanStatusOK
+			var errVal error
+			if retErr != nil {
+				status = observability.SpanStatusError
+				errVal = retErr
 			}
+			obsEndSpan(ctx, s.obs, span, status, errVal, nil)
 		}()
 	}
 	if len(messages) == 0 {
@@ -349,9 +320,7 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 	dialogue := buildDialogueText(messages)
 	rawMemories, err := s.generateMemories(ctx, chatModel, dialogue)
 	if err != nil {
-		if obsOk {
-			s.obs.Incr(ctx, "ctx_memory_errors_total", nil, 1)
-		}
+		obsIncr(ctx, s.obs, "ctx_memory_errors_total", nil, 1)
 		return nil, fmt.Errorf("提取记忆失败: %w", err)
 	}
 
@@ -372,9 +341,7 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 		}
 		result = append(result, m)
 	}
-	if obsOk {
-		s.obs.Incr(ctx, "ctx_memory_extracted_total", nil, int64(len(result)))
-	}
+	obsIncr(ctx, s.obs, "ctx_memory_extracted_total", nil, int64(len(result)))
 
 	return result, nil
 }
@@ -518,58 +485,25 @@ func buildDialogueText(messages []entity.ChatMessage) string {
 	return sb.String()
 }
 
-// extractKeywords 从查询中提取关键词，过滤停用词
+// maxHistoryKeywords 「相关历史」通道最多使用的关键词条数：每个词项都会变成一个 ILIKE 条件
+const maxHistoryKeywords = 5
+
+// extractKeywords 提取「相关历史」通道用的关键词。
+//
+// 必须复用 rag.ExtractKeywords（gse 分词），不要在这里另写一套切词规则：
+// 旧实现用 tokenRegexp = [\x{4e00}-\x{9fff}]+ 切分，会把一整段连续中文当成**一个**词项，
+// 于是 SearchRecentByKeywords 真正执行的是 content ILIKE '%那网络安全这块你们是怎么做的%'
+// —— 历史消息里不可能出现这么长的整串，一条都匹配不上，「相关历史」通道等于空转；
+// gse 切出的短词（"网络安全"）才可能命中。
+//
+// 第二个理由是口径统一：调用方通过 cfg.PreExtractedKeywords 传进来的那条快路径，
+// 本来就是 rag.ExtractKeywords 的产物。两条路径同源，行为才不会随「传没传」而变。
 func extractKeywords(query string) []string {
-	parts := tokenRegexp.FindAllString(query, -1)
-
-	seen := make(map[string]struct{})
-	var keywords []string
-	for _, p := range parts {
-		p = strings.TrimSpace(strings.ToLower(p))
-		if p == "" {
-			continue
-		}
-		if stopwords.IsStopWord(p) {
-			continue
-		}
-		if len([]rune(p)) < 2 {
-			continue
-		}
-		if isChineseString(p) && allRunesAreStopWord(p) {
-			continue
-		}
-		if _, ok := seen[p]; ok {
-			continue
-		}
-		seen[p] = struct{}{}
-		keywords = append(keywords, p)
-	}
-
-	// 最多返回 5 个关键词
-	if len(keywords) > 5 {
-		keywords = keywords[:5]
+	keywords := rag.ExtractKeywords(query)
+	if len(keywords) > maxHistoryKeywords {
+		keywords = keywords[:maxHistoryKeywords]
 	}
 	return keywords
-}
-
-// isChineseString 判断字符串是否全部由中文组成
-func isChineseString(s string) bool {
-	for _, r := range s {
-		if r < '\u4e00' || r > '\u9fff' {
-			return false
-		}
-	}
-	return true
-}
-
-// allRunesAreStopWord 判断字符串中每个 rune（单字）是否都是停用词
-func allRunesAreStopWord(s string) bool {
-	for _, r := range s {
-		if !stopwords.IsStopWord(string(r)) {
-			return false
-		}
-	}
-	return true
 }
 
 // truncateMemoriesByTokens 按真 BPE token 预算截断记忆，优先保留"重要度+更新时间"综合靠前的。

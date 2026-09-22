@@ -96,15 +96,18 @@ type EmbeddingConfig struct {
 
 // RAGConfig 描述检索增强配置
 type RAGConfig struct {
-	Enabled        bool           `mapstructure:"enabled"`
-	TopK           int            `mapstructure:"top_k"`
-	RecallK        int            `mapstructure:"recall_k"` // 混合检索召回量（Rerank 前），默认 TopK*5
-	ScoreThreshold float64        `mapstructure:"score_threshold"`
-	VectorWeight   float64        `mapstructure:"vector_weight"`
-	KeywordWeight  float64        `mapstructure:"keyword_weight"`
-	RRFK           float64        `mapstructure:"rrf_k"`
-	Reranker       RerankerConfig `mapstructure:"reranker"`
-	Expander       ExpanderConfig `mapstructure:"expander"`
+	Enabled        bool    `mapstructure:"enabled"`
+	TopK           int     `mapstructure:"top_k"`
+	RecallK        int     `mapstructure:"recall_k"` // 混合检索召回量（Rerank 前），默认 TopK*5
+	ScoreThreshold float64 `mapstructure:"score_threshold"`
+	VectorWeight   float64 `mapstructure:"vector_weight"`
+	KeywordWeight  float64 `mapstructure:"keyword_weight"`
+	// KeywordScoreThreshold 是「向量侧全灭时」关键词结果的最低匹配比例。
+	// 之前这个字段没有配置入口，构造器只能吃硬编码默认值 0.25。
+	KeywordScoreThreshold float64        `mapstructure:"keyword_score_threshold"`
+	RRFK                  float64        `mapstructure:"rrf_k"`
+	Reranker              RerankerConfig `mapstructure:"reranker"`
+	Expander              ExpanderConfig `mapstructure:"expander"`
 }
 
 // RerankerConfig 描述重排序配置
@@ -128,14 +131,28 @@ type ExpanderConfig struct {
 
 // ToolsConfig 描述工具调用配置
 type ToolsConfig struct {
-	Enabled   bool            `mapstructure:"enabled"`
-	WebSearch WebSearchConfig `mapstructure:"web_search"`
+	Enabled    bool                   `mapstructure:"enabled"`
+	WebSearch  WebSearchConfig        `mapstructure:"web_search"`
+	MCPServers []SystemMCPServerConfig `mapstructure:"mcp_servers"`
 }
 
 // WebSearchConfig 描述网络搜索工具配置
 type WebSearchConfig struct {
 	APIKey  string `mapstructure:"api_key"`
 	BaseURL string `mapstructure:"base_url"`
+}
+
+// SystemMCPServerConfig 系统预置 MCP 服务器配置
+type SystemMCPServerConfig struct {
+	Name        string            `mapstructure:"name" json:"name"`
+	Description string            `mapstructure:"description" json:"description"`
+	Transport   string            `mapstructure:"transport" json:"transport"`               // stdio | sse | http
+	Command     string            `mapstructure:"command" json:"command,omitempty"`         // stdio
+	Args        []string          `mapstructure:"args" json:"args,omitempty"`               // stdio
+	Env         map[string]string `mapstructure:"env" json:"env,omitempty"`                 // stdio
+	URL         string            `mapstructure:"url" json:"url,omitempty"`                 // sse/http
+	Headers     map[string]string `mapstructure:"headers" json:"headers,omitempty"`         // sse/http
+	Timeout     int               `mapstructure:"timeout" json:"timeout,omitempty"`         // 默认 30
 }
 
 // DingTalkConfig 描述钉钉开放平台配置
@@ -226,6 +243,29 @@ type ObservabilityConfig struct {
 	OTelServiceName string  `mapstructure:"otel_service_name"`
 	// OTelSamplingRate 头采样概率 0~1，0 = 不采样，1 = 全采样
 	OTelSamplingRate float64 `mapstructure:"otel_sampling_rate"`
+	// OTelInsecure 控制 OTLP gRPC 的传输安全：
+	// true  = 明文连接，适用于内网 / 边车 Collector 或本机 Jaeger；
+	// false = 不传传输凭据选项，由 OTLP SDK 使用默认 TLS（宿主机根证书），适用于 SaaS 后端。
+	// 默认 true，与历史行为保持一致。
+	OTelInsecure bool `mapstructure:"otel_insecure"`
+	// OTelHeaders 是附加到每次 OTLP 请求上的 gRPC metadata，用于鉴权，例如
+	// {"Authorization": "Basic <base64(public_key:secret_key)>"}、
+	// {"x-byteapm-appkey": "xxx"}、{"Authorization": "Bearer <token>"}。
+	// 值属于敏感信息，只放本地配置或环境变量，不要提交进仓库。
+	OTelHeaders map[string]string `mapstructure:"otel_headers"`
+	// OTelBizRoutes 是「无条件保留」的业务路由模板列表：命中它的请求不受
+	// OTelSamplingRate 影响，一定导出到三方平台。
+	//
+	// 为什么判据是「路由模板」而不是「请求路径」：模板取自 gin 的 c.FullPath()，
+	// 形如 /api/v1/chat/sessions/:id/messages —— 同一条路由下不同 session id 会归一
+	// 成同一个值，配置里不会出现「每个 id 一条」的基数爆炸。
+	//
+	// 为什么必须精确相等、不能用前缀：实测噪声第一名是
+	// /api/v1/chat/sessions/:id/traces（追踪页自身轮询，占全部入口 span 的 29%），
+	// 它与业务路由 /api/v1/chat/sessions/:id/messages 共享前缀 /api/v1/chat/sessions
+	// —— 只要允许前缀匹配，一条配置就能把最大的噪声源放回来。
+	// 没有 route 属性的根 span（后台任务）不受影响，仍按 OTelSamplingRate 采样。
+	OTelBizRoutes []string `mapstructure:"otel_biz_routes"`
 }
 
 var globalConfig *Config
@@ -386,10 +426,23 @@ func Default() *Config {
 			FeedbackEnabled:      true,
 			MaxCardinalityLabels: 500,
 			// OTel 默认值：noop 不打印 span，开发期可改 stdout 调试，生产期改 otlp
-		OTelExporter:     "noop",
+			OTelExporter:     "noop",
 			OTelOTLPEndpoint: "localhost:4317",
 			OTelServiceName:  "solvify-agent",
 			OTelSamplingRate: 1.0,
+			// 默认明文，保持历史行为；接 SaaS 后端时置为 false 走 TLS
+			OTelInsecure: true,
+			// 业务链路必留：这三条是「带完整 RAG / LLM 子树、用户真正会去查」的写接口。
+			//
+			// 为什么不把列表接口一起留下：实测 3 天 634 条 HTTP 入口 span 里，
+			// 纯轮询类（追踪页 184 + 消息列表 55 + 会话列表 25 + 各类配置读取）
+			// 占了七成以上，它们子树浅、数量大，是三方平台「trace 列表被刷屏」的唯一成因。
+			// 留这三条即可把必留比例从 100% 压到约 22%，而问答链路一条不少。
+			OTelBizRoutes: []string{
+				"/api/v1/chat/sessions/:id/messages",
+				"/api/v1/documents/:id/reindex",
+				"/api/v1/chat/messages/:message_id/feedback",
+			},
 		},
 	}
 }
@@ -683,6 +736,14 @@ func applyEnv(cfg *Config) {
 	if value := os.Getenv("OTEL_SAMPLING_RATE"); value != "" {
 		cfg.Observability.OTelSamplingRate = parseFloat(value, cfg.Observability.OTelSamplingRate)
 	}
+	if value := os.Getenv("OTEL_INSECURE"); value != "" {
+		cfg.Observability.OTelInsecure = parseBool(value, cfg.Observability.OTelInsecure)
+	}
+	// OTEL_HEADERS 形如 "Authorization=Bearer xxx,x-byteapm-appkey=yyy"，
+	// 与官方 OTEL_EXPORTER_OTLP_HEADERS 的书写格式一致。
+	if value := os.Getenv("OTEL_HEADERS"); value != "" {
+		cfg.Observability.OTelHeaders = parseHeaderList(value)
+	}
 
 	// Agent 行为开关
 	if value := os.Getenv("AGENT_QUICK_MAX_ITERATIONS"); value != "" {
@@ -752,4 +813,30 @@ func parseFloat(value string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
+}
+
+// parseHeaderList 解析 "k1=v1,k2=v2" 形式的头部列表，供 OTEL_HEADERS 环境变量使用。
+// 按第一个 '=' 切分，因此取值里出现 '='（如 base64 填充）不会被截断；
+// 缺少 '=' 或键名为空的条目会被忽略。全部无效时返回 nil，避免下游拿到空 map。
+func parseHeaderList(raw string) map[string]string {
+	out := make(map[string]string)
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		idx := strings.Index(item, "=")
+		if idx <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(item[:idx])
+		if key == "" {
+			continue
+		}
+		out[key] = strings.TrimSpace(item[idx+1:])
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
