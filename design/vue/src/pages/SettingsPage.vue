@@ -71,12 +71,12 @@
           <section>
             <div class="flex items-center justify-between mb-3">
               <h2 class="text-sm font-semibold text-slate-900">可用工具</h2>
-              <span class="text-xs text-slate-400">{{ toolTemplates.length }} 个</span>
+              <span class="text-xs text-slate-400">{{ nonMCPTemplates.length }} 个</span>
             </div>
             <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
-              <div v-if="!toolTemplates.length" class="px-4 py-8 text-center text-sm text-slate-400">暂无可用的工具模板</div>
+              <div v-if="!nonMCPTemplates.length" class="px-4 py-8 text-center text-sm text-slate-400">暂无可用的工具模板</div>
               <div
-                  v-for="t in toolTemplates"
+                  v-for="t in nonMCPTemplates"
                   :key="t.id"
                   class="px-4 py-3 border-b border-slate-100 last:border-0"
               >
@@ -142,6 +142,17 @@
                   </div>
                   <div class="text-xs text-slate-400 mt-0.5 truncate">
                     {{ p.description || '暂无描述' }}
+                  </div>
+                  <div v-if="p.mcp_tool_manifest && p.mcp_tool_manifest.length" class="mt-2">
+                    <div class="text-xs text-slate-400 mb-1">{{ p.mcp_tool_manifest.length }} 个工具</div>
+                    <div class="flex flex-wrap gap-1">
+                      <span
+                          v-for="tool in p.mcp_tool_manifest"
+                          :key="tool.name"
+                          :title="tool.description || tool.name"
+                          class="text-[11px] px-1.5 py-0.5 rounded-md bg-slate-50 border border-slate-200 text-slate-600"
+                      >{{ tool.name }}</span>
+                    </div>
                   </div>
                 </div>
                 <div class="flex items-center gap-1.5 shrink-0">
@@ -275,7 +286,7 @@
 
           <template v-if="modalMode === 'tool'">
             <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">显示名称</label><input v-model="tForm.display_name" placeholder="我的搜索工具" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" /></div>
-            <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">工具类型 <span class="text-red-500">*</span></label><AppSelect v-model="selToolType" placeholder="选择工具类型" class="w-full" @change="onToolTypeChange"><el-option v-for="t in toolTemplates" :key="t.id" :value="t.id" :label="t.name" /></AppSelect></div>
+            <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">工具类型 <span class="text-red-500">*</span></label><AppSelect v-model="selToolType" placeholder="选择工具类型" class="w-full" @change="onToolTypeChange"><el-option v-for="t in nonMCPTemplates" :key="t.id" :value="t.id" :label="t.name" /></AppSelect></div>
             <div v-if="selectedExistingProviderConfig" class="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
               该供应商已配置为「{{ selectedExistingProviderConfig.display_name || selectedExistingProviderConfig.provider_name }}」，请编辑现有配置。
             </div>
@@ -614,6 +625,13 @@ const mcpProviders = computed(() => {
   const t = toolTemplates.value.find(t => t.tool_key === 'mcp')
   return t?.providers ?? []
 })
+
+// 通用工具模板：排除 MCP 容器模板、仅含 mcp 供应商的模板、以及无供应商的空壳模板
+const nonMCPTemplates = computed(() => toolTemplates.value.filter(t => {
+  if (t.tool_key === 'mcp') return false
+  if (t.providers.length === 0) return false
+  return !t.providers.every(p => p.provider_type === 'mcp')
+}))
 
 // 当前用户已启用的 MCP 配置（按 provider_id 索引）
 const mcpUserConfigsByProvider = computed(() => {

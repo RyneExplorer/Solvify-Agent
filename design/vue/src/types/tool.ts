@@ -25,6 +25,7 @@ export interface ToolProviderInfo {
   provider_config: ProviderConfig | null
   admin_config: Record<string, unknown> | null
   rate_limit: Record<string, unknown> | null
+  mcp_tool_manifest?: MCPToolInfo[] | null
   is_enabled: boolean
   is_system: boolean
   display_order: number
@@ -60,6 +61,20 @@ export interface MCPConfig {
 export interface MCPToolInfo {
   name: string
   description?: string
+}
+
+// 管理后台 MCP 服务器聚合信息
+export interface MCPServerInfo {
+  id: string
+  tool_type_id: string
+  tool_type_name: string
+  tool_type_key: string
+  provider_key: string
+  name: string
+  description: string
+  is_enabled: boolean
+  is_system: boolean
+  mcp_tool_manifest: MCPToolInfo[] | null
 }
 
 // 工具测试结果（通用，含 MCP 扩展字段）
@@ -114,6 +129,7 @@ export interface ProviderBrief {
   config_schema: Record<string, unknown> | null
   input_schema: Record<string, unknown> | null
   is_system: boolean
+  mcp_tool_manifest?: MCPToolInfo[] | null
 }
 
 export interface ToolTemplate {

@@ -144,7 +144,10 @@
     <div v-if="activeTab === 'tools'">
       <div class="flex justify-between mb-4">
         <SearchInput v-model="toolSearch" placeholder="搜索工具类型..." wrapper-class="w-80" />
-        <AppButton @click="openToolTypeModal()">+ 添加工具类型</AppButton>
+        <div class="flex gap-2">
+          <AppButton variant="secondary" @click="cleanupEmptyToolTypes">清理空工具类型</AppButton>
+          <AppButton @click="openToolTypeModal()">+ 添加工具类型</AppButton>
+        </div>
       </div>
       <AppCard class="!p-0 overflow-hidden">
         <table class="w-full text-sm border-collapse">
@@ -240,6 +243,76 @@
             </tr>
           </tbody>
         </table>
+      </AppCard>
+    </div>
+
+    <!-- MCP 服务器管理 -->
+    <div v-if="activeTab === 'mcpServers'">
+      <div class="flex justify-between mb-4">
+        <span class="text-sm text-slate-500">全部 MCP 供应商（含其所属工具类型与工具清单）</span>
+        <AppButton variant="secondary" size="sm" @click="loadMCPServers">刷新</AppButton>
+      </div>
+      <AppCard class="!p-0 overflow-hidden">
+        <table class="w-full text-sm border-collapse">
+          <thead>
+            <tr class="bg-slate-50 border-b border-slate-200">
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">名称</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">所属工具类型</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">Provider Key</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">来源</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">状态</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">工具数</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="s in mcpServers" :key="s.id" class="border-b border-slate-100 last:border-b-0">
+              <td class="px-4 py-3">
+                <div class="font-medium text-slate-900">{{ s.name }}</div>
+                <div class="text-xs text-slate-400 mt-0.5 max-w-xs truncate">{{ s.description || '暂无描述' }}</div>
+              </td>
+              <td class="px-4 py-3">
+                <div class="text-slate-900">{{ s.tool_type_name }}</div>
+                <div class="text-xs text-slate-400 font-mono">{{ s.tool_type_key }}</div>
+              </td>
+              <td class="px-4 py-3 text-slate-500 font-mono text-xs">{{ s.provider_key }}</td>
+              <td class="px-4 py-3">
+                <AppBadge v-if="s.is_system" variant="blue">系统预置</AppBadge>
+                <AppBadge v-else variant="neutral">管理员配置</AppBadge>
+              </td>
+              <td class="px-4 py-3"><AppBadge :variant="s.is_enabled ? 'success' : 'neutral'">{{ s.is_enabled ? '启用' : '停用' }}</AppBadge></td>
+              <td class="px-4 py-3 text-slate-900">
+                <span v-if="s.mcp_tool_manifest">{{ s.mcp_tool_manifest.length }}</span>
+                <span v-else class="text-slate-400">未探测</span>
+              </td>
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-1">
+                  <AppButton
+                    variant="ghost" size="sm"
+                    :disabled="s.is_system"
+                    :title="s.is_system ? '系统预置供应商不支持编辑' : ''"
+                    @click="openMCPServerEdit(s)"
+                  >编辑</AppButton>
+                  <AppButton
+                    variant="ghost" size="sm"
+                    :disabled="s.is_system"
+                    :title="s.is_system ? '系统预置供应商不支持启停（由配置文件管理）' : ''"
+                    @click="toggleMCPServerEnabled(s)"
+                  >{{ s.is_enabled ? '停用' : '启用' }}</AppButton>
+                  <AppButton variant="ghost" size="sm" @click="probeMCPServer(s)">探测</AppButton>
+                  <AppButton
+                    variant="ghost" size="sm"
+                    :disabled="s.is_system"
+                    :title="s.is_system ? '系统预置供应商不支持删除（修改配置文件后会自动删除）' : ''"
+                    class="text-red-600 hover:text-red-700 hover:bg-red-50 disabled:!text-slate-300 disabled:hover:!bg-transparent"
+                    @click="deleteMCPServer(s.id)"
+                  >删除</AppButton>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="!mcpServers.length" class="px-4 py-8 text-center text-sm text-slate-400">暂无 MCP 供应商</div>
       </AppCard>
     </div>
 
@@ -751,6 +824,31 @@
             </div>
           </div>
 
+          <!-- MCP 工具清单（该 MCP 连接后提供的工具） -->
+          <div v-if="toolProviderForm.provider_type === 'mcp'" class="border border-slate-200 rounded-xl p-3 bg-slate-50">
+            <div class="flex items-center justify-between mb-1">
+              <label class="block text-[13px] font-medium text-slate-600">该 MCP 提供的工具</label>
+              <button
+                type="button"
+                :disabled="mcpProbing"
+                class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-0.5 rounded-md hover:bg-slate-50"
+                @click="autoProbeCurrentMCP(true)"
+              >{{ mcpProbing ? '探测中...' : '重新探测' }}</button>
+            </div>
+            <p class="text-xs text-slate-400 mb-2">打开编辑框时自动探测并保存，展示该 MCP 服务器提供的能力</p>
+            <div v-if="mcpProbing" class="text-xs text-slate-400 py-2">正在连接 MCP 服务器探测工具...</div>
+            <div v-else-if="mcpManifest.length" class="space-y-1 max-h-[200px] overflow-y-auto pr-1">
+              <div v-for="t in mcpManifest" :key="t.name"
+                   class="px-2 py-1.5 rounded-md bg-white border border-slate-200 text-slate-800 text-xs">
+                <div class="font-medium">{{ t.name }}</div>
+                <div v-if="t.description" class="opacity-60 font-normal mt-0.5">{{ t.description }}</div>
+              </div>
+            </div>
+            <div v-else class="text-xs text-slate-400 px-3 py-3 rounded-lg border border-slate-200 border-dashed text-center">
+              尚未探测到工具。点上方“重新探测”，或保存后再次打开会自动探测。
+            </div>
+          </div>
+
           <!-- Config Schema Builder -->
           <div>
             <div class="flex items-center justify-between mb-1.5">
@@ -954,7 +1052,7 @@ import SearchInput from '../components/ui/SearchInput.vue'
 import StatCard from '../components/StatCard.vue'
 import TraceRootProvider from '../components/TraceRootProvider.vue'
 import type { ModelInfo, ModelTestResult } from '@/types/model'
-import type { ToolTypeInfo, ToolProviderInfo, ToolTestResult, MCPConfig } from '@/types/tool'
+import type { ToolTypeInfo, ToolProviderInfo, ToolTestResult, MCPToolInfo, MCPConfig, MCPServerInfo } from '@/types/tool'
 import type { AdminSession, TraceSummary, ChatTraceDetail, MetricsSnapshot } from '@/types/chat'
 import {
   adminListUsers,
@@ -975,6 +1073,11 @@ import {
   adminUpdateToolProvider,
   adminDeleteToolProvider,
   adminListProviderTypes,
+  adminTestTool,
+  adminProbeTool,
+  adminListMCPServers,
+  adminDeleteMCPServer,
+  adminCleanupEmptyToolTypes,
   adminListSessions,
   adminDeleteSession,
   adminCleanupSessions,
@@ -999,6 +1102,7 @@ const adminTabs = [
   { key: 'sessions', label: '会话管理' },
   { key: 'models', label: '模型管理' },
   { key: 'tools', label: '工具管理' },
+  { key: 'mcpServers', label: 'MCP 服务器' },
   { key: 'observability', label: '可观测性' },
 ]
 
@@ -1369,6 +1473,16 @@ const toolProviderForm = ref<{
 const toolProviderFormValid = computed(() => toolProviderForm.value.name.trim() && toolProviderForm.value.provider_key.trim() && toolProviderForm.value.provider_type.trim())
 const toolTestResult = ref<ToolTestResult | null>(null)
 const toolTesting = ref(false)
+// MCP 供应商探测到的工具清单（持久化 + 本次探测结果），用于在 MCP 配置区下方固定展示
+const mcpManifest = ref<MCPToolInfo[]>([])
+const mcpProbing = ref(false)
+// 弹窗关闭时清空 MCP 探测状态，避免下次打开残留
+watch(toolProviderModalVisible, (open) => {
+  if (!open) {
+    mcpManifest.value = []
+    mcpProbing.value = false
+  }
+})
 
 // ── MCP 专用表单状态 ──
 interface MCPFormState {
@@ -1672,7 +1786,41 @@ function openToolProviderModal(provider?: ToolProviderInfo) {
     toolProviderForm.value = { name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] }
   }
   toolTestResult.value = null
+  mcpManifest.value = (provider?.provider_type === 'mcp' && provider?.mcp_tool_manifest) ? [...provider.mcp_tool_manifest] : []
+  mcpProbing.value = false
   toolProviderModalVisible.value = true
+
+  // 编辑已有 MCP 供应商：打开即自动探测并持久化工具清单
+  if (provider?.provider_type === 'mcp' && provider.id && provider.provider_config) {
+    autoProbeCurrentMCP(false)
+  }
+}
+
+// 探测当前 MCP 供应商的工具清单；编辑已有供应商时传 provider_id 让后端持久化
+async function autoProbeCurrentMCP(force: boolean) {
+  const provider = editingToolProvider.value
+  if (mcpProbing.value) return
+  try {
+    mcpProbing.value = true
+    const providerConfig = provider?.provider_config && typeof provider.provider_config === 'object'
+      ? provider.provider_config as unknown as Record<string, unknown>
+      : buildMCPProviderConfig(mcpForm)
+    const res = await adminProbeTool({
+      provider_type: 'mcp',
+      provider_id: provider?.id,
+      provider_config: providerConfig,
+    })
+    const data = res.data
+    if (data?.mcp_tools) {
+      mcpManifest.value = data.mcp_tools
+    } else if (force && data) {
+      ElMessage.warning(data.message || '未探测到工具')
+    }
+  } catch (e: any) {
+    ElMessage.error(e.message || '探测 MCP 工具失败')
+  } finally {
+    mcpProbing.value = false
+  }
 }
 
 async function saveToolProvider() {
@@ -1732,11 +1880,16 @@ async function testToolProvider() {
     }
     const res = await adminTestTool({
       provider_type: toolProviderForm.value.provider_type,
+      provider_id: editingToolProvider.value?.id,
       provider_config: providerConfig,
       admin_config: parseKVRows(toolProviderForm.value.admin_config_rows),
       tool_input: {},
     })
     toolTestResult.value = res.data
+    // MCP 且后端返回了工具清单时，同步刷新固定展示区
+    if (toolProviderForm.value.provider_type === 'mcp' && res.data?.mcp_tools) {
+      mcpManifest.value = res.data.mcp_tools
+    }
   } catch (e: any) {
     toolTestResult.value = {
       success: false,
@@ -1771,6 +1924,99 @@ async function deleteToolProvider(id: string) {
   } catch (e: any) {
     if (e === 'cancel' || e === 'close') return
     ElMessage.error(e.message || '删除失败')
+  }
+}
+
+// ── MCP 服务器管理 ──
+const mcpServers = ref<MCPServerInfo[]>([])
+
+async function loadMCPServers() {
+  try {
+    const res = await adminListMCPServers()
+    if (res.code === 0) mcpServers.value = res.data.servers || []
+  } catch (e: any) {
+    ElMessage.error(e.message || '加载 MCP 服务器失败')
+  }
+}
+
+// 把 MCP 服务器行映射成供应商编辑弹窗所需的工具类型上下文
+function mcpServerToolTypeContext(s: MCPServerInfo): ToolTypeInfo {
+  return {
+    id: s.tool_type_id,
+    name: s.tool_type_name,
+    tool_key: s.tool_type_key,
+    description: '',
+    execution_mode: 'sync',
+    input_schema: null,
+    is_enabled: true,
+    provider_count: 0,
+  }
+}
+
+async function openMCPServerEdit(s: MCPServerInfo) {
+  try {
+    const res = await adminListToolProviders(s.tool_type_id)
+    if (res.code !== 0) return
+    const provider = res.data.providers?.find((p: ToolProviderInfo) => p.id === s.id)
+    if (!provider) {
+      ElMessage.error('未找到该供应商详情')
+      return
+    }
+    currentToolType.value = mcpServerToolTypeContext(s)
+    openToolProviderModal(provider)
+  } catch (e: any) {
+    ElMessage.error(e.message || '加载供应商详情失败')
+  }
+}
+
+async function toggleMCPServerEnabled(s: MCPServerInfo) {
+  try {
+    await adminUpdateToolProvider(s.tool_type_id, s.id, { is_enabled: !s.is_enabled })
+    await loadMCPServers()
+    ElMessage.success(s.is_enabled ? '停用成功' : '启用成功')
+  } catch (e: any) {
+    ElMessage.error(e.message || '操作失败')
+  }
+}
+
+async function probeMCPServer(s: MCPServerInfo) {
+  try {
+    const res = await adminProbeTool({ provider_type: 'mcp', provider_id: s.id })
+    const tools = res.data?.mcp_tools
+    if (tools?.length) {
+      ElMessage.success(`探测到 ${tools.length} 个工具`)
+      await loadMCPServers()
+    } else {
+      ElMessage.warning(res.data?.message || '未探测到工具')
+    }
+  } catch (e: any) {
+    ElMessage.error(e.message || '探测失败')
+  }
+}
+
+async function deleteMCPServer(id: string) {
+  try {
+    await ElMessageBox.confirm('确定删除这台 MCP 服务器吗？若其所属工具类型因此变空且非 MCP 容器类型，将一并删除。', '提示', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
+    await adminDeleteMCPServer(id)
+    await loadMCPServers()
+    await loadToolTypes()
+    ElMessage.success('删除成功')
+  } catch (e: any) {
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '删除失败')
+  }
+}
+
+async function cleanupEmptyToolTypes() {
+  try {
+    await ElMessageBox.confirm('确定清理所有无供应商的工具类型吗？（不含 MCP 容器类型）', '提示', { confirmButtonText: '清理', cancelButtonText: '取消', type: 'warning' })
+    const res = await adminCleanupEmptyToolTypes()
+    await loadToolTypes()
+    await loadMCPServers()
+    ElMessage.success(`已清理 ${res.data?.deleted ?? 0} 个空工具类型`)
+  } catch (e: any) {
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '清理失败')
   }
 }
 
@@ -1940,6 +2186,7 @@ watch(activeTab, (tab) => {
   if (tab === 'sessions') loadSessions()
   if (tab === 'models') loadModels()
   if (tab === 'tools') loadToolTypes()
+  if (tab === 'mcpServers') loadMCPServers()
   if (tab === 'observability' && !obsMetrics.value) loadObsMetrics()
 })
 
@@ -1959,6 +2206,7 @@ onMounted(() => {
   if (activeTab.value === 'sessions') loadSessions()
   if (activeTab.value === 'models') loadModels()
   if (activeTab.value === 'tools') loadToolTypes()
+  if (activeTab.value === 'mcpServers') loadMCPServers()
   if (activeTab.value === 'observability') {
     loadObsMetrics()
     // 如果用户默认打开就是链路 Traces tab，也自动拉一次

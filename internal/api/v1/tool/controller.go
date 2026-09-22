@@ -86,6 +86,16 @@ func (c *Controller) DeleteToolType(ctx *gin.Context) {
 	response.Success(ctx, nil)
 }
 
+// CleanupEmptyToolTypes 清理所有无供应商的非容器工具类型（含其用户配置），返回删除数量
+func (c *Controller) CleanupEmptyToolTypes(ctx *gin.Context) {
+	deleted, err := c.providerService.CleanupEmptyToolTypes(ctx.Request.Context())
+	if err != nil {
+		response.BizError(ctx, err)
+		return
+	}
+	response.Success(ctx, gin.H{"deleted": deleted})
+}
+
 // ========== 管理员接口：工具供应商 ==========
 
 // ListProviderTypes 返回所有已注册的供应商类型
@@ -148,6 +158,28 @@ func (c *Controller) DeleteToolProvider(ctx *gin.Context) {
 	response.Success(ctx, nil)
 }
 
+// ========== 管理员接口：MCP 服务器管理 ==========
+
+// ListMCPServers 列出全部 MCP 供应商（含所属工具类型信息）
+func (c *Controller) ListMCPServers(ctx *gin.Context) {
+	result, err := c.providerService.ListMCPServers(ctx.Request.Context())
+	if err != nil {
+		response.BizError(ctx, err)
+		return
+	}
+	response.Success(ctx, result)
+}
+
+// DeleteMCPServer 删除 MCP 供应商；所属工具类型若随之变空且非 mcp 容器类型，级联删除空壳类型
+func (c *Controller) DeleteMCPServer(ctx *gin.Context) {
+	id := ctx.Param("providerId")
+	if err := c.providerService.DeleteMCPServerWithCleanup(ctx.Request.Context(), id); err != nil {
+		response.BizError(ctx, err)
+		return
+	}
+	response.Success(ctx, nil)
+}
+
 // TestToolProvider 测试工具供应商连接
 func (c *Controller) TestToolProvider(ctx *gin.Context) {
 	var req request.TestToolRequest
@@ -157,6 +189,22 @@ func (c *Controller) TestToolProvider(ctx *gin.Context) {
 	}
 
 	result, err := c.providerService.Test(ctx.Request.Context(), req)
+	if err != nil {
+		response.BizError(ctx, err)
+		return
+	}
+	response.Success(ctx, result)
+}
+
+// ProbeMCPTools 探测 MCP 供应商的工具清单（不执行工具调用）；传入 provider_id 时持久化
+func (c *Controller) ProbeMCPTools(ctx *gin.Context) {
+	var req request.TestToolRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(ctx, "请求参数错误")
+		return
+	}
+
+	result, err := c.providerService.ProbeMCPTools(ctx.Request.Context(), req)
 	if err != nil {
 		response.BizError(ctx, err)
 		return
@@ -183,6 +231,8 @@ func (c *Controller) ListToolTemplates(ctx *gin.Context) {
 		ConfigSchema json.RawMessage `json:"config_schema"`
 		InputSchema  json.RawMessage `json:"input_schema"`
 		IsSystem     bool            `json:"is_system"`
+		// MCP 专用：该服务器探测到的工具清单（[ {name, description} ]，可能为 null）
+		MCPToolManifest json.RawMessage `json:"mcp_tool_manifest"`
 	}
 	type templateInfo struct {
 		ID            string          `json:"id"`
@@ -209,14 +259,15 @@ func (c *Controller) ListToolTemplates(ctx *gin.Context) {
 		if providers != nil {
 			for _, p := range providers.Providers {
 				t.Providers = append(t.Providers, providerBrief{
-					ID:           p.ID,
-					ProviderKey:  p.ProviderKey,
-					Name:         p.Name,
-					Description:  p.Description,
-					ProviderType: p.ProviderType,
-					ConfigSchema: p.ConfigSchema,
-					InputSchema:  p.InputSchema,
-					IsSystem:     p.IsSystem,
+					ID:              p.ID,
+					ProviderKey:     p.ProviderKey,
+					Name:            p.Name,
+					Description:     p.Description,
+					ProviderType:    p.ProviderType,
+					ConfigSchema:    p.ConfigSchema,
+					InputSchema:     p.InputSchema,
+					IsSystem:        p.IsSystem,
+					MCPToolManifest: p.MCPToolManifest,
 				})
 			}
 		}

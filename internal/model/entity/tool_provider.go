@@ -21,6 +21,7 @@ type ToolProvider struct {
 	ProviderConfig datatypes.JSON `gorm:"type:jsonb" json:"provider_config"`                           // 供应商配置（HTTP 配置等）
 	AdminConfig    datatypes.JSON `gorm:"type:jsonb" json:"admin_config"`                              // 管理员业务参数
 	RateLimit      datatypes.JSON `gorm:"type:jsonb" json:"rate_limit"`                                // 限流配置
+	MCPToolManifest datatypes.JSON `gorm:"type:jsonb" json:"mcp_tool_manifest"`                        // MCP 供应商探测到的工具清单 [{name,description}]
 	IsEnabled      bool           `gorm:"default:true;index" json:"is_enabled"`
 	IsSystem       bool           `gorm:"default:false;comment:是否系统预置" json:"is_system"` // 系统预置不可删除
 	DisplayOrder   int            `gorm:"default:0" json:"display_order"`

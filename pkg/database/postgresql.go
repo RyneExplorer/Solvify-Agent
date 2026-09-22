@@ -230,6 +230,7 @@ func EnsureToolProviderSchema(db *gorm.DB) error {
 	}
 	missingCols := []colDef{
 		{name: "is_system", ddl: "boolean NOT NULL DEFAULT false"},
+		{name: "mcp_tool_manifest", ddl: "jsonb"},
 	}
 
 	for _, mc := range missingCols {
