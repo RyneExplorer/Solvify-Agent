@@ -118,8 +118,9 @@ func TestQuickGraph_OneCompiledRunnableServesConcurrentRequestsWithIsolatedState
 		arrive.Wait()
 		releaseAll()
 	}()
-	// 兜底：万一有请求没走到检索节点，15s 后放行，用例以断言失败收场而不是挂死。
-	guard := time.AfterFunc(15*time.Second, releaseAll)
+	// 兜底：万一有请求没走到检索节点，45s 后放行，用例以断言失败收场而不是挂死。
+	// 必须早于请求截止时间（60s），否则兜底永远不生效（旧实现 15s>10s 是死代码）。
+	guard := time.AfterFunc(45*time.Second, releaseAll)
 	defer guard.Stop()
 
 	retriever := &barrierRetriever{arrive: arrive, release: release}
@@ -142,7 +143,9 @@ func TestQuickGraph_OneCompiledRunnableServesConcurrentRequestsWithIsolatedState
 			wantReply := "reply-" + kb
 
 			// 唯一的请求级变量就是入参本身：ChatModel 与改写结果都挂在它上面，不再经 ctx 注入。
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			// deadline 留足余量：CI 上 -race + coverage + 全包并行时 CPU 争用严重，
+			// 10s 会让「只是慢、并不串数据」的正常请求被误杀成 GraphRunError。
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 
 			input := &quickGraphInput{
