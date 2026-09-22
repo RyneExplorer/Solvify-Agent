@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/go-ego/gse"
@@ -129,6 +130,7 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	}
 
 	topK := query.effectiveTopK()
+	startedAt := time.Now()
 
 	logger.Infof("混合检索开始: vectorQuery=%q, keywordQuery=%q, topK=%d, knowledgeBaseIDs=%v",
 		query.Question, query.keywordQueryText(), topK, query.KnowledgeBaseIDs)
@@ -213,11 +215,11 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	keywordNorm := minMaxNormalize(filteredKeyword)
 
 	// ===== Step 3: RRF 融合 =====
-	fused := r.reciprocalRankFusion(filteredVector, filteredKeyword)
-	observeStage(rec, ctx, "rrf_fused", float64(len(fused)))
+	fusedRaw := r.reciprocalRankFusion(filteredVector, filteredKeyword)
+	observeStage(rec, ctx, "rrf_fused", float64(len(fusedRaw)))
 
 	// ===== Step 4: 跨源交叉验证 =====
-	fused = r.crossSourceFilter(fused, filteredVector, filteredKeyword, vectorNorm, keywordNorm)
+	fused := r.crossSourceFilter(fusedRaw, filteredVector, filteredKeyword, vectorNorm, keywordNorm)
 	observeStage(rec, ctx, "cross_filtered", float64(len(fused)))
 
 	// ===== Step 5: TopK 截取 =====
@@ -241,6 +243,14 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 
 	logger.Infof("混合检索最终结果: %d 条 (向量过滤阈值=%.2f, TopK=%d, 向量候选=%d, 关键词候选=%d)",
 		len(docs), r.scoreThreshold, topK, len(filteredVector), len(filteredKeyword))
+
+	// 每次检索的一行结构化摘要：把漏斗各阶段计数与最终命中的 chunk 一起打出，
+	// 便于本地评测时直接对照 gold（chunk 级）算 hit@k / MRR，无需另接指标系统。
+	// 注意：只打印 id 与计数，不打印 chunk 正文（日志规范禁止输出正文与密钥）。
+	logger.Infof("检索摘要 | 耗时=%s 向量原始=%d 关键词原始=%d 向量过滤=%d 关键词过滤=%d 融合=%d 交叉过滤=%d 最终=%d topK=%d 命中=[%s]",
+		time.Since(startedAt).Round(time.Millisecond),
+		len(vr.docs), len(kr.docs), len(filteredVector), len(filteredKeyword),
+		len(fusedRaw), len(fused), len(docs), topK, chunkIDPreview(docs))
 
 	return Result{
 		Hit:       len(docs) > 0,
@@ -728,6 +738,19 @@ func observeStage(rec observability.Recorder, ctx context.Context, stage string,
 		return
 	}
 	rec.Observe(ctx, "rag_retriever_stage_count", map[string]string{"stage": stage}, count)
+}
+
+// chunkIDPreview 把命中结果拼成 "chunkId@docId#idx(s=score)" 的紧凑串，供检索摘要日志使用。
+// id 取后 8 位（复用 shortHash）：单次日志内足以区分，且不会把日志撑成一行一屏。
+func chunkIDPreview(docs []Document) string {
+	if len(docs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(docs))
+	for _, d := range docs {
+		parts = append(parts, fmt.Sprintf("%s@%s#%d(s=%.3f)", shortHash(d.ID), shortHash(d.DocumentID), d.ChunkIndex, d.Score))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // observeIncr 记录一次检索侧计数指标。
