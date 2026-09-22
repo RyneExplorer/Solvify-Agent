@@ -291,20 +291,36 @@ func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string, userC
 				continue
 			}
 
+			// 用户可在工具配置页按工具名停用单个工具（config.disabled_tools），未配置则全部启用
+			disabled := parseDisabledTools(userConfig)
+
 			// 前缀需带上 provider_key，否则多个 MCP Server 出现同名工具（如都有 search_files）
 			// 时后者会覆盖前者，Agent 实际只能调到其中一个。
 			// 最终形态：{tool_key}_{provider_key}_{tool_name}，例如 mcp_filesystem_read_file
 			prefix := mcpToolPrefix(config.ToolType.ToolKey, config.ToolProvider.ProviderKey)
 			callTimeout := mcpCallTimeout(providerConfig.MCP)
+			loaded := 0
 			for _, mt := range mcpTools {
+				if len(disabled) > 0 {
+					info, infoErr := mt.Info(ctx)
+					if infoErr != nil {
+						logger.Warnf("[ToolFactory] MCP 工具信息获取失败，跳过该工具: providerKey=%s, err=%v",
+							config.ToolProvider.ProviderKey, infoErr)
+						continue
+					}
+					if disabled[info.Name] {
+						continue
+					}
+				}
+				loaded++
 				tools = append(tools, &prefixedTool{
 					BaseTool: mt,
 					prefix:   prefix,
 					timeout:  callTimeout,
 				})
 			}
-			logger.Infof("[ToolFactory] MCP 工具加载成功: providerKey=%s, prefix=%s, tools=%d, callTimeout=%v",
-				config.ToolProvider.ProviderKey, prefix, len(mcpTools), callTimeout)
+			logger.Infof("[ToolFactory] MCP 工具加载成功: providerKey=%s, prefix=%s, tools=%d/%d, callTimeout=%v",
+				config.ToolProvider.ProviderKey, prefix, loaded, len(mcpTools), callTimeout)
 			continue
 		}
 
@@ -322,6 +338,32 @@ func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string, userC
 	}
 
 	return tools
+}
+
+// parseDisabledTools 解析用户配置中的 disabled_tools 数组（MCP 工具级停用名单）
+// 未配置或解析失败时返回 nil，表示全部启用
+func parseDisabledTools(userConfig map[string]interface{}) map[string]bool {
+	if userConfig == nil {
+		return nil
+	}
+	raw, ok := userConfig["disabled_tools"]
+	if !ok {
+		return nil
+	}
+	list, ok := raw.([]interface{})
+	if !ok || len(list) == 0 {
+		return nil
+	}
+	disabled := make(map[string]bool, len(list))
+	for _, v := range list {
+		if name, ok := v.(string); ok && name != "" {
+			disabled[name] = true
+		}
+	}
+	if len(disabled) == 0 {
+		return nil
+	}
+	return disabled
 }
 
 // mcpToolPrefix 构造 MCP 工具名前缀：{tool_key}_{provider_key}
