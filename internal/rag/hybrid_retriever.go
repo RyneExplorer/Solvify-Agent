@@ -5,38 +5,16 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 	"time"
-	"unicode"
 
-	"github.com/go-ego/gse"
 	"gorm.io/gorm"
 
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/observability"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
-	"solvify-agent/pkg/stopwords"
+	"solvify-agent/pkg/textseg"
 )
-
-var (
-	segOnce sync.Once
-	segInst gse.Segmenter
-)
-
-// getSegmenter 获取全局 gse 分词实例（懒加载，使用内嵌词典）
-func getSegmenter() *gse.Segmenter {
-	segOnce.Do(func() {
-		seg, err := gse.NewEmbed()
-		if err != nil {
-			logger.Errorf("gse 词典加载失败: %v", err)
-			return
-		}
-		segInst = seg
-		logger.Info("gse 词典加载完成")
-	})
-	return &segInst
-}
 
 // HybridRetriever 实现混合检索（向量 + 关键词 + RRF 融合）
 type HybridRetriever struct {
@@ -393,7 +371,7 @@ func keywordSearchArgs(query Query, keywordArray string) []any {
 }
 
 func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]scoredChunk, error) {
-	keywords := extractKeywords(query.keywordQueryText())
+	keywords := textseg.Extract(query.keywordQueryText())
 	if len(keywords) == 0 {
 		return nil, nil
 	}
@@ -425,58 +403,11 @@ func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]sco
 // ExtractKeywords 用与关键词检索完全一致的分词 + 停用词口径从文本中提取词项。
 // 供上层（service 层构造检索 query、做实体回填）复用，保证「规划出的词」
 // 与「实际参与关键字匹配的词」是同一套口径。
+//
+// 实现已收敛到 pkg/textseg：那份口径同时被建库侧（给 chunk 打关键词）使用，
+// 两侧调同一个函数，才能从结构上排除「一边产词、一边产子串」这类不一致。
 func ExtractKeywords(text string) []string {
-	return extractKeywords(text)
-}
-
-// extractKeywords 使用 gse 分词提取关键词，过滤停用词
-//
-// 长度要求「≥2 个字符」（按 rune 算，不是按字节）。这不是排版偏好，而是由检索的打分口径决定的：
-// keywordSearch 的分数是「这条 chunk 覆盖了 query 的多少比例」——
-//
-//	score = COUNT(chunk 关键词 ∩ query 词项) / cardinality(query 词项)
-//
-// 而 chunk 侧的关键词只有两类来源（见 document_chunk_service.extractKeywords）：
-// 中文 2~12 字 ngram、英文/数字 `[A-Za-z0-9_./:-]{2,64}` —— **不存在单字符词条**
-// （实测：全表 171 个 chunk、3286 个词条里长度=1 的有 0 个）。
-// 所以单字符 query 词项（「分」「能」「做」「里」「层」这类由分词切出来的字）
-// 分子恒为 0，却照样占一个分母：纯噪声，只会把所有候选分数一起压低，
-// 在 keywordScoreThreshold 兜底过滤下甚至能把结果全滤光。故直接丢弃。
-// 纯标点（“？”、“，”）同理，用 hasWordChar 兜住。
-func extractKeywords(question string) []string {
-	seg := getSegmenter()
-	words := seg.Cut(question, true)
-
-	var keywords []string
-	seen := make(map[string]bool)
-	for _, w := range words {
-		w = strings.ToLower(strings.TrimSpace(w))
-		if w == "" || len([]rune(w)) < 2 {
-			continue
-		}
-		if !hasWordChar(w) {
-			continue
-		}
-		if stopwords.IsStopWord(w) {
-			continue
-		}
-		if seen[w] {
-			continue
-		}
-		seen[w] = true
-		keywords = append(keywords, w)
-	}
-	return keywords
-}
-
-// hasWordChar 判断词项里是否含字母或数字（纯标点/空白/换行的词项对检索无意义）。
-func hasWordChar(s string) bool {
-	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return true
-		}
-	}
-	return false
+	return textseg.Extract(text)
 }
 
 // batchFillTitles 对检索结果批量填充文档标题。

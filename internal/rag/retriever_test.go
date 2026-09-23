@@ -3,6 +3,8 @@ package rag
 import (
 	"strings"
 	"testing"
+
+	"solvify-agent/pkg/textseg"
 )
 
 func TestQueryKeywordQueryText(t *testing.T) {
@@ -62,7 +64,7 @@ func TestExtractKeywords(t *testing.T) {
 	// 纯标点不能成为关键词：它匹配不到任何文档的关键词，
 	// 只会抬高关键字命中率的分母、压低全部候选分。
 	for _, k := range got {
-		if !hasWordChar(k) {
+		if !textseg.HasWordChar(k) {
 			t.Errorf("纯标点词项 %q 不应出现在关键词里: %v", k, got)
 		}
 	}
