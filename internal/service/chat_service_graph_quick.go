@@ -128,6 +128,7 @@ const (
 	intentQuestion = "question" // 知识查询（默认，最常见）
 	intentIdentity = "identity" // 身份确认（你是谁、你能做什么）
 	intentMeta     = "meta"     // 元问题（我的历史记录、你刚才说了什么）
+	intentRealtime = "realtime" // 实时信息（天气/新闻/行情，本模式无工具，直接告知）
 )
 
 // rewriteResult 一次查询改写的完整产出：LLM 返回的 JSON 字段 + 本地推导的派生字段。
@@ -171,7 +172,8 @@ const rewriteSystemPrompt = `你是一个查询改写助手。根据用户的原
 
 ## 意图识别
 - greeting: 问候语（你好、hi、在吗、早上好）
-- chitchat: 闲聊（今天天气怎么样、讲个笑话、随便聊聊）
+- chitchat: 闲聊（讲个笑话、随便聊聊、安慰一下我）
+- realtime: 实时信息（天气、气温、最近的新闻、股价、汇率等，必须联网或调工具才能答对）
 - question: 知识查询（业务问题、技术问题、需要从知识库找答案）
 - identity: 身份确认（你是谁、你能做什么、介绍一下你自己）
 - meta: 元问题（我的历史记录、你刚才说了什么、回顾对话）
@@ -182,7 +184,7 @@ const rewriteSystemPrompt = `你是一个查询改写助手。根据用户的原
 - 问题包含可能冲突的关键概念（如"怎么导出数据"未指明导出格式/导出范围）→ 追问
 - 用户同时提及多个实体且未指明主体 → 追问
 以下情况**不要**追问：
-- 打招呼、闲聊、身份类意图（greeting/chitchat/identity）→ 直接返回原问题
+- 打招呼、闲聊、身份、实时类意图（greeting/chitchat/identity/realtime）→ 直接返回原问题
 - 有历史对话可以消解歧义 → 直接改写，need_clarify=false
 - 即使问题有些宽泛，但可以给一个通用回答 → 直接回答，need_clarify=false
 
@@ -299,10 +301,11 @@ func quickRewriteFn(ctx context.Context, input *quickGraphInput) (*quickGraphPay
 	}, nil
 }
 
-// 覆盖四类场景：
+// 覆盖五类场景：
 //
 //	greeting: 你好 / hi / 早上好 / 在吗
 //	identity: 你是谁 / 你能做什么 / 介绍一下自己
+//	realtime: 今天天气怎么样 / 最近的新闻 / 股价多少（本模式答不了，走「告知」路径）
 //	chitchat: 今天星期几 / 讲个笑话 / 随便聊聊（含"今天/现在+时间查询"）
 //	meta:     我的历史 / 刚才说了什么
 //
@@ -314,7 +317,11 @@ var localIntentRules = []struct {
 }{
 	{intentGreeting, reGreeting},
 	{intentIdentity, reIdentity},
-	// chitchat 覆盖「闲聊 + 系统信息查询」，都是 LLM 容易误识别成 question 的场景
+	// realtime 必须排在 chitchat 之前：天气/新闻类问法看起来像闲聊，但答案不在知识库里
+	// （随时间变化），本模式又没有实时工具 —— 跑检索只会白花时间再回一句「知识库没有」；
+	// 判成 chitchat 更糟：模型会顺着「闲聊」这个标签给你编一个天气出来。
+	{intentRealtime, reRealtimeQuery},
+	// chitchat 覆盖「闲聊 + 系统信息查询」，都是 LLM 容易误识别成 question 的场景。
 	{intentChitchat, reTimeInfo}, // 时间日期类
 	{intentChitchat, reChitchat}, // 纯闲聊类
 	{intentMeta, reMeta},
@@ -336,12 +343,16 @@ func matchLocalIntent(raw string) (string, bool) {
 }
 
 // 本地意图匹配用的正则，包级编译一次、全局复用。
+//
+// reRealtimeQuery 命中「只有实时数据才能答对」的问法（天气/新闻/行情）。本地只负责把它们
+// 导到「告知」路径：真正的答案在深度模式，靠工具拿。
 var (
-	reGreeting = regexp.MustCompile(`^(你好|您好|hi+|hello+|嗨|哈喽|在吗|在不在|早|早上好|下午好|晚上好|晚安|早安|午安|晚安)$`)
-	reIdentity = regexp.MustCompile(`^(你是谁|你是谁呀|你叫什么|你叫什么名字|你能做什么|你能干什么|你是干什么的|介绍一下你自己|自我介绍|你是什么模型|你是什么)$`)
-	reTimeInfo = regexp.MustCompile(`(今天|现在|当前|明天|后天)+(星期几|礼拜几|几号|多少号|日期|几号了|几点|几点钟|时间|日期是)`)
-	reChitchat = regexp.MustCompile(`^(讲个笑话|来个笑话|随便聊聊|聊聊呗|聊聊天|说点什么|有什么好玩的|今天天气怎么样|天气怎么样|心情不好|我心情不好|安慰一下我|夸夸我)$`)
-	reMeta     = regexp.MustCompile(`(我的历史|聊天记录|你刚才说了什么|刚才说的什么|上一个问题|前一个问题|回顾对话|我们聊了什么|你还记得|之前说的)`)
+	reGreeting      = regexp.MustCompile(`^(你好|您好|hi+|hello+|嗨|哈喽|在吗|在不在|早|早上好|下午好|晚上好|晚安|早安|午安|晚安)$`)
+	reIdentity      = regexp.MustCompile(`^(你是谁|你是谁呀|你叫什么|你叫什么名字|你能做什么|你能干什么|你是干什么的|介绍一下你自己|自我介绍|你是什么模型|你是什么)$`)
+	reTimeInfo      = regexp.MustCompile(`(今天|现在|当前|明天|后天)+(星期几|礼拜几|几号|多少号|日期|几号了|几点|几点钟|时间|日期是)`)
+	reChitchat      = regexp.MustCompile(`^(讲个笑话|来个笑话|随便聊聊|聊聊呗|聊聊天|说点什么|有什么好玩的|心情不好|我心情不好|安慰一下我|夸夸我)$`)
+	reRealtimeQuery = regexp.MustCompile(`(天气|气温|温度|下雨|降雨|降水|台风|空气质量|紫外线|最近的新闻|最新新闻|今日新闻|股价|股票行情|汇率|大盘)`)
+	reMeta          = regexp.MustCompile(`(我的历史|聊天记录|你刚才说了什么|刚才说的什么|上一个问题|前一个问题|回顾对话|我们聊了什么|你还记得|之前说的)`)
 )
 
 // deriveSkipRetrieve 判定「这次请求是否跳过知识库检索」，是全包唯一的规则来源。
@@ -349,13 +360,15 @@ var (
 // greeting/chitchat：无需知识库，直接闲聊
 // identity："你是谁/你能做什么"，System Prompt 里已定义，不需要检索
 // meta："我的历史记录/你刚才说了什么"，属于会话层，不走知识检索
+// realtime：天气/新闻/行情等实时信息，知识库里没有、检索也检索不出来，本模式又没有工具
+// ⇒ 跳过检索，让 LLM 按 prompt 的「实时信息处理」段直接告知用户
 // needClarify：需要先追问用户，同样不检索
 //
 // 旧实现把这条规则写在两处（本地命中链路 + LLM 结果链路），其中一处漏掉 needClarify 分支
 // 不会报错、只表现为多跑一次检索，所以这里收敛成唯一的函数。
 func deriveSkipRetrieve(intent string, needClarify bool) bool {
 	switch intent {
-	case intentGreeting, intentChitchat, intentIdentity, intentMeta:
+	case intentGreeting, intentChitchat, intentIdentity, intentMeta, intentRealtime:
 		return true
 	}
 	return needClarify
@@ -470,7 +483,7 @@ func doRewriteWithLLM(ctx context.Context, input *quickGraphInput) *rewriteResul
 // isValidIntent 检查 LLM 返回的意图是否在合法枚举内
 func isValidIntent(intent string) bool {
 	switch intent {
-	case intentGreeting, intentChitchat, intentQuestion, intentIdentity, intentMeta:
+	case intentGreeting, intentChitchat, intentQuestion, intentIdentity, intentMeta, intentRealtime:
 		return true
 	}
 	return false
