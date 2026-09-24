@@ -29,10 +29,54 @@ func NewPIISanitizer(contentMaxChars int, maskSecret bool) *PIISanitizer {
 	return &PIISanitizer{ContentMaxChars: contentMaxChars, MaskSecret: maskSecret}
 }
 
-// SanitizeString 对字符串做 PII 脱敏并按字符数截断。
-func (s *PIISanitizer) SanitizeString(text string) string {
-	if s == nil {
-		return strutil.TruncateWith(text, 200, strutil.EllipsisChar)
+// 内容字段的长度上限（rune）。这些值决定「一次排查能看到多少内容」。
+//
+// 为什么不复用 ContentMaxChars：它的语义是「单字段兜底截断」，默认 200，
+// 作用在所有没有独立长度控制的字符串上（error / url / 杂项 attrs）。
+// 内容字段的长度应由产生它的地方按场景决定，两者混用会让调参无从下手，
+// 也会让「声明 500 实际 200」这类不一致无从定位。
+const (
+	// contentLenShort 工具名列表等单行短文本
+	contentLenShort = 500
+	// contentLenMedium system prompt、单条消息、检索片段
+	contentLenMedium = 2000
+	// contentLenLong 工具返回、模型回复正文
+	contentLenLong = 4000
+	// contentLenFull 模型完整输入 messages（多轮工具结果叠加后体积最大）
+	contentLenFull = 12000
+	// contentHardCap 内容字段的硬上限：调用点漏传长度时的兜底，防止 span_tree 失控
+	contentHardCap = 20000
+)
+
+// isContentAttr 判断属性名是否属于「内容承载型」。
+//
+// 判据用命名约定而不是手写清单 —— 手写清单必然漏，而漏掉的字段会被静默截到
+// ContentMaxChars(200)，产生侧声明的 4000 全部作废且没有任何报错。
+// 所以：内容字段一律以 _preview 结尾即自动豁免；只有 gen_ai 语义约定的那几个名字
+// 由标准规定、改不了，必须显式列出。
+func isContentAttr(key string) bool {
+	if strings.HasSuffix(key, "_preview") {
+		return true
+	}
+	switch key {
+	case AttrGenAIInputMessages, AttrGenAIOutputMessages,
+		AttrGenAIToolCallArguments, AttrGenAIToolCallResult,
+		AttrGenAIRetrievalQueryText:
+		return true
+	}
+	return false
+}
+
+// maskOnly 只做 PII mask，不做任何长度截断。
+//
+// 分工：
+//   - SanitizeString  = maskOnly + 按 ContentMaxChars 截断（兜底，作用于无长度控制的字段）
+//   - TruncatePreview = maskOnly + 按调用点 maxRunes 截断（精确，作用于内容字段）
+//
+// s 为 nil 时原样返回，长度由调用方自行保证。
+func (s *PIISanitizer) maskOnly(text string) string {
+	if s == nil || text == "" {
+		return text
 	}
 	out := text
 	if s.MaskSecret {
@@ -41,30 +85,51 @@ func (s *PIISanitizer) SanitizeString(text string) string {
 	}
 	out = emailRe.ReplaceAllStringFunc(out, maskEmail)
 	out = phoneRe.ReplaceAllStringFunc(out, maskPhone)
-	out = strutil.TruncateWith(out, s.ContentMaxChars, strutil.EllipsisChar)
 	return out
 }
 
+// SanitizeString 对字符串做 PII 脱敏并按 ContentMaxChars 截断。
+//
+// 用途：作用于**没有独立长度控制**的字符串（Span.Error、反馈评论、Agent 步骤摘要等）。
+// 内容字段不要走这里，走 TruncatePreview。
+func (s *PIISanitizer) SanitizeString(text string) string {
+	if s == nil {
+		return strutil.TruncateWith(text, 200, strutil.EllipsisChar)
+	}
+	return strutil.TruncateWith(s.maskOnly(text), s.ContentMaxChars, strutil.EllipsisChar)
+}
+
 // SanitizeAttrs 对 attrs 中所有值递归做 PII 脱敏。
+//
+// 截断策略按属性名分流（见 sanitizeAttrValue）：内容字段只做 mask + 硬上限兜底，
+// 长度由产生侧的 TruncatePreview 决定；其余字段按 ContentMaxChars 兜底截断。
+//
+// 为什么必须分流：落库出口（cleanSpan）与三方导出出口（StartSpan / EndSpan）都调这里，
+// 若不分流，产生侧 TruncatePreview(x, 4000) 的结果会被这里无声截回 200 ——
+// 长度控制就有两个来源，且小的那个赢。
 func (s *PIISanitizer) SanitizeAttrs(attrs Attrs) Attrs {
 	if len(attrs) == 0 || s == nil {
 		return attrs
 	}
 	out := make(Attrs, len(attrs))
 	for k, v := range attrs {
-		out[k] = s.sanitizeValue(v)
+		out[k] = s.sanitizeAttrValue(k, v)
 	}
 	return out
 }
 
-func (s *PIISanitizer) sanitizeValue(v any) any {
+// sanitizeAttrValue 按「属性名」决定该用哪套截断规则。
+//
+// key 取外层属性名：嵌套结构里的值沿用同一个 key 判断 ——
+// 内容字段的判定依据是它挂在哪个属性上，不是它的嵌套深度。
+func (s *PIISanitizer) sanitizeAttrValue(key string, v any) any {
 	switch val := v.(type) {
 	case string:
-		return s.SanitizeString(val)
+		return s.sanitizeStr(key, val)
 	case map[string]string:
 		m := make(map[string]string, len(val))
 		for k, vv := range val {
-			m[k] = s.SanitizeString(vv)
+			m[k] = s.sanitizeStr(key, vv)
 		}
 		return m
 	case Attrs:
@@ -72,18 +137,27 @@ func (s *PIISanitizer) sanitizeValue(v any) any {
 	case map[string]any:
 		m := make(map[string]any, len(val))
 		for k, vv := range val {
-			m[k] = s.sanitizeValue(vv)
+			m[k] = s.sanitizeAttrValue(key, vv)
 		}
 		return m
 	case []string:
 		arr := make([]string, 0, len(val))
 		for _, vv := range val {
-			arr = append(arr, s.SanitizeString(vv))
+			arr = append(arr, s.sanitizeStr(key, vv))
 		}
 		return arr
 	default:
 		return v
 	}
+}
+
+// sanitizeStr 是 attrs 字符串值的统一脱敏出口。
+func (s *PIISanitizer) sanitizeStr(key, text string) string {
+	masked := s.maskOnly(text)
+	if isContentAttr(key) {
+		return strutil.TruncateWith(masked, contentHardCap, strutil.EllipsisChar)
+	}
+	return strutil.TruncateWith(masked, s.ContentMaxChars, strutil.EllipsisChar)
 }
 
 func maskEmail(s string) string {
@@ -144,21 +218,23 @@ func max(a, b int) int {
 	return b
 }
 
-// TruncatePreview 对 attrs 的「预览字段」做两段式控制：
-//  1. 先统一做 PII mask（SanitizeString）
-//  2. 再按 maxRunes 截断，并在尾部加 "…(+X chars)"，
-//     既保证前端能看到关键片段，又防止 attrs 把 span_tree JSON 撑爆。
+// TruncatePreview 对内容字段做「mask + 按 maxRunes 定长」，超长时补 "…(+X chars)" 尾标。
 //
-// 典型 maxRunes：query/args_preview = 300；response_preview/top doc snippet = 500；
-// short_preview（工具名列表/last_user_msg_preview）= 200。
+// 曾经的缺陷（这里误用了 SanitizeString）：SanitizeString 内部先按 ContentMaxChars(200)
+// 截断，于是
+//  1. maxRunes 传 500 / 800 时 `total <= maxRunes` 恒真 ⇒ 声明值全部失效，实际恒 200；
+//  2. "…(+X chars)" 分支永不可达 ⇒ 前端无法判断到底被砍掉多少字符。
+// 现在只 mask、不经过 ContentMaxChars，maxRunes 成为唯一的长度来源。
+//
+// 典型 maxRunes 见 contentLenShort / contentLenMedium / contentLenLong / contentLenFull。
 func (s *PIISanitizer) TruncatePreview(text string, maxRunes int) string {
-	if s == nil {
-		return strutil.TruncateWith(text, 300, strutil.EllipsisChar)
-	}
 	if maxRunes <= 0 {
-		maxRunes = 200
+		maxRunes = contentLenShort
 	}
-	masked := s.SanitizeString(text)
+	masked := text
+	if s != nil {
+		masked = s.maskOnly(text)
+	}
 	if masked == "" {
 		return ""
 	}

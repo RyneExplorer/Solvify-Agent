@@ -334,30 +334,60 @@ type defaultRecorder struct {
 	tracer      trace.Tracer
 	traceStates sync.Map
 	traceDecide sync.Map
+	// langfuseCallback 是官方 v2 Langfuse callback：WithTraceRoot 用它开 trace，
+	// SetTraceOutput 用它补 trace 级 output。未启用 Langfuse 时为 nil（两处都判空跳过）。
+	langfuseCallback LangfuseCallback
+}
+
+// recorderOptions 是 Recorder 的可选装配项。
+//
+// 为什么走 option 而不是往 NewRecorder 加形参：官方 Langfuse callback 只在启用了三方
+// 链路时才存在，属于「装配期才有的外部依赖」，不是 Recorder 的核心输入。
+// 用 option 后，没接三方的调用点（测试、探针）根本不需要提到它。
+type recorderOptions struct {
+	langfuseCallback LangfuseCallback
+}
+
+// RecorderOption 配置 Recorder 的可选能力。
+type RecorderOption func(*recorderOptions)
+
+// WithLangfuseCallback 让 Recorder 具备「开三方 trace + 交最终答复」的能力。
+//
+// 形参是有类型的接口（不是 ...interface{} 再运行时断言）：没接上时是「不传这个
+// option」，而不是「传了但断言不中、被静默跳过」。传 nil 等同于不传。
+func WithLangfuseCallback(c LangfuseCallback) RecorderOption {
+	return func(o *recorderOptions) {
+		if c != nil {
+			o.langfuseCallback = c
+		}
+	}
 }
 
 // NewRecorder 初始化 Recorder。需要在 InitTracerProvider / InitPrometheusRegistry 之后调用。
-func NewRecorder(cfg config.ObservabilityConfig, extraSinks ...Sink) Recorder {
+func NewRecorder(cfg config.ObservabilityConfig, opts ...RecorderOption) Recorder {
+	var o recorderOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	sanitizer := NewPIISanitizer(cfg.PIIContentMaxChars, cfg.PIIMaskSecret)
 	sampler := NewDefaultSampler(cfg.SamplingRate, cfg.ErrorAlwaysSample, cfg.FeedbackAlwaysSample, cfg.SlowThresholdMs, cfg.WhiteListUserIDs)
 	logSink := NewLogSink(cfg.ExportLogEnabled, sanitizer, sampler)
-	sinks := []Sink{logSink}
-	sinks = append(sinks, extraSinks...)
-	bs := NewBatchSink(sinks, cfg.SinkBufferSize, cfg.SinkBatchSize, cfg.SinkFlushIntervalMs)
+	bs := NewBatchSink([]Sink{logSink}, cfg.SinkBufferSize, cfg.SinkBatchSize, cfg.SinkFlushIntervalMs)
 	return &defaultRecorder{
-		enabled:   cfg.Enabled,
-		cfg:       cfg,
-		sampler:   sampler,
-		sanitizer: sanitizer,
-		sinks:     bs,
-		metrics:   GlobalMetrics(),
-		tracer:    GlobalTracer(),
+		enabled:           cfg.Enabled,
+		cfg:               cfg,
+		sampler:           sampler,
+		sanitizer:         sanitizer,
+		sinks:             bs,
+		metrics:           GlobalMetrics(),
+		tracer:            GlobalTracer(),
+		langfuseCallback: o.langfuseCallback,
 	}
 }
 
 // NewRecorderWithDBSink 在 NewRecorder 基础上挂 DBSink（写 chat_traces / chat_feedbacks / chat_agent_steps）。
-func NewRecorderWithDBSink(cfg config.ObservabilityConfig, db DBSink) Recorder {
-	r := NewRecorder(cfg).(*defaultRecorder)
+func NewRecorderWithDBSink(cfg config.ObservabilityConfig, db DBSink, opts ...RecorderOption) Recorder {
+	r := NewRecorder(cfg, opts...).(*defaultRecorder)
 	r.dbSink = db
 	return r
 }
@@ -1219,6 +1249,22 @@ func (r *defaultRecorder) WithTraceRoot(ctx context.Context, attrs TraceRootAttr
 			otelSpan.SetAttributes(kv...)
 		}
 	}
+	// 官方 v2 的 trace 必须先在这里「开」出来（StartTrace），后续 eino 回调才会挂到它下面，
+	// 收尾时也才有 traceRun 可交（EndTrace 从 ctx 取，见 langfuse_trace.go）。
+	// 本函数是「用户 + 会话同时可知」的唯一入口：HTTP 中间件建根 span 时
+	// 只拿得到 user_id，session_id 要解析请求体才知道。
+	//
+	// traceID 必须一并传进去：官方推荐自带 trace id 以便从自有 UI deeplink，
+	// 而自研 traceID 正是 chat_traces.id、也是随助手消息返回给前端的那个。
+	// 选项拼装见 langfuse_trace.go —— 那里说明了为什么 name / release / tags
+	// 也必须在这里给出（官方是「opts 覆盖 handler 默认值」，不是合并）。
+	//
+	// ⚠️ 位置必须在【给自研 http 根 span 打属性之后】：StartTrace 会清掉 ctx 里的 OTel span
+	// 再起新 span，早调用会把上面那段 user.id / session.id 打到 Langfuse root span 上。
+	if r.cfg.LangfuseEnabled() {
+		ctx = r.langfuseStartTrace(ctx, traceID, attrs)
+	}
+
 	return context.WithValue(ctx, rootAttrsKey, ra)
 }
 

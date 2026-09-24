@@ -33,6 +33,12 @@ const (
 	ComponentAgentTool      Component = "agent.tool"
 	ComponentAgentStep      Component = "agent.step"
 	ComponentRepository     Component = "repository"
+	ComponentRAGIndexer     Component = "rag.indexer"
+	// ComponentUnknown 是「组件类型认不出来」时的中性兜底值。
+	// ⚠️ 不要用有业务含义的值（如 ComponentAgentEngine）兜底：前端会把 component
+	// 原样渲染成「组件：xxx」，拿 agent.engine 兜底等于把「我不认识」伪装成
+	// 「这是 Agent」。历史实测：24 个 span 里有 10 个（41.7%）是这么来的。
+	ComponentUnknown Component = "unknown"
 )
 
 // Attrs 是 span/event 使用的属性集合。
@@ -195,6 +201,13 @@ type Recorder interface {
 	// 防止原始输入输出把 span_tree JSON 撑爆，也避免敏感信息直接落盘。
 	// 典型 maxRunes：200 / 300 / 500 三档。
 	PreviewAttr(text string, maxRunes int) string
+	// SetTraceOutput 把本次 trace 的最终答复推给三方平台（官方 EndTrace 语义）。
+	//
+	// 为什么不并进 FlushTrace：FlushTrace 在请求收尾时调用，那时答复早已产生；
+	// 而它拿不到答复内容，错误 / 中断路径更是压根没有答复。所以上报点必须是
+	// 「答复产生的那一处」= chatService 的成功收尾，这里只负责转发。
+	// 未启用三方平台时实现内部直接返回（调用方不必判空）。
+	SetTraceOutput(ctx context.Context, output string)
 }
 
 // TraceRootAttrs 携带 trace 根级属性。
@@ -205,4 +218,12 @@ type TraceRootAttrs struct {
 	RequestID  string
 	SearchMode string
 	ModelID    string
+	// Input 是用户本次提问的原文，作为三方平台上的 trace 级输入。
+	//
+	// 为什么原文直出、不在这里截断：官方 v2 的 MaskFunc 覆盖 trace 级 input
+	// （StartTrace 写 langfuse.observation.input 时调 c.prepare，trace.go:114）
+	// 与观测级 input / output（spanAttributeWriter.setString 逐值调 prepare），
+	// 所以脱敏是自动的；而「看完整提问」正是三方平台的价值，本地截断等于把它废掉。
+	// 长度上限交给官方 MaxAttributeValueLength / MaxSpanAttributeBytes 管。
+	Input string
 }

@@ -2,9 +2,7 @@ package observability
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,7 +13,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
@@ -123,7 +120,11 @@ func InitTracerProvider(ctx context.Context, cfg config.ObservabilityConfig) (tp
 		var exporter sdktrace.SpanExporter
 		exporter, err = buildOTelExporter(ctx, cfg)
 		if err != nil {
-			logger.Warnf("OTel exporter 初始化失败，回退到 noop: %v", err)
+			// 走到这里只可能是 stdouttrace 构造失败：配置取值非法已经被 config.Validate
+			// 拦在启动前（见那里的 otel_exporter 校验）。后果是 span 不会被导出，
+			// 但 span 生成、trace_id、自研落库都不受影响，三方链路本来也不走这条路
+			// ⇒ 记 Error 让人看见，但不阻断启动。
+			logger.Errorf("OTel exporter 初始化失败，span 将不会被导出，回退 noop: %v", err)
 			err = nil
 			exporter = nil
 		}
@@ -261,66 +262,30 @@ func routeAttr(attrs []attribute.KeyValue) (string, bool) {
 	return "", false
 }
 
-// otelExporterInitTimeout 是创建 OTLP exporter 的超时。
-// 注意 grpc.NewClient 是惰性建连，这里超时只覆盖 exporter 自身初始化，不覆盖真实导出。
-const otelExporterInitTimeout = 5 * time.Second
-
-// buildOTelExporter 根据 config 构造对应的 SpanExporter
+// buildOTelExporter 根据 config 构造对应的 SpanExporter。
+//
+// ⚠️ 这里刻意不再提供 OTLP 出口：三方追踪已统一交给官方 eino → Langfuse callback
+// （见 internal/app/app.go 的 initLangfuseHandler），走平台私有 ingestion API，
+// 既不需要 OTLP，也不需要 Collector 垫片。保留 OTel SDK 是为了两件事：
+//   - 自研 span 树上记录的 otel_trace_id（双轨对齐、日志串查）
+//   - stdout 模式便于本地看 span 长什么样
+//
+// 合法取值只有 config.OTelExporterNoop / config.OTelExporterStdout（空串等同 noop），
+// 且与 config.Validate 引用【同一组常量】—— 不会出现「校验说合法、实现说不认识」。
+// 写成别的值（例如老配置里残留的 otlp）会在 config.Validate 就被拦下、服务直接起不来，
+// 根本走不到本函数；下面的 default 分支只是防御，因为本函数是纯函数、可能被单独调用。
 func buildOTelExporter(ctx context.Context, cfg config.ObservabilityConfig) (sdktrace.SpanExporter, error) {
 	switch cfg.OTelExporter {
-	case "", "noop":
+	case config.OTelExporterNoop, "":
 		return nil, nil
-	case "stdout":
+	case config.OTelExporterStdout:
 		// stdouttrace 把 span 以 JSON 形式打印到 stdout，开发期调试用
 		return stdouttrace.New(stdouttrace.WithPrettyPrint())
-	case "otlp":
-		// 生产期走 OTLP gRPC 推到 Collector 或三方追踪服务端
-		ctxWithTimeout, cancel := context.WithTimeout(ctx, otelExporterInitTimeout)
-		defer cancel()
-
-		opts := make([]otlptracegrpc.Option, 0, 3)
-		// endpoint 为空时不传，交由 OTLP SDK 的默认值或标准
-		// OTEL_EXPORTER_OTLP_ENDPOINT 环境变量决定
-		if cfg.OTelOTLPEndpoint != "" {
-			opts = append(opts, otlptracegrpc.WithEndpoint(cfg.OTelOTLPEndpoint))
-		}
-		// 鉴权头（Authorization / x-byteapm-appkey 等）。为空时不传，
-		// 这样标准 OTEL_EXPORTER_OTLP_HEADERS 环境变量仍能生效
-		if len(cfg.OTelHeaders) > 0 {
-			opts = append(opts, otlptracegrpc.WithHeaders(cfg.OTelHeaders))
-		}
-		// 传输安全：只有显式要求明文时才调 WithInsecure。
-		// WithInsecure 是在 SDK 读完标准 OTEL_EXPORTER_OTLP_* 环境变量之后再应用的，
-		// 无条件调用会把 env 里配好的 https endpoint 悄悄降级成明文。
-		// 不传任何传输凭据选项时，OTLP SDK 默认使用宿主机根证书走 TLS。
-		if cfg.OTelInsecure {
-			opts = append(opts, otlptracegrpc.WithInsecure())
-		}
-
-		exp, err := otlptracegrpc.New(ctxWithTimeout, opts...)
-		if err != nil {
-			return nil, fmt.Errorf("OTLP exporter 创建失败: %w", err)
-		}
-		logger.Infof("OTLP exporter 已创建: endpoint=%q insecure=%v 鉴权头=%v",
-			cfg.OTelOTLPEndpoint, cfg.OTelInsecure, otelHeaderKeys(cfg.OTelHeaders))
-		return exp, nil
 	default:
-		return nil, errors.New("unknown otel_exporter: " + cfg.OTelExporter)
+		return nil, fmt.Errorf("未知的 otel_exporter: %q（合法值只有 %s/%s；"+
+			"OTLP 出口已移除，三方链路请改用 langfuse_* 配置走官方 eino callback）",
+			cfg.OTelExporter, config.OTelExporterNoop, config.OTelExporterStdout)
 	}
-}
-
-// otelHeaderKeys 返回鉴权头的键名（按字典序），仅用于日志输出。
-// 绝不返回键值：OTelHeaders 里放的通常是 API Key 或 Token。
-func otelHeaderKeys(headers map[string]string) []string {
-	if len(headers) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(headers))
-	for k := range headers {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // InitPrometheusRegistry 初始化独立的 Prometheus Registry + 所有指标变量。

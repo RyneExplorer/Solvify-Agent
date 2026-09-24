@@ -217,6 +217,21 @@ type EmailConfig struct {
 	Password string `mapstructure:"password"`
 }
 
+// otel_exporter 的合法取值。
+//
+// 为什么定义在配置层而不是 observability 的实现层：这个值有两个消费者 ——
+// Validate（决定启动能不能过）与 observability.buildOTelExporter（决定构造哪个 exporter）。
+// 以前两边各写一份字符串字面量，结果 OTLP 出口删了、Validate 却还认 otlp：
+// 配置写成 otlp 时校验通过、构造失败，再被降级成 noop ⇒ 三方链路悄悄没了，只留一条 WARN。
+// 收敛成常量后，加/删合法取值只有一处要改，不会再出现「校验说合法、实现说不认识」。
+const (
+	// OTelExporterNoop 不挂任何 SpanExporter。span 仍会生成（trace_id 照常有，
+	// 双轨对齐与日志串查都要用它），只是不往任何地方导出。
+	OTelExporterNoop = "noop"
+	// OTelExporterStdout 把 span 以 JSON 打到 stdout，仅本地调试看 span 结构用。
+	OTelExporterStdout = "stdout"
+)
+
 // ObservabilityConfig 描述可观测配置
 type ObservabilityConfig struct {
 	Enabled              bool     `mapstructure:"enabled"`
@@ -236,23 +251,19 @@ type ObservabilityConfig struct {
 	WhiteListUserIDs     []string `mapstructure:"whitelist_user_ids"`
 	MaxCardinalityLabels int      `mapstructure:"max_cardinality_labels"`
 
-	// OTel 配置（阶段 1.1 新增）：Trace 走 OpenTelemetry SDK
-	// Exporter: stdout（开发期控制台打印）/ otlp（生产期 OTLP gRPC）/ noop（不导出）
-	OTelExporter  string  `mapstructure:"otel_exporter"`
-	OTelOTLPEndpoint string  `mapstructure:"otel_otlp_endpoint"`
-	OTelServiceName string  `mapstructure:"otel_service_name"`
+	// OTel 配置：Trace 仍走 OpenTelemetry SDK，但【只服务于本地调试】。
+	//
+	// 三方追踪已改为官方 eino → Langfuse callback 直连平台（见本结构体的 langfuse_* 段）。
+	// 平台那条链路是【官方 callback 自己】说标准 OTLP/HTTP，不再需要我们这边的 OTLP 出口
+	// 与 Collector 垫片，所以 OTLP 出口连同只有它才用的三个配置项
+	// （otel_otlp_endpoint / otel_insecure / otel_headers）一并移除。
+	//
+	// 合法取值只有下面的 OTelExporterNoop / OTelExporterStdout；
+	// 写成别的值（包括老配置里残留的 otlp）会在 Validate 里直接报错、服务起不来。
+	OTelExporter    string `mapstructure:"otel_exporter"`
+	OTelServiceName string `mapstructure:"otel_service_name"`
 	// OTelSamplingRate 头采样概率 0~1，0 = 不采样，1 = 全采样
 	OTelSamplingRate float64 `mapstructure:"otel_sampling_rate"`
-	// OTelInsecure 控制 OTLP gRPC 的传输安全：
-	// true  = 明文连接，适用于内网 / 边车 Collector 或本机 Jaeger；
-	// false = 不传传输凭据选项，由 OTLP SDK 使用默认 TLS（宿主机根证书），适用于 SaaS 后端。
-	// 默认 true，与历史行为保持一致。
-	OTelInsecure bool `mapstructure:"otel_insecure"`
-	// OTelHeaders 是附加到每次 OTLP 请求上的 gRPC metadata，用于鉴权，例如
-	// {"Authorization": "Basic <base64(public_key:secret_key)>"}、
-	// {"x-byteapm-appkey": "xxx"}、{"Authorization": "Bearer <token>"}。
-	// 值属于敏感信息，只放本地配置或环境变量，不要提交进仓库。
-	OTelHeaders map[string]string `mapstructure:"otel_headers"`
 	// OTelBizRoutes 是「无条件保留」的业务路由模板列表：命中它的请求不受
 	// OTelSamplingRate 影响，一定导出到三方平台。
 	//
@@ -266,6 +277,54 @@ type ObservabilityConfig struct {
 	// —— 只要允许前缀匹配，一条配置就能把最大的噪声源放回来。
 	// 没有 route 属性的根 span（后台任务）不受影响，仍按 OTelSamplingRate 采样。
 	OTelBizRoutes []string `mapstructure:"otel_biz_routes"`
+
+	// ── Langfuse（官方 eino callback v2，走平台 OTLP 入口）──
+	//
+	// 与上面的 OTel 段是两条互斥通路，别同时开：
+	//   OTel 段     = 自研 span → 本进程 noop/stdout 出口（只服务本地调试）
+	//   Langfuse 段 = 官方 eino callback → 平台 /api/public/otel/v1/traces
+	//
+	// 官方 v2 走【标准 OTLP/HTTP】，不再用已弃用的 /api/public/ingestion 事件接口
+	// （那条通道平台已公告 2026-11-16 关停，此后只收 score-create）。
+	//
+	// Host / PublicKey / SecretKey 任一为空即视为未配置，启动时跳过官方 callback。
+	// 凭据属敏感信息，只放本地 config.yaml（已 gitignore）或环境变量。
+	LangfuseHost      string `mapstructure:"langfuse_host"`
+	LangfusePublicKey string `mapstructure:"langfuse_public_key"`
+	LangfuseSecretKey string `mapstructure:"langfuse_secret_key"`
+
+	// MaxExportBatchSize / BatchTimeoutMs 控制 OTLP 批量导出节奏，
+	// 对应官方 Config.MaxExportBatchSize / Config.BatchTimeout。
+	LangfuseMaxExportBatchSize int `mapstructure:"langfuse_max_export_batch_size"`
+	LangfuseBatchTimeoutMs     int `mapstructure:"langfuse_batch_timeout_ms"`
+	// TimeoutMs 是单次 OTLP HTTP 请求超时，对应官方 Config.Timeout（官方默认 10s）。
+	LangfuseTimeoutMs int `mapstructure:"langfuse_timeout_ms"`
+	// SampleRate 是官方 handler 自己的采样率，与自研轨的 SamplingRate 相互独立。
+	LangfuseSampleRate float64 `mapstructure:"langfuse_sample_rate"`
+	// Release / Tags 用于平台侧按版本、环境筛选。
+	//
+	// ⚠️ 这两个值必须由 WithTraceRoot 经 StartTrace 的选项一并下发：
+	// 官方 StartTrace 是「opts 覆盖 handler 默认值」，只配在 handler 上会被顶掉。
+	LangfuseRelease string   `mapstructure:"langfuse_release"`
+	LangfuseTags    []string `mapstructure:"langfuse_tags"`
+
+	// MaxQueueSize 是 OTel BatchSpanProcessor 的本地队列容量。
+	// ⚠️ 队列满时事件会被丢弃，但官方 v2 会计入丢弃统计并按 DropLogInterval 汇总告警
+	// （v1 是静默丢弃），所以别设太小。
+	LangfuseMaxQueueSize int `mapstructure:"langfuse_max_queue_size"`
+	// MaxSpanAttributeBytes 是「单个 span 上由本 callback 写入的属性」总量上限，
+	// 对应官方 Config.MaxSpanAttributeBytes；超限时按 input → output → metadata
+	// 从大到小依次截断（官方默认 4_000_000）。
+	LangfuseMaxSpanAttributeBytes int `mapstructure:"langfuse_max_span_attribute_bytes"`
+}
+
+// LangfuseEnabled 判断官方 eino → Langfuse callback 是否具备启用条件。
+//
+// 判据「三项凭据齐全」只在这里定义一次 —— app.initLangfuseHandler（决定是否注册 handler）
+// 与 recorder.WithTraceRoot（决定是否往 ctx 写 SetTrace 选项）必须用同一个判据，
+// 否则会出现「handler 没注册、但每条请求都在写选项」或反过来的错位。
+func (c ObservabilityConfig) LangfuseEnabled() bool {
+	return c.LangfuseHost != "" && c.LangfusePublicKey != "" && c.LangfuseSecretKey != ""
 }
 
 var globalConfig *Config
@@ -425,13 +484,11 @@ func Default() *Config {
 			PIIMaskSecret:        true,
 			FeedbackEnabled:      true,
 			MaxCardinalityLabels: 500,
-			// OTel 默认值：noop 不打印 span，开发期可改 stdout 调试，生产期改 otlp
-			OTelExporter:     "noop",
-			OTelOTLPEndpoint: "localhost:4317",
+			// OTel 默认值：noop 不打印 span，开发期可改 stdout 看 span 结构。
+			// 这里没有 otlp 可选 —— 接三方平台请配下方的 langfuse_*。
+			OTelExporter:     OTelExporterNoop,
 			OTelServiceName:  "solvify-agent",
 			OTelSamplingRate: 1.0,
-			// 默认明文，保持历史行为；接 SaaS 后端时置为 false 走 TLS
-			OTelInsecure: true,
 			// 业务链路必留：这三条是「带完整 RAG / LLM 子树、用户真正会去查」的写接口。
 			//
 			// 为什么不把列表接口一起留下：实测 3 天 634 条 HTTP 入口 span 里，
@@ -443,6 +500,15 @@ func Default() *Config {
 				"/api/v1/documents/:id/reindex",
 				"/api/v1/chat/messages/:message_id/feedback",
 			},
+			// Langfuse 官方 callback（v2 / OTLP）：下列数值与官方默认值一致
+			// （队列 2048 / 每批 512 / 批次超时 5s / 单次请求 10s）。
+			// ⚠️ BatchTimeoutMs 决定「低流量时最晚多久上报」：本地开发嫌慢就调小它。
+			LangfuseMaxExportBatchSize:    512,
+			LangfuseBatchTimeoutMs:        5000,
+			LangfuseTimeoutMs:             10000,
+			LangfuseSampleRate:            1.0,
+			LangfuseMaxQueueSize:          2048,
+			LangfuseMaxSpanAttributeBytes: 4_000_000,
 		},
 	}
 }
@@ -500,6 +566,19 @@ func (c *Config) Validate() error {
 	if c.Agent.MaxIterations <= 0 {
 		return errors.New("agent.max_iterations 必须大于 0")
 	}
+	// otel_exporter 的取值校验刻意放在 Enabled 之外：这个键决定的是「span 往哪儿去」，
+	// 与自研轨开关无关。⚠️ 这里必须拒绝 otlp 而不是放行后降级 —— OTLP 出口已随
+	// 「改用官方 callback」一并移除，老配置里残留的 otel_exporter: otlp 若只是
+	// WARN + 回退 noop，表现就是「平台上一个 trace 都没有、进程里也不报错」。
+	// 让启动直接失败，才是唯一看得见的方式。
+	switch c.Observability.OTelExporter {
+	case OTelExporterNoop, OTelExporterStdout, "":
+	default:
+		return fmt.Errorf("observability.otel_exporter 只支持 %s/%s（收到 %q）；"+
+			"OTLP 出口已移除，三方链路请改用 langfuse_host / langfuse_public_key / langfuse_secret_key",
+			OTelExporterNoop, OTelExporterStdout, c.Observability.OTelExporter)
+	}
+
 	if c.Observability.Enabled {
 		if c.Observability.SamplingRate < 0 || c.Observability.SamplingRate > 1 {
 			return errors.New("observability.sampling_rate 必须在 0 到 1 之间")
@@ -523,12 +602,6 @@ func (c *Config) Validate() error {
 		case "json", "prometheus", "both", "none":
 		default:
 			return errors.New("observability.metrics_format 只支持 json/prometheus/both/none")
-		}
-		// OTel 校验
-		switch c.Observability.OTelExporter {
-		case "stdout", "otlp", "noop", "":
-		default:
-			return errors.New("observability.otel_exporter 只支持 stdout/otlp/noop")
 		}
 		if c.Observability.OTelSamplingRate < 0 || c.Observability.OTelSamplingRate > 1 {
 			return errors.New("observability.otel_sampling_rate 必须在 0 到 1 之间")
@@ -729,20 +802,11 @@ func applyEnv(cfg *Config) {
 		cfg.Observability.MaxCardinalityLabels = parseInt(value, cfg.Observability.MaxCardinalityLabels)
 	}
 
-	// OTel 配置（阶段 1.1 新增）
+	// OTel 配置
 	cfg.Observability.OTelExporter = getEnv("OTEL_EXPORTER", cfg.Observability.OTelExporter)
-	cfg.Observability.OTelOTLPEndpoint = getEnv("OTEL_OTLP_ENDPOINT", cfg.Observability.OTelOTLPEndpoint)
 	cfg.Observability.OTelServiceName = getEnv("OTEL_SERVICE_NAME", cfg.Observability.OTelServiceName)
 	if value := os.Getenv("OTEL_SAMPLING_RATE"); value != "" {
 		cfg.Observability.OTelSamplingRate = parseFloat(value, cfg.Observability.OTelSamplingRate)
-	}
-	if value := os.Getenv("OTEL_INSECURE"); value != "" {
-		cfg.Observability.OTelInsecure = parseBool(value, cfg.Observability.OTelInsecure)
-	}
-	// OTEL_HEADERS 形如 "Authorization=Bearer xxx,x-byteapm-appkey=yyy"，
-	// 与官方 OTEL_EXPORTER_OTLP_HEADERS 的书写格式一致。
-	if value := os.Getenv("OTEL_HEADERS"); value != "" {
-		cfg.Observability.OTelHeaders = parseHeaderList(value)
 	}
 
 	// Agent 行为开关
@@ -813,30 +877,4 @@ func parseFloat(value string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
-}
-
-// parseHeaderList 解析 "k1=v1,k2=v2" 形式的头部列表，供 OTEL_HEADERS 环境变量使用。
-// 按第一个 '=' 切分，因此取值里出现 '='（如 base64 填充）不会被截断；
-// 缺少 '=' 或键名为空的条目会被忽略。全部无效时返回 nil，避免下游拿到空 map。
-func parseHeaderList(raw string) map[string]string {
-	out := make(map[string]string)
-	for _, item := range strings.Split(raw, ",") {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
-		}
-		idx := strings.Index(item, "=")
-		if idx <= 0 {
-			continue
-		}
-		key := strings.TrimSpace(item[:idx])
-		if key == "" {
-			continue
-		}
-		out[key] = strings.TrimSpace(item[idx+1:])
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }

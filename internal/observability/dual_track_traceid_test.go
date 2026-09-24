@@ -8,6 +8,7 @@ import (
 	"time"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	collectortracev1 "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 
 	"solvify-agent/pkg/config"
@@ -172,19 +173,14 @@ func TestSpanRecordsOTelTrackIDs(t *testing.T) {
 // 它不只断言「DB 里的 otel_trace_id 等于内部记录的某个字符串」，而是断言
 // **这个 ID 真的能在 OTLP 接收端收到的 span 里找到** —— 也就是「能跳到三方平台」这件事本身。
 func TestFlushTraceOTelTraceIDMatchesExportedSpan(t *testing.T) {
-	addr, recv := startOTLPReceiver(t)
-
-	exp, err := buildOTelExporter(context.Background(), config.ObservabilityConfig{
-		OTelExporter:     "otlp",
-		OTelOTLPEndpoint: addr,
-		OTelInsecure:     true,
-	})
-	if err != nil {
-		t.Fatalf("创建 OTLP exporter 失败: %v", err)
-	}
+	// 用内存 exporter 代替 OTLP 接收端：自研 OTLP 出口已随「改用官方 eino →
+	// Langfuse callback」一并移除，但本测试要守的语义与导出协议无关 ——
+	// 「DB 里的 otel_trace_id 必须真的对应一个被导出的 span」，这样前端拿着它
+	// 去三方平台（现在是 Langfuse）才跳得过去。
+	exp := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-		sdktrace.WithBatcher(exp),
+		sdktrace.WithSyncer(exp),
 	)
 	// tp.Shutdown 会连带关闭 exporter
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
@@ -239,17 +235,21 @@ func TestFlushTraceOTelTraceIDMatchesExportedSpan(t *testing.T) {
 		t.Error("挂了真实 exporter 且 AlwaysSample，OTelExported 应为 true")
 	}
 
-	// 关键一跳：把 BatchSpanProcessor 缓冲的 span 刷到接收端，验证 DB 里的 ID 真能查到。
+	// 关键一跳：验证 DB 里的 ID 真能在导出的 span 里找到。
 	flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := tp.ForceFlush(flushCtx); err != nil {
 		t.Fatalf("ForceFlush 失败: %v", err)
 	}
-	reqs, _ := recv.snapshot()
-	ids := exportedTraceIDs(reqs)
-	if _, ok := ids[got.OTelTraceID]; !ok {
-		t.Errorf("接收端没有 trace_id=%s 的 span —— 说明 DB 里的 otel_trace_id 跳不到三方平台；实际收到 span: %v",
-			got.OTelTraceID, spanNames(reqs))
+	found := false
+	for _, s := range exp.GetSpans() {
+		if s.SpanContext.TraceID().String() == got.OTelTraceID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("导出的 span 里没有 trace_id=%s —— 说明 DB 里的 otel_trace_id 对不上真实链路", got.OTelTraceID)
 	}
 }
 

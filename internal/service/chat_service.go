@@ -132,6 +132,9 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 			RequestID:  requestIDFromCtx(ctx),
 			SearchMode: searchMode,
 			ModelID:    req.ModelID,
+			// 用户提问原文 → 三方平台 trace 级 input。脱敏由官方 MaskFunc 负责，
+			// 这里不做本地截断（见 TraceRootAttrs.Input 注释）。
+			Input: req.Content,
 		})
 		traceID = observability.TraceIDFromContext(ctx)
 	}

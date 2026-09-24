@@ -9,65 +9,6 @@ import (
 	"github.com/mitchellh/mapstructure"
 )
 
-// TestParseHeaderList 覆盖 OTEL_HEADERS 环境变量的解析，重点是含 '=' 的取值不被截断。
-func TestParseHeaderList(t *testing.T) {
-	cases := []struct {
-		name string
-		raw  string
-		want map[string]string
-	}{
-		{
-			name: "空字符串返回 nil",
-			raw:  "",
-			want: nil,
-		},
-		{
-			name: "单个键值",
-			raw:  "Authorization=Bearer token",
-			want: map[string]string{"Authorization": "Bearer token"},
-		},
-		{
-			name: "多个键值并去除两端空格",
-			raw:  " Authorization = Bearer token , x-byteapm-appkey = abc ",
-			want: map[string]string{"Authorization": "Bearer token", "x-byteapm-appkey": "abc"},
-		},
-		{
-			name: "取值里的等号不被截断",
-			raw:  "Authorization=Basic dXNlcjpwYXNz==",
-			want: map[string]string{"Authorization": "Basic dXNlcjpwYXNz=="},
-		},
-		{
-			name: "缺少等号的条目被忽略",
-			raw:  "no-equals,Authorization=ok",
-			want: map[string]string{"Authorization": "ok"},
-		},
-		{
-			name: "等号开头视为非法",
-			raw:  "=value",
-			want: nil,
-		},
-		{
-			name: "全部非法时返回 nil",
-			raw:  ",,=",
-			want: nil,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := parseHeaderList(tc.raw)
-			if len(got) != len(tc.want) {
-				t.Fatalf("条目数不符: got=%v want=%v", got, tc.want)
-			}
-			for k, v := range tc.want {
-				if got[k] != v {
-					t.Fatalf("键 %q 的取值不符: got=%q want=%q", k, got[k], v)
-				}
-			}
-		})
-	}
-}
-
 // exampleConfigPath 指向仓库中被 git 跟踪的示例配置。
 // 测试的工作目录是 pkg/config，所以要相对走回仓库根。
 const exampleConfigPath = "../../configs/config.yaml.example"
@@ -103,8 +44,8 @@ func decodeStrict(raw any, out any) error {
 
 // TestExampleConfigKeysMatchStruct 守住示例配置的键名与结构体保持一致。
 //
-// 为什么需要这条：mapstructure 对不认识的键静默忽略 —— 把 otel_otlp_endpoint 写成
-// otel_otlp_endpont，服务照常启动、日志照常打印，字段却停在默认值，「配了等于没配」，
+// 为什么需要这条：mapstructure 对不认识的键静默忽略 —— 把 otel_exporter 写成
+// otel_exporters，服务照常启动、日志照常打印，字段却停在默认值，「配了等于没配」，
 // 只能靠抓包或读源码才能发现。而示例配置是全项目唯一面向使用者的配置文档，
 // 最容易随结构体演进而腐烂（结构体改了键名、示例没改，谁都发现不了）。
 // 这里用严格解码，任何对不上的键都直接让测试失败。
@@ -190,12 +131,9 @@ func TestExampleConfigObservabilitySection(t *testing.T) {
 		t.Errorf("observability.max_cardinality_labels 期望 500，实际 %d", got.MaxCardinalityLabels)
 	}
 
-	// OTel 三方导出
-	if got.OTelExporter != "noop" {
-		t.Errorf("observability.otel_exporter 期望 noop，实际 %q", got.OTelExporter)
-	}
-	if got.OTelOTLPEndpoint != "localhost:4317" {
-		t.Errorf("observability.otel_otlp_endpoint 期望 localhost:4317，实际 %q", got.OTelOTLPEndpoint)
+	// OTel（三方出口已移除，只剩本地调试用的 noop / stdout）
+	if got.OTelExporter != OTelExporterNoop {
+		t.Errorf("observability.otel_exporter 期望 %s，实际 %q", OTelExporterNoop, got.OTelExporter)
 	}
 	if got.OTelServiceName != "solvify-agent" {
 		t.Errorf("observability.otel_service_name 期望 solvify-agent，实际 %q", got.OTelServiceName)
@@ -203,11 +141,38 @@ func TestExampleConfigObservabilitySection(t *testing.T) {
 	if got.OTelSamplingRate != 1.0 {
 		t.Errorf("observability.otel_sampling_rate 期望 1.0，实际 %v", got.OTelSamplingRate)
 	}
-	if !got.OTelInsecure {
-		t.Error("observability.otel_insecure 没有解到 true")
+}
+
+// TestValidateRejectsRemovedOTLPExporter 守住「otel_exporter 写成 otlp 必须启动失败」。
+//
+// 为什么值得单独立一条：OTLP 出口已随「三方链路改用官方 eino callback」一并移除，
+// 但历史配置、教程、复制来的片段里到处是 otel_exporter: otlp。此时如果只是
+// WARN + 回退 noop，现象是「平台上一个 trace 都没有、进程里也不报错」——
+// 排查成本极高。这条测试保证 Validate 会把它拦在启动前。
+//
+// ⚠️ 这条必须能失败：把 Validate 的 case 列表改回含 "otlp" 时它就会红。
+func TestValidateRejectsRemovedOTLPExporter(t *testing.T) {
+	c := Default()
+
+	c.Observability.OTelExporter = "otlp"
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("otel_exporter=otlp 应当被 Validate 拒绝，实际通过了")
 	}
-	if len(got.OTelHeaders) != 0 {
-		t.Errorf("observability.otel_headers 期望空的键值对（示例里不能出现真实凭据），实际 %v", got.OTelHeaders)
+	if !strings.Contains(err.Error(), "otel_exporter") {
+		t.Errorf("报错里要带上出错的键名，方便定位；实际: %v", err)
+	}
+	// 报错必须给出下一步该怎么做，否则用户只知道错、不知道怎么改。
+	if !strings.Contains(err.Error(), "langfuse_") {
+		t.Errorf("报错里要指出去哪儿改（langfuse_* 三件套）；实际: %v", err)
+	}
+
+	// 其余合法值不能被误伤。
+	for _, v := range []string{OTelExporterNoop, OTelExporterStdout, ""} {
+		c.Observability.OTelExporter = v
+		if err := c.Validate(); err != nil {
+			t.Errorf("otel_exporter=%q 是合法值，不应报错: %v", v, err)
+		}
 	}
 }
 
@@ -249,13 +214,6 @@ func TestExampleConfigHasNoRealSecrets(t *testing.T) {
 		if !placeholderOK[s] {
 			t.Errorf("示例配置 %s 出现了疑似真实凭据（真实值只放本地 config.yaml 或环境变量），"+
 				"若确为占位符请显式加入白名单", path)
-		}
-	}
-
-	// otel_headers 里不能有任何条目：示例只给注释形态的例子。
-	if headers, found := lookupPath(values, "observability.otel_headers"); found {
-		if m, ok := headers.(map[string]any); ok && len(m) > 0 {
-			t.Errorf("示例配置 observability.otel_headers 必须为空（凭据只放本地或环境变量），实际 %v", m)
 		}
 	}
 }

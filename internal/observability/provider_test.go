@@ -7,8 +7,10 @@ import (
 	"solvify-agent/pkg/config"
 )
 
-// TestBuildOTelExporter 覆盖 exporter 类型分发与两种传输安全模式。
-// otlptracegrpc.New 内部用 grpc.NewClient 惰性建连，因此这里不需要真实服务端。
+// TestBuildOTelExporter 覆盖 exporter 类型分发。
+//
+// 回归价值：把已经移除的 otlp 重新放回 switch（或让它返回非 nil 而不报错），
+// 「otlp 已移除必须报错」这条用例会变红 —— 它守的是「三方出口只能有一条」。
 func TestBuildOTelExporter(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -31,28 +33,9 @@ func TestBuildOTelExporter(t *testing.T) {
 			cfg:  config.ObservabilityConfig{OTelExporter: "stdout"},
 		},
 		{
-			name: "otlp 明文连接（内网或本机 Collector）",
-			cfg: config.ObservabilityConfig{
-				OTelExporter:     "otlp",
-				OTelOTLPEndpoint: "127.0.0.1:4317",
-				OTelInsecure:     true,
-			},
-		},
-		{
-			name: "otlp TLS 加鉴权头（SaaS 后端）",
-			cfg: config.ObservabilityConfig{
-				OTelExporter:     "otlp",
-				OTelOTLPEndpoint: "otlp.example.com:443",
-				OTelInsecure:     false,
-				OTelHeaders:      map[string]string{"Authorization": "Bearer test-token"},
-			},
-		},
-		{
-			name: "otlp 不带 endpoint 时交由 SDK 默认值或标准环境变量决定",
-			cfg: config.ObservabilityConfig{
-				OTelExporter: "otlp",
-				OTelInsecure: true,
-			},
+			name:    "otlp 已移除，必须报错（三方链路改走官方 Langfuse callback）",
+			cfg:     config.ObservabilityConfig{OTelExporter: "otlp"},
+			wantErr: true,
 		},
 		{
 			name:    "未知 exporter 报错",
@@ -87,29 +70,5 @@ func TestBuildOTelExporter(t *testing.T) {
 				t.Fatalf("关闭 exporter 失败: %v", shutdownErr)
 			}
 		})
-	}
-}
-
-// TestOtelHeaderKeys 确认日志只输出鉴权头的键名，不泄露键值。
-func TestOtelHeaderKeys(t *testing.T) {
-	if got := otelHeaderKeys(nil); got != nil {
-		t.Fatalf("空 headers 应返回 nil，实际为 %v", got)
-	}
-	if got := otelHeaderKeys(map[string]string{}); got != nil {
-		t.Fatalf("空 map 应返回 nil，实际为 %v", got)
-	}
-
-	got := otelHeaderKeys(map[string]string{
-		"x-byteapm-appkey": "secret-app-key",
-		"Authorization":    "Bearer secret-token",
-	})
-	want := []string{"Authorization", "x-byteapm-appkey"}
-	if len(got) != len(want) {
-		t.Fatalf("键数量不符: got=%v want=%v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("键名或字典序不符: got=%v want=%v", got, want)
-		}
 	}
 }

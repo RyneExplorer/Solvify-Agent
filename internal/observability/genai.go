@@ -38,6 +38,19 @@ const (
 	AttrGenAIResponseModel         = "gen_ai.response.model"
 	AttrGenAIResponseFinishReasons = "gen_ai.response.finish_reasons"
 
+	// 输入 / 输出内容
+	//
+	// 这两个属性是三方平台渲染 Generation 卡片 Input / Output 的依据：
+	// 只发 token 用量、不发内容时，平台上模型调用的输入输出会一直是空的。
+	// 值的格式按 semconv 的 messages 数组（JSON 字符串）：
+	// [{"role":"user","parts":[{"type":"text","content":"..."}]}]
+	AttrGenAIInputMessages  = "gen_ai.input.messages"
+	AttrGenAIOutputMessages = "gen_ai.output.messages"
+
+	// 首字延迟（秒，double）。三方平台据此填 timeToFirstToken / completionStartTime，
+	// 是流式 LLM 应用最关键的体验指标，也是唯一无法从总耗时推算出来的指标。
+	AttrGenAIServerTimeToFirstToken = "gen_ai.server.time_to_first_token"
+
 	// token 用量
 	AttrGenAIUsageInputTokens     = "gen_ai.usage.input_tokens"
 	AttrGenAIUsageOutputTokens    = "gen_ai.usage.output_tokens"

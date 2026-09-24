@@ -38,6 +38,22 @@ func obsAddRootAttrs(ctx context.Context, obs observability.Recorder, attrs obse
 	}
 }
 
+// obsSetTraceOutput 空安全的「把本次 trace 的最终答复推给三方平台」。
+//
+// 为什么不再校验 traceID：官方 v2 的 EndTrace 只认 ctx 里的 traceRun，
+// 「本次有没有开 trace」由 ctx 自己说了算（取不到就静默跳过）。再补一层
+// 「traceID 非空」是给同一条事实加了第二个来源，只会掩盖「StartTrace 没被调用」这类真问题。
+//
+// 为什么由这个 helper 承担判空、而不是让 Recorder 实现承担：两者都要判 —— 这里省掉的是
+// `if obs != nil` 这类散落样板，实现内部那一层判的是「三方没接 / 答复为空」，
+// 语义不同、都不该合并。
+func obsSetTraceOutput(ctx context.Context, obs observability.Recorder, output string) {
+	if obs == nil || output == "" {
+		return
+	}
+	obs.SetTraceOutput(ctx, output)
+}
+
 // obsEndSpan 空安全的 span 结束。
 func obsEndSpan(ctx context.Context, obs observability.Recorder, span *observability.Span, status observability.SpanStatus, err error, attrs observability.Attrs) {
 	if obs != nil && span != nil {

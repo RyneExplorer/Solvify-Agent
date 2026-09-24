@@ -420,6 +420,13 @@ func (s *chatService) emitDoneAndSave(ctx context.Context, eventCh chan<- dto.St
 			finalMeta = datatypes.JSON(mustMarshal(m))
 		}
 	}
+	// 把最终答复推给三方平台（未接三方 / 答复为空时内部直接返回）。
+	//
+	// 上报点选这里，是因为这是两个模式共用的【唯一一处成功收尾】—— 错误路径、中断路径
+	// 都不会走到这里，而它们本来也没有「最终答复」可报。放到 FlushTrace 里会变成
+	// 「收尾时回头找答复」，那是第二个来源。
+	obsSetTraceOutput(ctx, s.obs, content)
+
 	eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "done", MessageID: msgID, Content: content, Sources: sources, Done: true})
 	go func() {
 		defer func() {

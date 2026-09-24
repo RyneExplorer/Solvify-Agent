@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	langfuse "github.com/cloudwego/eino-ext/callbacks/langfuse/v2"
+	"github.com/cloudwego/eino/callbacks"
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -54,6 +56,11 @@ type App struct {
 
 	// checkpoint 过期清理后台任务的取消函数，由 App 负责生命周期管理
 	checkpointCleanupCancel context.CancelFunc
+
+	// langfuseHandler 是官方 v2 Langfuse callback，由 App 负责生命周期管理。
+	// v1 只给了一个裸 flusher；v2 换成 handler 自带 Flush/Shutdown，且【必须 Shutdown】
+	// 才会关掉它自己创建的 TracerProvider（否则退出前最后一批 span 会留在队列里丢掉）。
+	langfuseHandler *langfuse.CallbackHandler
 
 	// MCP 客户端连接池，由 App 负责生命周期管理
 	mcpClientPool *providers.MCPClientPool
@@ -394,12 +401,24 @@ func (a *App) initDependencies() error {
 	promReg := observability.InitPrometheusRegistry(obsCfg)
 	logger.Infof("Prometheus Registry 已初始化")
 
+	// 官方 eino → Langfuse callback 必须先于 Recorder 建好：Recorder 要拿到它，
+	// 才能在「请求开始」时开 trace、在「成功收尾」时把 trace 级 output（助手最终答复）推给平台。
+	//
+	// 与自研 handler 的分工（两条轨不重叠）：
+	//   官方 handler → eino 组件上报到 Langfuse（trace / span / generation，走 OTLP）
+	//   自研 handler → 本地 span 树 + Prometheus 指标 + chat_traces 落库
+	// 不会重复上报：自研那条 OTLP 出口已随本次改造一并移除（见 config.Validate 对
+	// otel_exporter 的取值校验）。未配凭据时返回 nil，Recorder 侧判空跳过。
+	lfCallback := a.initLangfuseHandler(ctx, obsCfg)
+
 	// 阶段三：初始化可观测性 Recorder（DB Sink + 批量日志 Sink + 采样器 + PII）
-	// NewRecorder 内部调 GlobalMetrics() / GlobalTracer()，已经在上一步被赋值
+	// NewRecorder 内部调 GlobalMetrics() / GlobalTracer()，已经在上一步被赋值。
+	// lfCallback 可能是 nil，WithLangfuseCallback 内部会忽略，这里不必分支。
+	recOpts := []observability.RecorderOption{observability.WithLangfuseCallback(lfCallback)}
 	if !obsCfg.Enabled {
-		a.obsRecorder = observability.NewRecorder(obsCfg)
+		a.obsRecorder = observability.NewRecorder(obsCfg, recOpts...)
 	} else {
-		a.obsRecorder = observability.NewRecorderWithDBSink(obsCfg, obsRepo)
+		a.obsRecorder = observability.NewRecorderWithDBSink(obsCfg, obsRepo, recOpts...)
 	}
 	logger.Infof("可观测性模块初始化: enabled=%v sample_rate=%.2f db_sink=%v otel_exporter=%s", obsCfg.Enabled, obsCfg.SamplingRate, obsCfg.TraceTableEnabled, obsCfg.OTelExporter)
 	// 注册 eino 全局 callback：所有走 eino 标准接口的组件（ChatModel / Retriever / Tool / Embedding / Agent / Graph）
@@ -593,6 +612,71 @@ func (a *App) initServer() {
 }
 
 // gracefulShutdown 监听退出信号并优雅关闭服务
+// initLangfuseHandler 装配官方 eino → Langfuse callback（v2）。
+//
+// ⚠️ 这里是 v2 与 v1 最大的差别：官方 v2 明确弃用了 v1 的
+// NewLangfuseHandler / SetTrace / UpdateTraceOutput，改用 NewHandler / StartTrace / EndTrace；
+// 因为 v2 换成【标准 OTLP/HTTP】直发平台的 /api/public/otel/v1/traces，
+// 不再走已弃用的 /api/public/ingestion（平台公告该接口 2026-11-16 关停，此后只收 score-create）。
+//
+// 未配置完整（host / public_key / secret_key 任一为空）时静默跳过：本地开发默认不配，
+// 不能因此阻断启动。
+//
+// 返回的 LangfuseCallback 供 Recorder 在请求开始处开 trace（WithTraceRoot）、
+// 在成功收尾处补 trace 级 output（SetTraceOutput）；未配置凭据时返回【nil 接口】
+// （不是 (*CallbackHandler)(nil) —— 那样会绕过判空）。
+func (a *App) initLangfuseHandler(ctx context.Context, cfg config.ObservabilityConfig) observability.LangfuseCallback {
+	// 判据只认 config.LangfuseEnabled() —— recorder.WithTraceRoot 用的是同一个，
+	// 两处若各写一份，就会出现「handler 没注册但每条请求都在开 trace」的错位。
+	if !cfg.LangfuseEnabled() {
+		logger.Infof("Langfuse 未配置完整（host/public_key/secret_key 有空缺），跳过官方 callback")
+		return nil
+	}
+	// 脱敏用项目既有的 PII 规则，但【不截断】：MaskPII 与 SanitizeString 的差别见其注释。
+	// v2 的 MaskFunc 除 input/output 外也覆盖 trace metadata（trace.go:231），
+	// 但「能被脱敏」不等于「可以随便放」—— metadata 里仍然只放 ID 类字段。
+	sanitizer := observability.NewPIISanitizer(cfg.PIIContentMaxChars, cfg.PIIMaskSecret)
+	handler, err := langfuse.NewHandler(ctx, &langfuse.Config{
+		Host:        cfg.LangfuseHost,
+		PublicKey:   cfg.LangfusePublicKey,
+		SecretKey:   cfg.LangfuseSecretKey,
+		ServiceName: cfg.OTelServiceName,
+		// Name 是「没传 WithName 时」的兜底 trace 名；正常路径由 WithTraceRoot 显式下发。
+		Name:       cfg.OTelServiceName,
+		Release:    cfg.LangfuseRelease,
+		Tags:       cfg.LangfuseTags,
+		Timeout:    time.Duration(cfg.LangfuseTimeoutMs) * time.Millisecond,
+		SampleRate: cfg.LangfuseSampleRate,
+
+		MaxQueueSize:       cfg.LangfuseMaxQueueSize,
+		MaxExportBatchSize: cfg.LangfuseMaxExportBatchSize,
+		BatchTimeout:       time.Duration(cfg.LangfuseBatchTimeoutMs) * time.Millisecond,
+
+		MaxSpanAttributeBytes: cfg.LangfuseMaxSpanAttributeBytes,
+		// ⚠️ 刻意【不传】TracerProvider：官方只保证「callback 自己建的 provider」才认
+		// WithID 钉过来的 traceID（见其 Config 注释）。传了自研 provider 会让双轨 traceID 对不上。
+		// 同理不传 HTTPClient / SpanExporter，全走官方默认（gzip + OTLP/HTTP）。
+		MaskFunc: sanitizer.MaskPII,
+	})
+	if err != nil {
+		// 配了凭据却建不起来（host 写错、代理/证书问题等）→ 响亮报错但【不阻断启动】：
+		// 可观测性不该让业务起不来，但也不能静默 —— 静默正是 v1 时代最大的坑。
+		logger.Errorf("Langfuse 官方 callback 初始化失败，三方链路本次不生效: %v", err)
+		return nil
+	}
+	// 官方 README 的用法就是注册成 eino 全局 handler。它与自研 RegisterGlobalEinoCallback
+	// 并列存在、各画各的 span：官方那条进平台，自研那条进本地 span 树 + Prometheus + 落库。
+	callbacks.AppendGlobalHandlers(handler)
+	a.langfuseHandler = handler
+	logger.Infof("Langfuse 官方 callback 已注册（v2 / OTLP）: host=%s batch=%d/%dms sample_rate=%.2f",
+		cfg.LangfuseHost, cfg.LangfuseMaxExportBatchSize, cfg.LangfuseBatchTimeoutMs, cfg.LangfuseSampleRate)
+	// ⚠️ 与 v1 相比的可见性差别（值得写下来）：v1 的 ACL 对所有 4xx（含 401 凭证错）
+	// 【既不重试也不打日志】，直接当成功把整批事件丢掉；v2 走标准 OTLP exporter ——
+	// 4xx 会被 exporter 当失败重试，最终失败时打日志；callback 还会按 DropLogInterval
+	// 汇总「丢了哪些 span」。所以 v2 下凭证配错的可见性明显更好，但仍建议以平台侧是否收到为准。
+	return handler
+}
+
 func (a *App) gracefulShutdown() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
@@ -623,6 +707,17 @@ func (a *App) gracefulShutdown() {
 		if err := a.tracerShutdown(shutdownCtx); err != nil {
 			logger.Errorf("OTel TracerProvider 关闭失败: %v", err)
 		}
+	}
+
+	// 官方 Langfuse callback：v2 的 handler 自己持有 OTLP 批处理器与 TracerProvider，
+	// 必须 Shutdown 才会把队列里剩余的 span 导出并释放 provider。
+	// 只 Flush 不 Shutdown 会在退出前丢掉最后一批（最多一个 BatchTimeout 窗口的 span）。
+	if a.langfuseHandler != nil {
+		lfCtx, lfCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := a.langfuseHandler.Shutdown(lfCtx); err != nil {
+			logger.Errorf("Langfuse callback 关闭失败: %v", err)
+		}
+		lfCancel()
 	}
 
 	if a.postgresqlDB != nil {
