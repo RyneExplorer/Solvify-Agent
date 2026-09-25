@@ -16,10 +16,8 @@ func (ctrl *Controller) RegisterRoutes(router *gin.RouterGroup) {
 		chatGroup.DELETE("/sessions/:id", ctrl.DeleteSession)
 		chatGroup.POST("/sessions/:id/messages", ctrl.SendMessage)
 		chatGroup.GET("/sessions/:id/messages", ctrl.GetMessages)
-		chatGroup.GET("/sessions/:id/traces", ctrl.ListSessionTraces)
 		chatGroup.POST("/messages/:message_id/feedback", ctrl.SubmitFeedback)
 		chatGroup.GET("/feedbacks", ctrl.ListFeedbacks)
-		chatGroup.GET("/traces/:trace_id", ctrl.GetTrace)
 	}
 
 	adminGroup := router.Group("/admin/sessions")
@@ -30,11 +28,4 @@ func (ctrl *Controller) RegisterRoutes(router *gin.RouterGroup) {
 		adminGroup.POST("/cleanup", ctrl.AdminCleanupSessions)
 	}
 
-	obsAdmin := router.Group("/admin/observability")
-	obsAdmin.Use(middleware.RequireAdmin())
-	{
-		obsAdmin.GET("/metrics", ctrl.MetricsSnapshot)
-		obsAdmin.GET("/traces", ctrl.AdminListTraces)
-		obsAdmin.GET("/traces/:trace_id", ctrl.AdminGetTrace)
-	}
 }

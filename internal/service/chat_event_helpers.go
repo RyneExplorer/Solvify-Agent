@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	dto "solvify-agent/internal/model/dto/response"
-	"solvify-agent/internal/observability"
 	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
 )
@@ -50,8 +49,8 @@ func sendProgressEvent(ctx context.Context, eventCh chan<- dto.StreamEvent, cont
 
 // errEmptyAnswer 是「上游成功返回、但内容为空」的哨兵错误。
 //
-// 单独定义而非就地 errors.New：空回答要能被识别成一个明确的可重试失败 ——
-// 既用于可观测性打点，也用于测试断言（errors.Is），避免与"真·执行错误"混在一处判断。
+// 单独定义而非就地 errors.New：空回答要能被识别成一个明确的可重试失败，
+// 便于测试断言（errors.Is），避免与"真·执行错误"混在一处判断。
 var errEmptyAnswer = errors.New("模型未返回任何内容")
 
 // rejectEmptyAnswer 是「上游返回空内容」的统一守卫，快速模式与深度模式共用。
@@ -70,7 +69,6 @@ var errEmptyAnswer = errors.New("模型未返回任何内容")
 func rejectEmptyAnswer(
 	ctx context.Context,
 	eventCh chan<- dto.StreamEvent,
-	obs observability.Recorder,
 	mode, sessionID, modelID, assistantMsgID string,
 	fullContent, detail string,
 ) bool {
@@ -79,8 +77,6 @@ func rejectEmptyAnswer(
 		return false
 	}
 
-	obsIncr(ctx, obs, "chat_empty_answer_total", map[string]string{"mode": mode}, 1)
-	obsMarkError(ctx, obs, errEmptyAnswer)
 	logger.Warnf("[%s] 收到空回答，已拦截（不落库）: sessionID=%s, modelID=%s, assistantMsgID=%s, %s",
 		mode, sessionID, modelID, assistantMsgID, detail)
 

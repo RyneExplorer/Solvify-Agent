@@ -45,11 +45,6 @@ func (e *Engine) isInternalToolName(name string) bool {
 }
 
 func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.ToolCallingChatModel, eventCh chan<- Event) {
-	obsOk := e.obs != nil
-	if obsOk {
-		e.obs.Incr(ctx, "agent_engine_runs_total", nil, 1)
-	}
-
 	// ── 构建工具列表：内置 registry + 用户配置 ──
 	// 深度模式会先调用 EstimateToolsTokens 预构建工具集并写入 ctx，
 	// 这里优先复用；若没有预构建结果（如快速模式/直接调用）才现场构建。
@@ -161,9 +156,6 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	})
 	if err != nil {
 		logger.Errorf("[Agent] ChatModelAgent 初始化失败: %v", err)
-		if obsOk {
-			e.obs.Incr(ctx, "agent_engine_errors_total", map[string]string{"stage": "init"}, 1)
-		}
 		eventch.Send(ctx, eventCh, Event{
 			Type:      EventError,
 			Title:     "深度模式启动失败",

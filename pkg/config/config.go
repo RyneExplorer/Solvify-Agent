@@ -217,72 +217,24 @@ type EmailConfig struct {
 	Password string `mapstructure:"password"`
 }
 
-// otel_exporter 的合法取值。
+// ObservabilityConfig 描述「eino → Langfuse」这条三方链路的配置。
 //
-// 为什么定义在配置层而不是 observability 的实现层：这个值有两个消费者 ——
-// Validate（决定启动能不能过）与 observability.buildOTelExporter（决定构造哪个 exporter）。
-// 以前两边各写一份字符串字面量，结果 OTLP 出口删了、Validate 却还认 otlp：
-// 配置写成 otlp 时校验通过、构造失败，再被降级成 noop ⇒ 三方链路悄悄没了，只留一条 WARN。
-// 收敛成常量后，加/删合法取值只有一处要改，不会再出现「校验说合法、实现说不认识」。
-const (
-	// OTelExporterNoop 不挂任何 SpanExporter。span 仍会生成（trace_id 照常有，
-	// 双轨对齐与日志串查都要用它），只是不往任何地方导出。
-	OTelExporterNoop = "noop"
-	// OTelExporterStdout 把 span 以 JSON 打到 stdout，仅本地调试看 span 结构用。
-	OTelExporterStdout = "stdout"
-)
-
-// ObservabilityConfig 描述可观测配置
+// ⚠️ 本结构体已随自研可观测性模块整体裁剪，只剩下面这些 —— 采样率 / 慢查询阈值 /
+// 落库开关 / 指标格式 / sink 批量参数 / 本地 OTel 出口 / 白名单 / 基数上限 全部移除，
+// 因为它们描述的是「自研 span 树 + 落库 + Prometheus 出口」，那些已经不存在了。
+// 保留下来的键都有唯一消费点：observability.NewTracer（internal/observability）。
 type ObservabilityConfig struct {
-	Enabled              bool     `mapstructure:"enabled"`
-	SamplingRate         float64  `mapstructure:"sampling_rate"`
-	ErrorAlwaysSample    bool     `mapstructure:"error_always_sample"`
-	SlowThresholdMs      int      `mapstructure:"slow_threshold_ms"`
-	FeedbackAlwaysSample bool     `mapstructure:"feedback_always_sample"`
-	TraceTableEnabled    bool     `mapstructure:"trace_table_enabled"`
-	ExportLogEnabled     bool     `mapstructure:"export_log_enabled"`
-	MetricsFormat        string   `mapstructure:"metrics_format"`
-	SinkBufferSize       int      `mapstructure:"sink_buffer_size"`
-	SinkBatchSize        int      `mapstructure:"sink_batch_size"`
-	SinkFlushIntervalMs  int      `mapstructure:"sink_flush_interval_ms"`
-	PIIContentMaxChars   int      `mapstructure:"pii_content_max_chars"`
-	PIIMaskSecret        bool     `mapstructure:"pii_mask_secret"`
-	FeedbackEnabled      bool     `mapstructure:"feedback_enabled"`
-	WhiteListUserIDs     []string `mapstructure:"whitelist_user_ids"`
-	MaxCardinalityLabels int      `mapstructure:"max_cardinality_labels"`
+	// PIIMaskSecret 控制官方 Config.MaskFunc 是否连「密钥 / Token 形态」一起打码。
+	// 凭据类必须打，生产上应当为 true。
+	PIIMaskSecret bool `mapstructure:"pii_mask_secret"`
 
-	// OTel 配置：Trace 仍走 OpenTelemetry SDK，但【只服务于本地调试】。
-	//
-	// 三方追踪已改为官方 eino → Langfuse callback 直连平台（见本结构体的 langfuse_* 段）。
-	// 平台那条链路是【官方 callback 自己】说标准 OTLP/HTTP，不再需要我们这边的 OTLP 出口
-	// 与 Collector 垫片，所以 OTLP 出口连同只有它才用的三个配置项
-	// （otel_otlp_endpoint / otel_insecure / otel_headers）一并移除。
-	//
-	// 合法取值只有下面的 OTelExporterNoop / OTelExporterStdout；
-	// 写成别的值（包括老配置里残留的 otlp）会在 Validate 里直接报错、服务起不来。
-	OTelExporter    string `mapstructure:"otel_exporter"`
+	// OTelServiceName 同时作为官方 Config.ServiceName 与 trace 名（langfuse name）。
 	OTelServiceName string `mapstructure:"otel_service_name"`
-	// OTelSamplingRate 头采样概率 0~1，0 = 不采样，1 = 全采样
-	OTelSamplingRate float64 `mapstructure:"otel_sampling_rate"`
-	// OTelBizRoutes 是「无条件保留」的业务路由模板列表：命中它的请求不受
-	// OTelSamplingRate 影响，一定导出到三方平台。
-	//
-	// 为什么判据是「路由模板」而不是「请求路径」：模板取自 gin 的 c.FullPath()，
-	// 形如 /api/v1/chat/sessions/:id/messages —— 同一条路由下不同 session id 会归一
-	// 成同一个值，配置里不会出现「每个 id 一条」的基数爆炸。
-	//
-	// 为什么必须精确相等、不能用前缀：实测噪声第一名是
-	// /api/v1/chat/sessions/:id/traces（追踪页自身轮询，占全部入口 span 的 29%），
-	// 它与业务路由 /api/v1/chat/sessions/:id/messages 共享前缀 /api/v1/chat/sessions
-	// —— 只要允许前缀匹配，一条配置就能把最大的噪声源放回来。
-	// 没有 route 属性的根 span（后台任务）不受影响，仍按 OTelSamplingRate 采样。
-	OTelBizRoutes []string `mapstructure:"otel_biz_routes"`
 
 	// ── Langfuse（官方 eino callback v2，走平台 OTLP 入口）──
 	//
-	// 与上面的 OTel 段是两条互斥通路，别同时开：
-	//   OTel 段     = 自研 span → 本进程 noop/stdout 出口（只服务本地调试）
-	//   Langfuse 段 = 官方 eino callback → 平台 /api/public/otel/v1/traces
+	// 本项目只有这一条三方链路：官方 eino callback →
+	// 平台 /api/public/otel/v1/traces。
 	//
 	// 官方 v2 走【标准 OTLP/HTTP】，不再用已弃用的 /api/public/ingestion 事件接口
 	// （那条通道平台已公告 2026-11-16 关停，此后只收 score-create）。
@@ -299,12 +251,13 @@ type ObservabilityConfig struct {
 	LangfuseBatchTimeoutMs     int `mapstructure:"langfuse_batch_timeout_ms"`
 	// TimeoutMs 是单次 OTLP HTTP 请求超时，对应官方 Config.Timeout（官方默认 10s）。
 	LangfuseTimeoutMs int `mapstructure:"langfuse_timeout_ms"`
-	// SampleRate 是官方 handler 自己的采样率，与自研轨的 SamplingRate 相互独立。
+	// SampleRate 是官方 handler 自己的采样率（官方默认 1.0 = 全采）。
 	LangfuseSampleRate float64 `mapstructure:"langfuse_sample_rate"`
 	// Release / Tags 用于平台侧按版本、环境筛选。
 	//
-	// ⚠️ 这两个值必须由 WithTraceRoot 经 StartTrace 的选项一并下发：
+	// ⚠️ 这两个值必须由 observability.langfuseOptions 经 StartTrace 的选项一并下发：
 	// 官方 StartTrace 是「opts 覆盖 handler 默认值」，只配在 handler 上会被顶掉。
+	// ⚠️ Tags 只在这里配：官方 WithTags 是 append（不是覆盖），两处都给会在平台上重复。
 	LangfuseRelease string   `mapstructure:"langfuse_release"`
 	LangfuseTags    []string `mapstructure:"langfuse_tags"`
 
@@ -320,9 +273,9 @@ type ObservabilityConfig struct {
 
 // LangfuseEnabled 判断官方 eino → Langfuse callback 是否具备启用条件。
 //
-// 判据「三项凭据齐全」只在这里定义一次 —— app.initLangfuseHandler（决定是否注册 handler）
-// 与 recorder.WithTraceRoot（决定是否往 ctx 写 SetTrace 选项）必须用同一个判据，
-// 否则会出现「handler 没注册、但每条请求都在写选项」或反过来的错位。
+// 判据「三项凭据齐全」只在这里定义一次，且只有一处消费点（observability.NewTracer，
+// 决定是否建 handler）；判据不成立就返回 nil Tracer，调用点靠 nil 接收者空转。
+// 若再在别处写第二个判据，就会出现「handler 没注册、但每条请求都在开 trace」的错位。
 func (c ObservabilityConfig) LangfuseEnabled() bool {
 	return c.LangfuseHost != "" && c.LangfusePublicKey != "" && c.LangfuseSecretKey != ""
 }
@@ -416,10 +369,10 @@ func Default() *Config {
 			Timeout:   15,
 		},
 		RAG: RAGConfig{
-			Enabled:        true,
-			TopK:           3,
-			RecallK:        20,
-			ScoreThreshold: 0.7,
+			Enabled:             true,
+			TopK:                3,
+			RecallK:             20,
+			ScoreThreshold:      0.7,
 			Reranker: RerankerConfig{
 				Enabled:        false,
 				TopN:           3,
@@ -469,37 +422,8 @@ func Default() *Config {
 			},
 		},
 		Observability: ObservabilityConfig{
-			Enabled:              true,
-			SamplingRate:         0.2,
-			ErrorAlwaysSample:    true,
-			SlowThresholdMs:      5000,
-			FeedbackAlwaysSample: true,
-			TraceTableEnabled:    true,
-			ExportLogEnabled:     true,
-			MetricsFormat:        "json",
-			SinkBufferSize:       1024,
-			SinkBatchSize:        50,
-			SinkFlushIntervalMs:  200,
-			PIIContentMaxChars:   200,
-			PIIMaskSecret:        true,
-			FeedbackEnabled:      true,
-			MaxCardinalityLabels: 500,
-			// OTel 默认值：noop 不打印 span，开发期可改 stdout 看 span 结构。
-			// 这里没有 otlp 可选 —— 接三方平台请配下方的 langfuse_*。
-			OTelExporter:     OTelExporterNoop,
-			OTelServiceName:  "solvify-agent",
-			OTelSamplingRate: 1.0,
-			// 业务链路必留：这三条是「带完整 RAG / LLM 子树、用户真正会去查」的写接口。
-			//
-			// 为什么不把列表接口一起留下：实测 3 天 634 条 HTTP 入口 span 里，
-			// 纯轮询类（追踪页 184 + 消息列表 55 + 会话列表 25 + 各类配置读取）
-			// 占了七成以上，它们子树浅、数量大，是三方平台「trace 列表被刷屏」的唯一成因。
-			// 留这三条即可把必留比例从 100% 压到约 22%，而问答链路一条不少。
-			OTelBizRoutes: []string{
-				"/api/v1/chat/sessions/:id/messages",
-				"/api/v1/documents/:id/reindex",
-				"/api/v1/chat/messages/:message_id/feedback",
-			},
+			PIIMaskSecret:   true,
+			OTelServiceName: "solvify-agent",
 			// Langfuse 官方 callback（v2 / OTLP）：下列数值与官方默认值一致
 			// （队列 2048 / 每批 512 / 批次超时 5s / 单次请求 10s）。
 			// ⚠️ BatchTimeoutMs 决定「低流量时最晚多久上报」：本地开发嫌慢就调小它。
@@ -565,47 +489,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Agent.MaxIterations <= 0 {
 		return errors.New("agent.max_iterations 必须大于 0")
-	}
-	// otel_exporter 的取值校验刻意放在 Enabled 之外：这个键决定的是「span 往哪儿去」，
-	// 与自研轨开关无关。⚠️ 这里必须拒绝 otlp 而不是放行后降级 —— OTLP 出口已随
-	// 「改用官方 callback」一并移除，老配置里残留的 otel_exporter: otlp 若只是
-	// WARN + 回退 noop，表现就是「平台上一个 trace 都没有、进程里也不报错」。
-	// 让启动直接失败，才是唯一看得见的方式。
-	switch c.Observability.OTelExporter {
-	case OTelExporterNoop, OTelExporterStdout, "":
-	default:
-		return fmt.Errorf("observability.otel_exporter 只支持 %s/%s（收到 %q）；"+
-			"OTLP 出口已移除，三方链路请改用 langfuse_host / langfuse_public_key / langfuse_secret_key",
-			OTelExporterNoop, OTelExporterStdout, c.Observability.OTelExporter)
-	}
-
-	if c.Observability.Enabled {
-		if c.Observability.SamplingRate < 0 || c.Observability.SamplingRate > 1 {
-			return errors.New("observability.sampling_rate 必须在 0 到 1 之间")
-		}
-		if c.Observability.SinkBufferSize <= 0 {
-			return errors.New("observability.sink_buffer_size 必须大于 0")
-		}
-		if c.Observability.SinkBatchSize <= 0 {
-			return errors.New("observability.sink_batch_size 必须大于 0")
-		}
-		if c.Observability.SinkFlushIntervalMs <= 0 {
-			return errors.New("observability.sink_flush_interval_ms 必须大于 0")
-		}
-		if c.Observability.PIIContentMaxChars < 0 {
-			return errors.New("observability.pii_content_max_chars 不能小于 0")
-		}
-		if c.Observability.MaxCardinalityLabels <= 0 {
-			return errors.New("observability.max_cardinality_labels 必须大于 0")
-		}
-		switch c.Observability.MetricsFormat {
-		case "json", "prometheus", "both", "none":
-		default:
-			return errors.New("observability.metrics_format 只支持 json/prometheus/both/none")
-		}
-		if c.Observability.OTelSamplingRate < 0 || c.Observability.OTelSamplingRate > 1 {
-			return errors.New("observability.otel_sampling_rate 必须在 0 到 1 之间")
-		}
 	}
 	return nil
 }
@@ -755,59 +638,11 @@ func applyEnv(cfg *Config) {
 		cfg.Log.Compress = parseBool(value, cfg.Log.Compress)
 	}
 
-	// Observability 配置
-	if value := os.Getenv("OBSERVABILITY_ENABLED"); value != "" {
-		cfg.Observability.Enabled = parseBool(value, cfg.Observability.Enabled)
-	}
-	if value := os.Getenv("OBSERVABILITY_SAMPLING_RATE"); value != "" {
-		cfg.Observability.SamplingRate = parseFloat(value, cfg.Observability.SamplingRate)
-	}
-	if value := os.Getenv("OBSERVABILITY_ERROR_ALWAYS_SAMPLE"); value != "" {
-		cfg.Observability.ErrorAlwaysSample = parseBool(value, cfg.Observability.ErrorAlwaysSample)
-	}
-	if value := os.Getenv("OBSERVABILITY_SLOW_THRESHOLD_MS"); value != "" {
-		cfg.Observability.SlowThresholdMs = parseInt(value, cfg.Observability.SlowThresholdMs)
-	}
-	if value := os.Getenv("OBSERVABILITY_FEEDBACK_ALWAYS_SAMPLE"); value != "" {
-		cfg.Observability.FeedbackAlwaysSample = parseBool(value, cfg.Observability.FeedbackAlwaysSample)
-	}
-	if value := os.Getenv("OBSERVABILITY_TRACE_TABLE_ENABLED"); value != "" {
-		cfg.Observability.TraceTableEnabled = parseBool(value, cfg.Observability.TraceTableEnabled)
-	}
-	if value := os.Getenv("OBSERVABILITY_EXPORT_LOG_ENABLED"); value != "" {
-		cfg.Observability.ExportLogEnabled = parseBool(value, cfg.Observability.ExportLogEnabled)
-	}
-	if v := os.Getenv("OBSERVABILITY_METRICS_FORMAT"); v != "" {
-		cfg.Observability.MetricsFormat = v
-	}
-	if value := os.Getenv("OBSERVABILITY_SINK_BUFFER_SIZE"); value != "" {
-		cfg.Observability.SinkBufferSize = parseInt(value, cfg.Observability.SinkBufferSize)
-	}
-	if value := os.Getenv("OBSERVABILITY_SINK_BATCH_SIZE"); value != "" {
-		cfg.Observability.SinkBatchSize = parseInt(value, cfg.Observability.SinkBatchSize)
-	}
-	if value := os.Getenv("OBSERVABILITY_SINK_FLUSH_INTERVAL_MS"); value != "" {
-		cfg.Observability.SinkFlushIntervalMs = parseInt(value, cfg.Observability.SinkFlushIntervalMs)
-	}
-	if value := os.Getenv("OBSERVABILITY_PII_CONTENT_MAX_CHARS"); value != "" {
-		cfg.Observability.PIIContentMaxChars = parseInt(value, cfg.Observability.PIIContentMaxChars)
-	}
+	// Observability 配置（只剩「eino → Langfuse」这条三方链路用得到的项）
 	if value := os.Getenv("OBSERVABILITY_PII_MASK_SECRET"); value != "" {
 		cfg.Observability.PIIMaskSecret = parseBool(value, cfg.Observability.PIIMaskSecret)
 	}
-	if value := os.Getenv("OBSERVABILITY_FEEDBACK_ENABLED"); value != "" {
-		cfg.Observability.FeedbackEnabled = parseBool(value, cfg.Observability.FeedbackEnabled)
-	}
-	if value := os.Getenv("OBSERVABILITY_MAX_CARDINALITY_LABELS"); value != "" {
-		cfg.Observability.MaxCardinalityLabels = parseInt(value, cfg.Observability.MaxCardinalityLabels)
-	}
-
-	// OTel 配置
-	cfg.Observability.OTelExporter = getEnv("OTEL_EXPORTER", cfg.Observability.OTelExporter)
 	cfg.Observability.OTelServiceName = getEnv("OTEL_SERVICE_NAME", cfg.Observability.OTelServiceName)
-	if value := os.Getenv("OTEL_SAMPLING_RATE"); value != "" {
-		cfg.Observability.OTelSamplingRate = parseFloat(value, cfg.Observability.OTelSamplingRate)
-	}
 
 	// Agent 行为开关
 	if value := os.Getenv("AGENT_QUICK_MAX_ITERATIONS"); value != "" {

@@ -10,7 +10,6 @@ import (
 	"gorm.io/gorm"
 
 	"solvify-agent/internal/model/entity"
-	"solvify-agent/internal/observability"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/textseg"
@@ -142,28 +141,21 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	vr := <-vectorCh
 	kr := <-keywordCh
 
-	rec := observability.RecorderFromContext(ctx)
-
 	// 向量检索失败时降级：仅用关键词结果，不阻断检索
 	if vr.err != nil {
 		logger.Warnf("向量检索失败，降级为纯关键词检索: %v", vr.err)
 		vr.docs = nil // 清空，后续只用关键词结果
-		observeIncr(rec, ctx, "rag_retriever_degradation_total", map[string]string{"side": "vector", "reason": "search_error"})
 	}
 	if kr.err != nil {
 		logger.Warnf("关键词检索失败，降级为纯向量检索: %v", kr.err)
 		kr.docs = nil
-		observeIncr(rec, ctx, "rag_retriever_degradation_total", map[string]string{"side": "keyword", "reason": "search_error"})
 	}
 
 	// 两种检索都失败才报错
 	if vr.err != nil && kr.err != nil {
-		observeIncr(rec, ctx, "rag_retriever_degradation_total", map[string]string{"side": "both", "reason": "search_error"})
 		return Result{}, fmt.Errorf("混合检索完全失败: 向量(%v), 关键词(%v)", vr.err, kr.err)
 	}
 
-	observeStage(rec, ctx, "vector_raw", float64(len(vr.docs)))
-	observeStage(rec, ctx, "keyword_raw", float64(len(kr.docs)))
 
 	logger.Infof("向量检索命中: %d 条, 关键词检索命中: %d 条", len(vr.docs), len(kr.docs))
 
@@ -176,7 +168,6 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 			filteredVector = append(filteredVector, doc)
 		}
 	}
-	observeStage(rec, ctx, "vector_filtered", float64(len(filteredVector)))
 
 	// 1b. 关键词侧：陡峭度检测 + 最低匹配过滤
 	filteredKeyword := r.keywordSourceFilter(kr.docs)
@@ -184,9 +175,7 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	// 1c. 向量全灭时，对关键词结果加最低匹配比例过滤
 	if len(filteredVector) == 0 && len(filteredKeyword) > 0 {
 		filteredKeyword = filterByMinScore(filteredKeyword, r.keywordScoreThreshold, "关键词")
-		observeIncr(rec, ctx, "rag_retriever_degradation_total", map[string]string{"side": "keyword_only", "reason": "min_score_filter"})
 	}
-	observeStage(rec, ctx, "keyword_filtered", float64(len(filteredKeyword)))
 
 	// ===== Step 2: 同源内 Min-Max 归一化 =====
 	vectorNorm := minMaxNormalize(filteredVector)
@@ -194,11 +183,9 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 
 	// ===== Step 3: RRF 融合 =====
 	fusedRaw := r.reciprocalRankFusion(filteredVector, filteredKeyword)
-	observeStage(rec, ctx, "rrf_fused", float64(len(fusedRaw)))
 
 	// ===== Step 4: 跨源交叉验证 =====
 	fused := r.crossSourceFilter(fusedRaw, filteredVector, filteredKeyword, vectorNorm, keywordNorm)
-	observeStage(rec, ctx, "cross_filtered", float64(len(fused)))
 
 	// ===== Step 5: TopK 截取 =====
 	docs := make([]Document, 0, len(fused))
@@ -217,7 +204,6 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 			Score:           item.Score,
 		})
 	}
-	observeStage(rec, ctx, "final", float64(len(docs)))
 
 	logger.Infof("混合检索最终结果: %d 条 (向量过滤阈值=%.2f, TopK=%d, 向量候选=%d, 关键词候选=%d)",
 		len(docs), r.scoreThreshold, topK, len(filteredVector), len(filteredKeyword))
@@ -662,15 +648,6 @@ func (r *HybridRetriever) crossSourceFilter(
 	return result
 }
 
-// observeStage 记录混合检索各阶段的候选条数，供 Prometheus 观测管线漏斗。
-// rec 为 nil 时静默跳过（单元测试或未注册 observability 的场景）。
-func observeStage(rec observability.Recorder, ctx context.Context, stage string, count float64) {
-	if rec == nil {
-		return
-	}
-	rec.Observe(ctx, "rag_retriever_stage_count", map[string]string{"stage": stage}, count)
-}
-
 // chunkIDPreview 把命中结果拼成 "chunkId@docId#idx(s=score)" 的紧凑串，供检索摘要日志使用。
 // id 取后 8 位（复用 shortHash）：单次日志内足以区分，且不会把日志撑成一行一屏。
 func chunkIDPreview(docs []Document) string {
@@ -682,14 +659,4 @@ func chunkIDPreview(docs []Document) string {
 		parts = append(parts, fmt.Sprintf("%s@%s#%d(s=%.3f)", shortHash(d.ID), shortHash(d.DocumentID), d.ChunkIndex, d.Score))
 	}
 	return strings.Join(parts, ", ")
-}
-
-// observeIncr 记录一次检索侧计数指标。
-// 与 observeStage 一样对 nil Recorder 静默跳过：检索器会被非 HTTP 入口（脚本、批处理、
-// 单元测试）直接调用，那里没有注入 Recorder，不能因此 panic。
-func observeIncr(rec observability.Recorder, ctx context.Context, name string, labels map[string]string) {
-	if rec == nil {
-		return
-	}
-	rec.Incr(ctx, name, labels, 1)
 }

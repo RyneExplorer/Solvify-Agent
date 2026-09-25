@@ -5,8 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"solvify-agent/internal/model/entity"
-	"solvify-agent/internal/observability"
+	dto "solvify-agent/internal/model/dto/response"
 )
 
 // TestDurationFieldsAreNeverOmitted 守住一条机械的字段约定：
@@ -18,17 +17,15 @@ import (
 // 一个 undefined，前端只能猜（前端类型里 duration_ms?: number 就是这么来的）。
 //
 // 判据是机械的，所以守卫也写成机械的：新增耗时字段只要落在下面这几个
-// 「会直接出给前端」的结构体里，本测试自动覆盖，不需要有人记得去改它。
+// 「会直接出给前端 / 出到日志」的结构体里，本测试自动覆盖，不需要有人记得去改它。
+// ⚠️ 本测试曾经守 observability.Span / TraceResponse / entity.ChatTrace 等类型；
+// 那些类型已随自研可观测性模块整体移除，故类型清单改成现存的两个。
 //
 // 回归价值：给任意一个字段补回 ,omitempty，本测试立刻变红。
 func TestDurationFieldsAreNeverOmitted(t *testing.T) {
 	types := []any{
-		observability.Span{},      // 追踪详情的 span 树（P1-5 的现场）
-		observability.AgentStep{}, // Agent 单步落库 / 日志
-		TraceResponse{},           // 追踪列表 + 详情
-		TraceAgentStepResponse{},  // 追踪详情里的 agent_steps
-		entity.ChatTrace{},        // chat_traces 行
-		entity.AgentTaskStep{},    // agent_task_steps 行
+		dto.TestResult{},      // 模型连通性测试结果（response_time_ms）
+		syncTaskOverviewLog{}, // 同步任务概览日志（cost_ms）
 	}
 	for _, v := range types {
 		rt := reflect.TypeOf(v)

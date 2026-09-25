@@ -57,9 +57,14 @@ func buildDocsContextBlock(docs []*schema.Document, retrievalBudget int, modelNa
 		totalScore += s
 		scoredDocs = append(scoredDocs, scored{idx: i, score: s, title: title})
 	}
-	// 降序：高分段先分配
+	// 降序：高分段先分配。
+	// 必须全序：`s <= 0` 会被兜底成同一个 1e-6 ⇒ **所有 0 分文档彼此同分**，这不是边角情况。
+	// 同分时按 idx（检索器给的原顺序）裁决 ⇒ 「谁先拿预算」有确定规则，而不是由排序算法决定。
 	sort.Slice(scoredDocs, func(i, j int) bool {
-		return scoredDocs[i].score > scoredDocs[j].score
+		if scoredDocs[i].score != scoredDocs[j].score {
+			return scoredDocs[i].score > scoredDocs[j].score
+		}
+		return scoredDocs[i].idx < scoredDocs[j].idx
 	})
 
 	perDocHeadBudget := 60 // chunk_id/score/文档名 行的粗估

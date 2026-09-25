@@ -2,7 +2,7 @@ import { request } from './client'
 import type { ModelInfo, ModelTestResult } from '@/types/model'
 import type { ToolTypeInfo, ToolProviderInfo, ToolTestResult, MCPServerInfo } from '@/types/tool'
 import type { AdminUser } from '@/types/auth'
-import type { AdminSession, MetricsSnapshot, TraceSummary, ChatTraceDetail } from '@/types/chat'
+import type { AdminSession } from '@/types/chat'
 
 // ── 用户管理 ──
 
@@ -262,33 +262,4 @@ export function adminDeleteSession(id: string) {
 // 清理过期会话
 export function adminCleanupSessions() {
   return request<{ deleted: number }>('/admin/sessions/cleanup', { method: 'POST' })
-}
-
-// ── 可观测性（后台） ──
-
-// 获取可观测性指标快照
-export function adminGetObservabilityMetrics() {
-  return request<MetricsSnapshot>('/admin/observability/metrics')
-}
-
-// 分页查询 Trace 列表
-export function adminListTraces(params: {
-  page?: number
-  pageSize?: number
-  session_id?: string
-  status?: string
-  rating?: number
-}) {
-  const query = new URLSearchParams()
-  if (params.page !== undefined) query.set('page', String(params.page))
-  if (params.pageSize !== undefined) query.set('pageSize', String(params.pageSize))
-  if (params.session_id) query.set('session_id', params.session_id)
-  if (params.status) query.set('status', params.status)
-  if (params.rating !== undefined) query.set('rating', String(params.rating))
-  return request<{ traces: TraceSummary[]; total: number }>(`/admin/observability/traces?${query.toString()}`)
-}
-
-// 获取 Trace 详情
-export function adminGetTrace(traceId: string) {
-  return request<ChatTraceDetail>(`/admin/observability/traces/${traceId}`)
 }

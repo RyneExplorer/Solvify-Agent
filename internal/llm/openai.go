@@ -13,8 +13,6 @@ import (
 	einoOpenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
-
-	"solvify-agent/internal/observability"
 )
 
 // sharedHTTPClient 所有 LLM 客户端共享的 HTTP 连接池
@@ -27,10 +25,7 @@ var (
 func getSharedHTTPClient() *http.Client {
 	sharedHTTPClientOnce.Do(func() {
 		sharedHTTPClient = &http.Client{
-			// 出站追踪挂在这里：快速模式与深度模式的全部 LLM 调用都复用本客户端，
-			// 一次包装即可全覆盖，也是三方追踪平台上最有价值的出站点
-			// （模型 API 的实际耗时、状态码、失败原因都在这一层才看得到）。
-			Transport: observability.HTTPTransport(&http.Transport{
+			Transport: &http.Transport{
 				DialContext: (&net.Dialer{
 					Timeout:   10 * time.Second,
 					KeepAlive: 60 * time.Second, // TCP keep-alive 探活
@@ -43,7 +38,7 @@ func getSharedHTTPClient() *http.Client {
 				TLSHandshakeTimeout:   5 * time.Second,
 				ResponseHeaderTimeout: 60 * time.Second,
 				ForceAttemptHTTP2:     true, // 启用 HTTP/2 多路复用
-			}),
+			},
 		}
 	})
 	return sharedHTTPClient

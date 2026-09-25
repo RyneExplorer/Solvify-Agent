@@ -21,13 +21,12 @@ import (
 	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
-	"solvify-agent/internal/observability"
 	"solvify-agent/internal/rag"
 	"solvify-agent/pkg/config"
 	apperrors "solvify-agent/pkg/errors"
 	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
-	"solvify-agent/pkg/tokenutil"
+	"solvify-agent/pkg/traceid"
 )
 
 // quickGraphInput 快速模式 Graph 入参：一次请求内的全部共享上下文。
@@ -280,17 +279,6 @@ func quickRewriteFn(ctx context.Context, input *quickGraphInput) (*quickGraphPay
 	// 检索 query 双轨规划：本地规则，不依赖 LLM 结果是否可用。
 	// 向量侧吃「当前问题 + 最近几轮用户提问」，关键字侧吃「指代回填后的短句」。
 	queries := planQueriesFromInput(input, result.Rewritten)
-
-	observability.SetSpanAttrs(ctx, observability.Attrs{
-		"original_query":  input.OriginalQuery,
-		"rewritten_query": result.Rewritten,
-		"vector_query":    queries.Vector,
-		"keyword_query":   queries.Keyword,
-		"intent":          result.Intent,
-		"skip_retrieve":   fmt.Sprintf("%v", result.SkipRetrieve),
-		"need_clarify":    fmt.Sprintf("%v", result.NeedClarify),
-		"rewrite_ms":      fmt.Sprintf("%d", rewriteMs),
-	})
 
 	// 节点输出 = 载荷本身：改写结果与两路 query 挂上去，后面所有节点从同一个对象上读。
 	return &quickGraphPayload{
@@ -650,61 +638,12 @@ func quickGenerateFn(ctx context.Context, p *quickGraphPayload) (*quickGraphOutp
 		return nil, apperrors.NewDefault(apperrors.CodeInternalError)
 	}
 	msgs := p.Msgs
-	modelName := p.Input.ModelName
-
-	// 写 Generate span 的输入 attrs
-	var (
-		promptTokensEst int
-		lastUser        = findLastMessageByRole(msgs, "user")
-		firstSystem     = findFirstMessageByRole(msgs, "system")
-	)
-	// 粗估 prompt tokens（流式不返回 usage）
-	if modelName == "" {
-		modelName = "cl100k_base"
-	}
-	for _, m := range msgs {
-		if m != nil && m.Content != "" {
-			promptTokensEst += tokenutil.CountTokens(m.Content, modelName)
-		}
-	}
-	inAttrs := observability.Attrs{
-		"messages_n":    len(msgs),
-		"prompt_tokens": promptTokensEst,
-		"model_id":      modelName,
-	}
-	if lastUser != nil && lastUser.Content != "" {
-		inAttrs["last_user_msg_preview"] = lastUser.Content
-	}
-	if firstSystem != nil && firstSystem.Content != "" {
-		inAttrs["system_prompt_preview"] = firstSystem.Content
-	}
-	observability.SetSpanAttrs(ctx, inAttrs)
 	sr, err := cm.Stream(ctx, msgs)
 	if err != nil {
 		return nil, err
 	}
 	// docs 随出参带出去：调用方要用它拼 sources，这是「Invoke 之后还需要的东西」的唯一出口。
 	return &quickGraphOutput{Stream: sr, Docs: p.Docs}, nil
-}
-
-// findLastMessageByRole 找 msgs 中指定 role 的最后一条消息
-func findLastMessageByRole(msgs []*schema.Message, role string) *schema.Message {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i] != nil && string(msgs[i].Role) == role {
-			return msgs[i]
-		}
-	}
-	return nil
-}
-
-// findFirstMessageByRole 找 msgs 中指定 role 的第一条消息
-func findFirstMessageByRole(msgs []*schema.Message, role string) *schema.Message {
-	for _, m := range msgs {
-		if m != nil && string(m.Role) == role {
-			return m
-		}
-	}
-	return nil
 }
 
 // addQuickClarifyBranch 改写之后分叉：需要澄清 → clarify_end，否则 → retrieve。
@@ -778,44 +717,33 @@ func (s *chatService) processMessageGraphQuick(
 	req requestdto.SendMessageRequest,
 	eventCh chan<- dto.StreamEvent,
 ) {
-	// 根 Span + panic recover
-	ctx, span := startQuickSpan(ctx, s.obs, sessionID, userID, req.ModelID)
+	// panic recover：Graph 内部已有自己的错误出口，这里只兜住本函数栈上的意外 panic，
+	// 保证 SSE 流一定拿到终态事件、不会永远停在「正在生成」。
 	defer func() {
-		status := observability.SpanStatusOK
-		var errVal error
 		if r := recover(); r != nil {
-			status = observability.SpanStatusError
-			errVal = fmt.Errorf("panic: %v", r)
 			eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "error", Detail: "处理过程中发生未预期错误", Done: true})
 		}
-		obsEndSpan(ctx, s.obs, span, status, errVal, nil)
 	}()
-	obsIncr(ctx, s.obs, "chat_quick_graph_requests_total", map[string]string{"model_id": req.ModelID}, 1)
 
 	// 1) 初始化上下文（历史/摘要/记忆/画像/预算）
 	sendProgressEvent(ctx, eventCh, "正在加载上下文...")
-	t0 := time.Now()
 	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content)
 	if err != nil {
-		obsIncr(ctx, s.obs, "chat_quick_graph_errors_total", map[string]string{"stage": "init_ctx"}, 1)
-		obsMarkError(ctx, s.obs, err)
 		sendErrorEvent(ctx, eventCh, err, err.Error())
 		return
 	}
 	chatModel := client.ChatModel()
-	obsObserve(ctx, s.obs, "chat_quick_graph_init_ctx_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t0).Seconds())
 
 	// 2) 组装 Graph Input：System Prompt / History / 模型名 / 检索预算 / ChatModel
 	graphInput := buildQuickInput(req, userID, userMsgID, enhancedCtx, client, chatModel)
 
 	// 3) 跑完整条链路：改写 →（要澄清就到此为止）→ 检索 → 拼 prompt → 生成。
 	//    「改写要不要调 LLM」「要不要澄清」「要不要检索」全在图内判定并分叉，
-	//    图外只剩副作用（推事件、落库、埋点）——于是「一次请求走哪几条路」只有一处定义。
+	//    图外只剩副作用（推事件、落库）——于是「一次请求走哪几条路」只有一处定义。
 	graphCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	graphOut, err := invokeQuickGraph(graphCtx, s.quickGraph, graphInput, eventCh, req.ModelID, s.obs)
+	graphOut, err := invokeQuickGraph(graphCtx, s.quickGraph, graphInput, eventCh)
 	if err != nil {
-		obsMarkError(ctx, s.obs, err)
 		llmpkg.ReduceContextBudgetOnError(req.ModelID, err)
 		return
 	}
@@ -830,12 +758,10 @@ func (s *chatService) processMessageGraphQuick(
 	// 4) 生成助手消息 ID 并消费回答流。
 	//    ⚠️ start 必须等「确定不是澄清」之后再发：澄清路径不该先给前端开一个回答气泡。
 	assistantMsgID := uuid.New().String()
-	obsAddRootAttrs(ctx, s.obs, observability.Attrs{"assistant_message_id": assistantMsgID})
 	eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "start", MessageID: assistantMsgID})
 
 	fullContent, err := consumeQuickGraphStream(graphCtx, graphOut.Stream, assistantMsgID, eventCh)
 	if err != nil {
-		obsMarkError(ctx, s.obs, err)
 		llmpkg.ReduceContextBudgetOnError(req.ModelID, err)
 		return
 	}
@@ -845,41 +771,33 @@ func (s *chatService) processMessageGraphQuick(
 	// 且空消息进入后续 history 后会让该会话之后每一轮都失败 —— 一次空回答污染整条会话。
 	// 具体口径见 rejectEmptyAnswer（与深度模式共用）。
 	// graph 成功返回时 Docs 就是本次命中的文档（唯一来源：载荷 → 出参）。
-	if rejectEmptyAnswer(ctx, eventCh, s.obs, "quick", sessionID, req.ModelID, assistantMsgID,
+	if rejectEmptyAnswer(ctx, eventCh, "quick", sessionID, req.ModelID, assistantMsgID,
 		fullContent, fmt.Sprintf("retrievedDocs=%d", len(graphOut.Docs))) {
 		return
 	}
 
 	// 6) 出参里的 docs 就是本次命中的文档（来源唯一：载荷 → 出参，不再经过 context）
-	var (
-		sources   []dto.SourceInfo
-		docsCount int
-	)
+	var sources []dto.SourceInfo
 	if len(graphOut.Docs) > 0 {
 		sources = einoDocsToSourceInfos(graphOut.Docs)
-		docsCount = len(graphOut.Docs)
 	}
-	obsAddRootAttrs(ctx, s.obs, observability.Attrs{
-		"assistant_chars": fmt.Sprintf("%d", len([]rune(fullContent))),
-		"retrieved_docs":  fmt.Sprintf("%d", docsCount),
-	})
 
 	// 7) 结束事件 + 异步落库 + 异步刷新摘要记忆
 	s.emitDoneAndSave(ctx, eventCh, sessionID, assistantMsgID, fullContent, req, sources, nil, func(meta map[string]any) {
-		if s.obs != nil && meta != nil {
-			meta["trace_id"] = observability.TraceIDFromContext(ctx)
-			meta["eino_quick_graph_mode"] = true
+		if meta == nil {
+			return
 		}
+		if traceID := traceid.FromContext(ctx); traceID != "" {
+			meta["trace_id"] = traceID
+		}
+		meta["eino_quick_graph_mode"] = true
 	})
 	s.refreshContextAsync(ctx, userID, sessionID, enhancedCtx.History, chatModel)
 }
 
 // emitQuickClarify 处理快速模式的澄清终态：写 session 的 PendingClarify、
 // 落一条 assistant 追问消息（让历史自然串成 [user问题 → assistant追问 → user回答]）、
-// 推 clarify 事件，并补 span 属性。
-//
-// ⚠️ 这里只补属性、不结束 span：根 span 的结束统一由 processMessageGraphQuick 的 defer 收口，
-// 手动再 End 一次会覆盖 defer 写的时长（EndSpan 不是幂等的）。
+// 推 clarify 事件。
 func (s *chatService) emitQuickClarify(
 	ctx context.Context,
 	eventCh chan<- dto.StreamEvent,
@@ -900,7 +818,7 @@ func (s *chatService) emitQuickClarify(
 	clarifyMsgID := uuid.New().String()
 	// 追问消息同样要挂 trace_id：否则前端点开这条消息查不到链路（普通回答那条是挂的）。
 	var clarifyMeta datatypes.JSON
-	if traceID := observability.TraceIDFromContext(ctx); traceID != "" {
+	if traceID := traceid.FromContext(ctx); traceID != "" {
 		clarifyMeta = datatypes.JSON(mustMarshal(map[string]any{"trace_id": traceID}))
 	}
 	if err := s.saveAssistantMessage(ctx, sessionID, clarifyMsgID, clarify.Question, req, nil, clarifyMeta); err != nil {
@@ -911,26 +829,6 @@ func (s *chatService) emitQuickClarify(
 		Question: clarify.Question,
 		Options:  clarify.Options,
 	}, Done: true})
-
-	observability.SetSpanAttrs(ctx, observability.Attrs{
-		"need_clarify":   "true",
-		"clarify_intent": clarify.Intent,
-	})
-}
-
-// startQuickSpan 创建根 Span。obs 为 nil 时返回 nil span，调用方通过 obsEndSpan 空安全结束。
-// startQuickSpan 创建根 Span。obs 为 nil 时返回 nil span，调用方通过 obsEndSpan 空安全结束。
-func startQuickSpan(ctx context.Context, obs observability.Recorder, sessionID, userID, modelID string) (context.Context, *observability.Span) {
-	if obs == nil {
-		return ctx, nil
-	}
-	newCtx, span := obs.StartSpan(ctx, "chat.quick.graph", observability.ComponentAgentEngine, observability.Attrs{
-		"session_id":  sessionID,
-		"user_id":     userID,
-		"model_id":    modelID,
-		"search_mode": "quick_graph",
-	})
-	return newCtx, span
 }
 
 // buildQuickInput 组装 quickGraphInput：System Prompt / History / 预算 / 模型名 / ChatModel
@@ -967,16 +865,13 @@ func buildQuickInput(
 // 同一个静态错误会在每一个请求上重复出现一次。）
 func compileQuickGraph(
 	einoRetriever *rag.EinoRetrieverAdapter,
-	obs observability.Recorder,
 ) (einoCompose.Runnable[*quickGraphInput, *quickGraphOutput], error) {
 	g, err := buildQuickGraph(einoRetriever)
 	if err != nil {
-		obsIncr(nil, obs, "chat_quick_graph_errors_total", map[string]string{"stage": "build_graph"}, 1)
 		return nil, err
 	}
 	r, err := g.Compile(nil, einoCompose.WithGraphName("quick_rag_pipeline"))
 	if err != nil {
-		obsIncr(nil, obs, "chat_quick_graph_errors_total", map[string]string{"stage": "compile_graph"}, 1)
 		return nil, err
 	}
 	return r, nil
@@ -993,13 +888,9 @@ func invokeQuickGraph(
 	runnable einoCompose.Runnable[*quickGraphInput, *quickGraphOutput],
 	graphInput *quickGraphInput,
 	eventCh chan<- dto.StreamEvent,
-	modelID string,
-	obs observability.Recorder,
 ) (*quickGraphOutput, error) {
 	sendProgressEvent(graphCtx, eventCh, "正在执行快速检索链路...")
-	t0 := time.Now()
 	out, err := runnable.Invoke(graphCtx, graphInput)
-	obsObserve(graphCtx, obs, "chat_quick_graph_run_seconds", map[string]string{"model_id": modelID}, time.Since(t0).Seconds())
 	if err != nil {
 		sendErrorEvent(graphCtx, eventCh, err, "快速检索执行失败")
 		return nil, err

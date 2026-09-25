@@ -124,7 +124,7 @@ func TestQuickGraph_OneCompiledRunnableServesConcurrentRequestsWithIsolatedState
 	defer guard.Stop()
 
 	retriever := &barrierRetriever{arrive: arrive, release: release}
-	runnable, err := compileQuickGraph(rag.NewEinoRetrieverAdapter(retriever, 10), nil)
+	runnable, err := compileQuickGraph(rag.NewEinoRetrieverAdapter(retriever, 10))
 	if err != nil {
 		t.Fatalf("compileQuickGraph 失败: %v", err)
 	}
@@ -410,7 +410,7 @@ func BenchmarkPerRequestCost(b *testing.B) {
 		adapter := rag.NewEinoRetrieverAdapter(emptyRetriever{}, 10)
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			runnable, err := compileQuickGraph(adapter, nil)
+			runnable, err := compileQuickGraph(adapter)
 			if err != nil {
 				b.Fatalf("compileQuickGraph 失败: %v", err)
 			}
@@ -421,7 +421,7 @@ func BenchmarkPerRequestCost(b *testing.B) {
 	b.Run("invoke_only", func(b *testing.B) {
 		// 改动后的路径：Graph 只编译一次，请求期只装请求级变量（入参）并执行。
 		adapter := rag.NewEinoRetrieverAdapter(emptyRetriever{}, 10)
-		runnable, err := compileQuickGraph(adapter, nil)
+		runnable, err := compileQuickGraph(adapter)
 		if err != nil {
 			b.Fatalf("compileQuickGraph 失败: %v", err)
 		}

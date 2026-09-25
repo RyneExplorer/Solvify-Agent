@@ -137,58 +137,27 @@ email:
   username: ""
   password: ""
 
-# 可观测性配置（自研 trace 轨道 + OpenTelemetry 三方导出）
+# 可观测性配置（本项目唯一的三方链路：eino → Langfuse）
+#
+# ⚠️ 自研可观测性模块已整体删除 —— 本地 span 树、落库 chat_traces、Prometheus
+# /metrics、自研 eino callback、gin 追踪中间件、trace 查询接口与前端追踪页
+# 全部移除。本段现在只剩两件事：
+#   1. 脱敏开关与服务工作名（给官方 callback 用）；
+#   2. langfuse_* 三方凭据与导出节奏。
+#
+# 历史表 chat_traces / agent_tasks / agent_task_steps 与 messages.trace_id 列
+# 都还在库里，只是【不再写入】，方便需要时回查老数据。
 #
 # 整段都可以不写：不写时全部走 pkg/config 里的 Default()，取值与本文件标注的默认值一致。
-# 之所以还是列出来，是因为要接三方追踪平台时必须改文件末尾的 langfuse_* 几项，
+# 之所以还是列出来，是因为要接三方追踪平台时必须改 langfuse_* 几项，
 # 而 mapstructure 对拼错的键名是**静默忽略**的（配了等于没配，服务照常启动），
 # 有这份显式模板才好对照。pkg/config 里有一条测试会严格校验本段键名与结构体一致。
 observability:
-  # ---- 自研追踪轨道（前端「追踪详情」页的数据源 chat_traces）----
-  enabled: true                    # 总开关，关掉后 Recorder 退化为空实现
-  sampling_rate: 0.2               # 自研轨道采样率：只作用于「无业务归属」的 trace（健康检查、列表轮询
-                                   # 等噪声）。挂在某轮问答上的 trace 一律落库 —— 它的 trace_id 已随助手消息返回
-                                   # 给前端，采掉就成了查不到详情的悬空 ID。
-  error_always_sample: true        # 出错请求强制采样（不受 sampling_rate 限制）
-  slow_threshold_ms: 5000          # 慢请求阈值（毫秒），命中即强制采样
-  feedback_always_sample: true     # 带用户反馈的请求强制采样
-  trace_table_enabled: true        # 是否把 trace 落库到 chat_traces
-  export_log_enabled: true         # 是否额外打一份日志形态的 trace（生产建议关）
-  metrics_format: json
-  sink_buffer_size: 1024           # 异步 Sink 缓冲条数，满了会丢新记录，不要设太小
-  sink_batch_size: 50
-  sink_flush_interval_ms: 200
-  pii_content_max_chars: 200       # 字符串属性的截断长度（防 PII 外泄 + 防 span_tree 过大）
-                                   # 注意：对所有字符串属性生效，所以不要把 JSON 塞进属性
-                                   # （会被截成非法 JSON），这也是没做 gen_ai.input/output.messages 的原因
-  pii_mask_secret: true            # 对疑似密钥的取值打码
-  feedback_enabled: true
-  whitelist_user_ids: []           # 白名单用户 UUID：命中则强制全采样（填 UUID，不是用户名）
-  max_cardinality_labels: 500
-
-  # ---- OpenTelemetry（仅本地调试；三方追踪走文件末尾的 langfuse_*）----
-  #
-  # ⚠️ 这里已经没有 OTLP 出口了。官方 eino → Langfuse callback 直接走平台私有
-  # ingestion API（HTTP JSON），既不需要 OTLP、也不需要 Collector 垫片。所以下面三个
-  # 只有 OTLP 才用的键已随出口一并删除：
-  #   otel_otlp_endpoint / otel_insecure / otel_headers
-  # 从旧配置里抄过来会【启动失败】（Validate 报错），而不是静默降级成 noop。
-  #
-  # noop   = 不导出，默认值。span 仍会生成（trace_id 照常有，双轨对齐要用）
-  # stdout = 把 span 以 JSON 打到控制台，本地调试看 span 结构
-  otel_exporter: noop
+  pii_mask_secret: true                # 对疑似密钥的取值打码（传给官方 Config.MaskFunc）
   otel_service_name: "solvify-agent"   # 平台按它区分服务，多环境建议带后缀
-  # OTel 轨道采样率 0~1，1 = 全采样。与上面的 sampling_rate 是两套独立采样：
-  # 上面管「是否写 chat_traces」，这里管「OTel span 是否被导出」。
-  # ⚠️ 三方平台有没有数据【不由这里决定】—— 那条链路是官方 callback，有自己的
-  # langfuse_sample_rate；这里只影响本地调试的输出量与 Trace.OTelExported 字段。
-  # 采样器是 ParentBased：请求带上游 traceparent 时跟随上游的采样决定，
-  # 本值只对「本服务是链路起点」的请求生效。
-  otel_sampling_rate: 1.0
 
   # ---- Langfuse（官方 eino callback v2，走平台 OTLP 入口）----
   #
-  # 三方链路只有这一条（上面的 OTel 段现在只管本地调试）。
   # 官方 v2 用标准 OTLP/HTTP 直发 /api/public/otel/v1/traces，
   # 不再走已弃用的 /api/public/ingestion（平台公告 2026-11-16 关停，此后只收 score-create）。
   # 三项填全才会注册官方 callback；任一为空则启动时跳过（本地开发默认跳过，不影响启动）。
@@ -199,11 +168,12 @@ observability:
   langfuse_max_export_batch_size: 512  # 攒够多少条 span 导出一批（官方默认 512）
   langfuse_batch_timeout_ms: 5000      # 或最多等多久导出一批（官方默认 5s）
   langfuse_timeout_ms: 10000           # 单次 OTLP HTTP 请求超时（官方默认 10s）
-  langfuse_sample_rate: 1.0            # 官方 handler 侧采样率，与 sampling_rate 相互独立
-  # ⚠️ release / tags 必须经 StartTrace 的选项一并下发（见 recorder.WithTraceRoot）：
-  # 官方 StartTrace 是「opts 覆盖 handler 默认值」，只配在这里而不下发，平台上的字段会是空的。
+  langfuse_sample_rate: 1.0            # 官方 handler 侧采样率（1.0 = 全采）
+  # ⚠️ release / tags 必须经 StartTrace 的选项一并下发（见 observability.langfuseOptions）：
+  # 官方 StartTrace 是「opts 覆盖 handler 默认值」，只配在 handler 上会被顶掉，平台字段为空。
+  # ⚠️ tags 只在这里配：官方 WithTags 是 append（不是覆盖），两处都给会在平台上重复。
   langfuse_release: ""                 # 版本标识，平台侧按它筛选
-  langfuse_tags: []                    # 标签，例如 ["production", "jp"]
+  langfuse_tags: []                    # 静态标签，例如 ["production", "jp"]
 
   # ---- 以下两项对应官方 v2 Config 的同名字段，默认值与官方一致 ----
   # 本地队列容量。⚠️ 队列满会丢事件，但官方 v2 会计入丢弃统计并汇总告警

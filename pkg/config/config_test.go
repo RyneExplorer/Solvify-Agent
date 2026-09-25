@@ -81,98 +81,13 @@ func TestExampleConfigObservabilitySection(t *testing.T) {
 		t.Fatalf("observability 段里有结构体不认识的键: %v", err)
 	}
 
-	// 自研轨道
-	if !got.Enabled {
-		t.Error("observability.enabled 没有解到 true")
-	}
-	if got.SamplingRate != 0.2 {
-		t.Errorf("observability.sampling_rate 期望 0.2，实际 %v", got.SamplingRate)
-	}
-	if !got.ErrorAlwaysSample {
-		t.Error("observability.error_always_sample 没有解到 true")
-	}
-	if got.SlowThresholdMs != 5000 {
-		t.Errorf("observability.slow_threshold_ms 期望 5000，实际 %d", got.SlowThresholdMs)
-	}
-	if !got.FeedbackAlwaysSample {
-		t.Error("observability.feedback_always_sample 没有解到 true")
-	}
-	if !got.TraceTableEnabled {
-		t.Error("observability.trace_table_enabled 没有解到 true")
-	}
-	if !got.ExportLogEnabled {
-		t.Error("observability.export_log_enabled 没有解到 true")
-	}
-	if got.MetricsFormat != "json" {
-		t.Errorf("observability.metrics_format 期望 json，实际 %q", got.MetricsFormat)
-	}
-	if got.SinkBufferSize != 1024 {
-		t.Errorf("observability.sink_buffer_size 期望 1024，实际 %d", got.SinkBufferSize)
-	}
-	if got.SinkBatchSize != 50 {
-		t.Errorf("observability.sink_batch_size 期望 50，实际 %d", got.SinkBatchSize)
-	}
-	if got.SinkFlushIntervalMs != 200 {
-		t.Errorf("observability.sink_flush_interval_ms 期望 200，实际 %d", got.SinkFlushIntervalMs)
-	}
-	if got.PIIContentMaxChars != 200 {
-		t.Errorf("observability.pii_content_max_chars 期望 200，实际 %d", got.PIIContentMaxChars)
-	}
+	// 自研可观测性模块已整体移除，observability 段只剩「eino → Langfuse」这条
+	// 三方链路用得到的键 + 脱敏开关，这里逐个断言它们真的解到了。
 	if !got.PIIMaskSecret {
 		t.Error("observability.pii_mask_secret 没有解到 true")
 	}
-	if !got.FeedbackEnabled {
-		t.Error("observability.feedback_enabled 没有解到 true")
-	}
-	if len(got.WhiteListUserIDs) != 0 {
-		t.Errorf("observability.whitelist_user_ids 期望空列表，实际 %v", got.WhiteListUserIDs)
-	}
-	if got.MaxCardinalityLabels != 500 {
-		t.Errorf("observability.max_cardinality_labels 期望 500，实际 %d", got.MaxCardinalityLabels)
-	}
-
-	// OTel（三方出口已移除，只剩本地调试用的 noop / stdout）
-	if got.OTelExporter != OTelExporterNoop {
-		t.Errorf("observability.otel_exporter 期望 %s，实际 %q", OTelExporterNoop, got.OTelExporter)
-	}
 	if got.OTelServiceName != "solvify-agent" {
 		t.Errorf("observability.otel_service_name 期望 solvify-agent，实际 %q", got.OTelServiceName)
-	}
-	if got.OTelSamplingRate != 1.0 {
-		t.Errorf("observability.otel_sampling_rate 期望 1.0，实际 %v", got.OTelSamplingRate)
-	}
-}
-
-// TestValidateRejectsRemovedOTLPExporter 守住「otel_exporter 写成 otlp 必须启动失败」。
-//
-// 为什么值得单独立一条：OTLP 出口已随「三方链路改用官方 eino callback」一并移除，
-// 但历史配置、教程、复制来的片段里到处是 otel_exporter: otlp。此时如果只是
-// WARN + 回退 noop，现象是「平台上一个 trace 都没有、进程里也不报错」——
-// 排查成本极高。这条测试保证 Validate 会把它拦在启动前。
-//
-// ⚠️ 这条必须能失败：把 Validate 的 case 列表改回含 "otlp" 时它就会红。
-func TestValidateRejectsRemovedOTLPExporter(t *testing.T) {
-	c := Default()
-
-	c.Observability.OTelExporter = "otlp"
-	err := c.Validate()
-	if err == nil {
-		t.Fatal("otel_exporter=otlp 应当被 Validate 拒绝，实际通过了")
-	}
-	if !strings.Contains(err.Error(), "otel_exporter") {
-		t.Errorf("报错里要带上出错的键名，方便定位；实际: %v", err)
-	}
-	// 报错必须给出下一步该怎么做，否则用户只知道错、不知道怎么改。
-	if !strings.Contains(err.Error(), "langfuse_") {
-		t.Errorf("报错里要指出去哪儿改（langfuse_* 三件套）；实际: %v", err)
-	}
-
-	// 其余合法值不能被误伤。
-	for _, v := range []string{OTelExporterNoop, OTelExporterStdout, ""} {
-		c.Observability.OTelExporter = v
-		if err := c.Validate(); err != nil {
-			t.Errorf("otel_exporter=%q 是合法值，不应报错: %v", v, err)
-		}
 	}
 }
 

@@ -22,7 +22,7 @@ import (
 	"solvify-agent/pkg/config"
 	apperrors "solvify-agent/pkg/errors"
 	"solvify-agent/pkg/logger"
-	"solvify-agent/pkg/tokenutil"
+	"solvify-agent/pkg/traceid"
 )
 
 const (
@@ -43,8 +43,8 @@ type chatService struct {
 	agentEngine         *agent.Engine
 	contextSvc          ContextServiceInterface
 	prefSvc             UserPreferenceService
-	obs                 observability.Recorder
-	obsRepo             repository.ObservabilityRepo
+	tracer              *observability.Tracer
+	feedbackRepo        repository.FeedbackRepo
 	txMgr               repository.TxManager
 	embedClient         *llm.EmbeddingClient
 
@@ -56,8 +56,8 @@ type chatService struct {
 
 // NewChatService 创建聊天业务服务。
 //
-// 依赖全部显式声明：旧版本把 obs/obsRepo 塞在 extra ...interface{} 里再靠类型 switch
-// 分派，漏传或传错类型都不会报错，只会在运行时静默丢链路（s.obs == nil）。
+// 依赖全部显式声明：旧版本把 tracer/feedbackRepo 塞在 extra ...interface{} 里再靠类型 switch
+// 分派，漏传或传错类型都不会报错，只会在运行时静默丢链路。
 func NewChatService(
 	sessionRepo repository.ChatSessionRepo,
 	messageRepo repository.ChatMessageRepo,
@@ -70,8 +70,8 @@ func NewChatService(
 	agentEngine *agent.Engine,
 	contextSvc ContextServiceInterface,
 	prefSvc UserPreferenceService,
-	obs observability.Recorder,
-	obsRepo repository.ObservabilityRepo,
+	tracer *observability.Tracer,
+	feedbackRepo repository.FeedbackRepo,
 ) (ChatServiceInterface, error) {
 	defaultTopK := 10
 	if cfg := config.Get(); cfg != nil && cfg.RAG.TopK > 0 {
@@ -80,7 +80,7 @@ func NewChatService(
 	einoRetriever := rag.NewEinoRetrieverAdapter(retriever, defaultTopK)
 
 	// 快速模式的 Graph 在这里就编译好：装配错误只可能变成启动错误。
-	quickGraph, err := compileQuickGraph(einoRetriever, obs)
+	quickGraph, err := compileQuickGraph(einoRetriever)
 	if err != nil {
 		return nil, fmt.Errorf("编译快速检索链路失败: %w", err)
 	}
@@ -99,8 +99,8 @@ func NewChatService(
 		agentEngine:         agentEngine,
 		contextSvc:          contextSvc,
 		prefSvc:             prefSvc,
-		obs:                 obs,
-		obsRepo:             obsRepo,
+		tracer:              tracer,
+		feedbackRepo:        feedbackRepo,
 	}, nil
 }
 
@@ -123,51 +123,31 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 		searchMode = "quick"
 	}
 
-	var traceID string
-	if s.obs != nil {
-		ctx = s.obs.WithTraceRoot(ctx, observability.TraceRootAttrs{
-			UserID:     userID,
-			SessionID:  sessionID,
-			MessageID:  userMsgID,
-			RequestID:  requestIDFromCtx(ctx),
-			SearchMode: searchMode,
-			ModelID:    req.ModelID,
-			// 用户提问原文 → 三方平台 trace 级 input。脱敏由官方 MaskFunc 负责，
-			// 这里不做本地截断（见 TraceRootAttrs.Input 注释）。
-			Input: req.Content,
-		})
-		traceID = observability.TraceIDFromContext(ctx)
-	}
-
-	// 如果启用了可观测性 DB：先创建一个 agent_tasks 行，
-	//   task_id = trace_id，trace_id/session_id/user_id/search_mode/model_id 全初始化
-	//   这样即使中间任何环节崩了，前端仍能在详情页看到 task 基本信息 + 已写入的 agent_task_steps
-	if s.obsRepo != nil && traceID != "" {
-		_ = s.obsRepo.CreateAgentTask(ctx, &entity.AgentTask{
-			ID:         traceID,
-			TraceID:    traceID,
-			SessionID:  sessionID,
-			UserID:     userID,
-			ModelID:    req.ModelID,
-			SearchMode: searchMode,
-			StartedAt:  time.Now(),
-			Status:     "running",
-		})
-	}
+	// 本次请求的关联 id：先落进 ctx，Tracer.Start 会拿它当平台侧的 traceID，
+	// 于是「SSE / 消息 metadata 里的 id」与「平台上的 traceID」一定是同一个值。
+	//
+	// ⚠️ 这一步与「有没有接三方」无关：它是我们自己的关联标识，前端要靠它把助手消息
+	// 与平台上的链路对上，所以本地不配凭据时同样要生成（Tracer 为 nil 时 Start 原样返回 ctx）。
+	ctx, _ = traceid.Ensure(ctx)
+	ctx = s.tracer.Start(ctx, observability.TraceRootAttrs{
+		UserID:     userID,
+		SessionID:  sessionID,
+		MessageID:  userMsgID,
+		RequestID:  requestIDFromCtx(ctx),
+		SearchMode: searchMode,
+		ModelID:    req.ModelID,
+		// 用户提问原文 → 三方平台 trace 级 input。脱敏由官方 MaskFunc 负责，
+		// 这里不做本地截断（见 TraceRootAttrs.Input 注释）。
+		Input: req.Content,
+	})
 
 	eventCh := make(chan dto.StreamEvent, 100)
 	go func() {
 		defer close(eventCh)
-		status := "ok"
-		abortReason := ""
-		errorSummary := ""
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					logger.Errorf("SendMessage goroutine panic 已恢复: sessionID=%s, err=%v", sessionID, r)
-					status = "error"
-					errorSummary = fmt.Sprintf("panic: %v", r)
-					abortReason = "runtime_panic"
 				}
 			}()
 
@@ -190,14 +170,7 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 			}
 
 			getModeHandler(searchMode).Handle(ctx, s, userID, sessionID, userMsgID, req, eventCh)
-			if s.obs != nil {
-				s.obs.FlushTrace(ctx, userID, sessionID, userMsgID)
-			}
 		}()
-		// 结束 agent_tasks 行（无论成功/失败）
-		if s.obsRepo != nil && traceID != "" {
-			_ = s.obsRepo.MarkEnded(context.Background(), traceID, status, abortReason, errorSummary, 0, 0, 0.0, nil)
-		}
 	}()
 
 	return eventCh, nil
@@ -456,63 +429,6 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 		enhancedCtx.RetrievalBudget, toolsTokens, enhancedCtx.Summary != nil, maxCtx, enhancedCtx.UserCtx.Username,
 		enhancedCtx.Preference != nil)
 
-	// P1-⑨：分块 token 指标（Prometheus /metrics 直接聚合可看"到底是哪一块把窗口撑爆了"）
-	if s.obs != nil {
-		obs := s.obs
-		labels := map[string]string{
-			"model_id":   modelID,
-			"model_name": modelName,
-		}
-		// System prompt 骨架 + 摘要 + 记忆 + 用户上下文：快速/深度两模式都走 PromptBuilder.BuildSystem()
-		systemTokens := tokenutil.CountTokens(
-			NewPromptBuilder(PromptModeQuick, quickModeAgentSystemPrompt, enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx).
-				WithProfile(enhancedCtx.Profile).WithPreference(enhancedCtx.Preference).
-				BuildSystem(),
-			modelName,
-		)
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "system"}), float64(systemTokens))
-
-		// 摘要块单独打一个，方便看"摘要越长，爆窗口风险越高"趋势
-		summaryTokens := 0
-		if enhancedCtx.Summary != nil {
-			summaryTokens = tokenutil.CountTokens(enhancedCtx.Summary.Summary, modelName)
-		}
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "summary"}), float64(summaryTokens))
-
-		// 记忆块
-		memoryText := strings.Builder{}
-		for _, m := range enhancedCtx.Memories {
-			memoryText.WriteString(m.Content)
-			memoryText.WriteByte('\n')
-		}
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "memory"}), float64(tokenutil.CountTokens(memoryText.String(), modelName)))
-
-		// 用户画像+偏好（已经在 system 里，但单独打一个方便看 profile 模板是否膨胀）
-		profileText := strings.Builder{}
-		if enhancedCtx.Profile != nil {
-			profileText.WriteString(enhancedCtx.Profile.Department)
-			profileText.WriteByte(' ')
-			profileText.WriteString(enhancedCtx.Profile.Position)
-			profileText.WriteByte(' ')
-			profileText.WriteString(enhancedCtx.Profile.Expertise)
-		}
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "profile"}), float64(tokenutil.CountTokens(profileText.String(), modelName)))
-
-		// 历史块
-		historyText := strings.Builder{}
-		for _, m := range enhancedCtx.History {
-			historyText.WriteString(m.Content)
-			historyText.WriteByte('\n')
-		}
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "history"}), float64(tokenutil.CountTokens(historyText.String(), modelName)))
-
-		// 检索块预算（真实占用要等 buildDocsContextBlock 后才知道，这里先记录"给了多少预算"）
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "retrieval_budget"}), float64(enhancedCtx.RetrievalBudget))
-
-		// 工具定义块（深度模式才会有值）
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "tools"}), float64(toolsTokens))
-	}
-
 	logger.Infof("[Timing] initContext 总耗时: cost=%dms", time.Since(t0).Milliseconds())
 	return client, enhancedCtx, nil
 }
@@ -550,15 +466,6 @@ func (s *chatService) resolveClient(ctx context.Context, userID, modelID, modelT
 	default:
 		return nil, fmt.Errorf("不支持的模型类型: %s", modelType)
 	}
-
-	// 登记 modelID → 供应商：
-	// cfg.Provider 此时是「API 协议格式」（openai/anthropic），不是厂商名 ——
-	// 混用的后果是平台上所有模型都归到 openai，故先用 llm.ProviderLabel
-	// 从 base_url 还原真实服务方。
-	// eino 回调的 CallbackInput.Config 不带 provider，
-	// 而 gen_ai.provider.name 是三方追踪平台的必需属性，只能在这里（唯一解析模型配置的地方）登记一次，
-	// 之后由 observability 的 eino 回调按 model_id 反查。
-	observability.RegisterGenAIProvider(cfg.ModelID, llm.ProviderLabel(cfg.ModelID, cfg.Provider, cfg.BaseURL))
 
 	return llm.NewClientFromModelConfig(ctx, cfg)
 }

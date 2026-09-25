@@ -10,7 +10,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"solvify-agent/internal/model/dto/response"
-	"solvify-agent/internal/observability"
 	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
@@ -64,12 +63,7 @@ func (e *Engine) runWithRunner(
 	var fullAnswer strings.Builder
 	var interruptSent bool
 
-	// ── 迭代层：把本次 run 的事件流切成「轮次」，每轮落一行 agent_task_steps ──
-	// 这张表长期只有 1 行、而 agent_tasks 有 291 行的唯一原因就是没有生产者
-	// （结构体 / Recorder 方法 / 仓库方法 / 读侧接口全都现成，详见 agent_step_tracker.go）。
-	tracker := newAgentStepTracker(e.obs, observability.TraceIDFromContext(ctx))
 	// 用 defer 兜住最后一轮：正常结束、中断早返回、报错早返回三条出口都不必各自收尾。
-	defer tracker.finish()
 
 	for {
 		agentEvent, ok := iter.Next()
@@ -172,12 +166,11 @@ func (e *Engine) runWithRunner(
 		// ── 轮次边界：一次 Role=Assistant 输出就是一轮模型决策的开始 ──
 		// 放在流式/非流式分流**之前**，两条路径都能覆盖到。
 		if mv.Role == schema.Assistant {
-			tracker.beginRound()
 		}
 
 		// ── 流式：消费 MessageStream，逐 chunk 处理 ──
 		if mv.IsStreaming && mv.MessageStream != nil {
-			e.consumeMessageStream(ctx, mv, toolDescMap, &fullAnswer, eventCh, tracker)
+			e.consumeMessageStream(ctx, mv, toolDescMap, &fullAnswer, eventCh)
 			continue
 		}
 
@@ -187,7 +180,7 @@ func (e *Engine) runWithRunner(
 			continue
 		}
 
-		e.handleMessage(ctx, msg, mv.Role, mv.ToolName, toolDescMap, &fullAnswer, eventCh, tracker)
+		e.handleMessage(ctx, msg, mv.Role, mv.ToolName, toolDescMap, &fullAnswer, eventCh)
 	}
 
 	// 取一次来源快照：同一轮可能并行跑多个 knowledge_search，工具侧的收集结果由
@@ -243,7 +236,6 @@ func (e *Engine) consumeMessageStream(
 	toolDescMap map[string]string,
 	fullAnswer *strings.Builder,
 	eventCh chan<- Event,
-	tracker *agentStepTracker,
 ) {
 	stream := mv.MessageStream
 	defer stream.Close()
@@ -281,7 +273,6 @@ func (e *Engine) consumeMessageStream(
 				for _, tc := range msg.ToolCalls {
 					if tc.Function.Name != "" {
 						toolCallName = tc.Function.Name
-						tracker.noteToolCall(tc.Function.Name, tc.Function.Arguments)
 						eventch.Send(ctx, eventCh, Event{
 							Type:   EventToolCall,
 							Title:  "调用工具",
@@ -292,7 +283,6 @@ func (e *Engine) consumeMessageStream(
 					}
 				}
 				if strings.TrimSpace(msg.Content) != "" {
-					tracker.noteThinking(msg.Content)
 					eventch.Send(ctx, eventCh, Event{
 						Type:   EventThinking,
 						Title:  "深度推理中",
@@ -305,7 +295,6 @@ func (e *Engine) consumeMessageStream(
 
 			// 最终答案
 			if msg.Content != "" {
-				tracker.noteThinking(msg.Content)
 				fullAnswer.WriteString(msg.Content)
 				eventch.Send(ctx, eventCh, Event{Type: EventAnswer, Content: msg.Content})
 			}
@@ -314,7 +303,6 @@ func (e *Engine) consumeMessageStream(
 
 		// Role=Tool 完整结果
 		if mv.Role == schema.Tool && msg.Content != "" {
-			tracker.noteToolResult(msg.Content)
 			title, detail, _ := formatToolEnd(toolCallName, &einoTool.CallbackOutput{Response: msg.Content}, toolDescMap)
 			eventch.Send(ctx, eventCh, Event{
 				Type:       EventToolResult,
@@ -336,7 +324,6 @@ func (e *Engine) handleMessage(
 	toolDescMap map[string]string,
 	fullAnswer *strings.Builder,
 	eventCh chan<- Event,
-	tracker *agentStepTracker,
 ) {
 	switch role {
 	case schema.Assistant:
@@ -345,7 +332,6 @@ func (e *Engine) handleMessage(
 				if tc.Function.Name == "" {
 					continue
 				}
-				tracker.noteToolCall(tc.Function.Name, tc.Function.Arguments)
 				title, detail := formatToolStart(tc.Function.Name, extractQueryFromArgs(tc.Function.Arguments), nil, toolDescMap)
 				eventch.Send(ctx, eventCh, Event{
 					Type:   EventToolCall,
@@ -355,7 +341,6 @@ func (e *Engine) handleMessage(
 				})
 			}
 			if strings.TrimSpace(msg.Content) != "" {
-				tracker.noteThinking(msg.Content)
 				eventch.Send(ctx, eventCh, Event{
 					Type:   EventThinking,
 					Title:  "深度推理中",
@@ -366,14 +351,12 @@ func (e *Engine) handleMessage(
 			return
 		}
 		if msg.Content != "" {
-			tracker.noteThinking(msg.Content)
 			fullAnswer.WriteString(msg.Content)
 			eventch.Send(ctx, eventCh, Event{Type: EventAnswer, Content: msg.Content})
 		}
 
 	case schema.Tool:
 		if msg.Content != "" {
-			tracker.noteToolResult(msg.Content)
 			title, detail, _ := formatToolEnd(toolName, &einoTool.CallbackOutput{Response: msg.Content}, toolDescMap)
 			eventch.Send(ctx, eventCh, Event{
 				Type:       EventToolResult,

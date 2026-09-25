@@ -310,65 +310,6 @@ func EnsureMessageFeedbackSchema(db *gorm.DB) error {
 	return nil
 }
 
-// EnsureChatTraceSchema 补齐 chat_traces 表缺失的列与索引。
-//
-// 背景：chat_traces 由 SQL 脚本建表（scripts/init_knowledge_schema.sql），没有走 AutoMigrate；
-// entity.ChatTrace 后来新增了 otel_trace_id（双轨 traceID 对齐，见 internal/observability），
-// 已存在的库不会自动加列，而 GORM Create 会把该列写进 INSERT →
-// 报 column "otel_trace_id" does not exist，直接导致所有 trace 落库失败。
-// 这里在启动期幂等补齐，避免要求运维手工执行 DDL。
-func EnsureChatTraceSchema(db *gorm.DB) error {
-	var tableExists bool
-	if err := db.Raw(
-		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'chat_traces')`,
-	).Scan(&tableExists).Error; err != nil {
-		return fmt.Errorf("检查 chat_traces 表存在性失败: %w", err)
-	}
-	if !tableExists {
-		return nil
-	}
-
-	type colDef struct {
-		name string
-		ddl  string // ALTER TABLE ... ADD COLUMN ... 的列定义（不含列名）
-	}
-	// otel_trace_id：自研 traceID 对应的 OTel traceID，用于从本系统跳转到三方追踪平台
-	missingCols := []colDef{
-		{name: "otel_trace_id", ddl: "varchar(32)"},
-	}
-
-	for _, mc := range missingCols {
-		var exists bool
-		if err := db.Raw(
-			`SELECT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_name = 'chat_traces' AND column_name = ?
-			)`, mc.name,
-		).Scan(&exists).Error; err != nil {
-			logger.Warnf("[trace] 检查列 %s 失败: %v", mc.name, err)
-			continue
-		}
-		if exists {
-			continue
-		}
-		logger.Infof("[trace] 列 %s 不存在，正在 ALTER TABLE ADD COLUMN", mc.name)
-		if err := db.Exec(
-			fmt.Sprintf("ALTER TABLE chat_traces ADD COLUMN IF NOT EXISTS %s %s", mc.name, mc.ddl),
-		).Error; err != nil {
-			logger.Warnf("[trace] 自动补列 %s 失败: %v", mc.name, err)
-		} else {
-			logger.Infof("[trace] 列 %s 已补齐", mc.name)
-		}
-	}
-
-	// 索引：按 OTel traceID 反查对话（在三方平台看到异常 trace 后回查本系统的业务信息）
-	// 判据是「定义」而不是「名字」，免得与建库基线各建一份等价索引
-	if err := ensureIndex(db, chatTraceOTelIndexSpec); err != nil {
-		logger.Warnf("[trace] 索引 idx_chat_traces_otel_trace_id 检查失败: %v", err)
-	}
-	return nil
-}
-
 // vectorColumnHasNoDimension 判断 format_type 的输出是否是「无维度」的 vector 列。
 // pgvector 允许 vector 列不带维度修饰符，但这样的列无法建立 ivfflat/hnsw 索引，
 // PostgreSQL 会报 SQLSTATE 22023: column does not have dimensions。

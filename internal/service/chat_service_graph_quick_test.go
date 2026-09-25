@@ -189,7 +189,7 @@ func newQuickTestService(t *testing.T, upstreamURL string) (*chatService, *fakeC
 	sessRepo := &fakeSessionRepo{}
 	einoRetriever := rag.NewEinoRetrieverAdapter(emptyRetriever{}, 10)
 	// 与生产路径同源：Graph 在「构造期」编译一次，请求期复用（见 compileQuickGraph）。
-	quickGraph, err := compileQuickGraph(einoRetriever, nil)
+	quickGraph, err := compileQuickGraph(einoRetriever)
 	if err != nil {
 		t.Fatalf("编译快速检索链路失败: %v", err)
 	}

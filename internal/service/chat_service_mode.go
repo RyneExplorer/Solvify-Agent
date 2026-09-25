@@ -16,8 +16,8 @@ import (
 	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
-	"solvify-agent/internal/observability"
 	"solvify-agent/pkg/eventch"
+	"solvify-agent/pkg/traceid"
 	"solvify-agent/pkg/logger"
 )
 
@@ -26,36 +26,18 @@ import (
 // processDeepMode 深度思考模式处理流程
 // 使用 eino ReAct Agent，自动管理 Think → Act → Observe 循环
 func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, userMsgID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	var span *observability.Span
-	if s.obs != nil {
-		ctx, span = s.obs.StartSpan(ctx, "chat.deep", observability.ComponentAgentEngine, observability.Attrs{
-			"session_id":  sessionID,
-			"user_id":     userID,
-			"model_id":    req.ModelID,
-			"search_mode": "deep",
-		})
-	}
 	defer func() {
-		status := observability.SpanStatusOK
-		var errVal error
 		if r := recover(); r != nil {
-			status = observability.SpanStatusError
-			errVal = fmt.Errorf("panic: %v", r)
-			obsMarkError(ctx, s.obs, errVal)
 			eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "error", Detail: "处理过程中发生未预期错误", Done: true})
 		}
-		obsEndSpan(ctx, s.obs, span, status, errVal, nil)
 	}()
-	obsIncr(ctx, s.obs, "chat_deep_requests_total", map[string]string{"model_id": req.ModelID}, 1)
 
 	assistantMsgID := uuid.New().String()
-	obsAddRootAttrs(ctx, s.obs, observability.Attrs{"assistant_message_id": assistantMsgID})
 
 	// P0-④ 关键修复：在 initContext 之前，先把"将发送给模型的工具定义"预构建并按真 BPE 算总 token，
 	// 之后把 toolsTokens 传给 initContext，calculateContextBudgets 会先从 maxCtx 扣除，
 	// 避免工具定义悄悄吃掉历史/检索预算，导致最终请求超上下文长度。
 	sendProgressEvent(ctx, eventCh, "正在加载上下文...")
-	t0 := time.Now()
 	preToolsTokens := 0
 	deepCtx := ctx
 	if s.agentEngine != nil {
@@ -64,7 +46,6 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		client, cErr := s.resolveClient(ctx, userID, req.ModelID, req.ModelType)
 		if cErr == nil {
 			modelName := client.ModelName()
-			obsAddRootAttrs(ctx, s.obs, observability.Attrs{"model_name": modelName})
 			preToolsTokens, deepCtx, tErr = s.agentEngine.EstimateToolsTokens(ctx, userID, req.KnowledgeBaseIDs, modelName, req.MCPUserConfigIDs...)
 			if tErr != nil {
 				logger.Warnf("预估算工具定义 token 失败，按 0 处理: %v", tErr)
@@ -76,22 +57,11 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 
 	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content, preToolsTokens)
 	if err != nil {
-		obsIncr(ctx, s.obs, "chat_deep_errors_total", map[string]string{"stage": "init_ctx"}, 1)
-		obsMarkError(ctx, s.obs, err)
 		sendErrorEvent(ctx, eventCh, err, err.Error())
 		return
 	}
 	history := excludeByMessageID(enhancedCtx.History, userMsgID)
 	chatModel := client.ChatModel()
-	modelName := client.ModelName()
-	obsAddRootAttrs(ctx, s.obs, observability.Attrs{
-		"model_name":       modelName,
-		"tools_tokens":     fmt.Sprintf("%d", preToolsTokens),
-		"history_budget":   fmt.Sprintf("%d", enhancedCtx.HistoryBudget),
-		"retrieval_budget": fmt.Sprintf("%d", enhancedCtx.RetrievalBudget),
-	})
-	obsObserve(ctx, s.obs, "chat_deep_init_ctx_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t0).Seconds())
-
 	eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "start", MessageID: assistantMsgID})
 
 	sendProgressEvent(ctx, eventCh, "正在深度推理...")
@@ -140,11 +110,8 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 			}
 		}
 	}
-	t1 := time.Now()
 	agentEventCh, err := s.agentEngine.Execute(deepCtx, agentReq, chatModel)
 	if err != nil {
-		obsIncr(ctx, s.obs, "chat_deep_errors_total", map[string]string{"stage": "agent_execute"}, 1)
-		obsMarkError(ctx, s.obs, err)
 		logger.Errorf("Agent 执行失败, sessionID=%s: %v", sessionID, err)
 		llm.ReduceContextBudgetOnError(req.ModelID, err)
 		sendErrorEvent(ctx, eventCh, err, "Agent 执行失败")
@@ -154,8 +121,6 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	var fullContent string
 	var agentSources []dto.SourceInfo
 	var reasoningSteps []dto.ReasoningStep
-	toolCallsN := 0
-	toolErrorsN := 0
 	toolEventSeen := false
 	agentErrorSeen := false
 
@@ -211,13 +176,9 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		}
 		if agentEvent.Type == agent.EventToolCall {
 			toolEventSeen = true
-			toolCallsN++
 		}
 		if agentEvent.Type == agent.EventToolResult {
 			toolEventSeen = true
-			if agentEvent.Status == "error" {
-				toolErrorsN++
-			}
 		}
 		if agentEvent.Type == agent.EventError {
 			agentErrorSeen = true
@@ -241,29 +202,11 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		}
 		_ = s.sessionRepo.ClearPendingClarify(ctx, sessionID)
 	}
-	obsObserve(ctx, s.obs, "chat_deep_agent_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t1).Seconds())
-	obsIncr(ctx, s.obs, "agent_runs_total", map[string]string{
-		"error_seen": fmt.Sprintf("%t", agentErrorSeen),
-		"tool_calls": fmt.Sprintf("%d", toolCallsN),
-	}, 1)
-	obsAddRootAttrs(ctx, s.obs, observability.Attrs{
-		"tool_calls":      toolCallsN,
-		"tool_errors":     toolErrorsN,
-		"steps_n":         len(reasoningSteps),
-		"rag_docs_n":      len(agentSources),
-		"agent_error":     agentErrorSeen,
-		"tool_used":       toolEventSeen,
-		"assistant_chars": len([]rune(fullContent)),
-	})
-
 	if agentErrorSeen {
-		obsMarkError(ctx, s.obs, fmt.Errorf("agent 执行过程中发生错误"))
 		return
 	}
 	if !toolEventSeen && looksLikeExecutionPlan(fullContent) {
 		logger.Warnf("深度模式未产生工具调用，仅返回执行计划，sessionID=%s, content=%q", sessionID, fullContent)
-		obsIncr(ctx, s.obs, "agent_plan_without_tool_total", nil, 1)
-		obsMarkError(ctx, s.obs, fmt.Errorf("深度模式未产生工具调用"))
 		eventch.Send(ctx, eventCh, dto.StreamEvent{
 			Type:      "error",
 			Title:     "深度推理未完成",
@@ -281,7 +224,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	// 会直接穿过该分支，被下面的 emitDoneAndSave 当成功收尾：用户看到空白气泡，
 	// 且空 assistant 消息进入后续 history（部分厂商对空 content 直接 400），
 	// 一次空回答污染该会话之后每一轮。
-	if rejectEmptyAnswer(ctx, eventCh, s.obs, "deep", sessionID, req.ModelID, assistantMsgID,
+	if rejectEmptyAnswer(ctx, eventCh, "deep", sessionID, req.ModelID, assistantMsgID,
 		fullContent, fmt.Sprintf("sources=%d, steps=%d", len(agentSources), len(reasoningSteps))) {
 		return
 	}
@@ -291,8 +234,8 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	if len(reasoningSteps) > 0 {
 		metaMap["reasoning_steps"] = reasoningSteps
 	}
-	if s.obs != nil {
-		metaMap["trace_id"] = observability.TraceIDFromContext(ctx)
+	if traceID := traceid.FromContext(ctx); traceID != "" {
+		metaMap["trace_id"] = traceID
 	}
 	if len(metaMap) > 0 {
 		metadata = datatypes.JSON(mustMarshal(metaMap))
@@ -307,64 +250,41 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 // 关键修复（P1-① 幂等+重试）：
 //   - 旧实现 fire-and-forget，数据库抖动就把摘要写丢，下次 BuildContext 拿 existing=nil
 //     → 历史越跑越长真的爆窗口。现在 SummarizeSession / ExtractMemories 各自独立 3 次指数退避。
-//   - 任何一步失败都记 Obs 指标（summary_refresh_errors_total / memory_extract_errors_total），
-//     后面上线可从 /metrics 直接看成功率。
-//   - trace 连续性：后台任务用 DetachedTraceContext 派生上下文，而不是 context.Background()。
-//     前者只切断取消信号、保留 SpanContext，两个后台 span 因而仍挂在本次请求的同一条 trace 下；
-//     后者会让它们成为独立根 trace（三方平台上的「孤儿 trace」）。
 func (s *chatService) refreshContextAsync(ctx context.Context, userID, sessionID string, history []entity.ChatMessage, chatModel model.BaseChatModel) {
 	if s == nil || s.contextSvc == nil {
 		return
 	}
-	obs := s.obs
 
 	// 后台刷新要脱离请求 ctx（响应已返回，不能被请求取消掐断），
-	// 但不能连 trace 上下文一起丢 —— 直接用 context.Background() 会让
-	// ctx.summarize / ctx.extract_memories 失去父节点、各自成为独立根 trace，
-	// 在三方平台上表现为「孤儿 trace」且拿不到 user/session 归属。
-	// DetachedTraceContext 只搬 SpanContext、不搬取消信号，正好是这里要的语义。
-	// 在 goroutine 外先取一次，避免与父 span 结束产生竞态。
-	baseCtx := observability.DetachedTraceContext(ctx)
+	// 但也不该换成 context.Background()：那会把 ctx 上的值（含本次请求的关联 id）一起丢掉。
+	// context.WithoutCancel 只切断取消信号、保留全部值，正好是这里要的语义。
+	// 在 goroutine 外先取一次，避免与父 ctx 结束产生竞态。
+	baseCtx := context.WithoutCancel(ctx)
 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.Errorf("refreshContextAsync panic 已恢复: sessionID=%s, err=%v", sessionID, r)
-				obsIncr(context.Background(), obs, "ctx_refresh_panic_total", nil, 1)
 			}
 		}()
 
-		obsIncr(context.Background(), obs, "ctx_refresh_requests_total", nil, 1)
-
-		summaryOK := true
 		if err := runWithRetry(3, "ctx.summary", func(attempt int) error {
 			refreshCtx, cancel := context.WithTimeout(baseCtx, 45*time.Second+time.Duration(attempt*15)*time.Second)
 			defer cancel()
 			_, err := s.contextSvc.SummarizeSession(refreshCtx, sessionID, chatModel)
 			return err
 		}); err != nil {
-			summaryOK = false
 			logger.Warnf("生成会话摘要失败（已重试 3 次）: sessionID=%s, err=%v", sessionID, err)
-			obsIncr(context.Background(), obs, "ctx_summary_refresh_errors_total", nil, 1)
 		}
 
-		memoryOK := true
 		if err := runWithRetry(3, "ctx.memory", func(attempt int) error {
 			refreshCtx, cancel := context.WithTimeout(baseCtx, 45*time.Second+time.Duration(attempt*15)*time.Second)
 			defer cancel()
 			_, err := s.contextSvc.ExtractMemories(refreshCtx, userID, sessionID, history, chatModel)
 			return err
 		}); err != nil {
-			memoryOK = false
 			logger.Warnf("提取用户记忆失败（已重试 3 次）: sessionID=%s, err=%v", sessionID, err)
-			obsIncr(context.Background(), obs, "ctx_memory_extract_errors_total", nil, 1)
 		}
-
-		labels := map[string]string{
-			"summary_ok": ctxBoolLabel(summaryOK),
-			"memory_ok":  ctxBoolLabel(memoryOK),
-		}
-		obsIncr(context.Background(), obs, "ctx_refresh_runs_total", labels, 1)
 	}()
 }
 
@@ -393,13 +313,6 @@ func runWithRetry(maxAttempts int, tag string, fn func(attempt int) error) error
 	return lastErr
 }
 
-func ctxBoolLabel(b bool) string {
-	if b {
-		return "ok"
-	}
-	return "fail"
-}
-
 // ─── 共享辅助方法 ───────────────────────────────────────────
 
 // emitDoneAndSave 发送 done 事件并异步保存助手消息。
@@ -423,9 +336,9 @@ func (s *chatService) emitDoneAndSave(ctx context.Context, eventCh chan<- dto.St
 	// 把最终答复推给三方平台（未接三方 / 答复为空时内部直接返回）。
 	//
 	// 上报点选这里，是因为这是两个模式共用的【唯一一处成功收尾】—— 错误路径、中断路径
-	// 都不会走到这里，而它们本来也没有「最终答复」可报。放到 FlushTrace 里会变成
+	// 都不会走到这里，而它们本来也没有「最终答复」可报。放到别处会变成
 	// 「收尾时回头找答复」，那是第二个来源。
-	obsSetTraceOutput(ctx, s.obs, content)
+	s.tracer.End(ctx, content)
 
 	eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "done", MessageID: msgID, Content: content, Sources: sources, Done: true})
 	go func() {
@@ -440,14 +353,6 @@ func (s *chatService) emitDoneAndSave(ctx context.Context, eventCh chan<- dto.St
 			logger.Errorf("保存助手消息失败, messageID=%s: %v", msgID, err)
 		}
 	}()
-}
-
-// providerLabel 返回 LLM 客户端的可观测性标签
-func providerLabel(client *llm.OpenAIClient) string {
-	if client == nil {
-		return "unknown"
-	}
-	return "openai_compatible"
 }
 
 // excludeByMessageID 按消息 ID 剔除本轮刚落库的 user 消息

@@ -103,7 +103,7 @@ var _ einoModel.BaseChatModel = (*recordingChatModel)(nil)
 func TestQuickRewriteNode_CallsLLMOnlyForAnaphora(t *testing.T) {
 	ensureTestConfig(t)
 
-	runnable, err := compileQuickGraph(rag.NewEinoRetrieverAdapter(&barrierRetriever{}, 10), nil)
+	runnable, err := compileQuickGraph(rag.NewEinoRetrieverAdapter(&barrierRetriever{}, 10))
 	if err != nil {
 		t.Fatalf("compileQuickGraph 失败: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestQuickRewriteNode_CallsLLMOnlyForAnaphora(t *testing.T) {
 func TestQuickRewriteNode_FallsBackToOriginalQueryOnLLMFailure(t *testing.T) {
 	ensureTestConfig(t)
 
-	runnable, err := compileQuickGraph(rag.NewEinoRetrieverAdapter(&barrierRetriever{}, 10), nil)
+	runnable, err := compileQuickGraph(rag.NewEinoRetrieverAdapter(&barrierRetriever{}, 10))
 	if err != nil {
 		t.Fatalf("compileQuickGraph 失败: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestQuickClarifyBranch_ShortCircuitsRetrieveAndGenerate(t *testing.T) {
 
 	const clarifyQ = "你是要导出哪些数据？是单个知识库还是全部知识库？"
 	forbid := &forbidRetriever{t: t}
-	runnable, err := compileQuickGraph(rag.NewEinoRetrieverAdapter(forbid, 10), nil)
+	runnable, err := compileQuickGraph(rag.NewEinoRetrieverAdapter(forbid, 10))
 	if err != nil {
 		t.Fatalf("compileQuickGraph 失败: %v", err)
 	}
@@ -535,4 +535,19 @@ func TestDoRewriteReturnsSingleOutcome(t *testing.T) {
 		t.Errorf("doRewriteWithLLM 的返回值 = %v，期望恰好一个 *rewriteResult。\n"+
 			"多返回值 + 平行字段要求调用方成组搬运；请把新产出加进 rewriteResult。", got)
 	}
+}
+
+// findLastMessageByRole 找 msgs 中指定 role 的最后一条消息。
+//
+// 原先住在生产文件 chat_service_graph_quick.go 里，唯一用途是给「自研 span 树」的
+// prompt 属性取值；那条链路随可观测模块一起删除后，只剩本文件用它断言
+// 「改写结果确实进了 prompt」（而不只是被写进了某个字段）。
+// 于是把它挪到测试里，避免生产代码里留一个只有测试用的 helper。
+func findLastMessageByRole(msgs []*schema.Message, role string) *schema.Message {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i] != nil && string(msgs[i].Role) == role {
+			return msgs[i]
+		}
+	}
+	return nil
 }

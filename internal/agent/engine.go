@@ -7,7 +7,6 @@ import (
 	"github.com/cloudwego/eino/adk"
 	einoTool "github.com/cloudwego/eino/components/tool"
 
-	"solvify-agent/internal/observability"
 	"solvify-agent/internal/repository"
 	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/config"
@@ -38,7 +37,6 @@ type Engine struct {
 	internalTools []internalToolRegistryEntry
 	toolFactory   tool.ToolFactory
 	cfg           config.AgentConfig
-	obs           observability.Recorder
 	checkpointRepo repository.AgentCheckpointRepo
 }
 
@@ -46,16 +44,11 @@ type Engine struct {
 func NewEngine(
 	toolFactory tool.ToolFactory,
 	cfg config.AgentConfig,
-	obs ...observability.Recorder,
 ) *Engine {
-	e := &Engine{
+	return &Engine{
 		toolFactory: toolFactory,
 		cfg:         cfg,
 	}
-	if len(obs) > 0 && obs[0] != nil {
-		e.obs = obs[0]
-	}
-	return e
 }
 
 // RegisterInternal 注册一个内置工具。
@@ -68,10 +61,6 @@ func (e *Engine) RegisterInternal(name string, order int, dangerous bool, build 
 		Dangerous: dangerous,
 		Build:     build,
 	})
-}
-
-func (e *Engine) WithObservability(obs observability.Recorder) {
-	e.obs = obs
 }
 
 func (e *Engine) WithCheckpointRepo(repo repository.AgentCheckpointRepo) {

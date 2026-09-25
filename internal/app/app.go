@@ -12,8 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	langfuse "github.com/cloudwego/eino-ext/callbacks/langfuse/v2"
-	"github.com/cloudwego/eino/callbacks"
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -45,22 +43,14 @@ type App struct {
 	cfg          *config.Config
 	postgresqlDB *gorm.DB
 	redis        *redis.Client
-	obsRecorder  observability.Recorder
+	// tracer 是「eino → Langfuse」这条三方链路的唯一入口，由 App 负责生命周期管理。
+	// 未配凭据时是 nil，调用点（chatService）靠 nil 接收者安全空转。
+	tracer       *observability.Tracer
 	router       *api.Router
 	server       *http.Server
 
-	// 阶段 1.4：OTel 资源，由 App 负责生命周期管理
-	// （Prometheus Registry 不在这里：纯内存对象、没有待关闭的资源，
-	//   在 initDependencies 里建好后直接传给 Router 即可，不必再存一层。）
-	tracerShutdown func(context.Context) error
-
 	// checkpoint 过期清理后台任务的取消函数，由 App 负责生命周期管理
 	checkpointCleanupCancel context.CancelFunc
-
-	// langfuseHandler 是官方 v2 Langfuse callback，由 App 负责生命周期管理。
-	// v1 只给了一个裸 flusher；v2 换成 handler 自带 Flush/Shutdown，且【必须 Shutdown】
-	// 才会关掉它自己创建的 TracerProvider（否则退出前最后一批 span 会留在队列里丢掉）。
-	langfuseHandler *langfuse.CallbackHandler
 
 	// MCP 客户端连接池，由 App 负责生命周期管理
 	mcpClientPool *providers.MCPClientPool
@@ -173,12 +163,6 @@ func (a *App) initDatabase() error {
 		logger.Warnf("tool_providers schema 补齐异常（不阻塞启动）: %v", err)
 	}
 
-	// chat_traces 表 schema 补齐（双轨 traceID 对齐新增 otel_trace_id 列 + 索引，
-	// 缺列会让 GORM INSERT 报 column does not exist，导致所有 trace 落库失败）
-	if err := database.EnsureChatTraceSchema(postgresqlDB); err != nil {
-		logger.Warnf("chat_traces schema 补齐异常（不阻塞启动）: %v", err)
-	}
-
 	// Redis 缓存连接
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
 	if err != nil {
@@ -208,9 +192,6 @@ func (a *App) initEmbedding() rag.EmbeddingFunc {
 	if err != nil {
 		logger.Fatal("初始化 Embedding 客户端失败", zap.Error(err))
 	}
-	// 同 chat 的 LLM：登记 modelID → 供应商，供 eino 回调补 gen_ai.provider.name
-	observability.RegisterGenAIProvider(a.cfg.Embedding.Model, a.cfg.Embedding.Provider)
-
 	redisCache := cache.New(a.redis, "emb:", embeddingRedisTTL)
 	var inMem sync.Map // map[string][]float64
 	var sf singleflight.Group
@@ -325,9 +306,6 @@ func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo rep
 
 	// ── 初始化 Agent Engine ──
 	agentEngine := agent.NewEngine(toolFactory, a.cfg.Agent)
-	if a.obsRecorder != nil {
-		agentEngine.WithObservability(a.obsRecorder)
-	}
 
 	// ── 注册内置工具（按 Order 升序出现在 prompt "可用工具" 段） ──
 	agentEngine.RegisterInternal("knowledge_search", 1, false,
@@ -380,50 +358,8 @@ func (a *App) initDependencies() error {
 	storageQuotaRepo := repository.NewStorageQuotaRepository(a.postgresqlDB)
 	userRepo := repository.NewUserRepository(a.postgresqlDB)
 	userPreferenceRepo := repository.NewUserPreferenceRepository(a.postgresqlDB)
-	obsRepo := repository.NewObservabilityRepository(a.postgresqlDB)
+	feedbackRepo := repository.NewFeedbackRepository(a.postgresqlDB)
 	agentCheckpointRepo := repository.NewAgentCheckpointRepository(a.postgresqlDB)
-
-	// 阶段 1.4：可观测性初始化（OTel Tracer + Prometheus Registry + Recorder）
-	//
-	// 顺序很重要：必须先 InitTracerProvider / InitPrometheusRegistry，再 NewRecorder，
-	// 否则 NewRecorder 拿到的 GlobalMetrics() 是兜底空 metrics，/metrics 路由不会暴露真实指标。
-	obsCfg := a.cfg.Observability
-	ctx := context.Background()
-	tp, tracerShutdown, err := observability.InitTracerProvider(ctx, obsCfg)
-	if err != nil {
-		logger.Warnf("OTel TracerProvider 初始化失败，回退 noop: %v", err)
-	} else {
-		a.tracerShutdown = tracerShutdown
-		if tp != nil {
-			logger.Infof("OTel TracerProvider 已初始化: exporter=%s sample_rate=%.2f", obsCfg.OTelExporter, obsCfg.OTelSamplingRate)
-		}
-	}
-	promReg := observability.InitPrometheusRegistry(obsCfg)
-	logger.Infof("Prometheus Registry 已初始化")
-
-	// 官方 eino → Langfuse callback 必须先于 Recorder 建好：Recorder 要拿到它，
-	// 才能在「请求开始」时开 trace、在「成功收尾」时把 trace 级 output（助手最终答复）推给平台。
-	//
-	// 与自研 handler 的分工（两条轨不重叠）：
-	//   官方 handler → eino 组件上报到 Langfuse（trace / span / generation，走 OTLP）
-	//   自研 handler → 本地 span 树 + Prometheus 指标 + chat_traces 落库
-	// 不会重复上报：自研那条 OTLP 出口已随本次改造一并移除（见 config.Validate 对
-	// otel_exporter 的取值校验）。未配凭据时返回 nil，Recorder 侧判空跳过。
-	lfCallback := a.initLangfuseHandler(ctx, obsCfg)
-
-	// 阶段三：初始化可观测性 Recorder（DB Sink + 批量日志 Sink + 采样器 + PII）
-	// NewRecorder 内部调 GlobalMetrics() / GlobalTracer()，已经在上一步被赋值。
-	// lfCallback 可能是 nil，WithLangfuseCallback 内部会忽略，这里不必分支。
-	recOpts := []observability.RecorderOption{observability.WithLangfuseCallback(lfCallback)}
-	if !obsCfg.Enabled {
-		a.obsRecorder = observability.NewRecorder(obsCfg, recOpts...)
-	} else {
-		a.obsRecorder = observability.NewRecorderWithDBSink(obsCfg, obsRepo, recOpts...)
-	}
-	logger.Infof("可观测性模块初始化: enabled=%v sample_rate=%.2f db_sink=%v otel_exporter=%s", obsCfg.Enabled, obsCfg.SamplingRate, obsCfg.TraceTableEnabled, obsCfg.OTelExporter)
-	// 注册 eino 全局 callback：所有走 eino 标准接口的组件（ChatModel / Retriever / Tool / Embedding / Agent / Graph）
-	// 会自动打 span 和通用指标，不用再在业务代码里手动成对 StartSpan/EndSpan。
-	observability.RegisterGlobalEinoCallback(a.obsRecorder)
 
 	// 模型配置缓存（10 分钟 TTL）
 	modelCache := cache.New(a.redis, "model:", 10*time.Minute)
@@ -525,8 +461,18 @@ func (a *App) initDependencies() error {
 	dingtalkSvc := service.NewDingTalkService(a.cfg.DingTalk, dingtalkBindingRepo, dingtalkStateCache, dingtalkClient)
 	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncItemRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, textExtractor, dingtalkClient, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
-	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo, a.obsRecorder)
-	chatSvc, err := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.obsRecorder, obsRepo)
+	// 三方链路：只有「eino → Langfuse」这一条，没有自研 span 树 / 落库 / 指标出口。
+	// NewTracer 在凭据不全时返回 (nil, nil)，调用点靠 nil 接收者空转，不必各自判分支。
+	obsCfg := a.cfg.Observability
+	tracer, tErr := observability.NewTracer(context.Background(), obsCfg)
+	if tErr != nil {
+		logger.Errorf("Langfuse 初始化失败，三方链路本次不生效: %v", tErr)
+	} else {
+		a.tracer = tracer
+	}
+
+	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo)
+	chatSvc, err := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.tracer, feedbackRepo)
 	if err != nil {
 		return fmt.Errorf("初始化聊天服务失败: %w", err)
 	}
@@ -536,7 +482,6 @@ func (a *App) initDependencies() error {
 	searchSvc := service.NewSearchService(chatMessageRepo, chunkRepo)
 
 	// 路由
-	// 阶段 1.4：把 Prometheus Registry 注入 Router，/metrics 路由直接挂 promhttp.HandlerFor(promReg)
 	a.router = api.NewRouter(
 		userSvc,
 		adminUserSvc,
@@ -555,7 +500,6 @@ func (a *App) initDependencies() error {
 		toolProviderService,
 		userToolConfigService,
 		prefSvc,
-		promReg, // /metrics 走 promhttp.HandlerFor(promReg)；形参有类型，漏传/传错编译不过
 	)
 
 	return nil
@@ -598,10 +542,6 @@ func (a *App) initServer() {
 	engine.Use(middleware.Recovery())
 	engine.Use(middleware.CORS())
 	engine.Use(middleware.Logger())
-	if a.obsRecorder != nil {
-		// 阶段三：可观测性链路中间件（生成 request_id、记录 HTTP 指标、panic 恢复）
-		engine.Use(observability.NewTraceMiddleware(a.obsRecorder).Handler())
-	}
 	a.router.Setup(engine)
 
 	a.server = &http.Server{
@@ -609,72 +549,6 @@ func (a *App) initServer() {
 		Handler:           engine,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-}
-
-// gracefulShutdown 监听退出信号并优雅关闭服务
-// initLangfuseHandler 装配官方 eino → Langfuse callback（v2）。
-//
-// ⚠️ 这里是 v2 与 v1 最大的差别：官方 v2 明确弃用了 v1 的
-// NewLangfuseHandler / SetTrace / UpdateTraceOutput，改用 NewHandler / StartTrace / EndTrace；
-// 因为 v2 换成【标准 OTLP/HTTP】直发平台的 /api/public/otel/v1/traces，
-// 不再走已弃用的 /api/public/ingestion（平台公告该接口 2026-11-16 关停，此后只收 score-create）。
-//
-// 未配置完整（host / public_key / secret_key 任一为空）时静默跳过：本地开发默认不配，
-// 不能因此阻断启动。
-//
-// 返回的 LangfuseCallback 供 Recorder 在请求开始处开 trace（WithTraceRoot）、
-// 在成功收尾处补 trace 级 output（SetTraceOutput）；未配置凭据时返回【nil 接口】
-// （不是 (*CallbackHandler)(nil) —— 那样会绕过判空）。
-func (a *App) initLangfuseHandler(ctx context.Context, cfg config.ObservabilityConfig) observability.LangfuseCallback {
-	// 判据只认 config.LangfuseEnabled() —— recorder.WithTraceRoot 用的是同一个，
-	// 两处若各写一份，就会出现「handler 没注册但每条请求都在开 trace」的错位。
-	if !cfg.LangfuseEnabled() {
-		logger.Infof("Langfuse 未配置完整（host/public_key/secret_key 有空缺），跳过官方 callback")
-		return nil
-	}
-	// 脱敏用项目既有的 PII 规则，但【不截断】：MaskPII 与 SanitizeString 的差别见其注释。
-	// v2 的 MaskFunc 除 input/output 外也覆盖 trace metadata（trace.go:231），
-	// 但「能被脱敏」不等于「可以随便放」—— metadata 里仍然只放 ID 类字段。
-	sanitizer := observability.NewPIISanitizer(cfg.PIIContentMaxChars, cfg.PIIMaskSecret)
-	handler, err := langfuse.NewHandler(ctx, &langfuse.Config{
-		Host:        cfg.LangfuseHost,
-		PublicKey:   cfg.LangfusePublicKey,
-		SecretKey:   cfg.LangfuseSecretKey,
-		ServiceName: cfg.OTelServiceName,
-		// Name 是「没传 WithName 时」的兜底 trace 名；正常路径由 WithTraceRoot 显式下发。
-		Name:       cfg.OTelServiceName,
-		Release:    cfg.LangfuseRelease,
-		Tags:       cfg.LangfuseTags,
-		Timeout:    time.Duration(cfg.LangfuseTimeoutMs) * time.Millisecond,
-		SampleRate: cfg.LangfuseSampleRate,
-
-		MaxQueueSize:       cfg.LangfuseMaxQueueSize,
-		MaxExportBatchSize: cfg.LangfuseMaxExportBatchSize,
-		BatchTimeout:       time.Duration(cfg.LangfuseBatchTimeoutMs) * time.Millisecond,
-
-		MaxSpanAttributeBytes: cfg.LangfuseMaxSpanAttributeBytes,
-		// ⚠️ 刻意【不传】TracerProvider：官方只保证「callback 自己建的 provider」才认
-		// WithID 钉过来的 traceID（见其 Config 注释）。传了自研 provider 会让双轨 traceID 对不上。
-		// 同理不传 HTTPClient / SpanExporter，全走官方默认（gzip + OTLP/HTTP）。
-		MaskFunc: sanitizer.MaskPII,
-	})
-	if err != nil {
-		// 配了凭据却建不起来（host 写错、代理/证书问题等）→ 响亮报错但【不阻断启动】：
-		// 可观测性不该让业务起不来，但也不能静默 —— 静默正是 v1 时代最大的坑。
-		logger.Errorf("Langfuse 官方 callback 初始化失败，三方链路本次不生效: %v", err)
-		return nil
-	}
-	// 官方 README 的用法就是注册成 eino 全局 handler。它与自研 RegisterGlobalEinoCallback
-	// 并列存在、各画各的 span：官方那条进平台，自研那条进本地 span 树 + Prometheus + 落库。
-	callbacks.AppendGlobalHandlers(handler)
-	a.langfuseHandler = handler
-	logger.Infof("Langfuse 官方 callback 已注册（v2 / OTLP）: host=%s batch=%d/%dms sample_rate=%.2f",
-		cfg.LangfuseHost, cfg.LangfuseMaxExportBatchSize, cfg.LangfuseBatchTimeoutMs, cfg.LangfuseSampleRate)
-	// ⚠️ 与 v1 相比的可见性差别（值得写下来）：v1 的 ACL 对所有 4xx（含 401 凭证错）
-	// 【既不重试也不打日志】，直接当成功把整批事件丢掉；v2 走标准 OTLP exporter ——
-	// 4xx 会被 exporter 当失败重试，最终失败时打日志；callback 还会按 DropLogInterval
-	// 汇总「丢了哪些 span」。所以 v2 下凭证配错的可见性明显更好，但仍建议以平台侧是否收到为准。
-	return handler
 }
 
 func (a *App) gracefulShutdown() {
@@ -692,30 +566,13 @@ func (a *App) gracefulShutdown() {
 		logger.Fatal("HTTP 服务关闭失败", zap.Error(err))
 	}
 
-	// 阶段三：优雅关闭可观测性 recorder（刷新批量 Sink）
-	if a.obsRecorder != nil {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if err := a.obsRecorder.Shutdown(shutdownCtx); err != nil {
-			logger.Errorf("可观测性 recorder 关闭失败: %v", err)
-		}
-	}
-	// 阶段 1.4：优雅关闭 OTel TracerProvider（flush 还在 batcher 里的 span 到 exporter）
-	if a.tracerShutdown != nil {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if err := a.tracerShutdown(shutdownCtx); err != nil {
-			logger.Errorf("OTel TracerProvider 关闭失败: %v", err)
-		}
-	}
-
-	// 官方 Langfuse callback：v2 的 handler 自己持有 OTLP 批处理器与 TracerProvider，
+	// 三方链路关闭：官方 v2 handler 自己持有 OTLP 批处理器与 TracerProvider，
 	// 必须 Shutdown 才会把队列里剩余的 span 导出并释放 provider。
 	// 只 Flush 不 Shutdown 会在退出前丢掉最后一批（最多一个 BatchTimeout 窗口的 span）。
-	if a.langfuseHandler != nil {
+	if a.tracer != nil {
 		lfCtx, lfCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := a.langfuseHandler.Shutdown(lfCtx); err != nil {
-			logger.Errorf("Langfuse callback 关闭失败: %v", err)
+		if err := a.tracer.Close(lfCtx); err != nil {
+			logger.Errorf("Langfuse 关闭失败: %v", err)
 		}
 		lfCancel()
 	}

@@ -303,7 +303,7 @@ func TestIndexSpecsDoNotDivergeFromBaseline(t *testing.T) {
 		byName[b.Name] = b
 	}
 
-	specs := []indexSpec{pgVectorIndexSpec, keywordsGINIndexSpec, chatTraceOTelIndexSpec}
+	specs := []indexSpec{pgVectorIndexSpec, keywordsGINIndexSpec}
 	specs = append(specs, contextIndexSpecs...)
 
 	for _, spec := range specs {

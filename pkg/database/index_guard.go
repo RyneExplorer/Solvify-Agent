@@ -80,15 +80,6 @@ var (
 			DDL:     `CREATE INDEX IF NOT EXISTS idx_user_memories_user_active ON user_memories (user_id, is_active, updated_at DESC)`,
 		},
 	}
-
-	// 用 OTel traceID 反查对话（在三方平台看到异常 trace 后回查本系统业务信息）
-	chatTraceOTelIndexSpec = indexSpec{
-		Table:   "chat_traces",
-		Name:    "idx_chat_traces_otel_trace_id",
-		Method:  "btree",
-		Columns: []string{"otel_trace_id"},
-		DDL:     `CREATE INDEX IF NOT EXISTS idx_chat_traces_otel_trace_id ON chat_traces (otel_trace_id)`,
-	}
 )
 
 // indexSpec 声明「代码期望库里存在的一个索引」。

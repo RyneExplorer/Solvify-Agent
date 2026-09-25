@@ -43,10 +43,6 @@ var readVerbPrefixes = []string{
 // 判据：这些写之间**没有「一条成立就必须另一条也成立」的约束**。
 // 反过来，只要存在「A 写了 B 就必须写」的关系，就必须进 InTx，不能登记在这里。
 var multiRepoWriteAllowed = map[string]string{
-	"chat_service.go:chatService.SendMessage": "obsRepo 是链路/任务台账（可观测），sessionRepo.ClearPendingClarify 是会话的澄清状态清理。" +
-		"两者互相独立：可观测写入失败不该回滚业务状态，反过来把可观测塞进业务事务还会" +
-		"把它的成功与否绑上业务回滚（静默丢链路）并拉长事务持有时长。各自独立提交是正确的。",
-
 	"document_service.go:documentService.runProcessJob": "documentJobRepo.MarkRunning 与 documentRepo.MarkProcessFailed 是**补偿**关系：" +
 		"后者只在前者失败之后才执行。若强行放进同一事务，MarkProcessFailed 会被一起回滚，" +
 		"恰好丢掉我们最需要的失败记录 —— 这类「失败后补偿」不能同事务。",

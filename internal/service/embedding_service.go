@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"solvify-agent/internal/observability"
 	"solvify-agent/pkg/config"
 	apperrors "solvify-agent/pkg/errors"
 )
@@ -32,9 +31,6 @@ func NewEmbeddingService(cfg config.EmbeddingConfig) EmbeddingServiceInterface {
 		cfg: cfg,
 		httpClient: &http.Client{
 			Timeout: defaultEmbeddingTimeoutSeconds * time.Second,
-			// 出站追踪：向量化通常是最耗时的外部依赖之一，耗时与失败原因需要能在
-			// 三方平台按 HTTP 维度看到，而不是只看到上层一个总的 embedding span。
-			Transport: observability.HTTPTransport(nil),
 		},
 	}
 }
