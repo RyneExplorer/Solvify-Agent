@@ -28,7 +28,7 @@ func (r *documentVersionRepository) ListByDocument(ctx context.Context, userID, 
 	var items []entity.DocumentVersion
 	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND document_id = ?", userID, documentID).
-		Order("version_no DESC").
+		Order("version_no DESC, id").
 		Find(&items).Error
 	return items, err
 }
@@ -50,7 +50,7 @@ func (r *documentVersionRepository) FindLatestByDocument(ctx context.Context, us
 	var version entity.DocumentVersion
 	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND document_id = ?", userID, documentID).
-		Order("version_no DESC").
+		Order("version_no DESC, id").
 		First(&version).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return entity.DocumentVersion{}, false, nil
@@ -89,7 +89,7 @@ func (r *documentVersionRepository) nextVersionNo(tx *gorm.DB, userID, documentI
 	var latest entity.DocumentVersion
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("user_id = ? AND document_id = ?", userID, documentID).
-		Order("version_no DESC").
+		Order("version_no DESC, id").
 		First(&latest).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return 1, nil

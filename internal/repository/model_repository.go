@@ -38,7 +38,7 @@ func (r *modelRepository) List(ctx context.Context) ([]entity.Model, error) {
 	var models []entity.Model
 	err := dbFor(ctx, r.db).
 		Where("is_enabled = ?", true).
-		Order("name ASC").
+		Order("name ASC, id").
 		Find(&models).Error
 	return models, err
 }

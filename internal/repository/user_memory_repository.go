@@ -26,7 +26,7 @@ func (r *userMemoryRepository) ListActive(ctx context.Context, userID string, li
 	var memories []entity.UserMemory
 	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND is_active = ?", userID, true).
-		Order("updated_at DESC").
+		Order("updated_at DESC, id").
 		Limit(limit).
 		Find(&memories).Error
 	return memories, err

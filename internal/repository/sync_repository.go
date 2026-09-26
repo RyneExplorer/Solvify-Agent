@@ -41,7 +41,7 @@ func (r *syncSourceRepository) List(ctx context.Context, userID string, deletedS
 	var items []entity.SyncSource
 	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND status <> ?", userID, deletedStatus).
-		Order("created_at DESC").
+		Order("created_at DESC, id").
 		Find(&items).Error
 	return items, err
 }
@@ -150,7 +150,7 @@ func (r *syncJobRepository) ListBySource(ctx context.Context, userID, sourceID s
 	var items []entity.SyncJob
 	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND sync_source_id = ?", userID, sourceID).
-		Order("created_at DESC").
+		Order("created_at DESC, id").
 		Find(&items).Error
 	return items, err
 }
@@ -224,7 +224,7 @@ func (r *syncItemRepository) ListBySource(ctx context.Context, userID, sourceID 
 	var items []entity.SyncItem
 	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND sync_source_id = ?", userID, sourceID).
-		Order("item_type ASC, name ASC").
+		Order("item_type ASC, name ASC, id").
 		Find(&items).Error
 	return items, err
 }
@@ -438,7 +438,7 @@ func (r *syncedDocumentRepository) nextVersionNo(tx *gorm.DB, userID, documentID
 	var latest entity.DocumentVersion
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("user_id = ? AND document_id = ?", userID, documentID).
-		Order("version_no DESC").
+		Order("version_no DESC, id").
 		First(&latest).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return 1, nil

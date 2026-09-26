@@ -144,6 +144,12 @@ func (r *ExpandRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 // 而命中文档必然已通过入口的可见性过滤，但**留一条不设边界的 chunk 出口就是在复制
 // 这次缺陷的成因模式**（“这条路径忘了设边界，因为没人知道它也要”）——
 // 可见性是每个「把 chunk 内容交出去」的出口的共同约束，不是某两条 SQL 的局部修补。
+//
+// ⚠️ `, dc.id` 同样是**全序**兜底：本查询按 (knowledge_base_id, document_id) 限定、
+// 按 chunk_index 排序，而表上的唯一索引是 (version_id, chunk_index) ——
+// 一旦同一文档出现第二个版本，chunk_index 就会重名、排序退化成非全序。
+// 今天库里还没有多版本文档（实测 0 条），但这不是结构保证。
+// 守卫：TestAllChunkReadSQLsAreTotallyOrdered。
 var expandAdjacentChunksSQL = `
 		SELECT dc.id, dc.chunk_index, dc.content
 		FROM document_chunks dc
@@ -151,7 +157,7 @@ var expandAdjacentChunksSQL = `
 			AND dc.document_id = ?
 			AND dc.chunk_index >= ?
 			AND dc.chunk_index <= ?` + retrievedChunkVisibilitySQL + `
-		ORDER BY dc.chunk_index`
+		ORDER BY dc.chunk_index, dc.id`
 
 // expandDocumentChunks 扩展单个文档的相邻分块
 func (r *ExpandRetriever) expandDocumentChunks(ctx context.Context, knowledgeBaseID, documentID string, docs []Document) ([]Document, error) {

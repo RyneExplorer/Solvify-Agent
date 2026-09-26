@@ -133,7 +133,7 @@ func (r *userRepository) AdminList(offset, limit int, filter *UserListFilter) ([
 		return nil, 0, err
 	}
 
-	if err := q.Order("created_at DESC").Offset(offset).Limit(limit).Find(&users).Error; err != nil {
+	if err := q.Order("created_at DESC, id").Offset(offset).Limit(limit).Find(&users).Error; err != nil {
 		return nil, 0, err
 	}
 

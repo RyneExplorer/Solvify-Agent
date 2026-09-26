@@ -274,6 +274,11 @@ func (a *App) initRetriever(embeddingFunc rag.EmbeddingFunc) rag.Retriever {
 		VectorWeight:   a.cfg.RAG.VectorWeight,
 		KeywordWeight:  a.cfg.RAG.KeywordWeight,
 		RRFK:           a.cfg.RAG.RRFK,
+		// 这两个字段曾经漏传：配置里有、构造器也认，但这个唯一的装配点不传，
+		// 于是线上恒为硬编码默认值 —— 「配了等于没配」，只有读源码才发现。
+		// ⚠️ HybridRetrieverConfig 每新增一个来自 RAGConfig 的字段，这里必须同步。
+		KeywordScoreThreshold: a.cfg.RAG.KeywordScoreThreshold,
+		CandidateMultiplier:   a.cfg.RAG.CandidateMultiplier,
 	})
 
 	// 可选：Rerank 重排序装饰器

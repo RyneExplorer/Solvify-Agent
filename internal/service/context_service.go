@@ -528,9 +528,13 @@ func mergeMessages(a, b []entity.ChatMessage) []entity.ChatMessage {
 	add(a)
 	add(b)
 
-	// 按创建时间排序
+	// 按创建时间排序。全序：CreatedAt 只到微秒且同批写入常见同值，
+	// 同值时按 ID 裁决，否则拼接给模型的历史消息顺序由排序算法决定。
 	sort.Slice(result, func(i, j int) bool {
-		return result[i].CreatedAt.Before(result[j].CreatedAt)
+		if !result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].CreatedAt.Before(result[j].CreatedAt)
+		}
+		return result[i].ID < result[j].ID
 	})
 
 	return result

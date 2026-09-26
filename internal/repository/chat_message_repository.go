@@ -39,7 +39,7 @@ func (r *chatMessageRepository) FindBySessionID(ctx context.Context, sessionID s
 	var messages []entity.ChatMessage
 	err := dbFor(ctx, r.db).
 		Where("session_id = ?", sessionID).
-		Order("created_at ASC").
+		Order("created_at ASC, id").
 		Find(&messages).Error
 	return messages, err
 }
@@ -52,7 +52,7 @@ func (r *chatMessageRepository) FindBySessionIDForContext(ctx context.Context, s
 	err := dbFor(ctx, r.db).
 		Select("id, session_id, role, content, created_at").
 		Where("session_id = ?", sessionID).
-		Order("created_at ASC").
+		Order("created_at ASC, id").
 		Find(&messages).Error
 	return messages, err
 }
@@ -62,7 +62,7 @@ func (r *chatMessageRepository) FindRecent(ctx context.Context, sessionID string
 	var messages []entity.ChatMessage
 	err := dbFor(ctx, r.db).
 		Where("session_id = ?", sessionID).
-		Order("created_at DESC").
+		Order("created_at DESC, id").
 		Limit(limit).
 		Find(&messages).Error
 
@@ -82,7 +82,7 @@ func (r *chatMessageRepository) FindRecentForContext(ctx context.Context, sessio
 	err := dbFor(ctx, r.db).
 		Select("id, session_id, role, content, created_at").
 		Where("session_id = ?", sessionID).
-		Order("created_at DESC").
+		Order("created_at DESC, id").
 		Limit(limit).
 		Find(&messages).Error
 
@@ -130,7 +130,7 @@ func (r *chatMessageRepository) SearchRecentByKeywords(ctx context.Context, sess
 
 	var messages []entity.ChatMessage
 	err := query.
-		Order("created_at DESC").
+		Order("created_at DESC, id").
 		Limit(limit).
 		Find(&messages).Error
 
@@ -156,7 +156,7 @@ func (r *chatMessageRepository) SearchByKeyword(ctx context.Context, userID, que
 		JOIN chat_sessions s ON s.id = m.session_id
 		WHERE s.user_id = ?
 		  AND m.content ILIKE ?
-		ORDER BY m.created_at DESC
+		ORDER BY m.created_at DESC, m.id
 		LIMIT ?
 	`, userID, keyword, topK).Scan(&results).Error
 
@@ -185,7 +185,7 @@ func (r *chatMessageRepository) SearchRecentByVector(ctx context.Context, sessio
 		WHERE session_id = ?
 		  AND embedding IS NOT NULL
 		  AND embedding <-> ? <= ?
-		ORDER BY embedding <-> ?
+		ORDER BY embedding <-> ?, id
 		LIMIT ?
 	`, sessionID, embeddingStr, distanceThreshold, embeddingStr, limit).Scan(&messages).Error
 

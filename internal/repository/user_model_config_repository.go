@@ -57,7 +57,7 @@ func (r *userModelConfigRepository) ListByUserID(ctx context.Context, userID str
 	var configs []entity.UserModelConfig
 	err := dbFor(ctx, r.db).
 		Where("user_id = ?", userID).
-		Order("display_name ASC").
+		Order("display_name ASC, id").
 		Find(&configs).Error
 	return configs, err
 }

@@ -106,6 +106,16 @@ type RAGConfig struct {
 	// 之前这个字段没有配置入口，构造器只能吃硬编码默认值 0.25。
 	KeywordScoreThreshold float64        `mapstructure:"keyword_score_threshold"`
 	RRFK                  float64        `mapstructure:"rrf_k"`
+	// CandidateMultiplier 是检索候选池的放大系数：两侧各取 TopK×N 条候选，
+	// 融合 / 过滤后再收敛到 TopK。默认 1（即只取 TopK 条）。
+	//
+	// 为什么默认 1：2026-09-23 的 A/B 实测（test1/rag_eval/AB-对比结论-20260923.md）
+	// 把每侧候选从 6 收到 3，精度 82.1% → 95.7%、含噪率 17.9% → 4.3%，
+	// 而 hit@1 / hit@3 / MRR 全部持平（都已满分）。
+	// ≤ 0 时由检索器回落到默认值（不会变成 LIMIT 0 恒空）。
+	// ⚠️ 与 rag 的 min-max 归一化耦合：归一化把每侧最后一名压成 0、交叉过滤又丢掉
+	// 单源且 0 的结果 ⇒ 每侧最后一名必然出局，实际存活 = TopK-1。改归一化前先读报告。
+	CandidateMultiplier int `mapstructure:"candidate_multiplier"`
 	Reranker              RerankerConfig `mapstructure:"reranker"`
 	Expander              ExpanderConfig `mapstructure:"expander"`
 }
@@ -373,6 +383,7 @@ func Default() *Config {
 			TopK:                3,
 			RecallK:             20,
 			ScoreThreshold:      0.7,
+			CandidateMultiplier: 1,
 			Reranker: RerankerConfig{
 				Enabled:        false,
 				TopN:           3,

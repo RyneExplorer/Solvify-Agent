@@ -24,6 +24,8 @@ type HybridRetriever struct {
 	keywordWeight         float64
 	keywordScoreThreshold float64 // 向量全灭时，关键词结果的最低匹配比例
 	rrfK                  float64
+	keywordIDFWeighted    bool // 关键词打分是否给罕见词加权，见 HybridRetrieverConfig 说明
+	candidateMultiplier   int  // 候选放大系数（TopK × N）
 }
 
 // HybridRetrieverConfig 描述混合检索器配置
@@ -35,6 +37,21 @@ type HybridRetrieverConfig struct {
 	KeywordWeight         float64
 	KeywordScoreThreshold float64
 	RRFK                  float64
+	// KeywordIDFWeighted 打开后，关键词打分改为「按词的罕见程度加权」（默认关闭 = 所有词同权）。
+	//
+	// 为什么需要这个开关：现状打分是「命中词项数 ÷ query 词项数」，分母只看**命中个数**，
+	// 不看命中的是「分区表」还是「每次」。词表从每块 20 项扩到 150+ 项之后，
+	// 任意一块正文都能撞上几个通用词，于是无关块与正确块在同一个候选池里同权竞争。
+	// 打开后权重 w(t) = 1/(1+df(t))（df = 命中该词的可见块数）：
+	// 泛化词 df 大 ⇒ 权重趋 0；罕见词/专名 df 小 ⇒ 权重趋 1。
+	// ⚠️ df=0（该词在目标库里一条都没有）时权重 = 1，即与旧口径**持平**：这类词对每条候选的分子
+	// 都是 0，只把分母抬成同一个倍数，所以**不改变排序**，只影响绝对分（唯一后果是 vector 全灭时那条阈值）。
+	// 之所以不发散成 0：那是**第二个**改动，会把「给罕见词加权」和「重定义覆盖率分母」捆在一起，
+	// 实验就说不清是谁的功劳。全部 w=1 时与原公式**逐字等价**。
+	KeywordIDFWeighted bool
+	// CandidateMultiplier 是候选放大系数：先按 TopK×N 多取候选，融合 / 阈值过滤后再收敛到 TopK。
+	// <= 0 时用默认值。调小它 = 收紧两侧进入融合的候选池。
+	CandidateMultiplier int
 }
 
 // NewHybridRetriever 创建混合检索器
@@ -59,6 +76,10 @@ func NewHybridRetriever(cfg HybridRetrieverConfig) *HybridRetriever {
 	if rrfK <= 0 {
 		rrfK = 60
 	}
+	candidateMultiplier := cfg.CandidateMultiplier
+	if candidateMultiplier <= 0 {
+		candidateMultiplier = defaultCandidateMultiplier
+	}
 	return &HybridRetriever{
 		db:                    cfg.DB,
 		embeddingFunc:         cfg.EmbeddingFunc,
@@ -67,6 +88,8 @@ func NewHybridRetriever(cfg HybridRetrieverConfig) *HybridRetriever {
 		keywordWeight:         keywordWeight,
 		keywordScoreThreshold: keywordScoreThreshold,
 		rrfK:                  rrfK,
+		keywordIDFWeighted:    cfg.KeywordIDFWeighted,
+		candidateMultiplier:   candidateMultiplier,
 	}
 }
 
@@ -84,6 +107,7 @@ func NewHybridRetrieverFromConfig(db *gorm.DB, embeddingFunc EmbeddingFunc) *Hyb
 		// 想调只能改代码。这里补上，并在 pkg/config 里加了 keyword_score_threshold。
 		KeywordScoreThreshold: cfg.KeywordScoreThreshold,
 		RRFK:                  cfg.RRFK,
+		CandidateMultiplier:   cfg.CandidateMultiplier,
 	})
 }
 
@@ -222,23 +246,12 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	}, nil
 }
 
-// retrievedChunkVisibilitySQL 是所有 chunk 检索路径**必须**拼上的可见性边界：排除已软删文档。
+// retrievedChunkVisibilitySQL 是可见性边界在本包内的引用名。
 //
-// 为什么需要它：软删（documents.status = 5）不会物理删除 chunk，所以「忘了过滤」=
-// 用户已经删掉的文档继续出现在回答与引用里。原先两条 SQL 各自内联、只过滤
-// knowledge_base_id / user_id，谁都没写这条 —— 而 service 侧的状态码是私有常量，
-// rag 层既看不到也不知道「删除」是几，**定义的缺失本身就是缺陷的成因**。
-//
-// 抽成常量、由两条 SQL 共同引用，是为了让「新增一条检索 SQL 漏了它」一眼可见，
-// 并且能被 hybrid_retriever_sql_test.go 直接断言。
-//
-// 用 NOT IN 子查询而不是 JOIN documents：沿用本文件既有的「主查询不 JOIN documents」
-// 优化，软删文档只占极小比例，子查询结果集很小；documents.id 是主键，无需额外索引。
-// 状态值取自 entity.DocumentStatusDeleted（领域层唯一真相源），不写字面量。
-var retrievedChunkVisibilitySQL = fmt.Sprintf(`
-			AND dc.document_id NOT IN (
-				SELECT d.id FROM documents d WHERE d.status = %d)`,
-	entity.DocumentStatusDeleted)
+// ⚠️ 定义已上移到 entity.RetrievedChunkVisibilitySQL：这条约束现在有**两个**使用方
+// （本包的 3 条检索 SQL + repository 的关键字搜索 SQL），留在本包会让另一个复制一份，
+// 于是「什么算可见」就有了两个来源。这里保留本别名，只为让既有引用与守卫断言不必改动。
+var retrievedChunkVisibilitySQL = entity.RetrievedChunkVisibilitySQL
 
 // vectorSearch 执行向量检索
 // 优化：主查询只查 document_chunks 表（不 LEFT JOIN documents），
@@ -261,19 +274,20 @@ var vectorSearchSQL = `
 		WHERE dc.knowledge_base_id IN (?)
 			AND dc.embedding IS NOT NULL
 			AND dc.user_id = ?` + retrievedChunkVisibilitySQL + `
-		ORDER BY dc.embedding <=> ?::vector
+		ORDER BY dc.embedding <=> ?::vector, dc.id
 		LIMIT ?`
 
 // vectorSearchArgs 按 vectorSearchSQL 里 ? 的出现顺序组装参数。
 //
 // 单独抽出来有两个理由：
 //  1. 5 个位置参数里有 2 个是同一个 vectorStr（SELECT 与 ORDER BY 各一次），内联极易错位；
-//  2. 末位 LIMIT 走 query.candidateLimit()，于是能被测试直接断言。
+//  2. 末位 LIMIT 走 query.candidateLimitWith(r.candidateMultiplier)，于是能被测试直接断言。
 //     这点很关键：曾经 Retrieve 里算了一遍兜底、两条 search 却各自重算 `query.TopK * 2`，
 //     调用方漏传 TopK 就静默变成 `LIMIT 0` 恒空；而单测若只覆盖 effectiveTopK 本身，
 //     抓不到"调用点没走它"这种回退。
-func vectorSearchArgs(query Query, vectorStr string) []any {
-	return []any{vectorStr, query.KnowledgeBaseIDs, query.UserID, vectorStr, query.candidateLimit()}
+func (r *HybridRetriever) vectorSearchArgs(query Query, vectorStr string) []any {
+	return []any{vectorStr, query.KnowledgeBaseIDs, query.UserID, vectorStr,
+		query.candidateLimitWith(r.candidateMultiplier)}
 }
 
 func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scoredChunk, error) {
@@ -285,7 +299,7 @@ func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scor
 	vectorStr := vectorToString(embedding)
 
 	var results []scoredChunk
-	err = r.db.WithContext(ctx).Raw(vectorSearchSQL, vectorSearchArgs(query, vectorStr)...).Scan(&results).Error
+	err = r.db.WithContext(ctx).Raw(vectorSearchSQL, r.vectorSearchArgs(query, vectorStr)...).Scan(&results).Error
 
 	if err != nil {
 		return nil, err
@@ -300,11 +314,50 @@ func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scor
 
 // keywordSearchSQL 是关键词检索 SQL。
 //
+// 打分口径：score = Σ(命中词项的权重) / Σ(query 全部词项的权重)。
+//   - 权重全为 1 时（KeywordIDFWeighted=false）：分子 = 命中个数、分母 = query 词项数，
+//     与旧的 `COUNT(*) / cardinality(...)` **逐字等价**；
+//   - 开启加权时：weight(t) = 1/(1+df(t))，df 是**可见块**里命中该词的块数
+//     ⇒ 泛化词（`每次`/`结果`/`数据`）权重趋 0，专名权重趋 1；df=0（库里一条都没有）时权重 = 1。
+//
+// ⚠️ 这个权重里**没有 N**（语料总块数），所以它只反映「这块比别的块稀有」，不反映「整个库有多大」。
+// 15 块的评测库里 df∈[1,15] ⇒ 权重跨度 8 倍；生产库里 df 能到 10 万 ⇒ 跨度上万倍，效果会比评测猛得多。
+// 换言之：这个评测只能证「方向对不对」，证不了「生产上会不会过猛」。
+//
+// 为什么用乘法权重而不是另写一条 SQL：两条 SQL 只差一个表达式，是"条件串味"的温床；
+// 权重全 1 时这条 SQL 退化成原口径，所以只有一处需要维护、也只有一处需要登记可见性边界。
+//
+// ⚠️ 分母是**全部** query 词项（含一条都匹配不到的），与旧口径一致 —— 不额外引入第二个变量。
+//
 // ⚠️ 这里**不能**带 `dc.embedding IS NOT NULL`。那个条件是从向量检索抄过来的：
 // 关键词命中与这条 chunk 有没有向量毫无关系。带上它的后果是 —— 向量化失败
 // （embedding 生成报错、模型没起、文档处理中途失败）的 chunk 在关键词侧**永久不可见**，
 // 而关键词侧本来就是这类 chunk 唯一的救命通道。向量侧保留该条件是必需的（要算距离）。
+//
+// ⚠️ 末尾的 `, dc.id` 不是装饰：没有它，这条排序就**不是全序**。
+// 命中率型口径的分值只有 k+1 种取值（k = query 词项数）⇒ 平局是常态，不是例外；
+// 而并列行的先后由 PG 的**排序算法**决定，`LIMIT` 一变算法就变
+// （7 行输入：LIMIT 3 走 top-N heapsort、≥4 走 quicksort，**执行计划文本完全相同**，
+// 只有 EXPLAIN ANALYZE 的 Sort Method 不同）。
+// 实测：只把候选池从 6 收到 3，gold 就从第 1 名掉到第 2 名 —— 而 gold 从未被切出候选池。
+// ⇒ 后果不是"名次错一点"，而是**让 A/B 实验把"排序算法换了"读成"配置有效果"**。
+// 守卫：hybrid_retriever_sql_test.go 的 TestAllChunkReadSQLsAreTotallyOrdered。
 var keywordSearchSQL = `
+		WITH qw AS (
+			SELECT t.term,
+			       CASE WHEN ?::boolean THEN
+			              1.0 / (1.0 + (
+			                  SELECT COUNT(*)::float
+			                  FROM document_chunks dc
+			                  WHERE dc.knowledge_base_id IN (?)
+			                    AND dc.keywords IS NOT NULL
+			                    AND dc.keywords && ARRAY[t.term]
+			                    AND dc.user_id = ?` + retrievedChunkVisibilitySQL + `
+			              ))
+			            ELSE 1.0 END AS weight
+			FROM unnest(?::text[]) AS t(term)
+		),
+		qnorm AS (SELECT GREATEST(SUM(weight), 1e-9) AS total FROM qw)
 		SELECT
 			dc.id,
 			dc.knowledge_base_id,
@@ -313,17 +366,17 @@ var keywordSearchSQL = `
 			dc.chunk_index,
 			dc.content,
 			(
-				SELECT COUNT(*)::float / GREATEST(cardinality(?::text[]), 1)
+				SELECT COALESCE(SUM(qw.weight), 0)
 				FROM unnest(dc.keywords) AS kw
-				WHERE kw = ANY(?::text[])
-			) AS score,
+				JOIN qw ON qw.term = kw
+			) / (SELECT total FROM qnorm) AS score,
 			COALESCE(dc.keywords::text, '{}') as keywords
 		FROM document_chunks dc
 		WHERE dc.knowledge_base_id IN (?)
 			AND dc.keywords IS NOT NULL
 			AND dc.keywords && ?::text[]
 			AND dc.user_id = ?` + retrievedChunkVisibilitySQL + `
-		ORDER BY score DESC
+		ORDER BY score DESC, dc.id
 		LIMIT ?`
 
 // chunkReadSQLs 登记所有「读取 chunk 内容、可能把内容交给用户」的检索 SQL。
@@ -352,8 +405,21 @@ var chunkReadSQLs = map[string]string{
 // 避免把最近几轮用户提问拼进来抬高分母、把排序拉向历史话题。
 
 // keywordSearchArgs 按 keywordSearchSQL 里 ? 的出现顺序组装参数（理由同 vectorSearchArgs）。
-func keywordSearchArgs(query Query, keywordArray string) []any {
-	return []any{keywordArray, keywordArray, query.KnowledgeBaseIDs, keywordArray, query.UserID, query.candidateLimit()}
+//
+// 8 个位置参数里 keywordArray 出现 2 次（CTE 算权重 + 主查询的 && 过滤）、
+// kbIDs 出现 2 次（CTE 统计 df + 主查询）、userID 出现 2 次，内联极易错位。
+// ⚠️ 位置参数一旦错位不会报错：轻则查不到、重则把 user_id 当知识库 id 用，只有跑真库才暴露。
+func (r *HybridRetriever) keywordSearchArgs(query Query, keywordArray string) []any {
+	return []any{
+		r.keywordIDFWeighted,   // ?1 权重模式开关
+		query.KnowledgeBaseIDs, // ?2 CTE 统计 df 用的知识库范围
+		query.UserID,           // ?3 CTE 统计 df 用的 user_id
+		keywordArray,           // ?4 CTE 的词项
+		query.KnowledgeBaseIDs, // ?5 主查询知识库范围
+		keywordArray,           // ?6 主查询 keywords && ?
+		query.UserID,           // ?7 主查询 user_id
+		query.candidateLimitWith(r.candidateMultiplier), // ?8 LIMIT
+	}
 }
 
 func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]scoredChunk, error) {
@@ -366,7 +432,7 @@ func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]sco
 
 	keywordArray := buildPostgresArray(keywords)
 
-	err := r.db.WithContext(ctx).Raw(keywordSearchSQL, keywordSearchArgs(query, keywordArray)...).Scan(&results).Error
+	err := r.db.WithContext(ctx).Raw(keywordSearchSQL, r.keywordSearchArgs(query, keywordArray)...).Scan(&results).Error
 
 	if err != nil {
 		return nil, err
@@ -499,13 +565,23 @@ func (r *HybridRetriever) reciprocalRankFusion(vectorResults, keywordResults []s
 		docScores[id].Score += r.keywordWeight / (r.rrfK + float64(i+1))
 	}
 
-	// 转换为切片并排序
+	// 转换为切片并排序。
+	//
+	// ⚠️ 比较函数必须是**全序**：融合分相等时按 id 裁决。
+	// 入参来自 map 迭代（顺序本身随机），所以先前只比 Score 的写法在等分时不可复现 ——
+	// 实测两条 keyword-only 结果的融合分 0.004918 / 0.004839 并不相等，因而没触发；
+	// 但只要等分就会咬人。
+	// ⚠️ 判定为全序之后**不需要 SliceStable**：任何排序算法在全序下都给出同一个序列，
+	// 稳定性保的是 map 那份随机顺序，语义为零（反而更慢、多一次分配）。
 	var results []scoredChunk
 	for _, doc := range docScores {
 		results = append(results, *doc)
 	}
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].ID < results[j].ID
 	})
 
 	return results

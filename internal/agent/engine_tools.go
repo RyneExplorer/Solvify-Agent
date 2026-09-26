@@ -33,10 +33,18 @@ func prebuiltToolsFromContext(ctx context.Context) (prebuiltToolsBundle, bool) {
 }
 
 // sortedInternalTools 按 Order 升序返回内置工具注册表的副本（用于 prompt 展示与构建）
+//
+// 必须全序：Order 是人工登记的小整数，两个工具登记成同一个值完全可能；
+// 同值时按 Name 裁决，否则工具在 prompt 里的先后由排序算法决定。
 func (e *Engine) sortedInternalTools() []internalToolRegistryEntry {
 	sorted := make([]internalToolRegistryEntry, len(e.internalTools))
 	copy(sorted, e.internalTools)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Order < sorted[j].Order })
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Order != sorted[j].Order {
+			return sorted[i].Order < sorted[j].Order
+		}
+		return sorted[i].Name < sorted[j].Name
+	})
 	return sorted
 }
 

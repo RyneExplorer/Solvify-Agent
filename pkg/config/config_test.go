@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -147,4 +148,46 @@ func lookupPath(values map[string]any, path string) (any, bool) {
 		}
 	}
 	return cur, true
+}
+
+// TestRAGCandidateMultiplierSurvivesMissingKey 守住「新增配置项缺键不能静默变 0」。
+//
+// 为什么这条必须有：configs/config.yaml 是 gitignore 的，线上每台机器的 yaml 都是旧版本，
+// 所以**新增配置项上线时必然是「结构体里有、yaml 里没有」**。Load 的写法是先 `Default()`
+// 再往它上面解码，缺键因此保留默认值 —— 这条测试就是钉住这个性质。
+//
+// 刻意走**真的 Load()**，而不是在测试里自己拼一遍 Default()+Decode：后者验的是
+// mapstructure 这个库的行为。一旦有人把 Load 改成 `cfg := &Config{}`（先零值再解码），
+// 手拼版照样全绿，而线上所有新配置项会一起静默失效 —— 断言就白写了。
+//
+// 取值本身也被钉住：候选放大系数默认 1 来自 2026-09-23 的 A/B 实测
+// （精度 82.1% → 95.7%、含噪率 17.9% → 4.3%，hit@1/hit@3/MRR 不变），
+// 见 test1/rag_eval/AB-对比结论-20260923.md。要改回 2，请先说明那份报告哪里不成立。
+func TestRAGCandidateMultiplierSurvivesMissingKey(t *testing.T) {
+	if got := Default().RAG.CandidateMultiplier; got != 1 {
+		t.Fatalf("Default() 的 rag.candidate_multiplier 期望 1（A/B 实测结论），实际 %d", got)
+	}
+
+	// 真实形态：yaml 的 rag 段写了别的键，就是没写 candidate_multiplier。
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	const body = "rag:\n  top_k: 5\n  score_threshold: 0.6\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("写临时配置失败: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if cfg.RAG.CandidateMultiplier != 1 {
+		t.Errorf("yaml 缺 candidate_multiplier 时应保留默认 1，实际 %d（新配置项会静默失效）",
+			cfg.RAG.CandidateMultiplier)
+	}
+	// 对照组：写了的键必须真的解到，否则上一条断言可能只是「整个 rag 段都没解进来」。
+	if cfg.RAG.TopK != 5 {
+		t.Errorf("rag.top_k 应解到 5，实际 %d（整个 rag 段都没解进来？）", cfg.RAG.TopK)
+	}
+	if cfg.RAG.ScoreThreshold != 0.6 {
+		t.Errorf("rag.score_threshold 应解到 0.6，实际 %v", cfg.RAG.ScoreThreshold)
+	}
 }

@@ -260,3 +260,35 @@ func TestRecentUserQuestionsStripsTruncationMarker(t *testing.T) {
 		t.Errorf("实体表首位=%q 期望 redis (全量=%v)", q.Entities[0], q.Entities)
 	}
 }
+
+// ─── 指代区间：两个正则的匹配起点必须不相交 ────────────────────────────────
+//
+// anaphoraMatches 把 head / pronoun 两个正则的结果合起来按**起点**升序排，
+// 再按「不重叠」去重。若两个正则在同一起点都命中，那么「谁先被保留」就取决于排序结果 ——
+// 而该处排序现在按「起点升序 + 更长者优先」兜底（已全序），但**更根本的保证**是：
+// 两个模式在同一起点本就互斥（head 以「这个/那个/这些/那些/上述…」开头，
+// pronoun 是「(那|这)?(它们|他们|她们|它|他|她)」，两者首字符集合与后续字符都不重合）。
+//
+// 这条用例把那个隐式前提显式化：一旦有人改动任一侧正则导致起点重叠，立刻变红。
+func TestAnaphoraRegexStartPositionsAreDisjoint(t *testing.T) {
+	corpus := []string{
+		"这个功能怎么用", "那个配置在哪", "这些文档怎么删", "那些参数是什么意思",
+		"上述问题怎么解决", "前述方案可行吗", "刚才说的那个接口", "之前提到的配置",
+		"前面的报错怎么办", "它们都在哪", "他们在做什么", "她们看到了吗", "它是什么",
+		"他负责哪块", "她提的需求", "那它们呢", "这它们呢", "这个它是什么",
+		"那这个怎么处理", "上述它们的问题", "那它是什么", "这它又是什么",
+		"这个 它", "那 它们", "这个它们都是什么",
+	}
+	for _, q := range corpus {
+		head := map[int]bool{}
+		for _, loc := range reAnaphoraHead.FindAllStringIndex(q, -1) {
+			head[loc[0]] = true
+		}
+		for _, loc := range reAnaphoraPronoun.FindAllStringIndex(q, -1) {
+			if head[loc[0]] {
+				t.Errorf("问题 %q：两个指代正则在同一位置 %d 命中 —— "+
+					"起点重叠会让「保留哪一个」取决于排序结果，必须让两个模式互斥", q, loc[0])
+			}
+		}
+	}
+}

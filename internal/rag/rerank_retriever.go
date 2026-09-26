@@ -147,7 +147,11 @@ func (r *RerankRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	}
 
 	sort.Slice(result.Documents, func(i, j int) bool {
-		return result.Documents[i].Score > result.Documents[j].Score
+		if result.Documents[i].Score != result.Documents[j].Score {
+			return result.Documents[i].Score > result.Documents[j].Score
+		}
+		// 重排分相等时按 id 裁决，保证顺序可复现（理由同 reciprocalRankFusion）。
+		return result.Documents[i].ID < result.Documents[j].ID
 	})
 
 	filtered := make([]Document, 0, len(result.Documents))

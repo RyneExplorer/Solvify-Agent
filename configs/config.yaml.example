@@ -75,6 +75,11 @@ rag:
   vector_weight: 0.7    # 向量检索权重
   keyword_weight: 0.3   # 关键词检索权重
   rrf_k: 60.0           # RRF 融合参数
+  # 仅「向量侧全灭」时生效：关键词结果的最低匹配比例
+  keyword_score_threshold: 0.25
+  # 每侧候选数 = top_k × 本系数。实测 1 的精度高于 2（82.1% → 95.7%、含噪 17.9% → 4.3%），
+  # 召回不变；代价是单侧排到第 4 名及以后的块拿不到。详见 test1/rag_eval/AB-对比结论-20260923.md
+  candidate_multiplier: 1
   # Rerank 重排序（可选）
   reranker:
     enabled: false

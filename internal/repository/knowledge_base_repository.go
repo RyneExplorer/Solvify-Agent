@@ -40,7 +40,7 @@ func (r *knowledgeBaseRepository) ListNormal(ctx context.Context, userID string,
 	var items []entity.KnowledgeBase
 	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND status = ?", userID, status).
-		Order("created_at DESC").
+		Order("created_at DESC, id").
 		Find(&items).Error
 	return items, err
 }

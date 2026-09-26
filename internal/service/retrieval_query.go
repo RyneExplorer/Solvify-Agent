@@ -293,7 +293,14 @@ func anaphoraMatches(question string) [][]int {
 	all := make([][]int, 0, 4)
 	all = append(all, reAnaphoraHead.FindAllStringIndex(question, -1)...)
 	all = append(all, reAnaphoraPronoun.FindAllStringIndex(question, -1)...)
-	sort.Slice(all, func(i, j int) bool { return all[i][0] < all[j][0] })
+	// 必须全序：两个正则的匹配**起点**理论上不相交（见 TestAnaphoraRegexStartPositionsAreDisjoint），
+	// 但那是隐式前提，一旦有人改动正则就会破 ⇒ 同起点时按「更长者优先」显式裁决。
+	sort.Slice(all, func(i, j int) bool {
+		if all[i][0] != all[j][0] {
+			return all[i][0] < all[j][0]
+		}
+		return all[i][1] > all[j][1]
+	})
 
 	kept := make([][]int, 0, len(all))
 	lastEnd := 0
