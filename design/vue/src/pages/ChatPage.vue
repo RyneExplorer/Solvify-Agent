@@ -22,9 +22,9 @@
           </button>
           <span
             v-if="selectedMCPConfigIds.length === 0"
-            title="默认使用已启用的全部"
-            class="text-[10px] text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-md"
-          >全部</span>
+            title="本次对话不使用任何 MCP 工具"
+            class="text-[10px] text-slate-500 bg-slate-50 px-1.5 py-0.5 rounded-md"
+          >未选</span>
           <span
             v-else
             class="text-[10px] text-slate-500 bg-slate-50 px-1.5 py-0.5 rounded-md shrink-0"
@@ -40,7 +40,7 @@
               >
                 <div class="px-4 py-3 border-b border-slate-100">
                   <div class="text-sm font-semibold text-slate-900">MCP 服务器</div>
-                  <div class="text-xs text-slate-400 mt-0.5">勾选要在本次对话启用的服务器；不勾选=使用全部</div>
+                  <div class="text-xs text-slate-400 mt-0.5">勾选要在本次对话启用的服务器；不勾选=不使用任何 MCP</div>
                 </div>
                 <!-- 搜索框：≥ 7 台时显示 -->
                 <div v-if="enabledMCPOptions.length >= 7" class="px-3 py-2 border-b border-slate-100">
@@ -71,7 +71,7 @@
                       'text-xs px-2 py-1 rounded-md border border-slate-200 transition-colors',
                       selectedMCPConfigIds.length === 0 ? 'bg-emerald-50 text-emerald-600' : 'text-slate-500 hover:bg-slate-50'
                     ]"
-                  >清空(=全部)</button>
+                  >清空(不用)</button>
                 </div>
                 <div class="max-h-[280px] overflow-y-auto py-1 w-[288px]">
                   <div v-if="filteredHeaderMCPOptions.length === 0" class="px-4 py-6 text-center text-xs text-slate-400">
@@ -168,6 +168,7 @@
                   </div>
                 </div>
               </div>
+              <DeepTaskPlan v-if="msg.execution_plan" :plan="msg.execution_plan" />
               <!-- Bubble -->
               <div :class="['px-4 py-3 rounded-2xl text-sm leading-relaxed', msg.role === 'user' ? 'bg-slate-100 text-slate-800' : msg.role === 'error' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-white text-slate-800']">
                 <div v-if="msg.role === 'assistant'" v-html="formatContent(msg.content, msg.sources)" class="md-content" />
@@ -246,7 +247,7 @@
           </div>
 
           <!-- Streaming loading -->
-          <div v-if="isLoading" class="flex justify-start">
+          <div v-if="isLoading || (pendingApproval && streamPlan)" class="flex justify-start">
             <div class="max-w-[80%]">
               <div class="px-4 py-3 rounded-2xl bg-white text-sm">
                 <div v-if="streamTimeline.length" class="mb-3 space-y-1.5">
@@ -259,10 +260,11 @@
                     <div v-if="step.detail" class="ml-5 mt-1 text-xs text-slate-500 bg-slate-50 rounded-lg px-3 py-2 whitespace-pre-wrap">{{ step.detail }}</div>
                   </div>
                 </div>
+                <DeepTaskPlan v-if="streamPlan" :plan="streamPlan" />
                 <div v-if="progressText" class="flex items-center gap-2 mb-2 text-xs text-slate-400">
                   <span class="w-3 h-3 border-2 border-slate-200 border-t-emerald-500 rounded-full animate-spin" />{{ progressText }}
                 </div>
-                <div v-if="!streamContent" class="flex gap-1 py-1">
+                <div v-if="isLoading && !streamContent" class="flex gap-1 py-1">
                   <span class="w-1 h-1 rounded-full bg-slate-300 animate-bounce" style="animation-delay:0s" />
                   <span class="w-1 h-1 rounded-full bg-slate-300 animate-bounce" style="animation-delay:0.15s" />
                   <span class="w-1 h-1 rounded-full bg-slate-300 animate-bounce" style="animation-delay:0.3s" />
@@ -494,6 +496,7 @@ import { useChat, getTooltipContent, cleanTitle } from '@/composables/useChat'
 import { useMarkdownTooltip } from '@/composables/useMarkdownTooltip'
 import { createNote } from '@/api/document'
 import ChatInputCard from '@/components/ChatInputCard.vue'
+import DeepTaskPlan from '@/components/DeepTaskPlan.vue'
 import AppDialog from '@/components/ui/AppDialog.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import AppDropdownSelect from '@/components/ui/AppDropdownSelect.vue'
@@ -501,7 +504,7 @@ import AppDropdownSelect from '@/components/ui/AppDropdownSelect.vue'
 const route = useRoute()
 const chat = useChat()
 const {
-  activeSession: session, messages, collapsedTimelines, isLoading, streamContent, streamSources, streamTimeline, progressText,
+  activeSession: session, messages, collapsedTimelines, isLoading, streamContent, streamSources, streamTimeline, streamPlan, progressText,
   modelOptions, knowledgeBases, connected, input, selectedModel, selectedKBs, searchMode, kbTriggerText,
   selectedMCPConfigIds, enabledMCPOptions, mcpLoading,
   init, sendMessage, scrollToBottom, toggleKB, formatContent, getSourceChunkIds, copyText, regenerate, retryLastMessage, stopGeneration,
@@ -538,7 +541,7 @@ const filteredHeaderMCPOptions = computed(() => {
 // 关闭下拉时清空搜索
 watch(headerMCPOpen, (open) => { if (!open) headerMCPSearch.value = '' })
 const headerMCPLabel = computed(() => {
-  if (!selectedMCPConfigIds.value.length) return '全部 MCP'
+  if (!selectedMCPConfigIds.value.length) return '不使用 MCP'
   const names = enabledMCPOptions.value.filter(o => selectedMCPConfigIds.value.includes(o.id)).map(o => o.name)
   if (names.length <= 2) return names.join('、') || '选择 MCP'
   return `${names[0]} +${names.length - 1}`
@@ -552,6 +555,7 @@ function selectAllMCP() {
   selectedMCPConfigIds.value = [...enabledMCPOptions.value.map(o => o.id)]
   headerMCPOpen.value = false
 }
+// 清空选择 = 本次对话不使用任何 MCP 工具（不再回退成「全部」）
 function clearMCP() {
   selectedMCPConfigIds.value = []
   headerMCPOpen.value = false
@@ -685,7 +689,7 @@ async function submitDialogFeedback() {
 }
 
 watch(
-  () => [messages.value.length, streamContent.value, streamTimeline.value.length],
+  () => [messages.value.length, streamContent.value, streamTimeline.value.length, JSON.stringify(streamPlan.value)],
   () => scrollToBottom(chatEl.value ?? null),
 )
 

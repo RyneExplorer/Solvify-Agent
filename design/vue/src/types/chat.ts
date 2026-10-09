@@ -8,6 +8,7 @@ export interface PendingCheckpointInfo {
   is_clarify?: boolean
   options?: string[]
   set_at: string
+  execution_plan?: ExecutionPlan
 }
 
 export interface ChatSession {
@@ -53,6 +54,27 @@ export interface ReasoningStep {
   status?: string
 }
 
+export interface TaskProgress {
+  id: string
+  agent: string
+  title: string
+  depends_on?: string[]
+  status: 'pending' | 'running' | 'success' | 'error' | 'canceled' | 'waiting'
+  summary?: string
+  added_version?: number
+}
+
+export interface ExecutionPlan {
+  id: string
+  version?: number
+  phase?: string
+  replan_reason?: string
+  round?: number
+  strategy: string
+  status: string
+  tasks: TaskProgress[]
+}
+
 export interface ChatMessage {
   id: string
   session_id: string
@@ -63,6 +85,7 @@ export interface ChatMessage {
   knowledge_base_ids?: string[]
   sources?: SourceInfo[]
   reasoning_steps?: ReasoningStep[]
+  execution_plan?: ExecutionPlan
   created_at: string
 }
 
@@ -74,7 +97,8 @@ export interface SendMessageRequest {
   search_mode: string
   model_id: string
   model_type: string
-  /** 用户启用的 MCP 工具配置 ID 列表（可多选，空表示使用全部已启用的） */
+  /** 用户选中的 MCP 工具配置 ID 列表；空数组=本次不使用任何 MCP 工具。
+   *  字段缺省（undefined）才表示「未做选择」，后端沿用历史行为=全部已启用。 */
   mcp_user_config_ids?: string[]
 }
 
@@ -106,6 +130,19 @@ export interface StreamEvent {
   checkpoint_id?: string
   interrupt_id?: string
   interrupt_info?: Record<string, unknown>
+  plan_id?: string
+  plan_version?: number
+  phase?: string
+  replan_reason?: string
+  round?: number
+  task_id?: string
+  parent_task_id?: string
+  agent_name?: string
+  task_status?: string
+  task_index?: number
+  task_total?: number
+  plan?: ExecutionPlan
+  task?: TaskProgress
 }
 
 // ── 审批请求状态（前端本地） ──
