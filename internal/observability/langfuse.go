@@ -86,7 +86,7 @@ func NewTracer(ctx context.Context, cfg config.ObservabilityConfig) (*Tracer, er
 	// （ChatModel / Retriever / Tool / Embedding / Agent / Graph）自动产出 span。
 	// 业务代码只在「一轮问答」的起止各调一次 Tracer.Start / Tracer.End，
 	// 中间不需要手写任何埋点。
-	callbacks.AppendGlobalHandlers(handler)
+	callbacks.AppendGlobalHandlers(WithExecutionTracing(handler))
 
 	t := &Tracer{handler: handler, cfg: cfg}
 	logger.Infof("Langfuse 已接入（官方 eino callback v2 / OTLP）: host=%s batch=%d/%dms sample_rate=%.2f",

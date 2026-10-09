@@ -23,7 +23,7 @@ func TestMCPProvider_Validate(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "stdio 配置合法",
+			name: "stdio 不再支持（网页版只能 http/sse）",
 			config: &tool.ExecuteConfig{
 				ProviderConfig: &tool.ProviderConfig{
 					MCP: &tool.MCPProviderConfig{
@@ -33,7 +33,7 @@ func TestMCPProvider_Validate(t *testing.T) {
 					},
 				},
 			},
-			wantErr: false,
+			wantErr: true,
 		},
 		{
 			name: "sse 配置合法",
@@ -69,7 +69,7 @@ func TestMCPProvider_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "stdio 缺少 command",
+			name: "stdio 缺少 command（已被整体拒绝）",
 			config: &tool.ExecuteConfig{
 				ProviderConfig: &tool.ProviderConfig{
 					MCP: &tool.MCPProviderConfig{
@@ -157,21 +157,18 @@ func TestMCPClientPool_Close(t *testing.T) {
 
 func TestConfigHash(t *testing.T) {
 	cfg1 := &tool.MCPProviderConfig{
-		Transport: "stdio",
-		Command:   "npx",
-		Args:      []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
+		Transport: "http",
+		URL:       "https://a.example.com/mcp",
 		Timeout:   30,
 	}
 	cfg2 := &tool.MCPProviderConfig{
-		Transport: "stdio",
-		Command:   "npx",
-		Args:      []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
+		Transport: "http",
+		URL:       "https://a.example.com/mcp",
 		Timeout:   60, // timeout 不同，但 hash 应相同
 	}
 	cfg3 := &tool.MCPProviderConfig{
-		Transport: "stdio",
-		Command:   "npx",
-		Args:      []string{"-y", "@modelcontextprotocol/server-fetch"}, // args 不同
+		Transport: "http",
+		URL:       "https://b.example.com/mcp", // url 不同
 		Timeout:   30,
 	}
 

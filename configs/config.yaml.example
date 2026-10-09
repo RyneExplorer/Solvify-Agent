@@ -45,6 +45,12 @@ agent:
   enable_demo: true
   max_iterations: 10
   score_threshold: 0.7
+  deep_plan_execute_enabled: true
+  deep_parallel_enabled: true
+  deep_max_plan_tasks: 4
+  deep_max_subagent_iterations: 3
+  deep_max_plan_execute_rounds: 8
+  deep_max_executor_iterations: 6
 
 # 默认 LLM 配置（系统级）
 llm:
@@ -102,6 +108,22 @@ tools:
   web_search:
     api_key: ""
     base_url: ""
+  # 系统预置 MCP 服务器列表（网页版仅支持 http/sse，不支持 stdio）
+  # 启动时自动加载到数据库（is_system=true），用户可在前端勾选启用；
+  # 也可跳过此处，直接在后台管理页新增（写入数据库，无需重启）
+  mcp_servers:
+    - name: "council"
+      description: "Council of AI 公开 MCP（GSPC 测量板，只读，无需鉴权）"
+      transport: "http"
+      url: "https://councilof.ai/mcp/free"
+      timeout: 30
+    # - name: "my-remote-mcp"
+    #   description: "远程 MCP 服务器示例"
+    #   transport: "sse"
+    #   url: "https://example.com/mcp/sse"
+    #   headers:
+    #     Authorization: "Bearer xxx"
+    #   timeout: 30
 
 # 钉钉集成配置
 dingtalk:

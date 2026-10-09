@@ -10,47 +10,12 @@ import (
 	"solvify-agent/internal/model/entity"
 )
 
-// PromptMode Prompt Builder 的模式（影响 System Prompt 基础内容）
-type PromptMode int
-
-const (
-	// PromptModeQuick 快速检索模式（quickModeSystemPrompt）
-	PromptModeQuick PromptMode = iota
-	// PromptModeDeep 深度思考模式（ReAct 规则作为 base，外部传入）
-	PromptModeDeep
-)
-
-// quickModeAgentSystemPrompt 快速检索模式的 base system prompt。
-// 快速模式不走 ReAct 工具循环，而是一次性：QueryRewrite → Retrieve → BuildPrompt → Generate，
-// 所以这里只保留"身份/引用规则/回答原则"，不要写 Think/Act/Observe 相关指令。
-const quickModeAgentSystemPrompt = `你是 Solvify 知识助理，专业的 AI 知识助手。
-
-## 引用规则
-1. 如果"参考资料"块出现在本次对话中（在你的用户问题前面），回答时只引用参考资料中明确陈述的内容。
-2. 引用格式：在对应句末插入 <kb doc="文档名" chunk_id="chunk_id" />，chunk_id 必须和参考资料中 [chunk_id=xxx] 完全一致。
-3. 引用只允许标签内的 chunk_id/文档名，不要把整段原文复制粘贴出来。
-4. 没有「参考资料」块时，可以基于你自己的通用知识回答，但要显式标注「以下内容基于通用知识，未来自知识库」；连通用知识也答不了，再说「在当前知识库中没有找到相关信息」。
-5. 有「参考资料」块但它答不了这个问题时，先答参考资料能答的部分，再用通用知识补充（同样标注）。
-
-## 实时信息处理
-本次对话运行在「快速模式」，没有接入实时数据工具（天气、新闻、联网搜索等）。遇到需要实时数据才能回答的问题：
-- 不要编造、不要推测具体数值或事件
-- 明确告知：当前无法获取实时天气、实时新闻等实时数据
-- 告知用户可以切换到「深度模式」，那里能调用天气、新闻、联网搜索等工具来查
-
-## 回答原则
-- 先给结论，再展开依据；需要结构化表达时优先使用 Markdown 表格或编号列表。
-- 必须使用用户偏好的回答语言，语言不确定时使用简体中文。
-- 如果参考资料里有多份互斥或版本差异较大的信息，要在回答中显式标注"不同文档存在差异，请根据实际场景核实"。
-- 回答尾部不要自行添加"希望对你有帮助"等客套语。`
-
 // PromptBuilder 统一构建 LLM 消息和 System Prompt
 // 所有模式（快速检索 / 深度思考）必须通过 Builder 注入 System Prompt 和历史消息，
 // 避免两处各写各的导致摘要 / 记忆 / 用户上下文注入行为不一致。
 // 阶段二精简：只保留 profile（用户画像 entity.User）、preference（用户偏好 entity.UserPreference）
 type PromptBuilder struct {
-	mode       PromptMode
-	baseSystem string                 // 快速 = quickModeSystemPrompt；深度 = ReAct 规则
+	baseSystem string                 // 基础 System Prompt（快速/深度均为空，ReAct 规则在 agent 层拼）
 	summary    *entity.ChatSummary    // 会话摘要
 	memories   []entity.UserMemory    // 用户记忆
 	userCtx    UserContext            // 用户基本信息 + 当前时间（保留已有结构）
@@ -58,10 +23,11 @@ type PromptBuilder struct {
 	preference *entity.UserPreference // 用户偏好（来源：UserPreference）
 }
 
-// NewPromptBuilder 快速模式创建（baseSystem 自动使用 quickModeSystemPrompt）
-func NewPromptBuilder(mode PromptMode, baseSystem string, summary *entity.ChatSummary, memories []entity.UserMemory, userCtx UserContext) *PromptBuilder {
+// NewPromptBuilder 创建 PromptBuilder。
+// baseSystem 是基础 System Prompt；ReAct 规则由 agent 层按模式拼在更前面（composeSystemPrompt），
+// 这里注入的只是用户上下文 / 摘要 / 记忆 / 偏好等增强信息。
+func NewPromptBuilder(baseSystem string, summary *entity.ChatSummary, memories []entity.UserMemory, userCtx UserContext) *PromptBuilder {
 	return &PromptBuilder{
-		mode:       mode,
 		baseSystem: baseSystem,
 		summary:    summary,
 		memories:   memories,
@@ -260,13 +226,14 @@ func (b *PromptBuilder) BuildHistory(history []entity.ChatMessage) []*schema.Mes
 // agent.runAgent 只负责在前面拼接 ReAct 规则，保证快速/深度两模式的摘要/记忆/偏好注入完全一致。
 // 同时完整填充 UserCtx 作为兜底：如果将来 runAgent 因某种原因拿到空的 SystemPrompt，
 // 还能从 UserCtx + Summary + Memories 重建增强提示词。
-func (b *PromptBuilder) BuildAgentRequestFields(userID, query, modelID, modelType string, kbIDs []string, userToolConfigIDs []string, history []entity.ChatMessage) agentpkg.Request {
+func (b *PromptBuilder) BuildAgentRequestFields(userID, query, modelID, modelType string, kbIDs []string, userToolConfigIDs []string, mcpDisabled bool, history []entity.ChatMessage) agentpkg.Request {
 	return agentpkg.Request{
 		UserID:            userID,
 		Query:             query,
 		History:           history,
 		KnowledgeBaseIDs:  kbIDs,
 		UserToolConfigIDs: userToolConfigIDs,
+		MCPDisabled:       mcpDisabled,
 		ModelID:           modelID,
 		ModelType:         modelType,
 		Summary:           b.summary,

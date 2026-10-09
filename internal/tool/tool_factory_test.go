@@ -70,7 +70,7 @@ func newMCPConfig(userConfigJSON string) entity.UserToolConfig {
 			ToolTypeID:   "tt-mcp",
 			ProviderKey:  "filesystem",
 			ProviderType: "mcp",
-			ProviderConfig: datatypes.JSON(`{"mcp":{"transport":"stdio"}}`),
+			ProviderConfig: datatypes.JSON(`{"mcp":{"transport":"http","url":"http://example.com/mcp"}}`),
 		},
 	}
 }

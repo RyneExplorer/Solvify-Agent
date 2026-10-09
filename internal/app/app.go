@@ -54,6 +54,10 @@ type App struct {
 
 	// MCP 客户端连接池，由 App 负责生命周期管理
 	mcpClientPool *providers.MCPClientPool
+	// MCP 预热所需依赖：供应商仓库（读已启用列表）、Provider（拉工具列表）、mcp ToolType 的 ID
+	mcpProviderRepo repository.ToolProviderRepository
+	mcpProvider     *providers.MCPProvider
+	mcpToolTypeID   string
 }
 
 // NewApp 创建应用实例
@@ -313,31 +317,31 @@ func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo rep
 	agentEngine := agent.NewEngine(toolFactory, a.cfg.Agent)
 
 	// ── 注册内置工具（按 Order 升序出现在 prompt "可用工具" 段） ──
-	agentEngine.RegisterInternal("knowledge_search", 1, false,
+	agentEngine.RegisterInternal("knowledge_search", 1, false, agent.DomainKnowledge,
 		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
 			return tool.NewKnowledgeSearchTool(vectorRetriever).WithContext(userID, kbIDs)
 		})
-	agentEngine.RegisterInternal("grep_chunks", 2, false,
+	agentEngine.RegisterInternal("grep_chunks", 2, false, agent.DomainKnowledge,
 		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
 			return tool.NewGrepChunksTool(chunkRepo)(userID, kbIDs)
 		})
-	agentEngine.RegisterInternal("get_document_info", 3, false,
+	agentEngine.RegisterInternal("get_document_info", 3, false, agent.DomainKnowledge,
 		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
 			return tool.NewGetDocumentInfoTool(documentRepo)(userID, kbIDs)
 		})
-	agentEngine.RegisterInternal("list_knowledge_chunks", 4, false,
+	agentEngine.RegisterInternal("list_knowledge_chunks", 4, false, agent.DomainKnowledge,
 		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
 			return tool.NewListKnowledgeChunksTool(documentRepo)(userID, kbIDs)
 		})
-	agentEngine.RegisterInternal("list_knowledge_bases", 5, false,
+	agentEngine.RegisterInternal("list_knowledge_bases", 5, false, agent.DomainKnowledge,
 		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
 			return tool.NewListKnowledgeBasesTool(kbRepo)(userID, kbIDs)
 		})
-	agentEngine.RegisterInternal("delete_document", 10, true,
+	agentEngine.RegisterInternal("delete_document", 10, true, agent.DomainDocMgmt,
 		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
 			return tool.NewDeleteDocumentTool(documentRepo)(userID, kbIDs)
 		})
-	agentEngine.RegisterInternal("ask_clarify", 20, false,
+	agentEngine.RegisterInternal("ask_clarify", 20, false, agent.DomainClarify,
 		func(ctx context.Context, userID string, kbIDs []string) einoTool.BaseTool {
 			return tool.NewAskClarifyTool()(userID, kbIDs)
 		})
@@ -399,13 +403,24 @@ func (a *App) initDependencies() error {
 
 	// MCP Provider：一个 MCP Server 可提供多个工具（一对多映射）
 	a.mcpClientPool = providers.NewMCPClientPool()
-	toolRegistry.Register("mcp", providers.NewMCPProvider(a.mcpClientPool))
+	a.mcpProvider = providers.NewMCPProvider(a.mcpClientPool)
+	toolRegistry.Register("mcp", a.mcpProvider)
 
 	// ToolFactory——Agent 引擎从 DB/Redis 加载用户配置的工具
 	toolFactory := tool.NewFactory(toolRegistry, cachedUserToolConfigRepo, cachedToolTypeRepo)
 
 	// 加载系统预置 MCP 服务器（从 config.yaml 同步到数据库）
 	a.loadSystemMCPServersWithTimeout()
+
+	// 异步预热已启用 MCP 的工具列表，避免首次问答时才建连接、卡在请求路径上。
+	// 这里保留预热所需的仓库/Provider 引用与 mcp ToolType 的 ID。
+	a.mcpProviderRepo = toolProviderRepo
+	if tt, err := cachedToolTypeRepo.GetByKey(context.Background(), mcpToolKey); err != nil {
+		logger.Warnf("[MCPPrewarm] 获取 mcp ToolType 失败，跳过预热: %v", err)
+	} else {
+		a.mcpToolTypeID = tt.ID
+		a.prewarmMCPServersAsync()
+	}
 
 	// Chunk Repository（文档分块查询）
 	chunkRepo := repository.NewDocumentChunkRepository(a.postgresqlDB)
@@ -477,10 +492,7 @@ func (a *App) initDependencies() error {
 	}
 
 	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo)
-	chatSvc, err := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, ai.Retriever, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.tracer, feedbackRepo)
-	if err != nil {
-		return fmt.Errorf("初始化聊天服务失败: %w", err)
-	}
+	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.tracer, feedbackRepo)
 	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo, toolProviderRepo, cachedUserToolConfigRepo, txMgr)
 	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry, cachedUserToolConfigRepo, txMgr)
 	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo, toolRegistry)
@@ -593,7 +605,7 @@ func (a *App) gracefulShutdown() {
 		}
 	}
 
-	// 关闭 MCP 客户端连接池（清理 stdio 子进程等资源）
+	// 关闭 MCP 客户端连接池（释放远端连接等资源）
 	if a.mcpClientPool != nil {
 		if err := a.mcpClientPool.Close(); err != nil {
 			logger.Errorf("MCP 客户端连接池关闭失败: %v", err)

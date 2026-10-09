@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	einoCompose "github.com/cloudwego/eino/compose"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 
@@ -16,10 +15,8 @@ import (
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/observability"
-	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/cache"
-	"solvify-agent/pkg/config"
 	apperrors "solvify-agent/pkg/errors"
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/traceid"
@@ -34,8 +31,6 @@ const (
 type chatService struct {
 	sessionRepo         repository.ChatSessionRepo
 	messageRepo         repository.ChatMessageRepo
-	retriever           rag.Retriever
-	einoRetriever       *rag.EinoRetrieverAdapter
 	modelRepo           repository.ModelRepo
 	userModelConfigRepo repository.UserModelConfigRepo
 	userRepo            repository.UserRepository
@@ -47,22 +42,13 @@ type chatService struct {
 	feedbackRepo        repository.FeedbackRepo
 	txMgr               repository.TxManager
 	embedClient         *llm.EmbeddingClient
-
-	// quickGraph 快速模式检索链路：启动期 build + Compile 一次，请求期只把请求级变量
-	// （ChatModel / 改写结果）装进 quickGraphInput 再 Invoke，不再经 context 注入。
-	// 图结构静态，因此「编译失败」被前移到启动期，请求期不存在该路径。
-	quickGraph einoCompose.Runnable[*quickGraphInput, *quickGraphOutput]
 }
 
 // NewChatService 创建聊天业务服务。
-//
-// 依赖全部显式声明：旧版本把 tracer/feedbackRepo 塞在 extra ...interface{} 里再靠类型 switch
-// 分派，漏传或传错类型都不会报错，只会在运行时静默丢链路。
 func NewChatService(
 	sessionRepo repository.ChatSessionRepo,
 	messageRepo repository.ChatMessageRepo,
 	txMgr repository.TxManager,
-	retriever rag.Retriever,
 	modelRepo repository.ModelRepo,
 	userModelConfigRepo repository.UserModelConfigRepo,
 	userRepo repository.UserRepository,
@@ -72,26 +58,11 @@ func NewChatService(
 	prefSvc UserPreferenceService,
 	tracer *observability.Tracer,
 	feedbackRepo repository.FeedbackRepo,
-) (ChatServiceInterface, error) {
-	defaultTopK := 10
-	if cfg := config.Get(); cfg != nil && cfg.RAG.TopK > 0 {
-		defaultTopK = cfg.RAG.TopK
-	}
-	einoRetriever := rag.NewEinoRetrieverAdapter(retriever, defaultTopK)
-
-	// 快速模式的 Graph 在这里就编译好：装配错误只可能变成启动错误。
-	quickGraph, err := compileQuickGraph(einoRetriever)
-	if err != nil {
-		return nil, fmt.Errorf("编译快速检索链路失败: %w", err)
-	}
-
+) ChatServiceInterface {
 	return &chatService{
 		sessionRepo:         sessionRepo,
 		messageRepo:         messageRepo,
 		txMgr:               txMgr,
-		retriever:           retriever,
-		einoRetriever:       einoRetriever,
-		quickGraph:          quickGraph,
 		modelRepo:           modelRepo,
 		userModelConfigRepo: userModelConfigRepo,
 		userRepo:            userRepo,
@@ -101,7 +72,7 @@ func NewChatService(
 		prefSvc:             prefSvc,
 		tracer:              tracer,
 		feedbackRepo:        feedbackRepo,
-	}, nil
+	}
 }
 
 // SendMessage 发送消息并获取流式响应

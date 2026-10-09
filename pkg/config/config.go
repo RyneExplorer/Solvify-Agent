@@ -50,6 +50,7 @@ type LogConfig struct {
 	MaxAge     int    `mapstructure:"max_age"`
 	Compress   bool   `mapstructure:"compress"`
 }
+
 // CORSConfig 描述跨域资源共享配置
 type CORSConfig struct {
 	Enabled          bool     `mapstructure:"enabled"`
@@ -63,12 +64,18 @@ type CORSConfig struct {
 
 // AgentConfig 描述 Agent 行为开关
 type AgentConfig struct {
-	EnableDemo              bool    `mapstructure:"enable_demo"`
-	MaxIterations           int     `mapstructure:"max_iterations"`
-	ScoreThreshold          float64 `mapstructure:"score_threshold"`
+	EnableDemo     bool    `mapstructure:"enable_demo"`
+	MaxIterations  int     `mapstructure:"max_iterations"`
+	ScoreThreshold float64 `mapstructure:"score_threshold"`
 	// QuickAgentMaxIterations 指定快速模式（eino ChatModelAgent）最多执行几个
 	// ReAct 循环，默认 2（最多 1 次工具调用+出答案）。
-	QuickAgentMaxIterations int `mapstructure:"quick_agent_max_iterations"`
+	QuickAgentMaxIterations   int  `mapstructure:"quick_agent_max_iterations"`
+	DeepPlanExecuteEnabled    bool `mapstructure:"deep_plan_execute_enabled"`
+	DeepParallelEnabled       bool `mapstructure:"deep_parallel_enabled"`
+	DeepMaxPlanTasks          int  `mapstructure:"deep_max_plan_tasks"`
+	DeepMaxSubagentIterations int  `mapstructure:"deep_max_subagent_iterations"`
+	DeepMaxPlanExecuteRounds  int  `mapstructure:"deep_max_plan_execute_rounds"`
+	DeepMaxExecutorIterations int  `mapstructure:"deep_max_executor_iterations"`
 }
 
 // LLMConfig 描述模型调用配置
@@ -104,8 +111,8 @@ type RAGConfig struct {
 	KeywordWeight  float64 `mapstructure:"keyword_weight"`
 	// KeywordScoreThreshold 是「向量侧全灭时」关键词结果的最低匹配比例。
 	// 之前这个字段没有配置入口，构造器只能吃硬编码默认值 0.25。
-	KeywordScoreThreshold float64        `mapstructure:"keyword_score_threshold"`
-	RRFK                  float64        `mapstructure:"rrf_k"`
+	KeywordScoreThreshold float64 `mapstructure:"keyword_score_threshold"`
+	RRFK                  float64 `mapstructure:"rrf_k"`
 	// CandidateMultiplier 是检索候选池的放大系数：两侧各取 TopK×N 条候选，
 	// 融合 / 过滤后再收敛到 TopK。默认 1（即只取 TopK 条）。
 	//
@@ -115,9 +122,9 @@ type RAGConfig struct {
 	// ≤ 0 时由检索器回落到默认值（不会变成 LIMIT 0 恒空）。
 	// ⚠️ 与 rag 的 min-max 归一化耦合：归一化把每侧最后一名压成 0、交叉过滤又丢掉
 	// 单源且 0 的结果 ⇒ 每侧最后一名必然出局，实际存活 = TopK-1。改归一化前先读报告。
-	CandidateMultiplier int `mapstructure:"candidate_multiplier"`
-	Reranker              RerankerConfig `mapstructure:"reranker"`
-	Expander              ExpanderConfig `mapstructure:"expander"`
+	CandidateMultiplier int            `mapstructure:"candidate_multiplier"`
+	Reranker            RerankerConfig `mapstructure:"reranker"`
+	Expander            ExpanderConfig `mapstructure:"expander"`
 }
 
 // RerankerConfig 描述重排序配置
@@ -141,8 +148,8 @@ type ExpanderConfig struct {
 
 // ToolsConfig 描述工具调用配置
 type ToolsConfig struct {
-	Enabled    bool                   `mapstructure:"enabled"`
-	WebSearch  WebSearchConfig        `mapstructure:"web_search"`
+	Enabled    bool                    `mapstructure:"enabled"`
+	WebSearch  WebSearchConfig         `mapstructure:"web_search"`
 	MCPServers []SystemMCPServerConfig `mapstructure:"mcp_servers"`
 }
 
@@ -156,13 +163,13 @@ type WebSearchConfig struct {
 type SystemMCPServerConfig struct {
 	Name        string            `mapstructure:"name" json:"name"`
 	Description string            `mapstructure:"description" json:"description"`
-	Transport   string            `mapstructure:"transport" json:"transport"`               // stdio | sse | http
-	Command     string            `mapstructure:"command" json:"command,omitempty"`         // stdio
-	Args        []string          `mapstructure:"args" json:"args,omitempty"`               // stdio
-	Env         map[string]string `mapstructure:"env" json:"env,omitempty"`                 // stdio
-	URL         string            `mapstructure:"url" json:"url,omitempty"`                 // sse/http
-	Headers     map[string]string `mapstructure:"headers" json:"headers,omitempty"`         // sse/http
-	Timeout     int               `mapstructure:"timeout" json:"timeout,omitempty"`         // 默认 30
+	Transport   string            `mapstructure:"transport" json:"transport"`       // stdio | sse | http
+	Command     string            `mapstructure:"command" json:"command,omitempty"` // stdio
+	Args        []string          `mapstructure:"args" json:"args,omitempty"`       // stdio
+	Env         map[string]string `mapstructure:"env" json:"env,omitempty"`         // stdio
+	URL         string            `mapstructure:"url" json:"url,omitempty"`         // sse/http
+	Headers     map[string]string `mapstructure:"headers" json:"headers,omitempty"` // sse/http
+	Timeout     int               `mapstructure:"timeout" json:"timeout,omitempty"` // 默认 30
 }
 
 // DingTalkConfig 描述钉钉开放平台配置
@@ -359,10 +366,16 @@ func Default() *Config {
 			Compress:   true,
 		},
 		Agent: AgentConfig{
-			EnableDemo:              true,
-			MaxIterations:           4,
-			ScoreThreshold:          0.7,
-			QuickAgentMaxIterations: 2,
+			EnableDemo:                true,
+			MaxIterations:             4,
+			ScoreThreshold:            0.7,
+			QuickAgentMaxIterations:   2,
+			DeepPlanExecuteEnabled:    true,
+			DeepParallelEnabled:       true,
+			DeepMaxPlanTasks:          4,
+			DeepMaxSubagentIterations: 3,
+			DeepMaxPlanExecuteRounds:  8,
+			DeepMaxExecutorIterations: 6,
 		},
 		LLM: LLMConfig{
 			Provider:    "mock",
@@ -500,6 +513,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Agent.MaxIterations <= 0 {
 		return errors.New("agent.max_iterations 必须大于 0")
+	}
+	if c.Agent.DeepPlanExecuteEnabled && (c.Agent.DeepMaxPlanExecuteRounds <= 0 || c.Agent.DeepMaxPlanExecuteRounds > 32 || c.Agent.DeepMaxExecutorIterations <= 0 || c.Agent.DeepMaxExecutorIterations > 32) {
+		return errors.New("深度模式执行轮次与 Executor 迭代上限必须在 1 到 32 之间")
+	}
+	if c.Agent.DeepPlanExecuteEnabled && (c.Agent.DeepMaxPlanTasks <= 0 || c.Agent.DeepMaxPlanTasks > 16) {
+		return errors.New("agent.deep_max_plan_tasks 必须在 1 到 16 之间")
+	}
+	if c.Agent.DeepPlanExecuteEnabled && c.Agent.DeepMaxSubagentIterations <= 0 {
+		return errors.New("agent.deep_max_subagent_iterations 必须大于 0")
 	}
 	return nil
 }
@@ -656,6 +678,24 @@ func applyEnv(cfg *Config) {
 	cfg.Observability.OTelServiceName = getEnv("OTEL_SERVICE_NAME", cfg.Observability.OTelServiceName)
 
 	// Agent 行为开关
+	if value := os.Getenv("AGENT_DEEP_PLAN_EXECUTE_ENABLED"); value != "" {
+		cfg.Agent.DeepPlanExecuteEnabled = parseBool(value, cfg.Agent.DeepPlanExecuteEnabled)
+	}
+	if value := os.Getenv("AGENT_DEEP_MAX_PLAN_EXECUTE_ROUNDS"); value != "" {
+		cfg.Agent.DeepMaxPlanExecuteRounds = parseInt(value, cfg.Agent.DeepMaxPlanExecuteRounds)
+	}
+	if value := os.Getenv("AGENT_DEEP_MAX_EXECUTOR_ITERATIONS"); value != "" {
+		cfg.Agent.DeepMaxExecutorIterations = parseInt(value, cfg.Agent.DeepMaxExecutorIterations)
+	}
+	if value := os.Getenv("AGENT_DEEP_PARALLEL_ENABLED"); value != "" {
+		cfg.Agent.DeepParallelEnabled = parseBool(value, cfg.Agent.DeepParallelEnabled)
+	}
+	if value := os.Getenv("AGENT_DEEP_MAX_PLAN_TASKS"); value != "" {
+		cfg.Agent.DeepMaxPlanTasks = parseInt(value, cfg.Agent.DeepMaxPlanTasks)
+	}
+	if value := os.Getenv("AGENT_DEEP_MAX_SUBAGENT_ITERATIONS"); value != "" {
+		cfg.Agent.DeepMaxSubagentIterations = parseInt(value, cfg.Agent.DeepMaxSubagentIterations)
+	}
 	if value := os.Getenv("AGENT_QUICK_MAX_ITERATIONS"); value != "" {
 		cfg.Agent.QuickAgentMaxIterations = parseInt(value, cfg.Agent.QuickAgentMaxIterations)
 	}

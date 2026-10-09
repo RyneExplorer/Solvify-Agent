@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"solvify-agent/internal/agent"
 	dto "solvify-agent/internal/model/dto/response"
 )
 
@@ -69,7 +70,7 @@ func TestSendErrorEvent_ReturnsImmediatelyWhenCtxCancelled(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		sendErrorEvent(ctx, eventCh, errors.New("boom"), "")
+		sendErrorEvent(ctx, eventCh, errors.New("boom"), agent.ProfileQuick)
 	}()
 
 	select {
@@ -83,7 +84,7 @@ func TestSendErrorEvent_ReturnsImmediatelyWhenCtxCancelled(t *testing.T) {
 // 缺了这条，把 Send 写成「无条件丢弃」也能让上面的用例通过。
 func TestSendErrorEvent_DeliversWhenCtxAlive(t *testing.T) {
 	eventCh := make(chan dto.StreamEvent, 1)
-	sendErrorEvent(context.Background(), eventCh, errors.New("boom"), "原始描述")
+	sendErrorEvent(context.Background(), eventCh, errors.New("boom"), agent.ProfileDeep)
 
 	select {
 	case ev := <-eventCh:

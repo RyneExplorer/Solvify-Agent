@@ -695,8 +695,8 @@ func getDefaultPlaceholderValue(ph string) interface{} {
 
 // normalizeMCPProviderConfig 规范化 MCP 供应商的 provider_config。
 // 管理员前端可能传入两种格式：
-//  A. 裸 MCP 配置：{"transport":"stdio","command":"uvx","args":[...]}  → 自动包装为标准结构
-//  B. 已包装格式：{"mcp":{"transport":"stdio",...}}  → 直接校验
+//  A. 裸 MCP 配置：{"transport":"http","url":"https://..."}  → 自动包装为标准结构
+//  B. 已包装格式：{"mcp":{"transport":"http",...}}  → 直接校验
 // 返回已包装的标准 ProviderConfig JSON。
 func normalizeMCPProviderConfig(raw json.RawMessage, registry tool.ProviderRegistry) (json.RawMessage, error) {
 	// 先尝试解析为标准 ProviderConfig（包含 mcp 字段）
@@ -726,7 +726,7 @@ func normalizeMCPProviderConfig(raw json.RawMessage, registry tool.ProviderRegis
 	}
 	// 至少 transport 存在，才认定是裸 MCP 配置
 	if mcpCfg.Transport == "" {
-		return nil, fmt.Errorf("MCP 配置缺少 transport 字段（stdio/sse/http）")
+		return nil, fmt.Errorf("MCP 配置缺少 transport 字段（sse/http）")
 	}
 	wrapped := tool.ProviderConfig{MCP: &mcpCfg}
 	exeCfg := &tool.ExecuteConfig{ProviderConfig: &wrapped}

@@ -71,13 +71,14 @@ const ClarifyDefaultTimeout = 10 * time.Minute
 
 // PendingCheckpointData 待恢复的 Agent checkpoint 信息
 type PendingCheckpointData struct {
-	CheckpointID string    `json:"checkpoint_id"`
-	InterruptID  string    `json:"interrupt_id"`
-	Question     string    `json:"question,omitempty"`
-	ToolName     string    `json:"tool_name,omitempty"`
-	IsClarify    bool      `json:"is_clarify,omitempty"`
-	Options      []string  `json:"options,omitempty"`
-	SetAt        time.Time `json:"set_at"`
+	CheckpointID  string         `json:"checkpoint_id"`
+	InterruptID   string         `json:"interrupt_id"`
+	Question      string         `json:"question,omitempty"`
+	ToolName      string         `json:"tool_name,omitempty"`
+	IsClarify     bool           `json:"is_clarify,omitempty"`
+	Options       []string       `json:"options,omitempty"`
+	SetAt         time.Time      `json:"set_at"`
+	ExecutionPlan datatypes.JSON `json:"execution_plan,omitempty"`
 }
 
 // HasPendingCheckpoint 检查 session 是否有待恢复的 checkpoint

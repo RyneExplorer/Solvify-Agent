@@ -11,6 +11,7 @@ import (
 
 	"solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/tool"
+	apperrors "solvify-agent/pkg/errors"
 	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/strutil"
@@ -46,13 +47,11 @@ func (e *Engine) runWithRunner(
 		if err != nil {
 			logger.Errorf("[Agent] ResumeWithParams 失败: %v", err)
 			eventch.Send(ctx, eventCh, Event{
-				Type:      EventError,
-				Title:     "恢复执行失败",
-				Detail:    "无法从中断点恢复，请重新发起深度模式请求",
-				Error:     err.Error(),
-				Status:    "error",
-				Retryable: false,
-				Done:      true,
+				Type:   EventError,
+				Kind:   apperrors.KindResumeFailed,
+				Error:  err.Error(),
+				Status: "error",
+				Done:   true,
 			})
 			return
 		}
@@ -79,24 +78,29 @@ func (e *Engine) runWithRunner(
 			logger.Errorf("[Agent] Runner 事件错误: %v", agentEvent.Err)
 			if isToolChoiceUnsupportedError(agentEvent.Err.Error()) {
 				eventch.Send(ctx, eventCh, Event{
-					Type:      EventError,
-					Title:     "当前模型不支持工具调用",
-					Detail:    "该模型不支持工具调用功能，无法使用联网搜索、天气查询等工具。建议切换到支持工具调用的模型（如通义千问、智谱清言、DeepSeek 等），或使用快速模式。",
-					Error:     agentEvent.Err.Error(),
-					Status:    "error",
-					Retryable: false,
-					Done:      true,
+					Type:   EventError,
+					Kind:   apperrors.KindToolUnsupported,
+					Error:  agentEvent.Err.Error(),
+					Status: "error",
+					Done:   true,
 				})
 				return
 			}
+			// 种类由错误链判定（结构化哨兵优先）：迭代超限等有哨兵的错误能落到
+			// 精确种类上；判不出来时归为「Agent 执行失败」——
+			// 它是本函数握着的事实，比笼统的 unknown 更有信息量。
+			// ⚠️ 这里原本写死了「深度思考模式执行异常」，而本函数被快速模式共用
+			// （runQuickAgent 第 69 行也走这里），于是快速模式的失败显示了深度模式的文案。
+			kind := apperrors.Classify(agentEvent.Err)
+			if kind == apperrors.KindUnknown {
+				kind = apperrors.KindAgentRunFailed
+			}
 			eventch.Send(ctx, eventCh, Event{
-				Type:      EventError,
-				Title:     "深度推理失败",
-				Detail:    "深度思考模式执行异常，请重试或使用快速模式",
-				Error:     agentEvent.Err.Error(),
-				Status:    "error",
-				Retryable: true,
-				Done:      true,
+				Type:   EventError,
+				Kind:   kind,
+				Error:  agentEvent.Err.Error(),
+				Status: "error",
+				Done:   true,
 			})
 			return
 		}
@@ -163,11 +167,6 @@ func (e *Engine) runWithRunner(
 
 		mv := agentEvent.Output.MessageOutput
 
-		// ── 轮次边界：一次 Role=Assistant 输出就是一轮模型决策的开始 ──
-		// 放在流式/非流式分流**之前**，两条路径都能覆盖到。
-		if mv.Role == schema.Assistant {
-		}
-
 		// ── 流式：消费 MessageStream，逐 chunk 处理 ──
 		if mv.IsStreaming && mv.MessageStream != nil {
 			e.consumeMessageStream(ctx, mv, toolDescMap, &fullAnswer, eventCh)
@@ -215,8 +214,12 @@ func (e *Engine) runWithRunner(
 	// Eino 框架不会在恢复完成后自动删除 CheckPointStore 中的记录（Delete 是可选接口，框架从不主动调用），
 	// 若不清理，agent_checkpoints 会无限堆积。恢复执行成功后这里主动删除，避免泄漏。
 	// 仅在正常完成（到达 EventDone）时清理：interrupt / error 早返回路径需要保留 checkpoint 供后续恢复。
-	if e.checkpointRepo != nil && checkpointID != "" {
-		if dErr := e.checkpointRepo.Delete(ctx, checkpointID); dErr != nil {
+	if checkpointID != "" {
+		store := e.buildCheckpointStore(req.SessionID)
+		deletable := store.(interface {
+			Delete(context.Context, string) error
+		})
+		if dErr := deletable.Delete(ctx, checkpointID); dErr != nil {
 			logger.Warnf("[Agent] 删除 checkpoint 字节失败（不阻塞）: checkpointID=%s, err=%v", checkpointID, dErr)
 		} else {
 			logger.Infof("[Agent] 已删除 checkpoint 字节: checkpointID=%s", checkpointID)

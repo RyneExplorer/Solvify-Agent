@@ -5,24 +5,33 @@ import (
 	"errors"
 	"strings"
 
+	"solvify-agent/internal/agent"
 	dto "solvify-agent/internal/model/dto/response"
+	apperrors "solvify-agent/pkg/errors"
 	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
 )
 
 // sendErrorEvent 发送友好的错误事件。
-// 匹配顺序：先查 err.Error()（包含底层错误详情如 503/429/timeout），再查 rawError（自定义描述）。
+//
+// 文案由「失败种类 × 模式」决定（见 chat_error_messages.go）。这里**不再接受调用方
+// 传的第二份描述** —— 曾经的 rawError 参数就是「同一个失败有两个文本来源」的入口，
+// 而它没能带上模式维度，快速模式的失败因此显示了深度模式的措辞。
 // ctx 已取消（客户端断连）时事件被丢弃、不阻塞，见 pkg/eventch。
-func sendErrorEvent(ctx context.Context, eventCh chan<- dto.StreamEvent, err error, rawError string) {
-	friendly := getFriendlyError(err, rawError)
+func sendErrorEvent(ctx context.Context, eventCh chan<- dto.StreamEvent, err error, profile agent.Profile) {
+	friendly := getFriendlyError(err, profile)
 
-	logger.Errorf("错误事件: title=%s, raw=%s, err=%v", friendly.Title, rawError, err)
+	logger.Errorf("错误事件: title=%s, kind=%s, err=%v", friendly.Title, apperrors.Classify(err), err)
 
+	errText := ""
+	if err != nil {
+		errText = err.Error()
+	}
 	eventch.Send(ctx, eventCh, dto.StreamEvent{
 		Type:      "error",
 		Title:     friendly.Title,
 		Detail:    friendly.Detail,
-		Error:     rawError,
+		Error:     errText,
 		Retryable: friendly.Retryable,
 		Done:      true,
 	})
@@ -80,11 +89,12 @@ func rejectEmptyAnswer(
 	logger.Warnf("[%s] 收到空回答，已拦截（不落库）: sessionID=%s, modelID=%s, assistantMsgID=%s, %s",
 		mode, sessionID, modelID, assistantMsgID, detail)
 
+	msg := messageFor(apperrors.KindEmptyAnswer, agent.Profile(mode))
 	eventch.Send(ctx, eventCh, dto.StreamEvent{
 		Type:      "error",
-		Title:     "AI 未返回内容",
-		Detail:    "模型本次没有返回任何内容，请重试或切换其他模型",
-		Retryable: true,
+		Title:     msg.Title,
+		Detail:    msg.Detail,
+		Retryable: msg.Retryable,
 		Done:      true,
 	})
 	return true
