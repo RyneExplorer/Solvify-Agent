@@ -259,6 +259,122 @@ func EnsureToolProviderSchema(db *gorm.DB) error {
 	return nil
 }
 
+// EnsureChatMessageEmbeddingSchema 补齐 chat_messages.embedding 列并核对维度。
+//
+// 语义召回要读写这一列，而它不进 AutoMigrate 也没有启动期检查，于是出现过
+// 「代码已按有向量写、库里 932 行全是 NULL」的状态：写侧批量报错、召回侧永远查不到，
+// 聊天本身照常工作，没有任何用户可见症状。
+//
+// 维度在这里核对（而不是等到写入失败）：配置里的 dimension 与列的实际维度必须一致，
+// 不一致时 INSERT/UPDATE 会报 `expected 1024 dimensions, not N`—— 但那是一行一行的
+// 失败，混在业务日志里没人看。启动期一次说清「配置要 N、库是 M」，错配就显形了。
+func EnsureChatMessageEmbeddingSchema(db *gorm.DB, wantDim int) error {
+	var tableExists bool
+	if err := db.Raw(
+		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'chat_messages')`,
+	).Scan(&tableExists).Error; err != nil {
+		return fmt.Errorf("检查 chat_messages 表存在性失败: %w", err)
+	}
+	if !tableExists {
+		logger.Warn("[embedding] chat_messages 表不存在，跳过向量列检查")
+		return nil
+	}
+
+	var colType string
+	err := db.Raw(`
+		SELECT COALESCE(format_type(a.atttypid, a.atttypmod), '')
+		FROM pg_attribute a
+		JOIN pg_class c ON c.oid = a.attrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = 'public' AND c.relname = 'chat_messages' AND a.attname = 'embedding'
+	`).Scan(&colType).Error
+	if err != nil {
+		return fmt.Errorf("查询 chat_messages.embedding 列定义失败: %w", err)
+	}
+
+	// 1) 列不存在 → 按配置维度补上。补完仍要核对，所以不 return。
+	if colType == "" {
+		if wantDim <= 0 {
+			logger.Warnf("[embedding] chat_messages.embedding 列不存在，且 embedding.dimension=%d 无法用于建列，跳过自动补列", wantDim)
+			return nil
+		}
+		logger.Infof("[embedding] chat_messages.embedding 列不存在，正在按 dimension=%d 补列", wantDim)
+		if err := db.Exec(fmt.Sprintf(
+			"ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS embedding vector(%d)", wantDim,
+		)).Error; err != nil {
+			return fmt.Errorf("补 chat_messages.embedding 列失败: %w", err)
+		}
+		logger.Infof("[embedding] chat_messages.embedding 列已补齐")
+		colType = fmt.Sprintf("vector(%d)", wantDim)
+	}
+
+	// 2) 列是无维度的 vector → 建不了 ANN 索引，且维度无从核对。
+	// 与 EnsurePGVectorIndex 同一处置：给出可直接执行的修复语句，不擅自 ALTER
+	// （改列类型会重写全表，且存量向量可能真的不是这个维度）。
+	if vectorColumnHasNoDimension(colType) {
+		logger.Warnf("[embedding] chat_messages.embedding 是「无维度」的 %s：ANN 索引无法建立，语义召回会退化成全表精确扫描；%s",
+			colType, chatMessageVectorRemediation(db, wantDim))
+		return nil
+	}
+
+	// 3) 维度核对：配置要的维度与列的实际维度必须一致。
+	colDim := vectorDimensionFromType(colType)
+	if wantDim > 0 && colDim > 0 && colDim != wantDim {
+		logger.Errorf("[embedding] 维度错配：embedding.dimension=%d，但 chat_messages.embedding 实际是 %s —— "+
+			"所有消息向量写入都会被 pgvector 拒绝（expected %d dimensions, not %d），语义召回恒为空。"+
+			"修复：改 configs/config.yaml 的 embedding.dimension 使其等于 %d，或执行 %s",
+			wantDim, colType, wantDim, colDim, colDim,
+			fmt.Sprintf("ALTER TABLE chat_messages ALTER COLUMN embedding TYPE vector(%d)", colDim))
+		return nil
+	}
+
+	// 4) 已写入多少行 —— 维度对得上但一行都没有，说明向量侧从未真正落库，
+	// 这跟「维度错配」是两种完全不同的故障，必须分开报。
+	var filled, total int64
+	if err := db.Raw(
+		`SELECT COUNT(*) AS total, COUNT(embedding) AS filled FROM chat_messages`,
+	).Row().Scan(&total, &filled); err != nil {
+		return fmt.Errorf("统计 chat_messages 向量覆盖率失败: %w", err)
+	}
+	if total > 0 && filled == 0 {
+		logger.Warnf("[embedding] chat_messages.embedding 列已就绪（%s），但 %d 条历史消息全部没有向量：语义召回在历史数据上无效。"+
+			"新消息会自动写入，历史消息需运行一次回填任务", colType, total)
+		return nil
+	}
+	logger.Infof("[embedding] chat_messages.embedding 已就绪（%s），向量覆盖 %d/%d 条消息", colType, filled, total)
+	return nil
+}
+
+// vectorDimensionFromType 从 `vector(1024)` 里取出 1024。
+// 取不出（非 vector 类型 / 无维度）时返回 0，由调用方按「无从核对」处理。
+func vectorDimensionFromType(colType string) int {
+	open := strings.Index(colType, "(")
+	close := strings.Index(colType, ")")
+	if open < 0 || close <= open {
+		return 0
+	}
+	dim, err := strconv.Atoi(strings.TrimSpace(colType[open+1 : close]))
+	if err != nil {
+		return 0
+	}
+	return dim
+}
+
+// chatMessageVectorRemediation 的维度取自库里真实存在的向量，取不到才退回配置值。
+// 与 vectorDimensionRemediation 同思路：提示里的数字必须与库中数据一致。
+func chatMessageVectorRemediation(db *gorm.DB, wantDim int) string {
+	var dim int
+	if err := db.Raw(
+		`SELECT vector_dims(embedding) FROM chat_messages WHERE embedding IS NOT NULL LIMIT 1`,
+	).Scan(&dim).Error; err == nil && dim > 0 {
+		return fmt.Sprintf("执行 ALTER TABLE chat_messages ALTER COLUMN embedding TYPE vector(%d) 即可正常建立", dim)
+	}
+	if wantDim > 0 {
+		return fmt.Sprintf("当前无存量向量，可直接执行 ALTER TABLE chat_messages ALTER COLUMN embedding TYPE vector(%d)", wantDim)
+	}
+	return "请确认向量模型维度后执行：ALTER TABLE chat_messages ALTER COLUMN embedding TYPE vector(<维度>)"
+}
+
 // EnsureMessageFeedbackSchema 补齐 message_feedback 表缺失的列。
 // 这张表是早期 AutoMigrate 创建的，后来 entity 加了 reasons / is_quick / trace_id 等列，
 // 但 AutoMigrate 不会给已存在的表 ADD COLUMN，导致 INSERT 时报 column "xxx" does not exist。

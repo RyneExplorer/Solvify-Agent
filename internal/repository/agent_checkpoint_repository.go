@@ -28,7 +28,7 @@ func (r *agentCheckpointRepository) Save(ctx context.Context, checkpointID, sess
 	}
 	return dbFor(ctx, r.db).
 		Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "id"}},
+			Columns:   []clause.Column{{Name: "id"}},
 			DoUpdates: clause.AssignmentColumns([]string{"checkpoint", "session_id", "expired_at", "updated_at"}),
 		}).
 		Create(&cp).Error
@@ -42,6 +42,10 @@ func (r *agentCheckpointRepository) Find(ctx context.Context, checkpointID strin
 			return nil, false, nil
 		}
 		return nil, false, err
+	}
+	// 过期清理是后台维护；恢复不能依赖清理任务是否已经运行。
+	if !cp.ExpiredAt.After(time.Now()) {
+		return nil, false, nil
 	}
 	return cp.Checkpoint, true, nil
 }
