@@ -40,7 +40,7 @@ import type { ExecutionPlan } from '@/types/chat'
 const props = defineProps<{ plan: ExecutionPlan }>()
 const completed = computed(() => props.plan.tasks.filter(task => task.status === 'success').length)
 const strategyLabel = computed(() => ({ direct: '直接执行', sequential: '顺序执行', parallel: '并行执行' } as Record<string, string>)[props.plan.strategy] ?? '任务执行')
-const phaseLabel = computed(() => ({ planning: '规划任务', executing: '执行任务', replanning: '评估与重规划', waiting: '等待审批', completed: '已完成', failed: '执行失败' } as Record<string, string>)[props.plan.phase ?? ''] ?? '任务处理中')
+const phaseLabel = computed(() => ({ planning: '规划任务', executing: '执行任务', replanning: '评估与重规划', waiting: '等待审批', completed: '已完成', failed: '执行失败', canceled: '已取消' } as Record<string, string>)[props.plan.phase ?? ''] ?? '任务处理中')
 
 function statusLabel(status: string) {
   return ({ pending: '等待依赖', running: '执行中', success: '已完成', error: '失败', waiting: '等待审批', canceled: '已取消' } as Record<string, string>)[status] ?? '待执行'

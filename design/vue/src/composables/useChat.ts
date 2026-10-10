@@ -8,7 +8,7 @@ import * as authApi from '@/api/auth'
 import * as toolApi from '@/api/tool'
 import { request } from '@/api/client'
 import type { ChatSession, ExecutionPlan, FeedbackRequest, PendingApproval, StreamEvent } from '@/types/chat'
-import { applyExecutionPlanEvent } from './chatExecutionPlan'
+import { applyExecutionPlanEvent, finishExecutionPlan } from './chatExecutionPlan'
 import type { ToolTemplate, UserToolConfigInfo } from '@/types/tool'
 
 // ── UI 展示用的本地类型 ──
@@ -265,6 +265,7 @@ export function useChat() {
   async function loadMessages(sessionId: string) {
     try {
       const res = await chatApi.getMessages(sessionId)
+      if (activeSessionId.value !== sessionId) return
       if (res.code === 0) {
         const serverMessages = (res.data.messages ?? []).map((m) => ({
           id: m.id,
@@ -307,6 +308,8 @@ export function useChat() {
 
   // 选中指定会话并加载消息
   function selectSession(sessionId: string) {
+    if (isLoading.value) return
+    interruptedAssistantId = ''
     streamPlan.value = null
     activeSessionId.value = sessionId
     loadMessages(sessionId)
@@ -319,6 +322,9 @@ export function useChat() {
       const pc = sess?.pending_checkpoint
       if (pc && pc.checkpoint_id) {
         streamPlan.value = pc.execution_plan ?? null
+        if (pc.execution_plan || pc.checkpoint_id.startsWith('deeppe-v1-')) {
+          searchMode.value = 'smart-reasoning'
+        }
         pendingApproval.value = {
           checkpoint_id: pc.checkpoint_id,
           interrupt_id: pc.interrupt_id,
@@ -366,7 +372,7 @@ export function useChat() {
     progressText.value = ''
     streamContent.value = ''
     streamTimeline.value = []
-    streamPlan.value = null
+    if (!isResume) streamPlan.value = null
 
     // 自动创建会话
     if (isNewSession) {
@@ -396,8 +402,10 @@ export function useChat() {
     let assistantId = ''
     let finalContent = ''
     let finalSources: StreamEvent['sources'] = []
+    let traceId: string | undefined
+    let reader: Awaited<ReturnType<typeof chatApi.sendMessage>> | undefined
 
-    const safetyTimer = setTimeout(() => {
+    const onStreamTimeout = () => {
       if (isLoading.value) {
         abortController?.abort()
         messages.value.push({
@@ -407,10 +415,11 @@ export function useChat() {
           retryable: true,
         })
       }
-    }, 120000)
+    }
+    let safetyTimer = setTimeout(onStreamTimeout, 120000)
 
     try {
-      const reader = await chatApi.sendMessage(activeSessionId.value, {
+      reader = await chatApi.sendMessage(activeSessionId.value, {
       content,
       model_id: selectedModel.value,
       model_type: modelOpt?.modelType ?? 'system',
@@ -421,14 +430,16 @@ export function useChat() {
       mcp_user_config_ids: selectedMCPConfigIds.value,
     }, abortController.signal)
 
-    const traceId = reader._meta?.trace_id
+    traceId = reader._meta?.trace_id
 
     const decoder = new TextDecoder()
     let buffer = ''
 
       while (true) {
         const { done, value } = await reader.read()
-        if (done) break
+        if (done) throw new Error('响应流意外结束，请重试')
+        clearTimeout(safetyTimer)
+        safetyTimer = setTimeout(onStreamTimeout, 120000)
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
@@ -523,7 +534,7 @@ export function useChat() {
 
               case 'error':
                 isLoading.value = false
-                if (streamPlan.value) streamPlan.value = { ...streamPlan.value, status: 'error' }
+                streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
                 messages.value.push({
                   id: 'e-' + Date.now(),
                   role: 'error',
@@ -550,7 +561,7 @@ export function useChat() {
                     detail: evt.clarify?.question ?? evt.detail ?? '',
                     tool_name: '',
                     target_ref: '',
-                    reason: evt.clarify?.context ?? '',
+                    reason: '',
                     options: evt.clarify?.options ?? [],
                     is_clarify: true,
                   }
@@ -576,7 +587,7 @@ export function useChat() {
               case 'done':
                 if (evt.content) finalContent = evt.content
                 if (evt.plan) streamPlan.value = applyExecutionPlanEvent(streamPlan.value, { ...evt, type: 'plan' })
-                if (streamPlan.value) streamPlan.value = { ...streamPlan.value, status: 'success', phase: 'completed' }
+                streamPlan.value = finishExecutionPlan(streamPlan.value, 'success')
                 streamTimeline.value.forEach(
                   (s) => s.status === 'running' && (s.status = 'success'),
                 )
@@ -627,10 +638,7 @@ export function useChat() {
       if (isAbort) {
         // 用户中断——保存已有的部分内容 / 推理步骤 / 来源
         if (finalContent || streamContent.value || streamTimeline.value.length || streamSources.value?.length || streamPlan.value) {
-          if (streamPlan.value) {
-            streamPlan.value.status = 'canceled'
-            streamPlan.value.tasks.forEach(task => { if (task.status === 'running' || task.status === 'pending') task.status = 'canceled' })
-          }
+          streamPlan.value = finishExecutionPlan(streamPlan.value, 'canceled')
           messages.value.push({
             id: assistantId || 'a-' + Date.now(),
             role: 'assistant',
@@ -643,15 +651,19 @@ export function useChat() {
         }
       } else {
         const msg = e instanceof Error ? e.message : '请求失败'
+        streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
         messages.value.push({
           id: 'e-' + Date.now(),
           role: 'error',
           content: msg,
           retryable: true,
+          execution_plan: streamPlan.value ?? undefined,
         })
       }
     } finally {
       clearTimeout(safetyTimer)
+      await reader?.cancel().catch(() => {})
+      reader?.releaseLock()
       abortController = null
       isLoading.value = false
       streamContent.value = ''
@@ -744,10 +756,40 @@ export function useChat() {
 
   // ── 审批 / 澄清追问统一入口 ──
   function approvePending(resolution: string) {
-    if (!pendingApproval.value) return
+    if (!pendingApproval.value || isLoading.value || !resolution.trim()) return
+    if (!selectedModel.value) {
+      ElMessage.warning('请先选择一个模型')
+      return
+    }
+    // 审批恢复原执行流程，不能随输入框切换到快速模式。
+    if (streamPlan.value || pendingApproval.value.checkpoint_id.startsWith('deeppe-v1-')) {
+      searchMode.value = 'smart-reasoning'
+    }
     input.value = resolution
+    const approval = pendingApproval.value
+    const plan = streamPlan.value
     pendingApproval.value = null
-    void sendMessage(undefined, true)
+    const sessionId = activeSessionId.value
+    void sendMessage(undefined, true).then(async () => {
+      if (activeSessionId.value !== sessionId) return
+      // 后端已消费的 checkpoint 不可再次审批；请求失败后重新核对可信状态。
+      if (!pendingApproval.value && messages.value.at(-1)?.role === 'error') {
+        try {
+          const res = await chatApi.getSession(sessionId!)
+          if (activeSessionId.value !== sessionId) return
+          if (activeSession.value) activeSession.value.pending_checkpoint = res.data.pending_checkpoint
+          if (res.data.pending_checkpoint?.checkpoint_id === approval.checkpoint_id) {
+            pendingApproval.value = approval
+            streamPlan.value = res.data.pending_checkpoint.execution_plan ?? plan
+          }
+        } catch { /* 状态未知时保留原审批入口，便于用户重试读取失败的请求 */
+          pendingApproval.value = approval
+          streamPlan.value = plan
+        }
+      } else if (!pendingApproval.value && activeSession.value) {
+        activeSession.value.pending_checkpoint = null
+      }
+    })
   }
 
   function cancelApproval() {
@@ -889,6 +931,9 @@ export function useChat() {
 
   // 重置聊天状态，开始新会话
   function newChat() {
+    if (isLoading.value) return
+    pendingApproval.value = null
+    interruptedAssistantId = ''
     activeSessionId.value = null
     messages.value = []
     collapsedTimelines.value = new Set()

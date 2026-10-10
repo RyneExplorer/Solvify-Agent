@@ -1,5 +1,19 @@
 import type { ExecutionPlan, StreamEvent } from '../types/chat'
 
+export function finishExecutionPlan(plan: ExecutionPlan | null, status: 'success' | 'error' | 'canceled'): ExecutionPlan | null {
+  if (!plan) return null
+  return {
+    ...plan,
+    status,
+    phase: status === 'success' ? 'completed' : status === 'error' ? 'failed' : 'canceled',
+    tasks: plan.tasks.map(task => ({
+      ...task,
+      status: status !== 'success' && ['pending', 'running', 'waiting'].includes(task.status) ? 'canceled' : task.status,
+      depends_on: [...(task.depends_on ?? [])],
+    })),
+  }
+}
+
 // 计划快照和任务增量都返回新对象，历史消息不会被下一次流式更新修改。
 export function applyExecutionPlanEvent(plan: ExecutionPlan | null, event: StreamEvent): ExecutionPlan | null {
   if (event.type === 'plan' && event.plan) {

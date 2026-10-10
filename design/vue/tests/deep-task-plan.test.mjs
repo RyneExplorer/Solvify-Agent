@@ -5,7 +5,38 @@ import { parse, compileScript } from '@vue/compiler-sfc'
 import { transformWithEsbuild } from 'vite'
 import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
-import { applyExecutionPlanEvent } from '../src/composables/chatExecutionPlan.ts'
+import { applyExecutionPlanEvent, finishExecutionPlan } from '../src/composables/chatExecutionPlan.ts'
+import { streamRequest } from '../src/api/client.ts'
+
+test('SSE 建立前的业务错误保持后端提示，避免误判为空流', async () => {
+  const originalFetch = globalThis.fetch
+  const originalStorage = globalThis.localStorage
+  globalThis.localStorage = { getItem: () => null }
+  globalThis.fetch = async () => new Response(JSON.stringify({ code: 404, message: '会话不存在' }), {
+    status: 200, headers: { 'Content-Type': 'application/json' },
+  })
+  try {
+    await assert.rejects(streamRequest('/chat/sessions/missing/messages', {}), /会话不存在/)
+  } finally {
+    globalThis.fetch = originalFetch
+    globalThis.localStorage = originalStorage
+  }
+})
+
+test('失败与取消收尾保留已完成任务并结束等待任务，不修改历史快照', () => {
+  const plan = structuredClone(initialPlan)
+  plan.tasks[0].status = 'success'
+  plan.tasks[1].status = 'waiting'
+  for (const status of ['error', 'canceled']) {
+    const finished = finishExecutionPlan(plan, status)
+    assert.equal(finished.status, status)
+    assert.equal(finished.phase, status === 'error' ? 'failed' : 'canceled')
+    assert.equal(finished.tasks[0].status, 'success')
+    assert.equal(finished.tasks[1].status, 'canceled')
+    assert.equal(finished.tasks[2].status, 'canceled')
+    assert.equal(plan.tasks[1].status, 'waiting')
+  }
+})
 
 const initialPlan = {
   id: 'p', strategy: 'parallel', status: 'running', tasks: [
