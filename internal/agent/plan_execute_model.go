@@ -10,6 +10,41 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// peControlModel 兼容只接受 auto 工具选择的思考模型。
+// 仅在上游明确拒绝 forced 参数时重试一次；原生阶段仍要求计划或 respond 工具。
+type peControlModel struct {
+	inner model.ToolCallingChatModel
+}
+
+func (m *peControlModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	inner, err := m.inner.WithTools(tools)
+	if err != nil {
+		return nil, err
+	}
+	return &peControlModel{inner: inner}, nil
+}
+
+func (m *peControlModel) Generate(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	msg, err := m.inner.Generate(ctx, msgs, opts...)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "thinking mode does not support this tool_choice") {
+		return msg, err
+	}
+	options := model.GetCommonOptions(nil, opts...)
+	if options.ToolChoice == nil || *options.ToolChoice != schema.ToolChoiceForced {
+		return nil, err
+	}
+	retryOptions := append(append([]model.Option(nil), opts...), model.WithToolChoice(schema.ToolChoiceAllowed))
+	return m.inner.Generate(ctx, msgs, retryOptions...)
+}
+
+func (m *peControlModel) Stream(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, msgs, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
 // peExecutorModel 在任何工具启动前验证整个调用集合，避免部分非法调用产生副作用。
 type peExecutorModel struct {
 	inner   model.ToolCallingChatModel

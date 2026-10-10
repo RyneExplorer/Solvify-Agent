@@ -86,12 +86,17 @@ func TestPlanExecutePlanRevisionRules(t *testing.T) {
 		if s.Plan.Tasks[0].Title != "研究 A" || s.Plan.Version != 1 {
 			t.Fatal("拒绝计划仍修改了可信状态")
 		}
+		p.Tasks[0].Title = "研究 A"
+		p.Tasks[0].DependsOn = []string{}
+		if err := r.installPlan(s, p); err != nil {
+			t.Fatalf("空依赖与省略依赖语义相同，不应拒绝: %v", err)
+		}
 		r.engine.cfg.DeepMaxPlanTasks = 1
 		p.Tasks = []TaskSpec{{ID: "latest", Agent: "synthesis_review", Title: "汇总", DependsOn: []string{"a"}}}
 		if err := r.installPlan(s, p); err != nil {
 			t.Fatal(err)
 		}
-		if s.Plan.ID == "" || s.Plan.Version != 2 || taskByID(s.Plan, "f").Status != TaskCanceled || s.Results["a"].Summary != "原结论" {
+		if s.Plan.ID == "" || s.Plan.Version != 3 || taskByID(s.Plan, "f").Status != TaskCanceled || s.Results["a"].Summary != "原结论" {
 			t.Fatal("版本或历史未保留")
 		}
 	})
@@ -130,5 +135,29 @@ func TestPlanExecutePlanRevisionRules(t *testing.T) {
 				t.Fatal("允许无限重试")
 			}
 		})
+	}
+}
+
+func TestPlanExecuteRetryLimitSurvivesIntermediateBatch(t *testing.T) {
+	r := &peRuntime{engine: deepTestEngine()}
+	s := &peState{
+		Request: Request{Query: "研究"},
+		Plan: ExecutionPlan{ID: "p", Version: 3, Strategy: "sequential", Tasks: []TaskSpec{
+			{ID: "failed", Agent: "knowledge_research", Title: "失败研究", Status: TaskError},
+			{ID: "f", Agent: "synthesis_review", Title: "汇总", Status: TaskSuccess},
+		}},
+		Results:   map[string]TaskResult{"failed": {Status: TaskError}, "f": {Status: TaskSuccess}},
+		Batch:     []TaskSpec{{ID: "f", Agent: "synthesis_review"}},
+		RetryUsed: true,
+	}
+	next := &pePlan{ExecutionPlan: ExecutionPlan{Strategy: "sequential", Reason: "再次研究", Tasks: []TaskSpec{
+		{ID: "retry", Agent: "knowledge_research", Title: "再次研究"},
+		{ID: "final", Agent: "synthesis_review", Title: "新汇总", DependsOn: []string{"retry"}},
+	}}}
+	if err := r.installPlan(s, next); err == nil {
+		t.Fatal("中间汇总批次绕过了只读重试次数限制")
+	}
+	if s.Plan.Version != 3 {
+		t.Fatal("被拒绝的计划改变可信状态")
 	}
 }

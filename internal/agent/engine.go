@@ -86,7 +86,7 @@ type Engine struct {
 func NewEngine(
 	toolFactory tool.ToolFactory,
 	cfg config.AgentConfig,
-) *Engine {
+) EngineInterface {
 	return &Engine{
 		toolFactory: toolFactory,
 		cfg:         cfg,

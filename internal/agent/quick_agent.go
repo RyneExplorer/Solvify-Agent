@@ -29,7 +29,7 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 	toolDescMap := logToolSet(ctx, e, req, allTools)
 
 	// 澄清中间件与迭代预算读同一个结果：澄清是一次普通工具调用，会占掉一轮模型调用，
-	// 恢复后还要继续扣 —— 预算必须容得下「澄清 + 业务工具 + 最终回答」，见 agentIterations。
+	// 恢复后还要继续扣 —— 预算必须容得下「检索 + 澄清 + 再检索 + 最终回答」，见 agentIterations。
 	clarifyNames := e.clarifyToolNames()
 	iterations := agentIterations(e.quickMaxIterations(), len(clarifyNames) > 0)
 
@@ -53,6 +53,8 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 		Model:         chatModel,
 		ToolsConfig:   adk.ToolsConfig{ToolsNodeConfig: toolsNodeConfig},
 		MaxIterations: iterations,
+		// 每次模型调用前的总预算检查（首次执行 / 每轮迭代 / 中断恢复三条路径共用）。
+		Handlers: []adk.ChatModelAgentMiddleware{newBudgetGuard(req, systemPromptFinal)},
 	})
 	if err != nil {
 		logger.Errorf("[Agent] ChatModelAgent 初始化失败: %v", err)

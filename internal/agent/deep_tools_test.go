@@ -44,3 +44,23 @@ func TestSelectRequestToolsUsesExplicitDomains(t *testing.T) {
 		t.Fatal("普通 Agent 应沿用 profile 工具集")
 	}
 }
+
+func TestDeepOperationTaskIncludesInternalDocumentManagement(t *testing.T) {
+	sorted := []internalToolRegistryEntry{
+		{Name: "knowledge", Domain: DomainKnowledge},
+		{Name: "delete_document", Domain: DomainDocMgmt, Dangerous: true},
+	}
+	buckets := map[ToolDomain][]einoTool.BaseTool{
+		DomainKnowledge: {namedTestTool{name: "knowledge"}},
+		DomainDocMgmt:   {namedTestTool{name: "delete_document"}},
+		DomainExternal:  {namedTestTool{name: "write_file"}},
+	}
+	set := selectRequestTools(sorted, buckets, Request{ToolDomains: taskToolDomains("web_research")})
+	got := set.namesOf()
+	if len(got) != 2 || got[0] != "delete_document" || got[1] != "write_file" {
+		t.Fatalf("操作任务丢失能力或泄露知识检索工具: %v", got)
+	}
+	if len(set.Entries) != 1 || set.Entries[0].Name != "delete_document" {
+		t.Fatalf("提示词工具清单与挂载工具不一致: %+v", set.Entries)
+	}
+}

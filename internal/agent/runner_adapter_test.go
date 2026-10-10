@@ -3,11 +3,22 @@ package agent
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
-	"solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/tool"
 )
+
+func TestFallbackAnswerKeepsUTF8AndDoesNotInventCitations(t *testing.T) {
+	answer := buildFallbackAnswer([]tool.SourceDocument{{Title: "资料", Content: strings.Repeat("中", 200)}})
+	if !utf8.ValidString(answer) {
+		t.Fatal("中文截断产生了无效 UTF-8")
+	}
+	if strings.Contains(answer, "chunk_id=") {
+		t.Fatal("缺少真实分块 ID 时不应编造引用")
+	}
+}
 
 // ─── 深度模式来源聚合 collectSources 的回归测试 ─────────────────────────────
 //
@@ -16,7 +27,7 @@ import (
 //   2. 来源顺序随 map 遍历随机，同一份检索结果每次刷新展示顺序都不同。
 // 下面用「同名不同 documentID」和「多次调用顺序稳定」两条不变量把这两个问题钉住。
 
-func docIDs(sources []response.SourceInfo) []string {
+func docIDs(sources []SourceInfo) []string {
 	ids := make([]string, 0, len(sources))
 	for _, s := range sources {
 		ids = append(ids, s.DocumentID)

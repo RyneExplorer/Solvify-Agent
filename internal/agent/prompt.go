@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	einoTool "github.com/cloudwego/eino/components/tool"
+
+	"solvify-agent/pkg/strutil"
 )
 
 // buildSystemPrompt 按模式分派系统提示词构建。
@@ -219,10 +221,7 @@ func resolveToolDescs(ctx context.Context, tools []einoTool.BaseTool) []toolDesc
 		if err != nil || info == nil {
 			continue
 		}
-		desc := info.Desc
-		if len(desc) > 120 {
-			desc = desc[:120] + "..."
-		}
+		desc := strutil.Truncate(info.Desc, 120)
 		descs = append(descs, toolDesc{Name: info.Name, Desc: desc})
 	}
 	return descs

@@ -32,10 +32,12 @@ func (e *Engine) Execute(ctx context.Context, req Request, chatModel model.ToolC
 			e.runQuickAgent(ctx, req, chatModel, eventCh)
 			return
 		}
-		if strings.HasPrefix(req.CheckpointID, "deeppe-v1-") || (req.CheckpointID == "" && e.cfg.DeepPlanExecuteEnabled) {
+		chatModel = &budgetModel{inner: chatModel, guard: newBudgetGuard(req, "")}
+		planExecute := strings.HasPrefix(req.CheckpointID, "deeppe-v1-") || (req.CheckpointID == "" && e.cfg.DeepPlanExecuteEnabled)
+		if planExecute {
 			e.runPlanExecute(ctx, req, chatModel, eventCh)
 		} else if strings.HasPrefix(req.CheckpointID, "deep-") {
-			e.runDeepOrchestrator(ctx, req, chatModel, eventCh)
+			e.resumeLegacyDeepOrchestrator(ctx, req, chatModel, eventCh)
 		} else {
 			e.runAgent(ctx, req, chatModel, eventCh)
 		}
@@ -195,7 +197,7 @@ func (e *Engine) deepSubagentIterations(req Request) int {
 // 直接构造 Engine（测试/工具）的场景。
 func (e *Engine) quickMaxIterations() int {
 	if e.cfg.QuickAgentMaxIterations <= 0 {
-		return 2
+		return 8
 	}
 	return e.cfg.QuickAgentMaxIterations
 }
@@ -219,7 +221,7 @@ func maxToolCalls(maxIterations int) int {
 //
 // 交互型工具（ask_clarify 澄清、危险工具审批）与业务工具一样各占一轮模型调用，
 // 但它们「暂停等人」—— 而 prompt 明确鼓励「不确定的先用检索工具找线索，真不行再澄清」，
-// 于是预算必须容得下「澄清 1 + 业务工具 1 + 最终回答 1」。
+// 于是预算必须容得下「检索 1 + 澄清 1 + 再检索 1 + 最终回答 1」。
 //
 // 下界必须由「本模式实际挂了什么」推导，不能只读配置：只看配置会让
 // 「挂了 ask_clarify 却给装不下的预算」结构上可能发生。实测就撞在这条上 ——
@@ -228,7 +230,7 @@ func maxToolCalls(maxIterations int) int {
 const (
 	finalAnswerRounds     = 1 // 最后一轮必须是最终回答，不能再调工具
 	businessToolRounds    = 1 // 业务工具（检索等）至少能用一次
-	interactiveToolRounds = 1 // 澄清 / 审批这类交互型工具至少能用一次
+	interactiveToolRounds = 2 // 一次澄清 / 审批，加上交互前的线索检索
 )
 
 // agentIterations 推导本模式的迭代预算：取「配置值」与「能力下界」的较大者。
@@ -305,7 +307,7 @@ func logToolSet(ctx context.Context, e *Engine, req Request, allTools []einoTool
 	userToolsN := 0
 	for _, t := range allTools {
 		info, err := t.Info(ctx)
-		if err != nil {
+		if err != nil || info == nil {
 			logger.Warnf("[Agent] 获取工具信息失败: %v", err)
 			continue
 		}

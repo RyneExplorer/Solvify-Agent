@@ -3,7 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/cloudwego/eino/schema"
@@ -99,12 +99,12 @@ func (r *peRuntime) installPlan(s *peState, next *pePlan) error {
 		}
 		if previous, ok := old[t.ID]; ok {
 			if previous.Status == TaskSuccess || previous.Status == TaskError || previous.Status == TaskCanceled {
-				if previous.Agent != t.Agent || previous.Title != t.Title || previous.Description != t.Description || !reflect.DeepEqual(previous.DependsOn, t.DependsOn) {
+				if previous.Agent != t.Agent || previous.Title != t.Title || previous.Description != t.Description || !slices.Equal(previous.DependsOn, t.DependsOn) {
 					return fmt.Errorf("已结束任务 %s 不可修改，请创建新任务", t.ID)
 				}
 				*t = previous
 			} else {
-				if t.Agent != "synthesis_review" && (s.Denied || s.Blocked) && (previous.Agent != t.Agent || previous.Description != t.Description || !reflect.DeepEqual(previous.DependsOn, t.DependsOn)) {
+				if t.Agent != "synthesis_review" && (s.Denied || s.Blocked) && (previous.Agent != t.Agent || previous.Description != t.Description || !slices.Equal(previous.DependsOn, t.DependsOn)) {
 					return fmt.Errorf("审批拒绝或权限错误后不可修改研究任务以绕过限制")
 				}
 				t.AddedVersion = previous.AddedVersion
@@ -194,9 +194,9 @@ func (r *peRuntime) installPlan(s *peState, next *pePlan) error {
 				return fmt.Errorf("副作用操作失败后不可自动重试或替代")
 			}
 		}
-		for _, task := range s.Batch {
-			if s.Results[task.ID].Status == TaskError {
-				if s.Unsafe[task.ID] || s.RetryUsed || s.Blocked || s.Denied {
+		for id, result := range s.Results {
+			if result.Status == TaskError {
+				if s.Unsafe[id] || s.RetryUsed || s.Blocked || s.Denied {
 					return fmt.Errorf("任务失败后不可再次自动研究")
 				}
 				retryUsed = true

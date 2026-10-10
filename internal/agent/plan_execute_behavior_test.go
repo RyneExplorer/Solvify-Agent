@@ -455,6 +455,20 @@ func TestPlanExecuteEmptyResultAndIterationLimits(t *testing.T) {
 			}
 			events := collectPEBehaviorEvents(t, ctx, e, Request{Query: test.name, UserID: "u", SessionID: test.name}, m)
 			requirePEError(t, events)
+			var final *ExecutionPlan
+			for _, event := range events {
+				if event.Plan != nil {
+					final = event.Plan
+				}
+			}
+			if final == nil || final.Status != TaskError || final.Phase != "failed" {
+				t.Fatalf("失败时未发布完整终态: %+v", final)
+			}
+			for _, task := range final.Tasks {
+				if task.Status == TaskPending || task.Status == TaskRunning || task.Status == TaskWaiting {
+					t.Fatalf("流程失败后任务仍可执行: %+v", task)
+				}
+			}
 		})
 	}
 }

@@ -9,7 +9,6 @@ import (
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 
-	"solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/tool"
 	apperrors "solvify-agent/pkg/errors"
 	"solvify-agent/pkg/eventch"
@@ -198,7 +197,7 @@ func (e *Engine) runWithRunner(
 	}
 
 	// ── 收集 Sources ──
-	var sources []response.SourceInfo
+	var sources []SourceInfo
 	if len(collected) > 0 {
 		sources = collectSources(collected)
 	}
@@ -398,7 +397,7 @@ func mapKeys(m map[string]any) []string {
 	return out
 }
 
-// collectSources 从 KnowledgeSearchTool.CollectedSources 转换成 response.SourceInfo。
+// collectSources 从 KnowledgeSearchTool.CollectedSources 转换成 SourceInfo。
 //
 // 分组口径与 chat_service_mapper.go 的 groupDocumentsToSources 保持一致，两条关键规则：
 //  1. 按 DocumentID 分组，不按 Title。同一份文档通常会命中多个 chunk 需要并成一条来源；
@@ -406,17 +405,17 @@ func mapKeys(m map[string]any) []string {
 //     并成一条，并让后者的 chunk 挂到前者的 documentID 上 —— 前端点击引用会跳到错的文档。
 //  2. 用 docOrder 记录首次出现顺序。直接遍历 map 会打乱来源顺序，而该顺序即检索的
 //     相似度顺序，打乱后用户每次看到的引用列表顺序都不一样。
-func collectSources(sources []tool.SourceDocument) []response.SourceInfo {
+func collectSources(sources []tool.SourceDocument) []SourceInfo {
 	if len(sources) == 0 {
 		return nil
 	}
 
-	docMap := make(map[string]*response.SourceInfo, len(sources))
+	docMap := make(map[string]*SourceInfo, len(sources))
 	docOrder := make([]string, 0, len(sources))
 	for _, src := range sources {
 		info, exists := docMap[src.DocumentID]
 		if !exists {
-			info = &response.SourceInfo{
+			info = &SourceInfo{
 				DocumentID:      src.DocumentID,
 				KnowledgeBaseID: src.KnowledgeBaseID,
 				Title:           src.Title,
@@ -424,7 +423,7 @@ func collectSources(sources []tool.SourceDocument) []response.SourceInfo {
 			docMap[src.DocumentID] = info
 			docOrder = append(docOrder, src.DocumentID)
 		}
-		info.Chunks = append(info.Chunks, response.ChunkSource{
+		info.Chunks = append(info.Chunks, ChunkSource{
 			ID:      src.ID,
 			Content: src.Content,
 			Score:   src.Score,
@@ -435,7 +434,7 @@ func collectSources(sources []tool.SourceDocument) []response.SourceInfo {
 		}
 	}
 
-	result := make([]response.SourceInfo, 0, len(docOrder))
+	result := make([]SourceInfo, 0, len(docOrder))
 	for _, docID := range docOrder {
 		result = append(result, *docMap[docID])
 	}
@@ -461,21 +460,17 @@ func buildFallbackAnswer(sources []tool.SourceDocument) string {
 			continue
 		}
 		usedTitles[title] = true
-		content := strings.TrimSpace(src.Content)
-		if len(content) > 160 {
-			content = content[:160] + "…"
-		}
-		chunkID := src.ID
-		if chunkID == "" {
-			chunkID = "c" + string(rune('0'+i))
-		}
+		content := strutil.Truncate(strings.TrimSpace(src.Content), 160)
 		sb.WriteString("- ")
 		sb.WriteString(title)
-		sb.WriteString(" <kb doc=\"")
-		sb.WriteString(title)
-		sb.WriteString("\" chunk_id=\"")
-		sb.WriteString(chunkID)
-		sb.WriteString("\" />\n")
+		if src.ID != "" {
+			sb.WriteString(" <kb doc=\"")
+			sb.WriteString(title)
+			sb.WriteString("\" chunk_id=\"")
+			sb.WriteString(src.ID)
+			sb.WriteString("\" />")
+		}
+		sb.WriteString("\n")
 		if content != "" {
 			sb.WriteString("  > ")
 			sb.WriteString(content)

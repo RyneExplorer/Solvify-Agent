@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"time"
@@ -26,13 +27,13 @@ func (s *InMemoryCheckPointStore) Get(_ context.Context, checkPointID string) ([
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	v, ok := s.data[checkPointID]
-	return v, ok, nil
+	return bytes.Clone(v), ok, nil
 }
 
 func (s *InMemoryCheckPointStore) Set(_ context.Context, checkPointID string, checkPoint []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data[checkPointID] = checkPoint
+	s.data[checkPointID] = bytes.Clone(checkPoint)
 	return nil
 }
 

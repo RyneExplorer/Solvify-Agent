@@ -24,7 +24,7 @@ func TestAgentIterations_Boundaries(t *testing.T) {
 		want        int
 	}{
 		{0, false, 2}, {1, false, 2}, {2, false, 2}, {5, false, 5},
-		{0, true, 3}, {1, true, 3}, {2, true, 3}, {3, true, 3}, {6, true, 6},
+		{0, true, 4}, {1, true, 4}, {2, true, 4}, {3, true, 4}, {4, true, 4}, {6, true, 6},
 	}
 	for _, c := range cases {
 		if got := agentIterations(c.configured, c.interactive); got != c.want {
@@ -43,7 +43,7 @@ func TestAgentIterations_NeverLowersConfigured(t *testing.T) {
 			}
 			floor := 2
 			if interactive {
-				floor = 3
+				floor = 4
 			}
 			if got < floor {
 				t.Errorf("agentIterations(%d, %v)=%d < 下界 %d", configured, interactive, got, floor)
@@ -52,8 +52,8 @@ func TestAgentIterations_NeverLowersConfigured(t *testing.T) {
 	}
 }
 
-// 生产路径守卫：快速模式真实挂上了 ask_clarify，而默认配置只有 2 轮 ——
-// 推导必须把预算抬到能容纳「澄清 + 一次工具 + 最终回答」，并且 prompt 里写的
+// 生产路径守卫：快速模式真实挂上了 ask_clarify，而默认配置为 8 轮 ——
+// 推导必须把预算抬到能容纳「检索 + 澄清 + 再检索 + 最终回答」，并且 prompt 里写的
 // 工具上限与 eino 的 MaxIterations 同源（都由这里推导）。
 func TestAgentIterations_QuickModeCoversItsOwnClarifyTool(t *testing.T) {
 	e, sorted := newProfileTestEngine(nil)
@@ -70,13 +70,13 @@ func TestAgentIterations_QuickModeCoversItsOwnClarifyTool(t *testing.T) {
 	configured := e.quickMaxIterations()
 	got := agentIterations(configured, true)
 
-	if got < 3 {
-		t.Fatalf("快速模式预算 %d 轮（配置 %d）装不下「澄清 1 + 工具 1 + 回答 1」"+
+	if got < 4 {
+		t.Fatalf("快速模式预算 %d 轮（配置 %d）装不下「检索 1 + 澄清 1 + 再检索 1 + 回答 1」"+
 			"⇒ 澄清之后必然 exceeds max iterations", got, configured)
 	}
 	// 工具上限 = 模型轮 - 1，且这两处必须来自同一个 got。
-	if want := 2; maxToolCalls(got) != want {
-		t.Fatalf("工具上限=%d，期望 %d（预算 %d 轮 = 澄清 1 + 工具 1 + 回答 1）", maxToolCalls(got), want, got)
+	if want := 7; maxToolCalls(got) != want {
+		t.Fatalf("工具上限=%d，期望 %d（默认预算应为 8 轮，含最终回答）", maxToolCalls(got), want)
 	}
 }
 

@@ -1,8 +1,17 @@
 package agent
 
 import (
+	"context"
 	"testing"
 )
+
+func TestBuildToolsWithoutDynamicFactory(t *testing.T) {
+	e := &Engine{}
+	got := e.buildToolsByDomain(context.Background(), nil, "u", nil, AllToolDomains, true)
+	if len(got[DomainExternal]) != 0 {
+		t.Fatalf("未配置工厂不应构建外部工具: %+v", got)
+	}
+}
 
 // TestSortedInternalToolsTotallyOrdered 断言「同 Order 的内置工具按 Name 裁决」。
 //

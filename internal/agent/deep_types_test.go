@@ -43,3 +43,15 @@ func TestExecutionPlanRejectsUnknownAgentAndStrategy(t *testing.T) {
 		t.Fatal("expected strategy validation error")
 	}
 }
+
+func TestExecutionPlanRejectsBlankTaskAndDuplicateDependencies(t *testing.T) {
+	for _, task := range []TaskSpec{
+		{ID: "  ", Agent: "knowledge_research"},
+		{ID: "f", Agent: "synthesis_review", DependsOn: []string{"a", "a"}},
+	} {
+		plan := ExecutionPlan{ID: "p", Strategy: "sequential", Tasks: []TaskSpec{{ID: "a", Agent: "knowledge_research"}, task}}
+		if err := plan.Validate(4); err == nil {
+			t.Fatalf("非法任务未被拒绝: %+v", task)
+		}
+	}
+}

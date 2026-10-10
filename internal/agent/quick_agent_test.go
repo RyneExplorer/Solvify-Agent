@@ -244,8 +244,8 @@ func TestQuickMaxIterationsIndependentFromDeep(t *testing.T) {
 	// 零值兜底：直接构造 Engine（不经配置校验）时不能返回 0，
 	// 否则 eino 收到 0 会走「无上限」，与「配置缺失」的真实意图相反。
 	zero, _ := newProfileTestEngine(nil)
-	if got := zero.quickMaxIterations(); got != 2 {
-		t.Fatalf("零值兜底=%d 期望 2", got)
+	if got := zero.quickMaxIterations(); got != 8 {
+		t.Fatalf("零值兜底=%d 期望 8", got)
 	}
 	if got := deepMaxIterations(0); got != 5 {
 		t.Fatalf("深度零值兜底=%d 期望 5", got)

@@ -2,8 +2,7 @@ package agent
 
 import (
 	"fmt"
-
-	"solvify-agent/internal/model/dto/response"
+	"strings"
 )
 
 const (
@@ -46,11 +45,11 @@ type TaskSpec struct {
 }
 
 type AgentEvidence struct {
-	ID         string                `json:"id"`
-	AgentName  string                `json:"agent_name"`
-	Summary    string                `json:"summary"`
-	Confidence float64               `json:"confidence,omitempty"`
-	Sources    []response.SourceInfo `json:"sources,omitempty"`
+	ID         string       `json:"id"`
+	AgentName  string       `json:"agent_name"`
+	Summary    string       `json:"summary"`
+	Confidence float64      `json:"confidence,omitempty"`
+	Sources    []SourceInfo `json:"sources,omitempty"`
 }
 
 type TaskResult struct {
@@ -63,9 +62,9 @@ type TaskResult struct {
 	Interrupt *Event          `json:"interrupt,omitempty"`
 }
 
-// Validate checks task references and detects dependency cycles before execution.
+// Validate 在执行前校验角色、任务标识、依赖引用和依赖环。
 func (p ExecutionPlan) Validate(maxTasks int) error {
-	if p.ID == "" || len(p.Tasks) == 0 {
+	if strings.TrimSpace(p.ID) == "" || len(p.Tasks) == 0 {
 		return fmt.Errorf("计划必须包含 ID 和任务")
 	}
 	if maxTasks > 0 && len(p.Tasks) > maxTasks {
@@ -76,7 +75,7 @@ func (p ExecutionPlan) Validate(maxTasks int) error {
 	}
 	seen := make(map[string]TaskSpec, len(p.Tasks))
 	for _, task := range p.Tasks {
-		if task.ID == "" || task.Agent == "" {
+		if strings.TrimSpace(task.ID) == "" || task.Agent == "" {
 			return fmt.Errorf("任务 ID 和 Agent 不能为空")
 		}
 		if _, ok := supportedDeepAgents[task.Agent]; !ok {
@@ -92,7 +91,12 @@ func (p ExecutionPlan) Validate(maxTasks int) error {
 	}
 	graph := make(map[string][]string, len(seen))
 	for _, task := range p.Tasks {
+		dependencies := make(map[string]bool, len(task.DependsOn))
 		for _, dep := range task.DependsOn {
+			if dependencies[dep] {
+				return fmt.Errorf("任务 %s 依赖重复: %s", task.ID, dep)
+			}
+			dependencies[dep] = true
 			if _, ok := seen[dep]; !ok {
 				return fmt.Errorf("任务 %s 依赖不存在: %s", task.ID, dep)
 			}
@@ -126,7 +130,7 @@ func (p ExecutionPlan) Validate(maxTasks int) error {
 	return nil
 }
 
-// ReadyTasks returns pending tasks whose dependencies all succeeded.
+// ReadyTasks 返回前置任务全部成功的待执行任务。
 func (p ExecutionPlan) ReadyTasks() []TaskSpec {
 	status := make(map[string]string, len(p.Tasks))
 	for _, task := range p.Tasks {

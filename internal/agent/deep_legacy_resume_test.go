@@ -13,7 +13,6 @@ import (
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 
-	"solvify-agent/internal/model/dto/response"
 	"solvify-agent/pkg/config"
 )
 
@@ -139,11 +138,11 @@ func TestDeepOrchestratorApprovalPreservesIndependentResults(t *testing.T) {
 }
 
 func TestFlattenSourcesMergesParallelEvidenceWithoutMutatingInputs(t *testing.T) {
-	source := response.SourceInfo{DocumentID: "doc", KnowledgeBaseID: "kb", Title: "资料", Score: 0.5, Chunks: []response.ChunkSource{{ID: "c1", Content: "内容"}}}
+	source := SourceInfo{DocumentID: "doc", KnowledgeBaseID: "kb", Title: "资料", Score: 0.5, Chunks: []ChunkSource{{ID: "c1", Content: "内容"}}}
 	second := source
 	second.Score = 0.9
-	second.Chunks = []response.ChunkSource{{ID: "c1"}, {ID: "c2"}}
-	got := flattenSources([]AgentEvidence{{Sources: []response.SourceInfo{source}}, {Sources: []response.SourceInfo{second}}})
+	second.Chunks = []ChunkSource{{ID: "c1"}, {ID: "c2"}}
+	got := flattenSources([]AgentEvidence{{Sources: []SourceInfo{source}}, {Sources: []SourceInfo{second}}})
 	if len(got) != 1 || len(got[0].Chunks) != 2 || got[0].Score != 0.9 {
 		t.Fatalf("来源聚合错误: %+v", got)
 	}

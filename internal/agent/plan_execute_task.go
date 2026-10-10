@@ -91,7 +91,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 				req.ToolDomains = taskToolDomains(task.Agent)
 				req.CheckpointID = ""
 				req.ResumeData = nil
-				req.Query = s.Request.Query + "\n当前研究任务：" + task.Description
+				req.Query = "原问题（仅作背景）：" + s.Request.Query + "\n只执行当前任务：" + task.Title + "\n任务说明：" + task.Description
 				req.History = append(req.History[:0:0], s.Request.History...)
 				inputs := task
 				if task.Agent == "synthesis_review" {
@@ -251,9 +251,17 @@ func (a *peTaskAgent) buildAgent(ctx context.Context, req Request) (*adk.ChatMod
 		}
 		buckets = copyBuckets
 	}
-	if req.AgentName == "web_research" && e.toolFactory != nil && !req.MCPDisabled {
-		// 重建任务级工具包装；底层连接仍由供应商连接池复用。
-		buckets = map[ToolDomain][]einoTool.BaseTool{DomainExternal: e.toolFactory.CreateAgentTools(ctx, req.UserID, req.UserToolConfigIDs...)}
+	if req.AgentName == "web_research" {
+		// 从可信任务请求重建操作工具；恢复不沿用新请求的工具选择或权限范围。
+		operations := e.buildToolsByDomain(ctx, sorted, req.UserID, req.KnowledgeBaseIDs, []ToolDomain{DomainDocMgmt}, false)
+		operations[DomainExternal] = buckets[DomainExternal]
+		if e.toolFactory != nil {
+			operations[DomainExternal] = nil
+			if !req.MCPDisabled {
+				operations[DomainExternal] = e.toolFactory.CreateAgentTools(ctx, req.UserID, req.UserToolConfigIDs...)
+			}
+		}
+		buckets = operations
 	}
 	ts := selectRequestTools(sorted, buckets, req)
 	config := buildToolsNodeConfig()

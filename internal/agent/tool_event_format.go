@@ -23,10 +23,6 @@ func parseToolResponse(response string) ToolResponseData {
 	return result
 }
 
-func parseGrepResponse(response string) ToolResponseData {
-	return parseToolResponse(response)
-}
-
 func parseKnowledgeSearchResult(response string) (titles []string, count int) {
 	var result struct {
 		Sources []struct {
@@ -129,7 +125,7 @@ func formatToolEnd(toolName string, output *toolComp.CallbackOutput, toolDescMap
 		}
 		return "知识库检索完成", "未找到相关内容", toolResult
 	case "grep_chunks":
-		result := parseGrepResponse(response)
+		result := parseToolResponse(response)
 		if result.Success && result.Data != nil {
 			if dataList, ok := result.Data.([]interface{}); ok && len(dataList) > 0 {
 				return "关键词搜索完成", fmt.Sprintf("找到 %d 条匹配结果", len(dataList)), toolResult
@@ -171,67 +167,4 @@ func formatToolEnd(toolName string, output *toolComp.CallbackOutput, toolDescMap
 	}
 
 	return fmt.Sprintf("%s 执行完成", toolName), "", toolResult
-}
-
-// formatToolError 根据组件类型和错误生成 EventError 的 title、detail、retryable
-func formatToolError(component, name string, err error) (title, detail string, retryable bool) {
-	errMsg := err.Error()
-
-	switch component {
-	case "Tool":
-		if isWebSearchTool(name, "") {
-			if strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "超时") {
-				return "联网搜索超时", "搜索请求超时，请稍后重试", true
-			}
-			if strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403") || strings.Contains(errMsg, "认证") || strings.Contains(errMsg, "api_key") {
-				return "联网搜索认证失败", "请检查 API Key 配置是否正确", false
-			}
-			if strings.Contains(errMsg, "429") || strings.Contains(errMsg, "rate") || strings.Contains(errMsg, "限流") {
-				return "联网搜索请求过多", "请求频率超限，请稍后重试", true
-			}
-			if strings.Contains(errMsg, "500") || strings.Contains(errMsg, "502") || strings.Contains(errMsg, "503") {
-				return "联网搜索服务异常", "搜索服务暂时不可用，请稍后重试", true
-			}
-			return "联网搜索失败", "搜索请求失败，请稍后重试", true
-		}
-
-		if name == "knowledge_search" {
-			return "知识库检索失败", "知识库查询异常，请稍后重试", true
-		}
-		if name == "grep_chunks" {
-			return "关键词搜索失败", "关键词搜索异常，请稍后重试", true
-		}
-		if name == "get_document_info" {
-			return "文档信息获取失败", "文档信息查询异常，请稍后重试", true
-		}
-		if name == "list_knowledge_chunks" {
-			return "文档列表获取失败", "文档列表查询异常，请稍后重试", true
-		}
-		if name == "list_knowledge_bases" {
-			return "知识库列表获取失败", "知识库列表查询异常，请稍后重试", true
-		}
-
-		return fmt.Sprintf("%s 执行失败", name), "工具调用失败，请稍后重试", true
-
-	case "ChatModel":
-		if strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "超时") {
-			return "AI 服务响应超时", "请稍后重试", true
-		}
-		if strings.Contains(errMsg, "429") || strings.Contains(errMsg, "rate") {
-			return "AI 服务请求过多", "请求频率超限，请稍后重试", true
-		}
-		return "AI 服务异常", "请稍后重试或选择其他模型", true
-
-	case "Embedding":
-		if strings.Contains(errMsg, "未安装") || strings.Contains(errMsg, "not found") {
-			return "向量模型未安装", "请先安装或切换可用的 Embedding 模型", false
-		}
-		if strings.Contains(errMsg, "连接失败") || strings.Contains(errMsg, "connection refused") || strings.Contains(errMsg, "connectex") {
-			return "向量服务未连接", "请检查 Embedding 服务是否已启动", true
-		}
-		return "向量服务异常", "请检查 Embedding 模型配置", true
-
-	default:
-		return fmt.Sprintf("%s 执行出错", component), "服务执行异常，请稍后重试", true
-	}
 }

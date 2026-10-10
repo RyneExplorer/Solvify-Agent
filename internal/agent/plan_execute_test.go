@@ -11,7 +11,22 @@ import (
 
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+	"solvify-agent/internal/tool"
 )
+
+type peRestoreToolFactory struct {
+	tool.ToolFactory
+	write          einoTool.BaseTool
+	wrongSelection atomic.Bool
+}
+
+func (f *peRestoreToolFactory) CreateAgentTools(_ context.Context, userID string, configIDs ...string) []einoTool.BaseTool {
+	if userID != "u" || len(configIDs) != 1 || configIDs[0] != "original-config" {
+		f.wrongSelection.Store(true)
+		return nil
+	}
+	return []einoTool.BaseTool{f.write}
+}
 
 func peCall(name string, args any) *schema.Message {
 	data, _ := json.Marshal(args)
@@ -59,7 +74,7 @@ func TestPlanExecuteApprovalRestoreNewEngine(t *testing.T) {
 				return base(ctx, msgs)
 			}
 			e := deepTestEngine()
-			req := Request{Query: "联合研究", UserID: "u", SessionID: "s"}
+			req := Request{Query: "联合研究", UserID: "u", SessionID: "s", UserToolConfigIDs: []string{"original-config"}}
 			events := collectPEEvents(t, ctx, e, req, m)
 			var interrupt Event
 			for _, ev := range events {
@@ -76,6 +91,8 @@ func TestPlanExecuteApprovalRestoreNewEngine(t *testing.T) {
 			req.CheckpointID = interrupt.CheckpointID
 			req.ResumeData = map[string]any{interrupt.InterruptID: &ApprovalResult{Approved: approved}}
 			other := deepTestEngine()
+			factory := &peRestoreToolFactory{write: deepApprovalTool{calls: &calls}}
+			other.toolFactory = factory
 			raw, found, err := e.buildCheckpointStore("s").Get(ctx, interrupt.CheckpointID)
 			if err != nil || !found {
 				t.Fatal("根 checkpoint 未保存")
@@ -83,7 +100,10 @@ func TestPlanExecuteApprovalRestoreNewEngine(t *testing.T) {
 			if err = other.buildCheckpointStore("s").Set(ctx, interrupt.CheckpointID, raw); err != nil {
 				t.Fatal(err)
 			}
-			events = collectPEEvents(t, ctx, other, req, m)
+			// 刷新后输入框未选择 MCP；恢复必须采用 checkpoint 中的原配置。
+			req.MCPDisabled = true
+			req.UserToolConfigIDs = nil
+			events = collectPEEvents(t, deepTestContext(t), other, req, m)
 			done := false
 			for _, ev := range events {
 				if ev.Type == EventError {
@@ -97,7 +117,7 @@ func TestPlanExecuteApprovalRestoreNewEngine(t *testing.T) {
 			if approved {
 				want = 1
 			}
-			if !done || calls.Load() != want || research.Load() != 1 {
+			if !done || calls.Load() != want || research.Load() != 1 || factory.wrongSelection.Load() {
 				t.Fatalf("done=%t calls=%d research=%d events=%+v", done, calls.Load(), research.Load(), events)
 			}
 		})

@@ -3,7 +3,6 @@ package agent
 import (
 	apperrors "solvify-agent/pkg/errors"
 
-	"solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
 )
 
@@ -51,14 +50,20 @@ type Request struct {
 	//   MCPDisabled=false, ids=nil/空  ⇒ 沿用历史行为，挂全部已启用 MCP
 	//   MCPDisabled=false, ids=[a,b]   ⇒ 只挂 a、b
 	//   MCPDisabled=true               ⇒ 一个 MCP 都不挂（ids 必须是空）
-	MCPDisabled  bool
-	ModelID      string              // 模型 ID
-	ModelType    string              // 模型类型（user/system）
-	Summary      *entity.ChatSummary // 会话摘要（长对话压缩内容）— 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段
-	Memories     []entity.UserMemory // 用户长期记忆 — 保留给调试/日志
-	UserCtx      PromptUserContext   // 用户基本信息 + 当前时间 — 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段
-	SystemPrompt string              // 统一入口注入的完整 System Prompt。不为空时 runAgent 完全信任它，不再内部二次拼接摘要/记忆
-	ResumeData   map[string]any      // 恢复执行时的审批数据（key=interruptID, value=用户审批结果）；为 nil 时首次执行
+	MCPDisabled bool
+	ModelID     string // 模型 ID
+	ModelType   string // 模型类型（user/system）
+	// ModelName 是 ModelID 解析后的真实模型名（如 "deepseek-chat"，不是 uuid）。
+	// budgetGuard 据此选 token 编码 —— 传 ModelID 会一路 fallback 到 cl100k_base。
+	ModelName string
+	// MaxContextLength 是模型**声明**的上下文窗口；预算检查再用
+	// llm.GetEffectiveMaxContextLength 收敛到运行时有效值。
+	MaxContextLength int
+	Summary          *entity.ChatSummary // 会话摘要（长对话压缩内容）— 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段
+	Memories         []entity.UserMemory // 用户长期记忆 — 保留给调试/日志
+	UserCtx          PromptUserContext   // 用户基本信息 + 当前时间 — 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段
+	SystemPrompt     string              // 统一入口注入的完整 System Prompt。不为空时 runAgent 完全信任它，不再内部二次拼接摘要/记忆
+	ResumeData       map[string]any      // 恢复执行时的审批数据（key=interruptID, value=用户审批结果）；为 nil 时首次执行
 	// TaskID/AgentName 用于受控深度编排中的任务归属和事件追踪。
 	TaskID      string
 	AgentName   string
@@ -85,12 +90,12 @@ func (p Profile) toolDomains() []ToolDomain {
 
 // Event 描述 Agent SSE 事件
 type Event struct {
-	Type    string                `json:"type"`
-	Title   string                `json:"title,omitempty"`
-	Detail  string                `json:"detail,omitempty"`
-	Status  string                `json:"status,omitempty"`
-	Content string                `json:"content,omitempty"`
-	Sources []response.SourceInfo `json:"sources,omitempty"`
+	Type    string       `json:"type"`
+	Title   string       `json:"title,omitempty"`
+	Detail  string       `json:"detail,omitempty"`
+	Status  string       `json:"status,omitempty"`
+	Content string       `json:"content,omitempty"`
+	Sources []SourceInfo `json:"sources,omitempty"`
 	// citation 事件字段
 	CitationID       string `json:"citation_id,omitempty"`
 	CitationChunkID  string `json:"chunk_id,omitempty"`

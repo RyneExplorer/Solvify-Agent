@@ -90,7 +90,7 @@ func (e *Engine) buildToolsByDomain(ctx context.Context, sorted []internalToolRe
 		buckets[entry.Domain] = append(buckets[entry.Domain], entry.Build(ctx, userID, kbIDs))
 	}
 	// 动态工具（MCP / HTTP）没有注册表项，统一落 DomainExternal，追加在桶尾。
-	if want[DomainExternal] && allowDynamic {
+	if want[DomainExternal] && allowDynamic && e.toolFactory != nil {
 		buckets[DomainExternal] = append(buckets[DomainExternal],
 			e.toolFactory.CreateAgentTools(ctx, userID, userToolConfigIDs...)...)
 	}
@@ -213,10 +213,7 @@ func (e *Engine) EstimateToolsTokens(ctx context.Context, userID string, kbIDs [
 		}
 		total += tokenutil.CountTokens(string(bs), modelName)
 	}
-	overhead := int(float64(total) * 0.2)
-	if overhead < 200 {
-		overhead = 200
-	}
+	overhead := max(int(float64(total)*0.2), 200)
 	total += overhead
 	bundle := prebuiltToolsBundle{Sorted: sorted, Buckets: buckets, TotalTokens: total}
 	return total, withPrebuiltTools(ctx, bundle), nil
