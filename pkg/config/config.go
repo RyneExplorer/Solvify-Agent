@@ -68,7 +68,7 @@ type AgentConfig struct {
 	MaxIterations  int     `mapstructure:"max_iterations"`
 	ScoreThreshold float64 `mapstructure:"score_threshold"`
 	// QuickAgentMaxIterations 指定快速模式（eino ChatModelAgent）最多执行几个
-	// ReAct 循环，默认 2（最多 1 次工具调用+出答案）。
+	// 模型调用，默认 8，澄清和最终回答均计入轮数，恢复不重置计数。
 	QuickAgentMaxIterations   int  `mapstructure:"quick_agent_max_iterations"`
 	DeepPlanExecuteEnabled    bool `mapstructure:"deep_plan_execute_enabled"`
 	DeepParallelEnabled       bool `mapstructure:"deep_parallel_enabled"`
@@ -369,7 +369,7 @@ func Default() *Config {
 			EnableDemo:                true,
 			MaxIterations:             4,
 			ScoreThreshold:            0.7,
-			QuickAgentMaxIterations:   2,
+			QuickAgentMaxIterations:   8,
 			DeepPlanExecuteEnabled:    true,
 			DeepParallelEnabled:       true,
 			DeepMaxPlanTasks:          4,

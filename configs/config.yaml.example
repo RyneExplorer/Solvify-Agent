@@ -44,6 +44,7 @@ cors:
 agent:
   enable_demo: true
   max_iterations: 10
+  quick_agent_max_iterations: 8 # 模型调用轮数，澄清恢复沿用剩余轮数
   score_threshold: 0.7
   deep_plan_execute_enabled: true
   deep_parallel_enabled: true
