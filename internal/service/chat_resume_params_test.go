@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"solvify-agent/internal/model/entity"
 	requestdto "solvify-agent/internal/model/dto/request"
+	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/repository"
 
 	"solvify-agent/internal/agent"
@@ -54,7 +54,7 @@ func pendingSession(age time.Duration, clarify bool) *entity.ChatSession {
 	raw, _ := json.Marshal(entity.PendingCheckpointData{
 		CheckpointID: "cp-1",
 		InterruptID:  "int-1",
-		IsClarify:clarify,
+		IsClarify:    clarify,
 		SetAt:        time.Now().Add(-age),
 	})
 	return &entity.ChatSession{ID: "s1", PendingCheckpoint: raw}
@@ -80,6 +80,30 @@ func TestApplyResumeSkipsWhenNoPending(t *testing.T) {
 	}
 	if repo.clearedCheckpoint || repo.clearedClarify {
 		t.Fatal("无 pending 时不该清标记（会把别的会话状态抹掉）")
+	}
+}
+
+func TestClearPendingResumeClearsBothMarkers(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		repo := &fakeSessionRepo{session: pendingSession(time.Minute, true)}
+		if failed {
+			repo.clearCpErr = errors.New("清除 checkpoint 失败")
+		}
+		newResumeTestService(repo).clearPendingResume(context.Background(), "s1")
+		if !repo.clearedCheckpoint || !repo.clearedClarify {
+			t.Fatal("终态清理必须尝试清除两处标记，不能因一处失败跳过另一处")
+		}
+	}
+}
+
+func TestApplyResumeRejectsMalformedPendingState(t *testing.T) {
+	repo := &fakeSessionRepo{session: &entity.ChatSession{ID: "s1", PendingCheckpoint: []byte(`{"checkpoint_id":`)}}
+	var req agent.Request
+	if err := newResumeTestService(repo).applyResumeParams(context.Background(), "s1", sendReq("同意"), &req); err == nil {
+		t.Fatal("损坏的审批状态被误判为首次执行")
+	}
+	if req.CheckpointID != "" || req.ResumeData != nil || repo.clearedCheckpoint {
+		t.Fatal("读取失败不应修改恢复参数或清除状态")
 	}
 }
 
@@ -208,7 +232,9 @@ func TestApplyResumeFindErrorDoesNotTouchAnything(t *testing.T) {
 	repo := &fakeSessionRepo{session: pendingSession(time.Minute, false), findErr: errors.New("db down")}
 	var agentReq agent.Request
 	svc := newResumeTestService(repo)
-	svc.applyResumeParams(context.Background(), "s1", sendReq("同意"), &agentReq)
+	if err := svc.applyResumeParams(context.Background(), "s1", sendReq("同意"), &agentReq); !errors.Is(err, repo.findErr) {
+		t.Fatalf("读取 checkpoint 失败必须阻止新执行并透传错误，实际 %v", err)
+	}
 
 	if agentReq.CheckpointID != "" {
 		t.Fatalf("读取失败时不该恢复: %q", agentReq.CheckpointID)

@@ -94,7 +94,7 @@ type StreamEvent struct {
 	MessageID        string `json:"message_id,omitempty"`
 	Done             bool   `json:"done"`
 	Error            string `json:"error,omitempty"`
-	Retryable        bool   `json:"retryable,omitempty"` // 是否可重试
+	Retryable        bool   `json:"retryable"` // 是否可重试；false 也必须传给前端
 	// clarify 事件字段：追问
 	Clarify *ClarifyPayload `json:"clarify,omitempty"`
 	// interrupt 事件字段：中断等待用户审批

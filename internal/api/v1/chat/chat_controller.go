@@ -11,6 +11,7 @@ import (
 	"solvify-agent/internal/api/v1/shared"
 	"solvify-agent/internal/middleware"
 	requestdto "solvify-agent/internal/model/dto/request"
+	responseDTO "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/service"
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/response"
@@ -131,7 +132,13 @@ func (ctrl *Controller) SendMessage(c *gin.Context) {
 	c.Header("X-Accel-Buffering", "no")
 
 	c.Stream(func(w io.Writer) bool {
-		event, ok := <-eventCh
+		var event responseDTO.StreamEvent
+		var ok bool
+		select {
+		case <-c.Request.Context().Done():
+			return false
+		case event, ok = <-eventCh:
+		}
 		if !ok {
 			return false
 		}

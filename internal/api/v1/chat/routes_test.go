@@ -7,10 +7,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"solvify-agent/internal/middleware"
+	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/service"
 	apperrors "solvify-agent/pkg/errors"
@@ -47,6 +49,35 @@ type stubChatService struct {
 
 	sessions []dto.SessionResponse
 	getErr   error
+	stream   <-chan dto.StreamEvent
+}
+
+func (s *stubChatService) SendMessage(context.Context, string, string, requestdto.SendMessageRequest) (<-chan dto.StreamEvent, error) {
+	return s.stream, s.getErr
+}
+
+type streamRecorder struct {
+	*httptest.ResponseRecorder
+}
+
+func (r streamRecorder) CloseNotify() <-chan bool { return make(chan bool) }
+
+func TestChatRoutes_DeepStreamHonorsRequestCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/sessions/"+testSessionID+"/messages", strings.NewReader(`{"content":"研究","knowledge_base_ids":["kb"],"model_id":"model","model_type":"system","search_mode":"smart-reasoning"}`)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	w := streamRecorder{httptest.NewRecorder()}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		newTestRouter(&stubChatService{stream: make(chan dto.StreamEvent)}, 1).ServeHTTP(w, req)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("客户端取消后 SSE 仍等待 Agent 事件")
+	}
 }
 
 func (s *stubChatService) ListSessions(context.Context, string) ([]dto.SessionResponse, error) {

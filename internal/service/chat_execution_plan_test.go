@@ -78,3 +78,17 @@ func TestLegacyExecutionPlanHistoryWithoutVersion(t *testing.T) {
 		t.Fatalf("旧历史计划无法回显: %+v", message.ExecutionPlan)
 	}
 }
+
+func TestNonRetryableStreamErrorPreservesFalse(t *testing.T) {
+	raw, err := json.Marshal(dto.StreamEvent{Type: "error", Done: true, Retryable: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if value, exists := decoded["retryable"]; !exists || value != false {
+		t.Fatalf("不可重试错误丢失 false，前端会误显示重试按钮: %s", raw)
+	}
+}

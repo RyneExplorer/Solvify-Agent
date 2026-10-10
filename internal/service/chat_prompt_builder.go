@@ -140,8 +140,6 @@ func (b *PromptBuilder) BuildSystem() string {
 		extras = append(extras, p.String())
 	}
 
-	pref := b.preference
-	_ = pref
 	// 角色模板：优先取"用户画像 Expertise/Department/Position"拼接出角色设定，
 	// 因为 UserPreference 和 User 表里没有 RoleTemplatePrompt 字段（属于未实现的阶段3扩展）。
 	var rolePrompt string

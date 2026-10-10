@@ -45,15 +45,18 @@ type App struct {
 	redis        *redis.Client
 	// tracer 是「eino → Langfuse」这条三方链路的唯一入口，由 App 负责生命周期管理。
 	// 未配凭据时是 nil，调用点（chatService）靠 nil 接收者安全空转。
-	tracer       *observability.Tracer
-	router       *api.Router
-	server       *http.Server
+	tracer *observability.Tracer
+	router *api.Router
+	server *http.Server
 
 	// checkpoint 过期清理后台任务的取消函数，由 App 负责生命周期管理
 	checkpointCleanupCancel context.CancelFunc
 
 	// MCP 客户端连接池，由 App 负责生命周期管理
 	mcpClientPool *providers.MCPClientPool
+	// embedFn 是带两级缓存 + singleflight 的向量化函数，由 initEmbedding 赋值一次。
+	// 存字段而不是当参数传：retriever 与 chatService 都用它，两处各建一份会白付缓存与握手。
+	embedFn rag.EmbeddingFunc
 	// MCP 预热所需依赖：供应商仓库（读已启用列表）、Provider（拉工具列表）、mcp ToolType 的 ID
 	mcpProviderRepo repository.ToolProviderRepository
 	mcpProvider     *providers.MCPProvider
@@ -167,6 +170,14 @@ func (a *App) initDatabase() error {
 		logger.Warnf("tool_providers schema 补齐异常（不阻塞启动）: %v", err)
 	}
 
+	// chat_messages.embedding 列补齐 + 维度核对（语义召回的读写两侧都靠它；
+	// 缺列或维度错配在写入时只是一行行报错，混在业务日志里没人看）
+	if a.cfg.Database.Postgres.EnablePGVector {
+		if err := database.EnsureChatMessageEmbeddingSchema(postgresqlDB, a.cfg.Embedding.Dimension); err != nil {
+			logger.Warnf("chat_messages 向量列检查异常（不阻塞启动）: %v", err)
+		}
+	}
+
 	// Redis 缓存连接
 	redisClient, err := database.OpenRedis(&a.cfg.Database.Redis)
 	if err != nil {
@@ -190,7 +201,9 @@ const (
 //  3. Embedding API 调用
 //
 // singleflight 防止并发击穿：同一 key 的并发请求只打一次 API。
-func (a *App) initEmbedding() rag.EmbeddingFunc {
+//
+// 结果存进 a.embedFn 后不再返回：调用方一律读字段，避免同一个函数有两个可达路径。
+func (a *App) initEmbedding() {
 
 	embeddingClient, err := llm.NewEmbeddingClientFromConfig(context.Background(), &a.cfg.Embedding)
 	if err != nil {
@@ -202,7 +215,7 @@ func (a *App) initEmbedding() rag.EmbeddingFunc {
 	var inMemMu sync.Mutex
 	inMemCount := 0
 
-	return func(ctx context.Context, text string) ([]float64, error) {
+	a.embedFn = func(ctx context.Context, text string) ([]float64, error) {
 		cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
 
 		// 层级 1：进程内 fast-path
@@ -304,14 +317,14 @@ func (a *App) initRetriever(embeddingFunc rag.EmbeddingFunc) rag.Retriever {
 // AgentComponents 持有 Agent 相关组件
 type AgentComponents struct {
 	Retriever   rag.Retriever
-	AgentEngine *agent.Engine
+	AgentEngine agent.EngineInterface
 }
 
 // initAgentComponents 初始化 Agent 相关组件（Embedding、RAG、工具注册、Agent 引擎）
 // 内置工具全部通过 RegisterInternal 注册，Engine 不感知具体工具类型，新增内置工具只需要在这里多调一行
 func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo repository.DocumentRepository, chunkRepo repository.DocumentChunkRepository, kbRepo repository.KnowledgeBaseRepository) *AgentComponents {
-	embeddingFunc := a.initEmbedding()
-	vectorRetriever := a.initRetriever(embeddingFunc)
+	a.initEmbedding()
+	vectorRetriever := a.initRetriever(a.embedFn)
 
 	// ── 初始化 Agent Engine ──
 	agentEngine := agent.NewEngine(toolFactory, a.cfg.Agent)
@@ -459,6 +472,20 @@ func (a *App) initDependencies() error {
 		logger.Infof("checkpoint 过期清理任务已启动: interval=%v", cleanupInterval)
 	}
 
+	// 历史消息向量回填（一次性，异步）。语义召回的判据是「消息有向量」，而向量只在
+	// 消息创建时写 —— 引入语义召回之前的历史消息一条都没有。keyset 分页 ⇒ 可续跑，
+	// 熔断 ⇒ embedding 侧整体不可用时立刻中止而不是刷几百行同因失败。
+	if a.cfg.Database.Postgres.EnablePGVector {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Errorf("历史消息向量回填 panic 已恢复: %v", r)
+				}
+			}()
+			service.NewMessageEmbeddingBackfiller(chatMessageRepo, a.embedFn).BackfillMessageEmbeddings(context.Background())
+		}()
+	}
+
 	// 初始化 Service
 	prefSvc := service.NewUserPreferenceService(userPreferenceRepo)
 	userSvc := service.NewUserService(userRepo, prefSvc, userModelCache)
@@ -492,7 +519,7 @@ func (a *App) initDependencies() error {
 	}
 
 	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo)
-	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.tracer, feedbackRepo)
+	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.tracer, feedbackRepo, a.embedFn)
 	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo, toolProviderRepo, cachedUserToolConfigRepo, txMgr)
 	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry, cachedUserToolConfigRepo, txMgr)
 	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo, toolRegistry)

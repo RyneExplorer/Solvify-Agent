@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -65,7 +66,7 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 		sendErrorEvent(ctx, eventCh, err, profile)
 		return
 	}
-	history := excludeByMessageID(enhancedCtx.History, userMsgID)
+	history := s.modelHistory(enhancedCtx, userMsgID)
 	chatModel := client.ChatModel()
 	eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "start", MessageID: assistantMsgID})
 
@@ -80,8 +81,14 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 	agentReq := agentPB.BuildAgentRequestFields(userID, req.Content, req.ModelID, req.ModelType, req.KnowledgeBaseIDs, req.MCPIDs(), req.MCPDisabled(), history)
 	agentReq.SessionID = sessionID
 	agentReq.Profile = profile
+	// agent 层拿不到 llm 客户端，预算检查需要的窗口与模型名由这里带过去。
+	agentReq.ModelName = client.ModelName()
+	agentReq.MaxContextLength = client.MaxContextLength()
 
-	s.applyResumeParams(ctx, sessionID, req, &agentReq)
+	if err := s.applyResumeParams(ctx, sessionID, req, &agentReq); err != nil {
+		sendErrorEvent(ctx, eventCh, err, profile)
+		return
+	}
 	agentEventCh, err := s.agentEngine.Execute(agentCtx, agentReq, chatModel)
 	if err != nil {
 		logger.Errorf("Agent 执行失败, sessionID=%s: %v", sessionID, err)
@@ -127,7 +134,7 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 				fullContent = agentEvent.Content
 			}
 			if len(agentEvent.Sources) > 0 {
-				agentSources = agentEvent.Sources
+				agentSources = agentSourcesToDTO(agentEvent.Sources)
 			}
 			if executionPlan != nil {
 				executionPlan.Status = "success"
@@ -156,6 +163,8 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 				raw, _ := json.Marshal(pcData)
 				if sErr := s.sessionRepo.SetPendingCheckpoint(ctx, sessionID, raw); sErr != nil {
 					logger.Errorf("存储 pending checkpoint 失败: %v", sErr)
+					sendErrorEvent(ctx, eventCh, fmt.Errorf("保存待审批状态失败: %w", sErr), profile)
+					return
 				} else {
 					logger.Infof("[ChatService] 已存储 pending checkpoint: sessionID=%s", sessionID)
 				}
@@ -188,6 +197,12 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 		}
 		if agentEvent.Type == agent.EventError {
 			agentErrorSeen = true
+			// 在错误发送前清理：前端收到错误即查询状态，不能读到已消费的澄清卡。
+			if agentReq.CheckpointID != "" {
+				clearCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				s.clearPendingResume(clearCtx, sessionID)
+				cancel()
+			}
 			// 失败原因只认种类，不再拿错误文本去撞关键词表 ——
 			// 此前把 agentEvent.Error 原样喂给关键词表，裸词 "exceeds" 让
 			// 「exceeds max iterations」也被判成上下文超长，把模型窗口从 64000 砍到 8192。
@@ -198,15 +213,21 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 		eventch.Send(ctx, eventCh, toStreamEvent(agentEvent, profile))
 
 		if len(agentEvent.Sources) > 0 {
-			agentSources = agentEvent.Sources
+			agentSources = agentSourcesToDTO(agentEvent.Sources)
 		}
 		applyReasoningStep(&reasoningSteps, agentEvent)
 	}
 
 	if agentErrorSeen || ctx.Err() != nil {
+		if !agentErrorSeen && agentReq.CheckpointID != "" {
+			clearCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			s.clearPendingResume(clearCtx, sessionID)
+			cancel()
+		}
 		if executionPlan != nil {
 			executionPlan.Status, executionPlan.Phase = agent.TaskError, "failed"
-			if ctx.Err() != nil {
+			// 客户端收到错误终态后会关闭 SSE；不能用随后的连接取消覆盖真实失败。
+			if ctx.Err() != nil && !agentErrorSeen {
 				executionPlan.Status = agent.TaskCanceled
 				failureDetail = "执行已取消"
 			}
@@ -219,10 +240,6 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 			saveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if err := s.saveAssistantMessage(saveCtx, sessionID, assistantMsgID, "深度任务未完成："+failureDetail, req, agentSources, metadata); err != nil {
 				logger.Errorf("保存深度任务失败记录失败: sessionID=%s, err=%v", sessionID, err)
-			}
-			if agentReq.CheckpointID != "" {
-				_ = s.sessionRepo.ClearPendingCheckpoint(saveCtx, sessionID)
-				_ = s.sessionRepo.ClearPendingClarify(saveCtx, sessionID)
 			}
 			cancel()
 		}
@@ -283,70 +300,6 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 	s.emitDoneAndSave(ctx, eventCh, sessionID, assistantMsgID, fullContent, req, agentSources, metadata, nil)
 
 	s.refreshContextAsync(ctx, userID, sessionID, enhancedCtx.History, chatModel)
-}
-
-// applyResumeParams 判断本次请求要不要恢复上次中断的执行，是则把恢复参数写进 agentReq。
-//
-// 三种情况都表示「本次走首次执行」，不改 agentReq：
-//   - session 上没有 pending checkpoint（正常首轮）
-//   - checkpoint 已超时（字节可能已被后台 Ticker 清理，恢复必然失败）
-//   - 有 checkpoint 但用户这次没带审批内容（前端重开了页面）
-//
-// 抽出来的原因是这段判断原本埋在事件消费循环上方：不产生事件、只改两个字段，
-// 混在里面既读不出来也测不了 —— 抽出后可覆盖上面三种分支 + 两种 ResumeData 形态。
-func (s *chatService) applyResumeParams(ctx context.Context, sessionID string, req requestdto.SendMessageRequest, agentReq *agent.Request) {
-	session, err := s.sessionRepo.FindByID(ctx, sessionID)
-	if err != nil {
-		// 查不到 session 时按「无 pending」继续，会让用户以为审批已提交、系统却重跑一遍。
-		// 至少留下 sessionID 便于对账。
-		logger.Warnf("[ChatService] 读取 session 失败，无法判断是否有待恢复 checkpoint: sessionID=%s, err=%v", sessionID, err)
-		return
-	}
-	if session == nil || !session.HasPendingCheckpoint() {
-		return
-	}
-	pc, _ := session.GetPendingCheckpoint()
-	if pc == nil {
-		return
-	}
-
-	// clarify 等的是「用户回答问题」，10min 够了；danger 等的是「用户做审批决策」，24h。
-	// 两个阈值混用会把还在慢慢审的请求当成过期直接清掉。
-	timeout := entity.CheckpointDefaultTimeout
-	if pc.IsClarify {
-		timeout = entity.ClarifyDefaultTimeout
-	}
-	if pc.IsExpired(timeout) {
-		logger.Warnf("[ChatService] pending checkpoint 已超时（%v），放弃恢复并清除: checkpointID=%s", timeout, pc.CheckpointID)
-		s.clearPendingResume(ctx, sessionID)
-		return
-	}
-
-	if req.Content == "" {
-		logger.Warnf("[ChatService] 有 pending checkpoint 但用户未提供审批内容，走首次执行: checkpointID=%s", pc.CheckpointID)
-		s.clearPendingResume(ctx, sessionID)
-		return
-	}
-
-	logger.Infof("[ChatService] 设置恢复参数: checkpointID=%s, interruptID=%s, isClarify=%v", pc.CheckpointID, pc.InterruptID, pc.IsClarify)
-	agentReq.CheckpointID = pc.CheckpointID
-	if pc.IsClarify {
-		// clarify 的恢复数据是用户的回答文本，与官方 FollowUpTool 的 UserAnswer 语义一致。
-		agentReq.ResumeData = map[string]any{pc.InterruptID: req.Content}
-		return
-	}
-	// danger 的恢复数据必须是结构化 ApprovalResult —— 前端发的是「同意/拒绝」这类中文文本。
-	agentReq.ResumeData = map[string]any{pc.InterruptID: parseApprovalResult(req.Content)}
-}
-
-// clearPendingResume 清掉待恢复标记。checkpoint 与 clarify 两处标记成对写入，必须成对清除。
-func (s *chatService) clearPendingResume(ctx context.Context, sessionID string) {
-	if err := s.sessionRepo.ClearPendingCheckpoint(ctx, sessionID); err != nil {
-		logger.Warnf("[ChatService] 清除 pending checkpoint 失败: sessionID=%s, err=%v", sessionID, err)
-	}
-	if err := s.sessionRepo.ClearPendingClarify(ctx, sessionID); err != nil {
-		logger.Warnf("[ChatService] 清除 pending clarify 失败: sessionID=%s, err=%v", sessionID, err)
-	}
 }
 
 // refreshContextAsync 异步更新会话摘要和提取用户记忆
@@ -459,6 +412,53 @@ func (s *chatService) emitDoneAndSave(ctx context.Context, eventCh chan<- dto.St
 	}()
 }
 
+// modelHistory 拼出真正发给模型的那份历史：近期对话 + 召回的相关历史。
+//
+// 两个容器分别裁剪过预算（见 contextService.BuildContext），这里只做装配：
+//   - 召回项按时间插回时间线，不单独堆在末尾 —— 堆在末尾的话模型会把它当成
+//     "最后发生的事"，而它其实是几个月前聊的；
+//   - 召回项加「历史片段 + 时间」前缀，否则同一句话出现在上下文里两次
+//     （一次在近期、一 次在召回），模型会当成重复消息而忽略；
+//   - 同一 ID 只保留一份：召回结果与近期重叠是常态，不是异常。
+//
+// 只对召回项加标注：近期对话是原原本本的对话历史，加了前缀反而在污染它；
+// 而 refreshContextAsync 消费的是 enhancedCtx.History 原文，不经过这里，
+// 摘要与记忆抽取拿到的仍然是干净原文。
+func (s *chatService) modelHistory(enhancedCtx *EnhancedContext, excludeID string) []entity.ChatMessage {
+	if enhancedCtx == nil {
+		return nil
+	}
+	recent := excludeByMessageID(enhancedCtx.History, excludeID)
+
+	// 先按 ID 排除已在近期里的，再加前缀 —— 反过来做会给同一句话加两次标注。
+	inRecent := make(map[string]struct{}, len(recent))
+	for _, m := range recent {
+		inRecent[m.ID] = struct{}{}
+	}
+
+	merged := make([]entity.ChatMessage, 0, len(recent)+len(enhancedCtx.RecallHistory))
+	merged = append(merged, recent...)
+	for _, m := range excludeByMessageID(enhancedCtx.RecallHistory, excludeID) {
+		if _, dup := inRecent[m.ID]; dup {
+			continue
+		}
+		m.Content = fmt.Sprintf("[历史片段 · %s] %s", m.CreatedAt.Format("2006-01-02 15:04"), m.Content)
+		merged = append(merged, m)
+	}
+	return sortMessagesByTime(merged)
+}
+
+// sortMessagesByTime 按时间正序排列（同值按 ID 裁决，保证全序 —— 红线 26）。
+func sortMessagesByTime(msgs []entity.ChatMessage) []entity.ChatMessage {
+	sort.SliceStable(msgs, func(i, j int) bool {
+		if !msgs[i].CreatedAt.Equal(msgs[j].CreatedAt) {
+			return msgs[i].CreatedAt.Before(msgs[j].CreatedAt)
+		}
+		return msgs[i].ID < msgs[j].ID
+	})
+	return msgs
+}
+
 // excludeByMessageID 按消息 ID 剔除本轮刚落库的 user 消息
 // SendMessage 会先落库 user 消息，FindRecent/FindBySessionID 会把它带回 history
 // 用 ID 精确匹配可以避免连续两次问相同问题时误删上一轮对话
@@ -474,132 +474,6 @@ func excludeByMessageID(history []entity.ChatMessage, excludeID string) []entity
 		result = append(result, m)
 	}
 	return result
-}
-
-// toStreamEvent 将 Agent 事件转换为 SSE 流式事件。
-//
-// 错误事件的文案在这里做**唯一的一次翻译**：agent 层只上报 Kind，面向用户的
-// Title/Detail 在这里按 Kind × 模式取自 chat_error_messages.go。
-// 因此快速模式的失败不可能再显示深度模式的措辞，同一句话也不会出现第二个来源。
-func toStreamEvent(e agent.Event, profile agent.Profile) dto.StreamEvent {
-	se := dto.StreamEvent{
-		Type:         e.Type,
-		Title:        e.Title,
-		Detail:       e.Detail,
-		Status:       e.Status,
-		Content:      e.Content,
-		Error:        e.Error,
-		Done:         e.Done,
-		Retryable:    e.Retryable,
-		PlanID:       e.PlanID,
-		PlanVersion:  e.PlanVersion,
-		Phase:        e.Phase,
-		ReplanReason: e.ReplanReason,
-		Round:        e.Round,
-		TaskID:       e.TaskID,
-		ParentTaskID: e.ParentTaskID,
-		AgentName:    e.AgentName,
-		TaskStatus:   e.TaskStatus,
-		TaskIndex:    e.TaskIndex,
-		TaskTotal:    e.TaskTotal,
-	}
-	if e.Type == agent.EventError {
-		msg := messageFor(e.Kind, profile)
-		se.Title, se.Detail, se.Retryable = msg.Title, msg.Detail, msg.Retryable
-	}
-	if e.Type == agent.EventPlan {
-		if e.Plan != nil {
-			se.Plan = agentPlanToDTO(e.Plan)
-		} else {
-			se.Plan = &dto.ExecutionPlan{ID: e.PlanID, Version: e.PlanVersion, Phase: e.Phase, Reason: e.ReplanReason, Strategy: "sequential", Status: e.TaskStatus}
-		}
-	}
-	if e.Type == agent.EventTaskCreated || e.Type == agent.EventTaskUpdated || e.Type == agent.EventTaskResult {
-		se.Task = &dto.TaskProgress{ID: e.TaskID, Agent: e.AgentName, Title: e.Title, DependsOn: e.DependsOn, Status: e.TaskStatus, Summary: e.Detail}
-	}
-	if len(e.Sources) > 0 {
-		se.Sources = e.Sources
-	}
-	// citation 事件的字段映射
-	if e.Type == agent.EventCitation {
-		se.CitationID = e.CitationID
-		se.CitationChunkID = e.CitationChunkID
-		se.CitationFileName = e.CitationFileName
-		se.CitationContent = e.CitationContent
-	}
-	// interrupt 事件：携带 checkpointID / interruptID / info
-	if e.Type == agent.EventInterrupt {
-		se.CheckpointID = e.CheckpointID
-		se.InterruptID = e.InterruptID
-		se.InterruptInfo = e.InterruptInfo
-		if e.IsClarify {
-			se.Clarify = &dto.ClarifyPayload{
-				Question: e.ClarifyQuestion,
-				Options:  e.ClarifyOptions,
-			}
-		}
-	}
-	return se
-}
-
-func agentPlanToDTO(plan *agent.ExecutionPlan) *dto.ExecutionPlan {
-	if plan == nil {
-		return nil
-	}
-	out := &dto.ExecutionPlan{ID: plan.ID, Version: plan.Version, Phase: plan.Phase, Reason: plan.Reason, Round: plan.Round, Strategy: plan.Strategy, Status: plan.Status, Tasks: make([]dto.TaskProgress, 0, len(plan.Tasks))}
-	for _, task := range plan.Tasks {
-		out.Tasks = append(out.Tasks, dto.TaskProgress{ID: task.ID, Agent: task.Agent, Title: task.Title, DependsOn: append([]string(nil), task.DependsOn...), Status: task.Status, Summary: task.Summary, AddedVersion: task.AddedVersion})
-	}
-	return out
-}
-
-func upsertTaskProgress(plan *dto.ExecutionPlan, event agent.Event) {
-	if plan == nil || event.TaskID == "" || (event.PlanID != "" && event.PlanID != plan.ID) || event.PlanVersion < plan.Version {
-		return
-	}
-	if event.PlanVersion > plan.Version {
-		plan.Version = event.PlanVersion
-	}
-	if event.Phase != "" {
-		plan.Phase = event.Phase
-	}
-	if event.ReplanReason != "" {
-		plan.Reason = event.ReplanReason
-	}
-	if event.Round > 0 {
-		plan.Round = event.Round
-	}
-	progress := dto.TaskProgress{ID: event.TaskID, Agent: event.AgentName, Title: event.Title, DependsOn: append([]string(nil), event.DependsOn...), Status: event.TaskStatus, Summary: event.Detail, AddedVersion: plan.Version}
-	for i := range plan.Tasks {
-		if plan.Tasks[i].ID == progress.ID {
-			plan.Tasks[i] = mergeTaskProgress(plan.Tasks[i], progress)
-			return
-		}
-	}
-	plan.Tasks = append(plan.Tasks, progress)
-}
-
-func mergeTaskProgress(current, update dto.TaskProgress) dto.TaskProgress {
-	update.AddedVersion = current.AddedVersion
-	if update.ID == "" {
-		update.ID = current.ID
-	}
-	if update.Agent == "" {
-		update.Agent = current.Agent
-	}
-	if update.Title == "" {
-		update.Title = current.Title
-	}
-	if len(update.DependsOn) == 0 {
-		update.DependsOn = current.DependsOn
-	}
-	if update.Status == "" {
-		update.Status = current.Status
-	}
-	if update.Summary == "" {
-		update.Summary = current.Summary
-	}
-	return update
 }
 
 // looksLikeExecutionPlan 判断内容是否只是执行计划而没有真正调用工具
@@ -651,32 +525,5 @@ func applyReasoningStep(steps *[]dto.ReasoningStep, e agent.Event) {
 			Detail:  e.Detail,
 			Status:  e.Status,
 		})
-	}
-}
-
-// parseApprovalResult 将前端返回的审批文本映射为官方结构化 ApprovalResult。
-// 这是 Host 的职责：官方 Host 直接发送 ApprovalResult，本项目前端目前发送"同意/拒绝"等文本，
-// 这里做一层等价映射，使中间件可沿用官方 approval_wrapper.go 的 *ApprovalResult 数据契约。
-// 同时兼容官方风格的 JSON：{"approved":true,"disapprove_reason":"..."}（前端若直接发结构化体也支持）。
-func parseApprovalResult(content string) *agent.ApprovalResult {
-	content = strings.TrimSpace(content)
-	if content == "" {
-		reason := "未提供审批内容"
-		return &agent.ApprovalResult{Approved: false, DisapproveReason: &reason}
-	}
-	// 官方风格的结构化 JSON
-	var structured agent.ApprovalResult
-	if json.Unmarshal([]byte(content), &structured) == nil && (structured.Approved || structured.DisapproveReason != nil) {
-		return &structured
-	}
-	// 兼容旧前端：关键词匹配
-	switch strings.ToLower(content) {
-	case "approve", "同意", "确认", "yes", "y", "ok":
-		return &agent.ApprovalResult{Approved: true}
-	case "reject", "拒绝", "取消", "no", "n":
-		return &agent.ApprovalResult{Approved: false, DisapproveReason: &content}
-	default:
-		// 无法识别：默认拒绝，原始文本作为原因便于排查
-		return &agent.ApprovalResult{Approved: false, DisapproveReason: &content}
 	}
 }

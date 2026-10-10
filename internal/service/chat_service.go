@@ -15,6 +15,7 @@ import (
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/observability"
+	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/cache"
 	apperrors "solvify-agent/pkg/errors"
@@ -35,13 +36,15 @@ type chatService struct {
 	userModelConfigRepo repository.UserModelConfigRepo
 	userRepo            repository.UserRepository
 	userCache           *cache.RedisCache
-	agentEngine         *agent.Engine
+	agentEngine         agent.AgentInterface
 	contextSvc          ContextServiceInterface
 	prefSvc             UserPreferenceService
 	tracer              *observability.Tracer
 	feedbackRepo        repository.FeedbackRepo
 	txMgr               repository.TxManager
-	embedClient         *llm.EmbeddingClient
+	// embedFn 复用 app.initEmbedding 的向量化函数（两级缓存 + singleflight），
+	// 不是裸客户端：同一段文本重复向量化会直接打 API。
+	embedFn rag.EmbeddingFunc
 }
 
 // NewChatService 创建聊天业务服务。
@@ -53,11 +56,12 @@ func NewChatService(
 	userModelConfigRepo repository.UserModelConfigRepo,
 	userRepo repository.UserRepository,
 	userCache *cache.RedisCache,
-	agentEngine *agent.Engine,
+	agentEngine agent.AgentInterface,
 	contextSvc ContextServiceInterface,
 	prefSvc UserPreferenceService,
 	tracer *observability.Tracer,
 	feedbackRepo repository.FeedbackRepo,
+	embedFn rag.EmbeddingFunc,
 ) ChatServiceInterface {
 	return &chatService{
 		sessionRepo:         sessionRepo,
@@ -72,6 +76,7 @@ func NewChatService(
 		prefSvc:             prefSvc,
 		tracer:              tracer,
 		feedbackRepo:        feedbackRepo,
+		embedFn:             embedFn,
 	}
 }
 
@@ -291,10 +296,7 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 	maxCtx := llm.GetEffectiveMaxContextLength(modelID, client.MaxContextLength())
 	toolsTokens := 0
 	if len(toolsTokensReserve) > 0 {
-		toolsTokens = toolsTokensReserve[0]
-		if toolsTokens < 0 {
-			toolsTokens = 0
-		}
+		toolsTokens = max(toolsTokensReserve[0], 0)
 	}
 	historyBudget, retrievalBudget, memoryBudget := calculateContextBudgets(maxCtx, toolsTokens)
 
@@ -336,19 +338,21 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 		prefCh <- r
 	}()
 
-	// goroutine C: BuildContext（内部自己已经是 4 路并行：summary/memories/recent/relevant）
+	// goroutine D: 当前问题的向量（语义召回的查询侧）。
+	// 单独一个 goroutine 是为了跟用户/偏好加载重叠 —— 这次调用是一次远程 API 往返，
+	// 串在 BuildContext 前面就等于把首字延迟直接加上。
+	queryEmbCh := make(chan []float64, 1)
+	go func() {
+		queryEmbCh <- s.queryEmbedding(ctx, currentQuery)
+	}()
+
+	// goroutine C: BuildContext（内部自己已经是 5 路并行：summary/memories/recent/关键词召回/语义召回）
 	go func() {
 		var r ctxLoadResult
 		if s.contextSvc != nil {
-			enhancedCtx, bErr := s.contextSvc.BuildContext(ctx, userID, sessionID, currentQuery, BuildContextConfig{
-				MaxTokens:         historyBudget,
-				MaxMemories:       10,
-				MaxRecentMessages: 20,
-				RetrievalBudget:   retrievalBudget,
-				MemoryBudget:      memoryBudget,
-				ModelName:         modelName,
-				ToolsTokens:       toolsTokens,
-			}, client.ChatModel())
+			enhancedCtx, bErr := s.contextSvc.BuildContext(ctx, userID, sessionID, currentQuery,
+				buildContextParams(historyBudget, retrievalBudget, memoryBudget, modelName, toolsTokens, <-queryEmbCh),
+				client.ChatModel())
 			if bErr != nil {
 				logger.Warnf("构建增强上下文失败，降级为传统方式: %v", bErr)
 			}
@@ -467,6 +471,9 @@ func (s *chatService) saveUserMessage(ctx context.Context, sessionID string, req
 	if err := s.messageRepo.Create(ctx, &userMsg); err != nil {
 		return "", err
 	}
+	// 提问也要有向量：只有答案有向量时，多轮指代（「你刚说的那个再展开下」）在
+	// 语义召回里永远命中不了 —— 召回的是答案，匹配的是新问题，两边对不上。
+	s.bgComputeEmbedding(ctx, userMsg.ID, userMsg.Content)
 	return userMsg.ID, nil
 }
 
@@ -490,14 +497,18 @@ func (s *chatService) saveAssistantMessage(ctx context.Context, sessionID, msgID
 }
 
 // bgComputeEmbedding 后台为消息计算向量表示，失败不阻塞主流程。
+//
+// ⚠️ 写失败是 Error 而不是 Warn：向量写不进去 ⇒ 这条消息在语义召回里**永远查不到**，
+// 而聊天本身照常工作，没有任何用户可见症状。dim 一并打出来，维度不匹配一眼可见
+// （系统性的维度错配由启动期 EnsureEmbeddingColumnDimension 兜住）。
 func (s *chatService) bgComputeEmbedding(ctx context.Context, messageID, content string) {
-	if s.embedClient == nil || strings.TrimSpace(content) == "" {
+	if s.embedFn == nil || strings.TrimSpace(content) == "" {
 		return
 	}
 	go func() {
 		embedCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		vec, err := s.embedClient.Embed(embedCtx, content)
+		vec, err := s.embedFn(embedCtx, content)
 		if err != nil {
 			logger.Warnf("消息向量计算失败: messageID=%s, err=%v", messageID, err)
 			return
@@ -507,9 +518,49 @@ func (s *chatService) bgComputeEmbedding(ctx context.Context, messageID, content
 			f32[i] = float32(v)
 		}
 		if err := s.messageRepo.UpdateEmbedding(embedCtx, messageID, f32); err != nil {
-			logger.Warnf("消息向量更新失败: messageID=%s, err=%v", messageID, err)
+			logger.Errorf("消息向量写入失败（该消息将无法被语义召回）: messageID=%s, dim=%d, err=%v",
+				messageID, len(f32), err)
 		}
 	}()
+}
+
+// buildContextParams 是 initContext 传给 BuildContext 的那份配置的唯一组装点。
+//
+// 抽出来的唯一原因是可测：initContext 整体要真 llm 客户端 + 真模型配置，
+// 而「查询向量有没有真的接进 BuildContextConfig」这一步是纯组装 ——
+// 它一旦漏掉，语义召回整个退化成死通道，而单测全绿（BuildContext 的用例自己传
+// QueryEmbedding，压根不经过这段接线）。
+func buildContextParams(historyBudget, retrievalBudget, memoryBudget int, modelName string, toolsTokens int, queryEmbedding []float64) BuildContextConfig {
+	return BuildContextConfig{
+		MaxTokens:         historyBudget,
+		MaxMemories:       10,
+		MaxRecentMessages: 20,
+		RetrievalBudget:   retrievalBudget,
+		MemoryBudget:      memoryBudget,
+		ModelName:         modelName,
+		ToolsTokens:       toolsTokens,
+		QueryEmbedding:    queryEmbedding,
+	}
+}
+
+// queryEmbedding 同步算当前问题的向量，供语义召回当查询条件。
+//
+// 与 bgComputeEmbedding 分成两个函数而不是共用一个，是因为等待策略相反：
+// 那份是写库，失败只影响「以后还能不能被召回」，所以丢后台；这份是本次请求的
+// 召回条件，拿不到就只能靠关键词通道，这里必须等得起。失败返回 nil，
+// BuildContext 会自动关闭语义通道 —— 召回是补充通道，不该拖垮整轮聊天。
+func (s *chatService) queryEmbedding(ctx context.Context, query string) []float64 {
+	if s.embedFn == nil || strings.TrimSpace(query) == "" {
+		return nil
+	}
+	embedCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	vec, err := s.embedFn(embedCtx, query)
+	if err != nil {
+		logger.Warnf("当前问题向量化失败，本次仅走关键词召回: err=%v", err)
+		return nil
+	}
+	return vec
 }
 
 // truncateHistoryByTokens 按真 BPE token 预算从尾部向前保留"完整轮对"。
