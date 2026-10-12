@@ -97,15 +97,11 @@ func (r *peRuntime) build(ctx context.Context) (adk.ResumableAgent, error) {
 		if err != nil {
 			return nil, err
 		}
-		data, _ := json.Marshal(struct {
-			Plan          ExecutionPlan
-			Results       map[string]TaskResult
-			RetryUsed     bool
-			Denied        bool
-			Blocked       bool
-			ExecutedSteps []planexecute.ExecutedStep
-		}{s.Plan, s.Results, s.RetryUsed, s.Denied, s.Blocked, in.ExecutedSteps})
-		return []*schema.Message{schema.SystemMessage(r.plannerInstruction() + "\n你是 Replanner：评估完成情况，调用 plan 调整或保留剩余任务；仅全部必要任务完成且最新汇总覆盖全部成功研究时调用 respond。失败只允许一次只读重试或替代研究，副作用失败与审批拒绝不得绕过。respond.response 必须基于汇总，保留引用，不输出计划 JSON。"), schema.UserMessage(s.Request.Query + "\n执行状态：" + string(data))}, nil
+		data, err := json.Marshal(replannerContext(s))
+		if err != nil {
+			return nil, fmt.Errorf("组装重规划上下文失败: %w", err)
+		}
+		return []*schema.Message{schema.SystemMessage(r.plannerInstruction() + "\n你是 Replanner：评估完成情况，调用 plan 调整或保留剩余任务；仅全部必要任务完成且最新汇总覆盖全部成功研究时调用 respond。失败只允许一次只读重试或替代研究，副作用失败与审批拒绝不得绕过。失败或取消任务只能保留为历史事实，不能出现在待执行任务的 depends_on 中。审批拒绝后取消依赖失败操作的旧待执行任务，保留已成功研究，安排仅依赖成功结果的 synthesis_review；无成功研究时 depends_on=[]，汇总明确说明用户拒绝、操作未执行，不再安排操作或替代研究。已结束任务原字段不得改写，可从新计划省略，程序会保留历史。尚未完成有效汇总前不得调用 respond。respond.response 必须基于汇总，保留引用，不输出计划 JSON。"), schema.UserMessage(s.Request.Query + "\n执行状态：" + string(data))}, nil
 	}})
 	if err != nil {
 		return nil, err

@@ -1,9 +1,8 @@
 package agent
 
 import (
-	apperrors "solvify-agent/pkg/errors"
-
 	"solvify-agent/internal/model/entity"
+	apperrors "solvify-agent/pkg/errors"
 )
 
 // PromptUserContext 描述注入到系统提示词中的用户上下文信息
@@ -35,6 +34,7 @@ const (
 
 // Request 描述 Agent 执行请求
 type Request struct {
+	RunID string // 由程序生成并随checkpoint冻结
 	// Profile 问答模式；空值等同 ProfileDeep（保持既有行为不变），判定一律走 effectiveProfile
 	Profile           Profile
 	CheckpointID      string               // 恢复执行时使用的 checkpointID（恢复场景必填）
@@ -58,6 +58,7 @@ type Request struct {
 	ModelName string
 	// MaxContextLength 是模型**声明**的上下文窗口；预算检查再用
 	// llm.GetEffectiveMaxContextLength 收敛到运行时有效值。
+	OutputLimit      int // 本次实际默认输出上限，调用级覆盖由最终模型保护处理
 	MaxContextLength int
 	Summary          *entity.ChatSummary // 会话摘要（长对话压缩内容）— 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段
 	Memories         []entity.UserMemory // 用户长期记忆 — 保留给调试/日志

@@ -2,12 +2,12 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 
 	"solvify-agent/internal/llm"
+	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/tokenutil"
 )
@@ -35,22 +35,14 @@ type budgetGuard struct {
 	// instruction 是本轮 System Prompt。state 里没有它
 	// （adk/chatmodel.go:216-230 的 state 只有 Messages/ToolInfos），
 	// 不传进来预算就会漏掉最大的一块固定开销。
-	// 若某版本 eino 把它也放进了 state.Messages，则由首条消息的 role 兜底去重。
-	instruction string
+	// 模型包装器接收最终消息，instruction 为空；不靠 role 猜测去重。
+	instruction         string
+	outputLimit         int
+	policy              config.ContextPolicy
+	finalCheckElsewhere bool
 }
 
 const (
-	// 估算的安全裕量。tokenutil.CountTokens 拿不到 BPE 时会退化成字符加权估算
-	// （pkg/tokenutil/tokenutil.go:69-78），未知模型一律按 cl100k_base 算（:12），
-	// 都不是供应商分词器；角色标记与 tool_calls/tool_call_id 的序列化开销也进不了
-	// 文本计数。这些全由裕量兜住，方向是「宁可多压」—— 估大不致命，估小才会超窗。
-	marginRatio = 0.08
-	marginFloor = 256
-
-	// 输出预留：留给模型生成的空间。
-	reserveRatio = 0.15
-	reserveFloor = 1024
-
 	// 单条工具结果消息的 token 上限。知识库检索结果是最可重新检索的一类，
 	// 压掉它不心疼。（决策 ⑦「按工具类型分档」留到后续阶段，这里先给全局值。）
 	toolResultCap = 1500
@@ -58,22 +50,13 @@ const (
 	toolResultTruncated = "\n\n（工具结果过长，已截断）"
 )
 
-// watermarkRatio 压缩触发水位：装配后总占用占有效窗口的比例上限。
-// 快速模式工具结果少而小（top_k=3，单 chunk 截 150 字符），主要风险来自历史，
-// 留更大余量比多塞历史划算。
-func watermarkRatio(p Profile) float64 {
-	if p == ProfileQuick {
-		return 0.60
-	}
-	return 0.75
-}
-
 // newBudgetGuard 构造当前模式的总预算检查。
-// 「窗口未知」不在这里判 —— 判定推迟到钩子里，那里会打 Warn 并放行，
-// 这样「没接上」是响亮的而不是静默跳过。
+// 窗口及输出在调用前解析，不能确定时明确拒绝。
 func newBudgetGuard(req Request, instruction string) *budgetGuard {
 	return &budgetGuard{
 		modelID:     req.ModelID,
+		outputLimit: req.OutputLimit,
+		policy:      config.ContextDefaults(),
 		declaredCtx: req.MaxContextLength,
 		modelName:   req.ModelName,
 		profile:     req.effectiveProfile(),
@@ -89,119 +72,89 @@ func (g *budgetGuard) BeforeModelRewriteState(
 		return ctx, state, nil
 	}
 
-	limit := llm.GetEffectiveMaxContextLength(g.modelID, g.declaredCtx)
-	if limit <= 0 {
-		// 拿不到窗口就不猜：宁可放行，也不按拍脑袋的数字砍上下文。
-		logger.Warnf("[BudgetGuard] 模型 %s 无有效上下文窗口，跳过预算检查", g.modelID)
-		return ctx, state, nil
+	policy := g.policy
+	if policy.OutputLimit == 0 {
+		policy = config.ContextDefaults()
 	}
-
-	toolTokens := toolInfosTokens(state.ToolInfos, g.modelName)
-	instrTokens := 0
-	if !startswithSystem(state.Messages) {
-		instrTokens = tokenutil.CountTokens(g.instruction, g.modelName)
+	output := g.outputLimit
+	if output == 0 {
+		output = policy.OutputLimit
 	}
-
-	fixed := instrTokens + toolTokens
-	used := messagesTokens(state.Messages, g.modelName)
-	margin := int(float64(used+fixed) * marginRatio)
-	if margin < marginFloor {
-		margin = marginFloor
+	budget, err := llm.ResolveContextBudget(g.modelID, g.modelName, g.declaredCtx, output, g.profile == ProfileQuick, policy)
+	if err != nil {
+		if g.finalCheckElsewhere {
+			// 调用级供应商选项可能覆盖输出上限，交由最终请求核对。
+			return ctx, state, nil
+		}
+		return ctx, state, err
 	}
-	reserve := int(float64(limit) * reserveRatio)
-	if reserve < reserveFloor {
-		reserve = reserveFloor
+	// Handler 明确收到不含 Instruction 的状态；模型包装器的 instruction 为空，接收最终消息。
+	fixed := llm.ToolsTokens(state.ToolInfos, g.modelName)
+	if g.instruction != "" {
+		fixed += llm.MessageTokens(schema.SystemMessage(g.instruction), g.modelName)
 	}
-
-	target := limit - fixed - reserve - margin
-	if w := int(float64(limit) * watermarkRatio(g.profile)); target > w {
-		target = w
-	}
-
-	// 单条工具结果的截断是**无条件**的：它是把「运行中追加」钉住的那条不变量，
-	// 与本次聚合额度够不够无关。曾把它挂在 target > 0 之下，于是窗口极小
-	// （固定开销吃满）时反而一条都不截 —— 天花板形同虚设。
+	before := llm.MessagesTokens(state.Messages, g.modelName) + fixed
 	msgs, truncated := truncateToolResults(state.Messages, g.modelName)
-	after := messagesTokens(msgs, g.modelName)
-
-	logger.Infof("[BudgetGuard] %s 预算: limit=%d instr=%d tools=%d reserve=%d margin=%d target=%d used=%d after=%d 截断=%d msgs=%d",
-		g.profile, limit, instrTokens, toolTokens, reserve, margin, target, used, after, truncated, len(msgs))
-
-	switch {
-	case target <= 0:
-		logger.Errorf("[BudgetGuard] 固定开销已吃满窗口，只剩「截断工具结果」一条手段: limit=%d fixed=%d reserve=%d margin=%d",
-			limit, fixed, reserve, margin)
-	case after > target:
-		// 「能安全丢的都丢了还压不下水位」通常意味着必留内容（用户提问 / 助手回答）
-		// 本身就超预算。这里不硬砍必留内容（它们的原文没有替代来源），只响亮记录，
-		// 把取舍交给上游装配器 —— 悄悄砍掉才是这个项目栽过跟头的形态。
-		logger.Errorf("[BudgetGuard] 压缩后仍超水位（必留内容本身过大）: %s limit=%d target=%d after=%d truncated=%d",
-			g.profile, limit, target, after, truncated)
+	after := llm.MessagesTokens(msgs, g.modelName) + fixed
+	removed := 0
+	for after > budget.Soft {
+		next, ok := dropOldConversation(msgs)
+		if !ok {
+			break
+		}
+		msgs = next
+		removed++
+		after = llm.MessagesTokens(msgs, g.modelName) + fixed
+		if after <= budget.Target {
+			break
+		}
 	}
-
-	if truncated > 0 {
-		state.Messages = msgs
+	if removed > 0 {
+		logger.Infof("上下文降级：减少旧对话组=%d", removed)
 	}
-	return ctx, state, nil
+	logger.Infof("上下文预算：模式=%s 窗口=%d 输出=%d 裕量=%d 硬上限=%d 软水位=%d 压缩前=%d 压缩后=%d 工具截断=%d", g.profile, budget.Limit, budget.Output, budget.Margin, budget.Hard, budget.Soft, before, after, truncated)
+	if err = budget.Check(after); err != nil && !g.finalCheckElsewhere {
+		return ctx, state, err
+	}
+	next := *state
+	next.Messages = msgs
+	return ctx, &next, nil
 }
 
-// startswithSystem 判断 System Prompt 是否已经躺在 state.Messages 里。
-// 放进去过的版本不能再加一次指令 token，否则预算被系统性低估。
-func startswithSystem(msgs []*schema.Message) bool {
-	for _, m := range msgs {
+// dropOldConversation 只减少最新用户问题前的完整普通对话，不移除工具轨迹。
+func dropOldConversation(msgs []*schema.Message) ([]*schema.Message, bool) {
+	lastUser := -1
+	for i, m := range msgs {
+		if m != nil && m.Role == schema.User {
+			lastUser = i
+		}
+	}
+	start := -1
+	for i := 0; i < lastUser; i++ {
+		m := msgs[i]
 		if m == nil {
 			continue
 		}
-		return m.Role == schema.System
-	}
-	return false
-}
-
-// messagesTokens 计整段消息的 token。
-func messagesTokens(msgs []*schema.Message, modelName string) int {
-	total := 0
-	for _, m := range msgs {
-		total += messageTokens(m, modelName)
-	}
-	return total
-}
-
-// messageTokens 计一条消息：正文 + 工具调用名/参数/id + 工具结果配对字段。
-// 后几项不参与纯文本计数，漏掉会系统性低估 ReAct 轨迹的开销。
-// constantPerMessage 是角色标记等每条消息的固定开销（OpenAI 对话格式的经验值）。
-func messageTokens(m *schema.Message, modelName string) int {
-	if m == nil {
-		return 0
-	}
-	const constantPerMessage = 4
-	total := constantPerMessage + tokenutil.CountTokens(m.Content, modelName)
-	for i := range m.ToolCalls {
-		total += tokenutil.CountTokens(m.ToolCalls[i].ID, modelName)
-		total += tokenutil.CountTokens(m.ToolCalls[i].Function.Name, modelName)
-		total += tokenutil.CountTokens(m.ToolCalls[i].Function.Arguments, modelName)
-	}
-	total += tokenutil.CountTokens(m.ToolCallID, modelName)
-	total += tokenutil.CountTokens(m.ToolName, modelName)
-	return total
-}
-
-// toolInfosTokens 计工具定义（JSON Schema）的 token。
-// 口径与 engine_tools.go:209-215 的 EstimateToolsTokens 保持一致：
-// 直接 marshal 整个 ToolInfo。两处必须同源，否则同一批工具会算出两个数。
-func toolInfosTokens(infos []*schema.ToolInfo, modelName string) int {
-	total := 0
-	for _, info := range infos {
-		if info == nil {
+		if start < 0 {
+			if m.Role == schema.User {
+				start = i
+			}
 			continue
 		}
-		bs, err := json.Marshal(info)
-		if err != nil {
-			total += tokenutil.CountTokens(info.Name+"\n"+info.Desc, modelName)
+		if m.Role == schema.System || m.Role == schema.Tool || len(m.ToolCalls) > 0 {
+			return msgs, false
+		}
+		if m.Role == schema.User {
+			start = i
 			continue
 		}
-		total += tokenutil.CountTokens(string(bs), modelName)
+		if m.Role == schema.Assistant && (i+1 == lastUser || (i+1 < len(msgs) && msgs[i+1] != nil && msgs[i+1].Role == schema.User)) {
+			next := append([]*schema.Message(nil), msgs[:start]...)
+			next = append(next, msgs[i+1:]...)
+			return next, true
+		}
 	}
-	return total
+	return msgs, false
 }
 
 // truncateToolResults 只截断工具结果消息的正文。

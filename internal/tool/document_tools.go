@@ -3,6 +3,8 @@ package tool
 import (
 	"context"
 	"fmt"
+	"solvify-agent/internal/model/entity"
+	"strings"
 	"time"
 
 	einoTool "github.com/cloudwego/eino/components/tool"
@@ -29,6 +31,10 @@ type GrepChunksInput struct {
 }
 
 func runGrepChunks(ctx context.Context, chunkRepo repository.DocumentChunkRepository, userID string, input GrepChunksInput) (ToolResponse, error) {
+	input.Keyword = strings.TrimSpace(input.Keyword)
+	if input.Keyword == "" {
+		return ToolResponse{Success: false, Message: "搜索关键词不能为空"}, nil
+	}
 	limit := input.Limit
 	if limit <= 0 {
 		limit = 10
@@ -83,7 +89,10 @@ type GetDocumentInfoInput struct {
 }
 
 func runGetDocumentInfo(ctx context.Context, documentRepo repository.DocumentRepository, userID string, input GetDocumentInfoInput) (ToolResponse, error) {
-	doc, found, err := documentRepo.FindByID(ctx, userID, input.DocumentID, 0)
+	if strings.TrimSpace(input.DocumentID) == "" {
+		return ToolResponse{Success: false, Message: "文档ID不能为空"}, nil
+	}
+	doc, found, err := documentRepo.FindByID(ctx, userID, input.DocumentID, entity.DocumentStatusDeleted)
 	if err != nil {
 		logger.Errorf("[Tool] get_document_info 查询异常: docID=%q, err=%v", input.DocumentID, err)
 		return ToolResponse{Success: false, Message: fmt.Sprintf("查询暂时不可用（%v）", err)}, nil
@@ -158,7 +167,7 @@ func runListKnowledgeChunks(ctx context.Context, documentRepo repository.Documen
 		docs, err := documentRepo.ListWithChunkCount(ctx, userID, kbID)
 		if err != nil {
 			logger.Errorf("[Tool] list_knowledge_chunks 查询异常: kbID=%q, err=%v", kbID, err)
-			continue
+			return ToolResponse{Success: false, Message: "获取文档列表失败，请稍后重试"}, nil
 		}
 		allDocs = append(allDocs, docs...)
 	}
@@ -167,14 +176,12 @@ func runListKnowledgeChunks(ctx context.Context, documentRepo repository.Documen
 		return ToolResponse{Success: true, Message: "知识库中没有文档", Data: []interface{}{}}, nil
 	}
 
-	startIdx := (page - 1) * pageSize
-	endIdx := startIdx + pageSize
-	if startIdx >= len(allDocs) {
+	// 先用除法检查页码，避免模型传入极大整数导致乘法溢出和切片越界。
+	if page-1 > (len(allDocs)-1)/pageSize {
 		return ToolResponse{Success: true, Message: "已到最后一页", Data: []interface{}{}}, nil
 	}
-	if endIdx > len(allDocs) {
-		endIdx = len(allDocs)
-	}
+	startIdx := (page - 1) * pageSize
+	endIdx := startIdx + min(pageSize, len(allDocs)-startIdx)
 
 	pagedDocs := allDocs[startIdx:endIdx]
 
@@ -220,15 +227,11 @@ func NewListKnowledgeChunksTool(documentRepo repository.DocumentRepository) func
 // ================ list_knowledge_bases ================
 
 type ListKnowledgeBasesInput struct {
-	IncludeStats bool `json:"include_stats" jsonschema_description:"是否包含文档数和存储量统计，默认true"`
+	IncludeStats *bool `json:"include_stats" jsonschema_description:"是否包含文档数和存储量统计，默认true"`
 }
 
 func runListKnowledgeBases(ctx context.Context, kbRepo repository.KnowledgeBaseRepository, userID string, input ListKnowledgeBasesInput) (ToolResponse, error) {
-	// 未传 include_stats 时 InferTool 默认给零值 false，这里我们期望默认 true
-	includeStats := input.IncludeStats
-	// 但如果字段是 optional，InferTool 会给零值。我们希望默认 true：
-	// 所以用指针 *bool 或者直接在这里设默认
-	// 不过用户没传就是 false——那就按用户传的来，如果传了就按用户的
+	includeStats := input.IncludeStats == nil || *input.IncludeStats
 
 	kbs, err := kbRepo.ListNormal(ctx, userID, 1)
 	if err != nil {
@@ -258,8 +261,16 @@ func runListKnowledgeBases(ctx context.Context, kbRepo repository.KnowledgeBaseR
 			Description: kb.Description,
 		}
 		if includeStats {
-			docCount, _ := kbRepo.CountDocuments(ctx, userID, kb.ID, 5)
-			storage, _ := kbRepo.SumDocumentStorage(ctx, userID, kb.ID, 5)
+			docCount, err := kbRepo.CountDocuments(ctx, userID, kb.ID, entity.DocumentStatusDeleted)
+			if err != nil {
+				logger.Errorf("知识库文档统计失败: kbID=%q, err=%v", kb.ID, err)
+				return ToolResponse{Success: false, Message: "获取知识库统计失败，请稍后重试"}, nil
+			}
+			storage, err := kbRepo.SumDocumentStorage(ctx, userID, kb.ID, entity.DocumentStatusDeleted)
+			if err != nil {
+				logger.Errorf("知识库存储统计失败: kbID=%q, err=%v", kb.ID, err)
+				return ToolResponse{Success: false, Message: "获取知识库统计失败，请稍后重试"}, nil
+			}
 			item.DocCount = int(docCount)
 			item.StorageKB = float64(storage) / 1024
 		}

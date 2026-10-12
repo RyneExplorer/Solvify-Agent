@@ -62,6 +62,8 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 		s, err := r.session(ctx)
 		var task TaskSpec
 		var req Request
+		var artifactInputs map[string]TaskResult
+		var inputs TaskSpec
 		if err == nil {
 			for _, candidate := range s.Batch {
 				if candidate.ID == taskID {
@@ -93,11 +95,15 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 				req.ResumeData = nil
 				req.Query = "原问题（仅作背景）：" + s.Request.Query + "\n只执行当前任务：" + task.Title + "\n任务说明：" + task.Description
 				req.History = append(req.History[:0:0], s.Request.History...)
-				inputs := task
+				inputs = task
 				if task.Agent == "synthesis_review" {
 					inputs.DependsOn = peResearchAncestors(s.Plan, task.ID)
 				}
 				req.Query = buildTaskQuery(req.Query, inputs, s.Results)
+				artifactInputs = make(map[string]TaskResult, len(inputs.DependsOn))
+				for _, dep := range inputs.DependsOn {
+					artifactInputs[dep] = s.Results[dep]
+				}
 				for i := range s.Plan.Tasks {
 					if s.Plan.Tasks[i].ID == task.ID {
 						s.Plan.Tasks[i].Status = TaskRunning
@@ -112,6 +118,19 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 			return
 		}
 		ctx = r.traceContext(ctx, "researching", taskID)
+		privateContext := &taskContextSnapshot{}
+		if saved != nil {
+			privateContext.Raw = saved.RuntimeContext
+		}
+		ctx = context.WithValue(ctx, taskContextSnapshotKey{}, privateContext)
+		if req.AgentName == "synthesis_review" {
+			evidence, readErr := r.engine.taskArtifactEvidence(ctx, req, inputs, artifactInputs)
+			if readErr != nil {
+				g.Send(&adk.AgentEvent{Err: readErr})
+				return
+			}
+			req.Query += evidence
+		}
 		agent, ks, err := a.buildAgent(ctx, req)
 		if err != nil {
 			g.Send(&adk.AgentEvent{Err: err})
@@ -135,6 +154,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 			child = agent.Run(ctx, childInput, opts...)
 		}
 		var answer string
+		var artifacts []artifactReference
 		var interrupt *adk.AgentEvent
 		for {
 			ev, ok := child.Next()
@@ -164,6 +184,10 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 						peEvent(g, Event{Type: EventToolCall, TaskID: task.ID, AgentName: task.Agent, Title: "调用工具 " + call.Function.Name, Detail: truncateTaskSummary(call.Function.Arguments, 200), Status: TaskRunning})
 					}
 				} else if mv.Role == schema.Tool {
+					var ref artifactReference
+					if json.Unmarshal([]byte(msg.Content), &ref) == nil && ref.ArtifactID != "" {
+						artifacts = appendArtifactReference(artifacts, ref)
+					}
 					peEvent(g, Event{Type: EventToolResult, TaskID: task.ID, AgentName: task.Agent, Title: "工具执行结果", ToolResult: msg.Content, Status: TaskSuccess})
 				} else if mv.Role == schema.Assistant {
 					answer = msg.Content
@@ -175,6 +199,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 			return
 		}
 		result = TaskResult{TaskID: task.ID, Agent: task.Agent, Status: TaskSuccess, Summary: strings.TrimSpace(answer)}
+		result.Artifacts = artifacts
 		if taskError != nil {
 			result.Status = TaskError
 			result.Error = taskError.Error()
@@ -195,6 +220,9 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 		if err == nil {
 			if previous, ok := s.Results[task.ID]; ok && resume != nil {
 				result.Evidence = append(previous.Evidence, result.Evidence...)
+				for _, ref := range previous.Artifacts {
+					result.Artifacts = appendArtifactReference(result.Artifacts, ref)
+				}
 			}
 			if reason := s.Failures[task.ID]; reason != "" && interrupt == nil {
 				result.Status, result.Error = TaskError, reason
@@ -222,7 +250,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 				g.Send(&adk.AgentEvent{Err: fmt.Errorf("缺少子任务恢复数据")})
 				return
 			}
-			ev := adk.CompositeInterrupt(ctx, map[string]any{"task_id": task.ID}, &peChildState{TaskID: task.ID, Data: data.Data}, adk.FromInterruptContexts(interrupt.Action.Interrupted.InterruptContexts))
+			ev := adk.CompositeInterrupt(ctx, map[string]any{"task_id": task.ID}, &peChildState{TaskID: task.ID, Data: data.Data, RuntimeContext: privateContext.Raw}, adk.FromInterruptContexts(interrupt.Action.Interrupted.InterruptContexts))
 			ev.AgentName = a.role
 			g.Send(ev)
 			return
@@ -265,7 +293,8 @@ func (a *peTaskAgent) buildAgent(ctx context.Context, req Request) (*adk.ChatMod
 	}
 	ts := selectRequestTools(sorted, buckets, req)
 	config := buildToolsNodeConfig()
-	config.Tools = ts.Tools
+	config.Tools = e.addArtifactTool(req, ts.Tools)
+	config.ToolCallMiddlewares = append(config.ToolCallMiddlewares, compose.ToolMiddleware{Invokable: e.artifactMiddleware(req)})
 	dangerous := e.dangerousToolNames(ctx, ts.Tools)
 	clarify := e.clarifyToolNames()
 	// 预算与中间件注入读同一个结果（见 agentIterations）。
@@ -277,7 +306,8 @@ func (a *peTaskAgent) buildAgent(ctx context.Context, req Request) (*adk.ChatMod
 	if len(clarify) > 0 {
 		config.ToolCallMiddlewares = append(config.ToolCallMiddlewares, compose.ToolMiddleware{Invokable: buildClarifyMiddleware(clarify)})
 	}
-	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: a.role, Description: a.Description(ctx), Instruction: composeSystemPrompt(buildDeepTaskPrompt(ctx, a.role, ts, iterations), req.SystemPrompt), Model: r.model, ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: config}, MaxIterations: iterations, GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
+	instruction := composeSystemPrompt(buildDeepTaskPrompt(ctx, a.role, ts, iterations), req.SystemPrompt)
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: a.role, Description: a.Description(ctx), Instruction: instruction, Model: r.model, ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: config}, MaxIterations: iterations, Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, instruction, r.model), newBudgetGuard(req, instruction)}, GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
 		return append([]*schema.Message{schema.SystemMessage(instruction)}, input.Messages...), nil
 	}})
 	return agent, knowledgeSearchToolOf(ts.Tools), err

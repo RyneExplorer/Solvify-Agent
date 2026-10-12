@@ -164,6 +164,9 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	// 等待两个检索完成
 	vr := <-vectorCh
 	kr := <-keywordCh
+	if ctx.Err() != nil {
+		return Result{}, ctx.Err()
+	}
 
 	// 向量检索失败时降级：仅用关键词结果，不阻断检索
 	if vr.err != nil {
@@ -306,7 +309,7 @@ func (r *HybridRetriever) vectorSearch(ctx context.Context, query Query) ([]scor
 	}
 
 	// 批量填 title（只对 topK*2 条查，开销可忽略）
-	batchFillTitles(r.db, results)
+	batchFillTitles(r.db.WithContext(ctx), results)
 
 	logger.Infof("向量检索原始结果: %d 条", len(results))
 	return results, nil
@@ -438,7 +441,7 @@ func (r *HybridRetriever) keywordSearch(ctx context.Context, query Query) ([]sco
 		return nil, err
 	}
 
-	batchFillTitles(r.db, results)
+	batchFillTitles(r.db.WithContext(ctx), results)
 
 	// 过滤零分结果
 	filtered := results[:0]
@@ -516,7 +519,8 @@ func buildPostgresArray(items []string) string {
 			sb.WriteString(",")
 		}
 		sb.WriteString("\"")
-		sb.WriteString(strings.ReplaceAll(item, "\"", "\\\""))
+		escaped := strings.ReplaceAll(item, "\\", "\\\\")
+		sb.WriteString(strings.ReplaceAll(escaped, "\"", "\\\""))
 		sb.WriteString("\"")
 	}
 	sb.WriteString("}")

@@ -40,7 +40,7 @@ func (m *peChoiceTestModel) Generate(_ context.Context, _ []*schema.Message, opt
 	return peCall("plan", map[string]any{"tasks": []any{}}), nil
 }
 
-func TestPEControlModelRetriesOnlyRejectedThinkingChoice(t *testing.T) {
+func TestPEControlModelUsesAutoChoiceWithoutRetry(t *testing.T) {
 	for _, failure := range []error{nil, errors.New("i/o timeout"), errors.New("status code: 429"), errors.New("invalid parameter")} {
 		m := &peChoiceTestModel{failure: failure}
 		control, err := (&peControlModel{inner: m}).WithTools([]*schema.ToolInfo{{Name: "plan"}})
@@ -50,14 +50,14 @@ func TestPEControlModelRetriesOnlyRejectedThinkingChoice(t *testing.T) {
 		opts := []model.Option{model.WithToolChoice(schema.ToolChoiceForced)}
 		msg, err := control.Generate(context.Background(), nil, opts...)
 		if failure == nil {
-			if err != nil || msg == nil || len(m.calls) != 2 || m.calls[1] != schema.ToolChoiceAllowed {
+			if err != nil || msg == nil || len(m.calls) != 1 || m.calls[0] != schema.ToolChoiceAllowed {
 				t.Fatalf("未正确兼容思考模型: calls=%v, err=%v", m.calls, err)
 			}
-		} else if err == nil || len(m.calls) != 1 {
+		} else if !errors.Is(err, failure) || len(m.calls) != 1 || m.calls[0] != schema.ToolChoiceAllowed {
 			t.Fatalf("非参数错误不应重试: calls=%v, err=%v", m.calls, err)
 		}
 		if *model.GetCommonOptions(nil, opts...).ToolChoice != schema.ToolChoiceForced {
-			t.Fatal("重试改写调用方选项")
+			t.Fatal("改写调用方选项")
 		}
 	}
 }

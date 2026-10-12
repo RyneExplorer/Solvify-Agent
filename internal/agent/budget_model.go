@@ -8,8 +8,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// budgetModel 在模型边界覆盖 Planner、Executor、Replanner 和专业 Agent。
-// 压缩使用消息副本，不修改框架 checkpoint 或异步追踪正在读取的消息。
+// budgetModel 管理调用副本；生产客户端在序列化边界核对实际供应商选项。
 type budgetModel struct {
 	inner model.ToolCallingChatModel
 	guard *budgetGuard
@@ -23,29 +22,37 @@ func (m *budgetModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChat
 	}
 	return &budgetModel{inner: inner, guard: m.guard, tools: append([]*schema.ToolInfo(nil), tools...)}, nil
 }
-
-func (m *budgetModel) Generate(ctx context.Context, messages []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+func (m *budgetModel) prepare(ctx context.Context, messages []*schema.Message, opts []model.Option) (context.Context, []*schema.Message, error) {
 	options := model.GetCommonOptions(nil, opts...)
 	tools := m.tools
 	if options.Tools != nil {
 		tools = options.Tools
 	}
-	ctx, state, err := m.guard.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: messages, ToolInfos: tools}, nil)
-	if err != nil {
-		return nil, err
+	guard := *m.guard
+	if options.MaxTokens != nil {
+		guard.outputLimit = *options.MaxTokens
 	}
-	return m.inner.Generate(ctx, state.Messages, opts...)
+	if options.Model != nil && *options.Model != guard.modelName {
+		guard.modelName = *options.Model
+		guard.declaredCtx = 0
+	}
+	if final, ok := m.inner.(interface{ FinalBudgetChecked() bool }); ok {
+		guard.finalCheckElsewhere = final.FinalBudgetChecked()
+	}
+	ctx, state, err := guard.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: messages, ToolInfos: tools}, nil)
+	return ctx, state.Messages, err
 }
-
-func (m *budgetModel) Stream(ctx context.Context, messages []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	options := model.GetCommonOptions(nil, opts...)
-	tools := m.tools
-	if options.Tools != nil {
-		tools = options.Tools
-	}
-	ctx, state, err := m.guard.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: messages, ToolInfos: tools}, nil)
+func (m *budgetModel) Generate(ctx context.Context, messages []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	ctx, input, err := m.prepare(ctx, messages, opts)
 	if err != nil {
 		return nil, err
 	}
-	return m.inner.Stream(ctx, state.Messages, opts...)
+	return m.inner.Generate(ctx, input, opts...)
+}
+func (m *budgetModel) Stream(ctx context.Context, messages []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	ctx, input, err := m.prepare(ctx, messages, opts)
+	if err != nil {
+		return nil, err
+	}
+	return m.inner.Stream(ctx, input, opts...)
 }

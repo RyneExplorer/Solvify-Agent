@@ -46,8 +46,9 @@ type peState struct {
 }
 
 type peChildState struct {
-	TaskID string
-	Data   []byte
+	RuntimeContext string
+	TaskID         string
+	Data           []byte
 }
 
 func init() {

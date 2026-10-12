@@ -102,7 +102,7 @@ func (e *Engine) runPlanExecute(ctx context.Context, req Request, chatModel mode
 	}
 	ctx = observability.WithExecutionMetadata(ctx, observability.ExecutionMetadata{CheckpointID: id, Phase: "planning", Resumed: len(req.ResumeData) > 0})
 	defer func() { r.traceContext(ctx, "completed", "") }()
-	store := e.buildCheckpointStore(req.SessionID)
+	store := e.contextStore(req)
 	interrupted := false
 	defer func() {
 		if !interrupted {

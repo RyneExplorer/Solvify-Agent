@@ -1,6 +1,10 @@
 package service
 
-import "testing"
+import (
+	"solvify-agent/internal/llm"
+	"solvify-agent/pkg/config"
+	"testing"
+)
 
 // V3：预算不得超发。
 //
@@ -16,17 +20,17 @@ func TestBudgetsNeverExceedSafeCap(t *testing.T) {
 		{"工具定义恰好等于安全顶", 8192, 7782}, // int(8192*0.95)=7782
 		{"工具定义略小于安全顶（剩余额度耗尽）", 8192, 7700},
 		{"极小窗口", 4096, 3900},
-		{"窗口为 0 走默认", 0, 0},
+		{"窗口未知返回零", 0, 0},
 		{"正常 128k", 128000, 3000},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			h, r, m := calculateContextBudgets(c.maxCtx, c.toolsTokens)
-			maxCtx := c.maxCtx
-			if maxCtx <= 0 {
-				maxCtx = 8192
+			budget, err := llm.ResolveContextBudget("", "", c.maxCtx, config.ContextDefaults().OutputLimit, false, config.ContextDefaults())
+			safeCap := 0
+			if err == nil {
+				safeCap = budget.Hard
 			}
-			safeCap := int(float64(maxCtx) * 0.95)
 
 			if h < 0 || r < 0 || m < 0 {
 				t.Fatalf("预算不得为负: 历史=%d 检索=%d 记忆=%d", h, r, m)

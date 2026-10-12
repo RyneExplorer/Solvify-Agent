@@ -11,7 +11,7 @@ import (
 )
 
 // peControlModel 兼容只接受 auto 工具选择的思考模型。
-// 仅在上游明确拒绝 forced 参数时重试一次；原生阶段仍要求计划或 respond 工具。
+// 首次请求即使用 auto；计划或 respond 工具输出仍由业务校验约束。
 type peControlModel struct {
 	inner   model.ToolCallingChatModel
 	runtime *peRuntime
@@ -27,8 +27,9 @@ func (m *peControlModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingC
 
 func (m *peControlModel) Generate(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
 	input := msgs
+	callOptions := append(append([]model.Option(nil), opts...), model.WithToolChoice(schema.ToolChoiceAllowed))
 	for attempt := range 2 {
-		msg, err := m.generate(ctx, input, opts...)
+		msg, err := m.inner.Generate(ctx, input, callOptions...)
 		if err != nil || m.runtime == nil {
 			return msg, err
 		}
@@ -80,19 +81,6 @@ func (m *peControlModel) validatePlan(ctx context.Context, msg *schema.Message) 
 		return err
 	}
 	return r.installPlan(&snapshot, &plan)
-}
-
-func (m *peControlModel) generate(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	msg, err := m.inner.Generate(ctx, msgs, opts...)
-	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "thinking mode does not support this tool_choice") {
-		return msg, err
-	}
-	options := model.GetCommonOptions(nil, opts...)
-	if options.ToolChoice == nil || *options.ToolChoice != schema.ToolChoiceForced {
-		return nil, err
-	}
-	retryOptions := append(append([]model.Option(nil), opts...), model.WithToolChoice(schema.ToolChoiceAllowed))
-	return m.inner.Generate(ctx, msgs, retryOptions...)
 }
 
 func (m *peControlModel) Stream(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {

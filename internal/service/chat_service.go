@@ -18,6 +18,7 @@ import (
 	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/cache"
+	"solvify-agent/pkg/config"
 	apperrors "solvify-agent/pkg/errors"
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/traceid"
@@ -278,7 +279,7 @@ func (s *chatService) GetMessages(ctx context.Context, userID, sessionID string)
 //
 // toolsTokensReserve 仅用于深度模式/带工具调用场景，调用方可先预计算工具 JSON Schema 占用的真 token，
 // 这里会先从总窗口里扣掉再分各块预算，避免 tools 定义直接把上下文撑爆（P0-④）。
-func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelID, modelType, currentQuery string, toolsTokensReserve ...int) (*llm.OpenAIClient, *EnhancedContext, error) {
+func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelID, modelType, currentQuery, currentMessageID string, toolsTokensReserve ...int) (*llm.OpenAIClient, *EnhancedContext, error) {
 	t0 := time.Now()
 
 	// 1. 解析模型客户端
@@ -298,7 +299,10 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 	if len(toolsTokensReserve) > 0 {
 		toolsTokens = max(toolsTokensReserve[0], 0)
 	}
-	historyBudget, retrievalBudget, memoryBudget := calculateContextBudgets(maxCtx, toolsTokens)
+	if _, err := llm.ResolveContextBudget(modelID, modelName, maxCtx, client.OutputLimit(), false, config.ContextDefaults()); err != nil {
+		return nil, nil, err
+	}
+	historyBudget, retrievalBudget, memoryBudget := calculateContextBudgetsWithOutput(maxCtx, client.OutputLimit(), toolsTokens)
 
 	// 3. 并行加载：BuildContext / 用户信息 / 用户偏好 —— 三者无依赖，全部 goroutine
 	type userLoadResult struct {
@@ -350,8 +354,10 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 	go func() {
 		var r ctxLoadResult
 		if s.contextSvc != nil {
+			contextParams := buildContextParams(historyBudget, retrievalBudget, memoryBudget, modelName, toolsTokens, <-queryEmbCh)
+			contextParams.CurrentMessageID = currentMessageID
 			enhancedCtx, bErr := s.contextSvc.BuildContext(ctx, userID, sessionID, currentQuery,
-				buildContextParams(historyBudget, retrievalBudget, memoryBudget, modelName, toolsTokens, <-queryEmbCh),
+				contextParams,
 				client.ChatModel())
 			if bErr != nil {
 				logger.Warnf("构建增强上下文失败，降级为传统方式: %v", bErr)
@@ -374,7 +380,7 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 		// 兜底：传统截断
 		msg, _ := s.messageRepo.FindRecentForContext(ctx, sessionID, 20)
 		enhancedCtx = &EnhancedContext{
-			History:         truncateHistoryByTokens(msg, historyBudget, modelName),
+			History:         truncateHistoryByTokens(excludeByMessageID(msg, currentMessageID), historyBudget, modelName),
 			HistoryBudget:   historyBudget,
 			RetrievalBudget: retrievalBudget,
 		}
@@ -532,6 +538,7 @@ func (s *chatService) bgComputeEmbedding(ctx context.Context, messageID, content
 // QueryEmbedding，压根不经过这段接线）。
 func buildContextParams(historyBudget, retrievalBudget, memoryBudget int, modelName string, toolsTokens int, queryEmbedding []float64) BuildContextConfig {
 	return BuildContextConfig{
+		BudgetsConfigured: true,
 		MaxTokens:         historyBudget,
 		MaxMemories:       10,
 		MaxRecentMessages: 20,

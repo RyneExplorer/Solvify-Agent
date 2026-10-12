@@ -1,7 +1,9 @@
 package service
 
 import (
+	"solvify-agent/internal/llm"
 	"solvify-agent/internal/model/entity"
+	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/tokenutil"
 )
@@ -17,35 +19,27 @@ const truncationMarker = "\n\n（内容过长，已截断）"
 //
 // P0-④ 关键修复：toolsTokens (深度模式/多工具场景的工具 JSON Schema 真 token 数) 必须先从总窗口
 // 扣除，再分配回复预留和固定预留，否则多工具时直接把历史 + 检索预算挤成负数或零。
-// 同时所有预算最终都按 0.95*maxCtx 的安全顶封顶，给偶发的角色名/special token 留余量。
+// 输出与裕量使用 LLM 同源策略；这里仅为候选装配分配额度，最终输入另行核对。
 //
 // 保底规则：**只在剩余额度装得下时才保底**。硬抬保底会突破 safeCap ——
 // 窗口极小（工具定义几乎吃满）时历史曾被无条件抬到 500，等于凭空超发。
 func calculateContextBudgets(maxContextLength int, toolsTokens ...int) (historyBudget, retrievalBudget, memoryBudget int) {
+	return calculateContextBudgetsWithOutput(maxContextLength, config.ContextDefaults().OutputLimit, toolsTokens...)
+}
+
+func calculateContextBudgetsWithOutput(maxContextLength, output int, toolsTokens ...int) (historyBudget, retrievalBudget, memoryBudget int) {
 	toolReserve := 0
 	if len(toolsTokens) > 0 && toolsTokens[0] > 0 {
 		toolReserve = toolsTokens[0]
 	}
 	if maxContextLength <= 0 {
-		maxContextLength = 8192
-	}
-	// 0.95 的安全顶：角色标记、特殊 token、工具结果 JSON 序列化扩展，都容易让"算刚好"爆。
-	safeCap := int(float64(maxContextLength) * 0.95)
-	if toolReserve >= safeCap {
 		return 0, 0, 0
 	}
-	remaining := safeCap - toolReserve
-
-	// 1. 回复预留：不超过 4096 或 safeCap 的 1/4
-	completionReserved := 4096
-	if remaining/4 < completionReserved {
-		completionReserved = remaining / 4
+	budget, err := llm.ResolveContextBudget("", "", maxContextLength, output, false, config.ContextDefaults())
+	if err != nil {
+		return 0, 0, 0
 	}
-	if completionReserved < 200 {
-		completionReserved = 200
-	}
-	remaining -= completionReserved
-
+	remaining := max(budget.Hard-toolReserve, 0)
 	// 2. 固定预留：System Prompt 基础骨架 + 当前 user question 包装 + 安全边距。
 	// ⚠️ 必须封顶到 remaining：过去这里没有上限，remaining < 300 时仍被抬到 300，
 	// 于是 remaining 变负并一路传导，最后把历史保底成一笔超发额度。

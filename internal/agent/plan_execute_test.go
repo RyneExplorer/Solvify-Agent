@@ -11,6 +11,7 @@ import (
 
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+
 	"solvify-agent/internal/tool"
 )
 
@@ -35,6 +36,10 @@ func peCall(name string, args any) *schema.Message {
 
 func collectPEEvents(t *testing.T, ctx context.Context, e *Engine, req Request, m *deepTestModel) []Event {
 	t.Helper()
+	if req.MaxContextLength == 0 {
+		req.MaxContextLength = 64000
+		req.ModelName = "gpt-4o"
+	}
 	events, err := e.Execute(ctx, req, m)
 	if err != nil {
 		t.Fatal(err)

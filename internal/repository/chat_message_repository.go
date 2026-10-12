@@ -134,10 +134,7 @@ func (r *chatMessageRepository) SearchRecentByKeywords(ctx context.Context, sess
 		Limit(limit).
 		Find(&messages).Error
 
-	// 反转顺序，使其按时间正序
-	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
-		messages[i], messages[j] = messages[j], messages[i]
-	}
+	// 返回近期匹配排名，展示时间顺序由装配层处理。
 
 	return messages, err
 }
@@ -199,10 +196,6 @@ func (r *chatMessageRepository) SearchRecentByVector(ctx context.Context, sessio
 
 	if err != nil {
 		return nil, err
-	}
-
-	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
-		messages[i], messages[j] = messages[j], messages[i]
 	}
 
 	return messages, nil
@@ -291,4 +284,3 @@ func (r *chatMessageRepository) BatchUpdateEmbedding(ctx context.Context, items 
 	sb.WriteString(`) AS v(id, vec) WHERE m.id = v.id`)
 	return dbFor(ctx, r.db).Exec(sb.String(), args...).Error
 }
-

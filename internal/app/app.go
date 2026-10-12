@@ -51,6 +51,7 @@ type App struct {
 
 	// checkpoint 过期清理后台任务的取消函数，由 App 负责生命周期管理
 	checkpointCleanupCancel context.CancelFunc
+	checkpointCleanupDone   chan struct{}
 
 	// MCP 客户端连接池，由 App 负责生命周期管理
 	mcpClientPool *providers.MCPClientPool
@@ -80,6 +81,21 @@ func (a *App) Initialize() error {
 		return err
 	}
 	if err := a.initDependencies(); err != nil {
+		a.stopContextCleanup()
+		if a.mcpClientPool != nil {
+			_ = a.mcpClientPool.Close()
+		}
+		if a.tracer != nil {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = a.tracer.Close(closeCtx)
+			cancel()
+		}
+		if a.redis != nil {
+			_ = database.CloseRedis(a.redis)
+		}
+		if a.postgresqlDB != nil {
+			_ = database.ClosePostgreSQL(a.postgresqlDB)
+		}
 		return err
 	}
 	a.initRouter()
@@ -142,6 +158,14 @@ func (a *App) initDatabase() error {
 		return fmt.Errorf("初始化 PostgreSQL 失败: %w", err)
 	}
 	a.postgresqlDB = postgresqlDB
+	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = database.EnsureContextArtifactSchema(schemaCtx, postgresqlDB)
+	schemaCancel()
+	if err != nil {
+		_ = database.ClosePostgreSQL(postgresqlDB)
+		a.postgresqlDB = nil
+		return fmt.Errorf("初始化上下文产物表失败: %w", err)
+	}
 
 	// pgvector 索引健康检查（仅在 enable_pgvector 时执行）
 	if a.cfg.Database.Postgres.EnablePGVector {
@@ -443,6 +467,8 @@ func (a *App) initDependencies() error {
 
 	// 注入 DB 版 CheckPointStore 所需的 AgentCheckpointRepo
 	ai.AgentEngine.WithCheckpointRepo(agentCheckpointRepo)
+	artifactRepo := repository.NewContextArtifactRepository(a.postgresqlDB)
+	ai.AgentEngine.WithArtifactRepo(artifactRepo)
 
 	// 启动 checkpoint 过期清理后台任务：定期删除 agent_checkpoints 中超过 TTL 的行。
 	// Eino 框架不自动调用 CheckPointStore.Delete（Delete 是可选接口），原 DeleteExpired 是死代码（无调用方）。
@@ -450,8 +476,10 @@ func (a *App) initDependencies() error {
 	{
 		cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 		a.checkpointCleanupCancel = cleanupCancel
+		a.checkpointCleanupDone = make(chan struct{})
 		const cleanupInterval = time.Hour
 		go func() {
+			defer close(a.checkpointCleanupDone)
 			ticker := time.NewTicker(cleanupInterval)
 			defer ticker.Stop()
 			for {
@@ -460,12 +488,17 @@ func (a *App) initDependencies() error {
 					logger.Info("checkpoint 过期清理任务已停止")
 					return
 				case <-ticker.C:
-					n, dErr := agentCheckpointRepo.DeleteExpired(cleanupCtx, time.Now())
+					cycleCtx, cycleCancel := context.WithTimeout(cleanupCtx, 30*time.Second)
+					n, dErr := agentCheckpointRepo.DeleteExpired(cycleCtx, time.Now())
 					if dErr != nil {
 						logger.Warnf("[CheckpointCleanup] 删除过期 checkpoint 失败: %v", dErr)
 					} else if n > 0 {
 						logger.Infof("[CheckpointCleanup] 已清理 %d 条过期 checkpoint", n)
 					}
+					if _, err := artifactRepo.DeleteExpired(cycleCtx, time.Now()); err != nil && cycleCtx.Err() == nil {
+						logger.Warn("上下文产物清理失败")
+					}
+					cycleCancel()
 				}
 			}
 		}()
@@ -621,6 +654,7 @@ func (a *App) gracefulShutdown() {
 		lfCancel()
 	}
 
+	a.stopContextCleanup()
 	if a.postgresqlDB != nil {
 		if err := database.ClosePostgreSQL(a.postgresqlDB); err != nil {
 			logger.Error("PostgresSQL 连接关闭失败", zap.Error(err))
@@ -639,12 +673,16 @@ func (a *App) gracefulShutdown() {
 		}
 	}
 
-	// 停止 checkpoint 过期清理后台任务
-	if a.checkpointCleanupCancel != nil {
-		a.checkpointCleanupCancel()
-	}
-
 	logger.Info("HTTP 服务已停止")
 	logger.Info("=========================================")
 	_ = logger.Sync()
+}
+
+func (a *App) stopContextCleanup() {
+	if a.checkpointCleanupCancel != nil {
+		a.checkpointCleanupCancel()
+		if a.checkpointCleanupDone != nil {
+			<-a.checkpointCleanupDone
+		}
+	}
 }

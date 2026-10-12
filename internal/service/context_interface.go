@@ -10,11 +10,13 @@ import (
 
 // BuildContextConfig 构建上下文的配置
 type BuildContextConfig struct {
-	MaxTokens          int    // 历史消息总 token 预算（0 表示按模型窗口自动计算）；近期对话与相关历史各自按比例分
-	MaxMemories        int
+	CurrentMessageID  string // 本轮已落库问题，在预算选择前排除
+	BudgetsConfigured bool   // true 时零额度禁用；false 时才填默认值
+	MaxTokens         int    // 历史消息总 token 预算（显式配置时 0 禁用）；近期对话与相关历史各自按比例分
+	MaxMemories       int
 	MaxRecentMessages int
-	RetrievalBudget    int // 知识库检索上下文最大 token 预算
-	MemoryBudget       int // 用户记忆最大 token 预算
+	RetrievalBudget   int // 知识库检索上下文最大 token 预算
+	MemoryBudget      int // 用户记忆最大 token 预算
 	// QueryEmbedding 是**当前问题**的向量，由调用方算好传进来（决策 ①）。
 	// 调用方预算好、传进来是本项目的既有范式：contextService 不再持有一份 embed 客户端。
 	// 为空时语义召回通道直接关闭，关键词通道不受影响。
@@ -34,9 +36,9 @@ type EnhancedContext struct {
 	Summary         *entity.ChatSummary
 	Memories        []entity.UserMemory
 	UserCtx         UserContext
-	HistoryBudget   int // 近期对话实际使用的 token 预算
-	RecallBudget    int // 相关历史实际使用的 token 预算
-	RetrievalBudget int // 实际使用的检索上下文 token 预算
+	HistoryBudget   int                    // 近期对话实际使用的 token 预算
+	RecallBudget    int                    // 相关历史实际使用的 token 预算
+	RetrievalBudget int                    // 实际使用的检索上下文 token 预算
 	Profile         *entity.User           // 当前用户画像实体（来源：user表扩展字段）
 	Preference      *entity.UserPreference // 当前用户偏好（来源：user_preferences 表）
 }

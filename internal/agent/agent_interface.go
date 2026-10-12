@@ -16,6 +16,7 @@ type AgentInterface interface {
 
 // EngineInterface 供 App 在启动阶段装配 Agent，不向业务层暴露工具注册操作。
 type EngineInterface interface {
+	WithArtifactRepo(repository.ContextArtifactRepo)
 	AgentInterface
 	RegisterInternal(name string, order int, dangerous bool, domain ToolDomain, build ToolBuildFn)
 	WithCheckpointRepo(repo repository.AgentCheckpointRepo)

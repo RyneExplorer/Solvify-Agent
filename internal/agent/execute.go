@@ -13,7 +13,9 @@ import (
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+	"github.com/google/uuid"
 
+	"solvify-agent/internal/llm"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/tool"
 	apperrors "solvify-agent/pkg/errors"
@@ -28,11 +30,27 @@ func (e *Engine) Execute(ctx context.Context, req Request, chatModel model.ToolC
 
 	go func() {
 		defer close(eventCh)
+		if limits, ok := chatModel.(interface{ ContextWindow() int }); ok && req.MaxContextLength <= 0 {
+			req.MaxContextLength = limits.ContextWindow()
+		}
+		if limits, ok := chatModel.(interface{ OutputLimit() int }); ok {
+			req.OutputLimit = limits.OutputLimit()
+		}
+		var restoreErr error
+		req, restoreErr = e.restoreContextRequest(ctx, req)
+		if restoreErr != nil {
+			e.emitPlanError(ctx, eventCh, restoreErr)
+			return
+		}
+		if req.RunID == "" {
+			req.RunID = uuid.NewString()
+		}
+		ctx = llm.WithBudgetIdentity(ctx, req.ModelID, req.MaxContextLength)
+		chatModel = &budgetModel{inner: chatModel, guard: newBudgetGuard(req, "")}
 		if req.effectiveProfile() == ProfileQuick {
 			e.runQuickAgent(ctx, req, chatModel, eventCh)
 			return
 		}
-		chatModel = &budgetModel{inner: chatModel, guard: newBudgetGuard(req, "")}
 		planExecute := strings.HasPrefix(req.CheckpointID, "deeppe-v1-") || (req.CheckpointID == "" && e.cfg.DeepPlanExecuteEnabled)
 		if planExecute {
 			e.runPlanExecute(ctx, req, chatModel, eventCh)
@@ -66,7 +84,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	buckets, reused := e.bucketsFor(ctx, sorted, req)
 	ts := selectRequestTools(sorted, buckets, req)
 	logToolSetReuse(ctx, profile, ts, reused)
-	allTools := ts.Tools
+	allTools := e.addArtifactTool(req, ts.Tools)
 	toolDescMap := logToolSet(ctx, e, req, allTools)
 
 	// 中间件注入与迭代预算读同一个结果：审批与澄清都会中断执行等用户回应，
@@ -89,6 +107,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	// ── 创建 adk.ChatModelAgent ──
 	toolsNodeConfig := buildToolsNodeConfig()
 	toolsNodeConfig.Tools = allTools
+	toolsNodeConfig.ToolCallMiddlewares = append(toolsNodeConfig.ToolCallMiddlewares, compose.ToolMiddleware{Invokable: e.artifactMiddleware(req)})
 	// ── 注入中间件：危险工具审批 + 澄清追问 ──
 	if len(dangerousNames) > 0 {
 		toolsNodeConfig.ToolCallMiddlewares = append(toolsNodeConfig.ToolCallMiddlewares,
@@ -114,6 +133,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 			ToolsNodeConfig: toolsNodeConfig,
 		},
 		MaxIterations: iterations,
+		Handlers:      []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, systemPromptFinal, chatModel), newBudgetGuard(req, systemPromptFinal)},
 	})
 	if err != nil {
 		logger.Errorf("[Agent] ChatModelAgent 初始化失败: %v", err)
@@ -128,7 +148,7 @@ func (e *Engine) runAgent(ctx context.Context, req Request, chatModel model.Tool
 	}
 
 	// ── 创建 Runner ──
-	store := e.buildCheckpointStore(req.SessionID)
+	store := e.contextStore(req)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:           agent,
 		EnableStreaming: true,

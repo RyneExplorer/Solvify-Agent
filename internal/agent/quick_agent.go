@@ -25,7 +25,7 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 	buckets, reused := e.bucketsFor(ctx, sorted, req)
 	ts := selectProfileTools(sorted, buckets, profile)
 	logToolSetReuse(ctx, profile, ts, reused)
-	allTools := ts.Tools
+	allTools := e.addArtifactTool(req, ts.Tools)
 	toolDescMap := logToolSet(ctx, e, req, allTools)
 
 	// 澄清中间件与迭代预算读同一个结果：澄清是一次普通工具调用，会占掉一轮模型调用，
@@ -40,6 +40,7 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 	inputMessages := buildInputMessages(req.Query, req.History)
 	toolsNodeConfig := buildToolsNodeConfig()
 	toolsNodeConfig.Tools = allTools
+	toolsNodeConfig.ToolCallMiddlewares = append(toolsNodeConfig.ToolCallMiddlewares, compose.ToolMiddleware{Invokable: e.artifactMiddleware(req)})
 	if len(clarifyNames) > 0 {
 		toolsNodeConfig.ToolCallMiddlewares = append(toolsNodeConfig.ToolCallMiddlewares,
 			compose.ToolMiddleware{Invokable: buildClarifyMiddleware(clarifyNames)})
@@ -54,7 +55,7 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 		ToolsConfig:   adk.ToolsConfig{ToolsNodeConfig: toolsNodeConfig},
 		MaxIterations: iterations,
 		// 每次模型调用前的总预算检查（首次执行 / 每轮迭代 / 中断恢复三条路径共用）。
-		Handlers: []adk.ChatModelAgentMiddleware{newBudgetGuard(req, systemPromptFinal)},
+		Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, systemPromptFinal, chatModel), newBudgetGuard(req, systemPromptFinal)},
 	})
 	if err != nil {
 		logger.Errorf("[Agent] ChatModelAgent 初始化失败: %v", err)
@@ -68,7 +69,7 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 		return
 	}
 
-	store := e.buildCheckpointStore(req.SessionID)
+	store := e.contextStore(req)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:           agent,
 		EnableStreaming: true,

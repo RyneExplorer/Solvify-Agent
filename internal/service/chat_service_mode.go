@@ -61,7 +61,7 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 		}
 	}
 
-	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content, preToolsTokens)
+	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content, userMsgID, preToolsTokens)
 	if err != nil {
 		sendErrorEvent(ctx, eventCh, err, profile)
 		return
@@ -82,6 +82,7 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 	agentReq.SessionID = sessionID
 	agentReq.Profile = profile
 	// agent 层拿不到 llm 客户端，预算检查需要的窗口与模型名由这里带过去。
+	agentReq.OutputLimit = client.OutputLimit()
 	agentReq.ModelName = client.ModelName()
 	agentReq.MaxContextLength = client.MaxContextLength()
 

@@ -74,6 +74,7 @@ type internalToolRegistryEntry struct {
 }
 
 type Engine struct {
+	artifactRepo      repository.ContextArtifactRepo
 	internalTools     []internalToolRegistryEntry
 	toolFactory       tool.ToolFactory
 	cfg               config.AgentConfig

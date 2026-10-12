@@ -40,7 +40,7 @@ func NewContextService(
 
 // BuildContext 构建增强后的对话上下文
 func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, currentQuery string, cfg BuildContextConfig, chatModel model.BaseChatModel) (*EnhancedContext, error) {
-	if cfg.MaxTokens <= 0 {
+	if !cfg.BudgetsConfigured && cfg.MaxTokens <= 0 {
 		cfg.MaxTokens = 1500
 	}
 	if cfg.MaxMemories <= 0 {
@@ -49,10 +49,10 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 	if cfg.MaxRecentMessages <= 0 {
 		cfg.MaxRecentMessages = 20
 	}
-	if cfg.RetrievalBudget <= 0 {
+	if !cfg.BudgetsConfigured && cfg.RetrievalBudget <= 0 {
 		cfg.RetrievalBudget = 2000
 	}
-	if cfg.MemoryBudget <= 0 {
+	if !cfg.BudgetsConfigured && cfg.MemoryBudget <= 0 {
 		cfg.MemoryBudget = 800
 	}
 
@@ -79,18 +79,26 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 	}()
 
 	go func() {
+		if cfg.MemoryBudget <= 0 {
+			resultCh <- loadResult{}
+			return
+		}
 		memories, err := s.memoryRepo.ListActive(ctx, userID, cfg.MaxMemories)
 		resultCh <- loadResult{memories: memories, err: err}
 	}()
 
 	go func() {
+		if cfg.MaxTokens <= 0 {
+			resultCh <- loadResult{}
+			return
+		}
 		recent, err := s.messageRepo.FindRecent(ctx, sessionID, cfg.MaxRecentMessages)
 		resultCh <- loadResult{recent: recent, err: err}
 	}()
 
 	go func() {
 		var relevant []entity.ChatMessage
-		if len(keywords) > 0 {
+		if cfg.MaxTokens > 0 && len(keywords) > 0 {
 			var err error
 			relevant, err = s.messageRepo.SearchRecentByKeywords(ctx, sessionID, keywords, recallTopK)
 			if err != nil {
@@ -104,7 +112,7 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 	// 两路都失败时只剩近期对话，仍能正常回答 —— 召回是补充通道，不是主通道。
 	go func() {
 		var recalled []entity.ChatMessage
-		if len(cfg.QueryEmbedding) > 0 {
+		if cfg.MaxTokens > 0 && len(cfg.QueryEmbedding) > 0 {
 			vec := make([]float32, len(cfg.QueryEmbedding))
 			for i, v := range cfg.QueryEmbedding {
 				vec[i] = float32(v)
@@ -127,7 +135,12 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 		vecRecall []entity.ChatMessage
 	)
 	for i := 0; i < 5; i++ {
-		r := <-resultCh
+		var r loadResult
+		select {
+		case r = <-resultCh:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 		if r.err != nil {
 			logger.Warnf("加载上下文组件失败: %v", r.err)
 			continue
@@ -152,9 +165,29 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 	// ── 两个容器各自裁剪，不合并后再裁 ──
 	// 旧顺序是「合并 → 摘要过滤 → 从尾部裁」，而召回的必然是老消息（排在头部），
 	// 于是每次都被第一个裁掉：语义召回接上了也没有实际效果。
+	recent = excludeByMessageID(recent, cfg.CurrentMessageID)
 	recentBudget, recallBudget := splitHistoryBudget(cfg.MaxTokens)
 	history := truncateHistoryByTokens(s.applySummary(recent, summary), recentBudget, cfg.ModelName)
-	recall := buildRecallContainer(kwRecall, vecRecall, recallBudget, cfg.ModelName)
+	// 重复近期消息在选择前过滤，不能占掉召回预算后再丢弃。
+	ids := map[string]bool{}
+	for _, m := range history {
+		ids[m.ID] = true
+	}
+	filter := func(list []entity.ChatMessage) []entity.ChatMessage {
+		out := make([]entity.ChatMessage, 0, len(list))
+		for _, m := range list {
+			if !ids[m.ID] && m.ID != cfg.CurrentMessageID {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	recall := buildRecallContainer(filter(kwRecall), filter(vecRecall), recallBudget, cfg.ModelName)
+	if len(recall) == 0 && recallBudget > 0 {
+		recentBudget = cfg.MaxTokens
+		recallBudget = 0
+		history = truncateHistoryByTokens(s.applySummary(recent, summary), recentBudget, cfg.ModelName)
+	}
 	memories = truncateMemoriesByTokens(memories, cfg.MemoryBudget, cfg.ModelName)
 
 	return &EnhancedContext{
@@ -208,32 +241,58 @@ func splitHistoryBudget(total int) (recent, recall int) {
 	return total - recall, recall
 }
 
-// buildRecallContainer 合并关键词与语义两路召回结果，按自己的预算裁剪。
-//
-// 与近期对话分开预算的原因只有一个：老消息在「按时间从尾部裁」里必然先被裁。
-// 这里反过来——**按相关度保留最靠前的**，被裁掉的永远是最不相关的那几条。
+// recallMessageCost 包含最终历史标注及消息角色开销。
+func recallMessageCost(m entity.ChatMessage, modelName string) int {
+	content := fmt.Sprintf("[历史片段 · %s] %s", m.CreatedAt.Format("2006-01-02 15:04"), m.Content)
+	return 4 + tokenutil.CountTokens(content, modelName)
+}
+
+// buildRecallContainer 先按两路排名选择，再按时间展示；关键词路排名仅表示近期匹配。
 func buildRecallContainer(kw, vec []entity.ChatMessage, budget int, modelName string) []entity.ChatMessage {
 	if budget <= 0 {
 		return nil
 	}
-	// 语义召回在前、关键词在后：语义分更可信，同一条被两路命中时靠前者胜出。
-	merged := dedupMessages(append(append([]entity.ChatMessage{}, vec...), kw...))
-	if len(merged) == 0 {
-		return nil
+	type candidate struct {
+		message entity.ChatMessage
+		score   float64
 	}
-
-	// 逐条累加，超预算即停（保留的是最相关的前缀）。
-	out := make([]entity.ChatMessage, 0, len(merged))
-	total := 0
-	for _, m := range merged {
-		cost := tokenutil.CountTokens(m.Content, modelName)
-		if total+cost > budget {
-			break
+	candidates := map[string]*candidate{}
+	for _, list := range [][]entity.ChatMessage{vec, kw} {
+		seen := map[string]bool{}
+		for rank, m := range list {
+			if seen[m.ID] {
+				continue
+			}
+			seen[m.ID] = true
+			c := candidates[m.ID]
+			if c == nil {
+				c = &candidate{message: m}
+				candidates[m.ID] = c
+			}
+			c.score += 1 / float64(60+rank+1)
 		}
-		total += cost
-		out = append(out, m)
 	}
-	return out
+	ranked := make([]*candidate, 0, len(candidates))
+	for _, c := range candidates {
+		ranked = append(ranked, c)
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		return ranked[i].message.ID < ranked[j].message.ID
+	})
+	out := make([]entity.ChatMessage, 0, len(ranked))
+	used := 0
+	for _, c := range ranked {
+		cost := recallMessageCost(c.message, modelName)
+		if used+cost > budget {
+			continue
+		}
+		used += cost
+		out = append(out, c.message)
+	}
+	return sortMessagesByTime(out)
 }
 
 // dedupMessages 按 ID 去重并按时间正序排列（同值时按 ID 裁决，保证全序）。
@@ -486,7 +545,7 @@ func (s *contextService) generateSummary(ctx context.Context, chatModel model.Ba
 	msg, err := chatModel.Generate(ctx, []*schema.Message{
 		schema.SystemMessage(prompt),
 		schema.UserMessage("请生成对话摘要："),
-	})
+	}, model.WithMaxTokens(800))
 	if err != nil {
 		return "", err
 	}
@@ -502,7 +561,7 @@ func (s *contextService) generateMemories(ctx context.Context, chatModel model.B
 	msg, err := chatModel.Generate(ctx, []*schema.Message{
 		schema.SystemMessage(prompt),
 		schema.UserMessage("以下是对话内容：\n\n" + dialogue),
-	})
+	}, model.WithMaxTokens(800))
 	if err != nil {
 		return nil, err
 	}

@@ -31,6 +31,11 @@ func buildTaskQuery(query string, task TaskSpec, results map[string]TaskResult) 
 	budget := synthesisInputLimit / max(1, len(task.DependsOn))
 	for _, dep := range task.DependsOn {
 		if result, ok := results[dep]; ok && strings.TrimSpace(result.Summary) != "" {
+			result.Artifacts = append([]artifactReference(nil), result.Artifacts...)
+			for i := range result.Artifacts {
+				result.Artifacts[i].Preview = ""
+				result.Artifacts[i].Read = ""
+			}
 			result.Summary = truncateTaskSummary(result.Summary, budget)
 			result.Evidence = append([]AgentEvidence(nil), result.Evidence...)
 			for i := range result.Evidence {

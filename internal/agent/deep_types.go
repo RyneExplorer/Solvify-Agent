@@ -54,13 +54,14 @@ type AgentEvidence struct {
 }
 
 type TaskResult struct {
-	TaskID    string          `json:"task_id"`
-	Agent     string          `json:"agent"`
-	Status    string          `json:"status"`
-	Summary   string          `json:"summary,omitempty"`
-	Evidence  []AgentEvidence `json:"evidence,omitempty"`
-	Error     string          `json:"error,omitempty"`
-	Interrupt *Event          `json:"interrupt,omitempty"`
+	Artifacts []artifactReference `json:"artifacts,omitempty"`
+	TaskID    string              `json:"task_id"`
+	Agent     string              `json:"agent"`
+	Status    string              `json:"status"`
+	Summary   string              `json:"summary,omitempty"`
+	Evidence  []AgentEvidence     `json:"evidence,omitempty"`
+	Error     string              `json:"error,omitempty"`
+	Interrupt *Event              `json:"interrupt,omitempty"`
 }
 
 // Validate 在执行前校验角色、任务标识、依赖引用和依赖环。
