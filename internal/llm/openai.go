@@ -13,6 +13,8 @@ import (
 	einoOpenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+
+	"solvify-agent/pkg/config"
 )
 
 // sharedHTTPClient 所有 LLM 客户端共享的 HTTP 连接池
@@ -46,7 +48,8 @@ func getSharedHTTPClient() *http.Client {
 
 // OpenAIClient 基于 eino-ext 实现 OpenAI 兼容 API 客户端
 type OpenAIClient struct {
-	chatModel        *einoOpenai.ChatModel
+	chatModel        model.ToolCallingChatModel
+	outputLimit      int
 	model            string
 	maxContextLength int
 }
@@ -77,7 +80,8 @@ func NewOpenAIClient(ctx context.Context, cfg OpenAIClientConfig) (*OpenAIClient
 		}
 	}
 
-	defaultMaxCompletionTokens := 4096
+	contextPolicy := config.ContextDefaults()
+	defaultMaxCompletionTokens := contextPolicy.OutputLimit
 	config := &einoOpenai.ChatModelConfig{
 		APIKey:              cfg.APIKey,
 		BaseURL:             cfg.BaseURL,
@@ -97,6 +101,9 @@ func NewOpenAIClient(ctx context.Context, cfg OpenAIClientConfig) (*OpenAIClient
 		config.Timeout = toDuration(*extra.Timeout)
 	}
 
+	if *config.MaxCompletionTokens <= 0 {
+		return nil, fmt.Errorf("%w: 最大输出必须为正", ErrContextConfig)
+	}
 	cm, err := einoOpenai.NewChatModel(ctx, config)
 	if err != nil {
 		return nil, err
@@ -104,11 +111,15 @@ func NewOpenAIClient(ctx context.Context, cfg OpenAIClientConfig) (*OpenAIClient
 
 	maxCtx := cfg.MaxContextLength
 	if maxCtx <= 0 {
-		maxCtx = 8192
+		maxCtx = modelContextRegistry[cfg.Model]
+		if maxCtx <= 0 {
+			maxCtx = parseContextFromName(cfg.Model)
+		}
 	}
 
 	return &OpenAIClient{
-		chatModel:        cm,
+		chatModel:        &contextModel{inner: cm, modelName: cfg.Model, declared: maxCtx, output: *config.MaxCompletionTokens, policy: contextPolicy},
+		outputLimit:      *config.MaxCompletionTokens,
 		model:            cfg.Model,
 		maxContextLength: maxCtx,
 	}, nil
@@ -122,6 +133,8 @@ func (c *OpenAIClient) ChatModel() model.ToolCallingChatModel {
 // ModelName 返回具体模型名（用于编码解析 / tiktoken / 指标分桶），
 // 对用户配置的自定义模型别名不做猜测。已知模型名（gpt-4o / qwen-* / deepseek-chat ...）可通过
 // tiktoken.EncodingForModel 拿到真 BPE；未知模型回退 cl100k_base。
+func (c *OpenAIClient) OutputLimit() int { return c.outputLimit }
+
 func (c *OpenAIClient) ModelName() string {
 	if c == nil {
 		return ""

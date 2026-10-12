@@ -33,6 +33,7 @@ const (
 	// ── 上下文装配 ──
 	KindKnowledgeSearch Kind = "knowledge_search"
 	KindHistoryLoad     Kind = "history_load"
+	KindContextBudget   Kind = "context_budget"
 
 	// ── 模型服务端（上游 HTTP 状态码 / 响应正文）──
 	KindModelUnavailable Kind = "model_unavailable"

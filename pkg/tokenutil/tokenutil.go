@@ -12,9 +12,9 @@ import (
 const defaultEncoding = "cl100k_base"
 
 var (
-	encMu       sync.RWMutex
-	encCache    = map[string]*tiktoken.Tiktoken{}
-	encErrs     = map[string]struct{}{} // 加载失败过的 name，避免反复打错误日志 / 网络请求
+	encMu    sync.RWMutex
+	encCache = map[string]*tiktoken.Tiktoken{}
+	encErrs  = map[string]struct{}{} // 加载失败过的 name，避免反复打错误日志 / 网络请求
 )
 
 // getEncoding 按名字取编码，失败就 fallback 到 defaultEncoding。
@@ -44,6 +44,10 @@ func getEncoding(name string) (*tiktoken.Tiktoken, error) {
 	tk, err := tiktoken.EncodingForModel(name)
 	if err != nil {
 		tk, err = tiktoken.GetEncoding(name)
+	}
+	if err != nil && name != defaultEncoding {
+		// 未注册的兼容模型仍使用默认 BPE；只有编码加载失败才退回字符估算。
+		tk, err = tiktoken.GetEncoding(defaultEncoding)
 	}
 	if err != nil {
 		encErrs[name] = struct{}{}

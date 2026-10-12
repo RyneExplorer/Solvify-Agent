@@ -6,10 +6,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/goccy/go-yaml"
 	"github.com/mitchellh/mapstructure"
-	"time"
 )
 
 const defaultConfigPath = "configs/config.yaml"
@@ -64,9 +64,11 @@ type CORSConfig struct {
 
 // AgentConfig 描述 Agent 行为开关
 type AgentConfig struct {
-	EnableDemo     bool    `mapstructure:"enable_demo"`
-	MaxIterations  int     `mapstructure:"max_iterations"`
-	ScoreThreshold float64 `mapstructure:"score_threshold"`
+	RuntimeContext RuntimeContextPolicy `mapstructure:"runtime_context"`
+	Context        ContextPolicy        `mapstructure:"context"`
+	EnableDemo     bool                 `mapstructure:"enable_demo"`
+	MaxIterations  int                  `mapstructure:"max_iterations"`
+	ScoreThreshold float64              `mapstructure:"score_threshold"`
 	// QuickAgentMaxIterations 指定快速模式（eino ChatModelAgent）最多执行几个
 	// 模型调用，默认 8，澄清和最终回答均计入轮数，恢复不重置计数。
 	QuickAgentMaxIterations   int  `mapstructure:"quick_agent_max_iterations"`
@@ -366,6 +368,8 @@ func Default() *Config {
 			Compress:   true,
 		},
 		Agent: AgentConfig{
+			Context:                   DefaultContextPolicy(),
+			RuntimeContext:            DefaultRuntimeContextPolicy(),
 			EnableDemo:                true,
 			MaxIterations:             4,
 			ScoreThreshold:            0.7,
@@ -463,6 +467,12 @@ func Default() *Config {
 
 // Validate 校验配置是否满足启动要求
 func (c *Config) Validate() error {
+	if err := c.Agent.RuntimeContext.Validate(); err != nil {
+		return err
+	}
+	if err := c.Agent.Context.Validate(); err != nil {
+		return err
+	}
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return errors.New("server.port 必须在 1 到 65535 之间")
 	}

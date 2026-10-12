@@ -32,6 +32,10 @@ type kindMessage struct {
 // ⚠️ 新增种类时只改这一张表。判定在 pkg/errors（哨兵优先、文本兜底），
 // 不要在 agent / controller 里另写用户可见文案。
 var errorMessages = map[apperrors.Kind]kindMessage{
+	apperrors.KindContextBudget: {ErrorMessage: ErrorMessage{
+		Title:  "上下文预算不足",
+		Detail: "必要内容超过模型输入额度，请缩短问题或选择更大窗口的模型",
+	}},
 	// ── 模型配置 ──
 	apperrors.KindModelConfig: {ErrorMessage: ErrorMessage{
 		Title:  "模型加载失败",

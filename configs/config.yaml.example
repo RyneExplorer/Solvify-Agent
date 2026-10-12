@@ -42,7 +42,29 @@ cors:
   max_age: 0
 
 agent:
+  # 上下文预算策略；省略时沿用代码默认，目标水位必须低于软水位。
+  context:
+    quick_soft_ratio: 0.60
+    quick_target_ratio: 0.50
+    deep_soft_ratio: 0.75
+    deep_target_ratio: 0.65
+    margin_ratio: 0.08
+    margin_floor: 256
+    output_limit: 4096 # 数据库模型配置可覆盖，最终检查使用本次实际输出上限。
   enable_demo: true
+  # 工具原文不可变保存；快速模式不调用摘要模型，深度每任务最多摘要两次。
+  runtime_context:
+    artifact_threshold: 1500
+    artifact_bytes: 2097152
+    run_bytes: 20971520
+    user_bytes: 104857600
+    ttl_hours: 48
+    read_runes: 4000
+    read_tokens: 1200
+    summary_input: 6000
+    summary_output: 800
+    summary_timeout_seconds: 15
+    summary_max_calls: 2
   max_iterations: 10
   quick_agent_max_iterations: 8 # 模型调用轮数，澄清恢复沿用剩余轮数
   score_threshold: 0.7
