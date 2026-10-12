@@ -55,13 +55,13 @@ func (r *toolTypeRepository) GetByKey(ctx context.Context, toolKey string) (*ent
 
 func (r *toolTypeRepository) List(ctx context.Context) ([]entity.ToolType, error) {
 	var toolTypes []entity.ToolType
-	err := dbFor(ctx, r.db).Order("name ASC").Find(&toolTypes).Error
+	err := dbFor(ctx, r.db).Order("name ASC, id").Find(&toolTypes).Error
 	return toolTypes, err
 }
 
 func (r *toolTypeRepository) ListEnabled(ctx context.Context) ([]entity.ToolType, error) {
 	var toolTypes []entity.ToolType
-	err := dbFor(ctx, r.db).Where("is_enabled = ?", true).Order("name ASC").Find(&toolTypes).Error
+	err := dbFor(ctx, r.db).Where("is_enabled = ?", true).Order("name ASC, id").Find(&toolTypes).Error
 	return toolTypes, err
 }
 

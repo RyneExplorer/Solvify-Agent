@@ -18,7 +18,7 @@ func closedCh() chan struct{} {
 
 // TestMCPClientPool_SweepSkipsBorrowedEntry 验证：借用中的连接不会被空闲回收
 //
-// 背景：关闭 stdio 连接会直接终止子进程，正在执行的 tools/call 会立刻失败。
+// 背景：关闭连接会让正在执行的 tools/call 立刻失败。
 // sweep 必须尊重借用计数，否则长耗时 MCP 调用会在半途被掐断。
 func TestMCPClientPool_SweepSkipsBorrowedEntry(t *testing.T) {
 	pool := NewMCPClientPool()
@@ -67,13 +67,14 @@ func TestMCPClientPool_AcquireAfterEvicted(t *testing.T) {
 
 // TestMCPClientPool_InitFailureNegativeCache 验证：初始化失败后不会反复重建条目
 //
-// 背景：服务端持续故障时，若每次请求都销毁旧条目再新建，会反复拉起子进程
+// 背景：服务端持续故障时，若每次请求都销毁旧条目再新建，会反复发起连接
 // 并形成惊群；失败后应在负缓存期内直接返回错误。
 func TestMCPClientPool_InitFailureNegativeCache(t *testing.T) {
 	pool := NewMCPClientPool()
+	// 用一个必然连不上的地址制造初始化失败（保留域后缀，不会真正解析到服务）
 	cfg := &tool.MCPProviderConfig{
-		Transport: "stdio",
-		Command:   "solvify-definitely-not-exist-command",
+		Transport: "http",
+		URL:       "http://127.0.0.1:1/mcp",
 		Timeout:   1,
 	}
 
@@ -121,7 +122,7 @@ func TestMCPClientPool_ClosedRejectsNew(t *testing.T) {
 	if err := pool.Close(); err != nil {
 		t.Fatalf("Close() 返回错误: %v", err)
 	}
-	cfg := &tool.MCPProviderConfig{Transport: "stdio", Command: "node"}
+	cfg := &tool.MCPProviderConfig{Transport: "http", URL: "http://127.0.0.1:1/mcp"}
 	if _, _, err := pool.GetOrCreate(context.Background(), cfg); err == nil {
 		t.Fatal("连接池关闭后应拒绝新建连接")
 	}
@@ -171,8 +172,8 @@ func TestMCPClientPool_AcquireSweepRace(t *testing.T) {
 func TestMCPClientPool_ConcurrentGetOrCreate(t *testing.T) {
 	pool := NewMCPClientPool()
 	cfg := &tool.MCPProviderConfig{
-		Transport: "stdio",
-		Command:   "solvify-definitely-not-exist-command",
+		Transport: "http",
+		URL:       "http://127.0.0.1:1/mcp",
 		Timeout:   1,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

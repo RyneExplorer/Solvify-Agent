@@ -19,6 +19,6 @@ const (
 	// DocumentStatusFailed 处理失败（chunk 可能只写入一部分）
 	DocumentStatusFailed = 4
 	// DocumentStatusDeleted 已软删。chunk 不会被物理清除，
-	// 因此所有检索路径都必须显式排除该状态的文档（见 rag 包的 retrievedChunkVisibilitySQL）。
+	// 因此所有检索路径都必须显式排除该状态的文档（见本包 RetrievedChunkVisibilitySQL）。
 	DocumentStatusDeleted = 5
 )

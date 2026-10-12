@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 
+	"solvify-agent/internal/agent"
 	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 )
@@ -44,7 +45,7 @@ func (h *quickModeHandler) Name() string { return chatModeQuick }
 
 func (h *quickModeHandler) Handle(ctx context.Context, s *chatService, userID, sessionID, userMsgID string,
 	req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	s.processMessageGraphQuick(ctx, userID, sessionID, userMsgID, req, eventCh)
+	s.processAgentMode(ctx, userID, sessionID, userMsgID, req, agent.ProfileQuick, eventCh)
 }
 
 // ─── 深度思考模式 ──────────────────────────────────────────
@@ -55,5 +56,5 @@ func (h *deepModeHandler) Name() string { return chatModeDeep }
 
 func (h *deepModeHandler) Handle(ctx context.Context, s *chatService, userID, sessionID, userMsgID string,
 	req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	s.processDeepMode(ctx, userID, sessionID, userMsgID, req, eventCh)
+	s.processAgentMode(ctx, userID, sessionID, userMsgID, req, agent.ProfileDeep, eventCh)
 }

@@ -46,7 +46,7 @@ type ApprovalResult struct {
 //  2. 恢复时按 isResumeTarget 分流：
 //     - 是本次恢复目标且有数据 → 看 ApprovalResult.Approved 决定放行 / 拒绝
 //     - 不是本次恢复目标（指向其它并发 interrupt）→ 重新 StatefulInterrupt 保活（官方 MUST）
-//     - 是恢复目标但无数据 → 直接放行（与官方语义一致：isResumeTarget&&!hasData 走 Run）
+//     - 是恢复目标但审批数据缺失或类型错误 → 拒绝执行，必须得到明确审批结果
 //
 // 工具本身（如 DeleteDocumentTool）不再需要写任何 Interrupt/Resume 代码。
 func buildDangerousToolMiddleware(dangerousNames map[string]bool) compose.InvokableToolMiddleware {
@@ -75,7 +75,7 @@ func buildDangerousToolMiddleware(dangerousNames map[string]bool) compose.Invoka
 
 			// 恢复执行：拿结构化审批结果（Host 在 ResumeWithParams 的 Targets 中放入 *ApprovalResult）
 			isResumeTarget, hasData, approval := compose.GetResumeContext[*ApprovalResult](ctx)
-			if isResumeTarget && hasData {
+			if isResumeTarget && hasData && approval != nil {
 				if approval.Approved {
 					logger.Infof("[ToolMiddleware] 用户审批通过，放行执行危险工具 %s", input.Name)
 					return next(ctx, input) // 放行真实业务逻辑
@@ -107,9 +107,7 @@ func buildDangerousToolMiddleware(dangerousNames map[string]bool) compose.Invoka
 				})
 			}
 
-			// isResumeTarget=true 但无数据：对齐官方语义，直接放行执行
-			logger.Warnf("[ToolMiddleware] 危险工具 %s 为恢复目标但无审批数据，按官方语义放行", input.Name)
-			return next(ctx, input)
+			return nil, fmt.Errorf("危险工具 %s 缺少有效审批结果，未执行", input.Name)
 		}
 	}
 }
@@ -166,7 +164,7 @@ func buildClarifyMiddleware(clarifyNames map[string]bool) compose.InvokableToolM
 			}
 
 			if !hasData || answer == "" {
-				return nil, fmt.Errorf("tool resumed without a user answer")
+				return nil, fmt.Errorf("恢复澄清任务缺少用户回答")
 			}
 
 			question := ""

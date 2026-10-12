@@ -37,25 +37,6 @@ services:
       retries: 10
       start_period: 5s
 
-  # OTel Collector：协议垫片。
-  # 应用侧只有 OTLP gRPC 出口，而 Langfuse 的 OTLP 入口只支持 HTTP，
-  # 由它收 gRPC(4317) 再转成 OTLP/HTTP 转发出去。配置见 ../configs/otel-collector.yaml。
-  # 凭据用宿主环境变量传入（也会自动读同目录的 .env）：
-  #   LANGFUSE_HOST  Langfuse 地址。自建且跑在宿主上用 host.docker.internal；
-  #                  若 Langfuse 也在本 compose 里，用 http://langfuse:3000
-  #   LANGFUSE_AUTH  base64("<public_key>:<secret_key>")
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.160.0
-    restart: unless-stopped
-    environment:
-      LANGFUSE_HOST: ${LANGFUSE_HOST:-http://host.docker.internal:3000}
-      LANGFUSE_AUTH: ${LANGFUSE_AUTH:-unset}
-    ports:
-      - "4317:4317"
-    volumes:
-      - ../configs/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
 volumes:
   postgres_dev_data:

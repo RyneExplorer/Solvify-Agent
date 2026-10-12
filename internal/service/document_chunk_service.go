@@ -3,32 +3,30 @@ package service
 import (
 	"context"
 	"regexp"
-	"sort"
 	"strings"
-	"unicode"
 
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 
 	"solvify-agent/internal/model/entity"
 	apperrors "solvify-agent/pkg/errors"
+	"solvify-agent/pkg/textseg"
 )
 
 const (
 	documentChunkTargetSize  = 800
 	documentChunkOverlapSize = 100
-	documentKeywordLimit     = 20
+	// chunkKeywordHardLimit 是「保险丝」，不是筛选规则。
+	//
+	// 存储层**不再挑词**：截断是不可逆的（词没落库，以后怎么调参都补不回来），
+	// 而打分是可逆的（存了但权重给低，以后调高即可）⇒「哪些词重要」交给检索侧打分决定，
+	// 存储层能不丢就不丢。实测 800 rune 窗口下每块词项中位 159、最大 183，
+	// 这个上限正常永远碰不到，只为防止异常输入把一行撑爆。
+	chunkKeywordHardLimit = 512
 )
-
-var documentStopWords = map[string]struct{}{
-	"我们": {}, "你们": {}, "他们": {}, "这个": {}, "那个": {}, "可以": {}, "需要": {},
-	"进行": {}, "如果": {}, "时候": {}, "一个": {}, "相关": {}, "内容": {}, "文档": {},
-	"用户": {}, "系统": {}, "支持": {}, "通过": {}, "使用": {}, "创建": {},
-}
 
 var (
 	htmlTagPattern          = regexp.MustCompile(`<[^>]+>`)
-	englishKeywordPattern   = regexp.MustCompile(`[A-Za-z0-9_./:-]{2,64}`)
 	separatorNormalizeRegex = regexp.MustCompile(`[\s,，.。;；:：!！?？()（）\[\]【】{}<>《》"'“”‘’、/\\|]+`)
 )
 
@@ -117,81 +115,27 @@ func (s *documentChunkService) BuildChunks(ctx context.Context, doc entity.Docum
 	return chunks, nil
 }
 
-// extractKeywords 按轻量规则提取关键词
+// extractKeywords 提取分块关键词。
+//
+// 口径唯一：与检索侧（`rag.ExtractKeywords` → `HybridRetriever.keywordSearch`）调用
+// **同一个** `textseg.Extract`。这是本函数只做一层转发的唯一理由 ——
+// 建库侧与检索侧各写一套切词规则，「什么算一个词」的定义就会漂移。这一点真实踩过：
+// 建库侧曾是穷举 2~12 字 ngram 子串、检索侧是真分词，两侧求交集几乎撞不上 ——
+// 正文里明明挂着「布隆过滤器」，用户搜「布隆」却永远搜不到。
+//
+// 换掉旧实现顺带修掉两个问题：
+//  1. 旧的 englishKeywordPattern（`[A-Za-z0-9_./:-]{2,64}`）**不要求含字母或数字**，
+//     markdown 分隔线 `---`、命令行参数 `-p` 都会被当成「英文关键词」入库；
+//     现在由 textseg.HasWordChar 兜住。
+//  2. 旧实现把候选按词频排序后砍到 20 个，而排序用的计数随后即被丢弃 ——
+//     结果是「能不丢的词被丢了」，见 pkg/textseg 的包注释。
+//
+// 入参 content 恒已过 NormalizeContent（6 个调用点全部如此）：html 已剥离、
+// 分隔符已规整，所以这里不再重复处理。
 func (s *documentChunkService) extractKeywords(content string) entity.TextArray {
-	cleaned := separatorNormalizeRegex.ReplaceAllString(htmlTagPattern.ReplaceAllString(content, " "), " ")
-	candidates := make(map[string]int)
-
-	// 1. 英文和数字标识保留为完整关键词，便于技术名词和文件名参与混合检索
-	for _, match := range englishKeywordPattern.FindAllString(cleaned, -1) {
-		s.addKeywordCandidate(candidates, strings.ToLower(match))
+	terms := textseg.Extract(content)
+	if len(terms) > chunkKeywordHardLimit {
+		terms = terms[:chunkKeywordHardLimit]
 	}
-
-	// 2. 中文暂用 2 到 12 字 ngram 轻量提取，后续可替换为 jieba 或 BM25 相关实现
-	for _, segment := range strings.Fields(cleaned) {
-		s.extractChineseCandidates(candidates, segment)
-	}
-
-	items := make([]string, 0, len(candidates))
-	for keyword := range candidates {
-		items = append(items, keyword)
-	}
-	s.sortKeywords(items, candidates)
-	if len(items) > documentKeywordLimit {
-		items = items[:documentKeywordLimit]
-	}
-	return entity.TextArray(items)
-}
-
-// extractChineseCandidates 提取中文候选关键词
-func (s *documentChunkService) extractChineseCandidates(candidates map[string]int, segment string) {
-	runes := []rune(segment)
-	chinese := make([]rune, 0, len(runes))
-	for _, r := range runes {
-		if unicode.Is(unicode.Han, r) {
-			chinese = append(chinese, r)
-			continue
-		}
-		s.collectChineseNgrams(candidates, chinese)
-		chinese = chinese[:0]
-	}
-	s.collectChineseNgrams(candidates, chinese)
-}
-
-// collectChineseNgrams 收集中文 ngram 关键词
-func (s *documentChunkService) collectChineseNgrams(candidates map[string]int, runes []rune) {
-	for start := 0; start < len(runes); start++ {
-		for size := 2; size <= 12 && start+size <= len(runes); size++ {
-			s.addKeywordCandidate(candidates, string(runes[start:start+size]))
-		}
-	}
-}
-
-// addKeywordCandidate 添加关键词候选
-func (s *documentChunkService) addKeywordCandidate(candidates map[string]int, keyword string) {
-	keyword = strings.TrimSpace(keyword)
-	if keyword == "" {
-		return
-	}
-	if _, ok := documentStopWords[keyword]; ok {
-		return
-	}
-	candidates[keyword]++
-}
-
-// sortKeywords 按出现次数和长度排序关键词
-func (s *documentChunkService) sortKeywords(items []string, scores map[string]int) {
-	sort.Slice(items, func(i, j int) bool {
-		leftScore := scores[items[i]]
-		rightScore := scores[items[j]]
-		if leftScore != rightScore {
-			return leftScore > rightScore
-		}
-		leftLen := len([]rune(items[i]))
-		rightLen := len([]rune(items[j]))
-		if leftLen != rightLen {
-			return leftLen > rightLen
-		}
-		return items[i] < items[j]
-	})
+	return entity.TextArray(terms)
 }

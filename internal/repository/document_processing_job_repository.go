@@ -63,7 +63,7 @@ func (r *documentProcessingJobRepository) ListByDocument(ctx context.Context, us
 	var items []entity.DocumentProcessingJob
 	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND document_id = ?", userID, documentID).
-		Order("created_at DESC").
+		Order("created_at DESC, id").
 		Find(&items).Error
 	return items, err
 }

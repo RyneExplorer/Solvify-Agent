@@ -40,7 +40,7 @@ func (r *documentRepository) ListByKnowledgeBase(ctx context.Context, userID, kb
 	var items []entity.Document
 	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND knowledge_base_id = ? AND status <> ?", userID, kbID, deletedStatus).
-		Order("created_at DESC").
+		Order("created_at DESC, id").
 		Find(&items).Error
 	return items, err
 }
@@ -58,7 +58,7 @@ func (r *documentRepository) ListWithChunkCount(ctx context.Context, userID, kbI
 		LEFT JOIN document_chunks dc ON dc.document_id = d.id
 		WHERE d.user_id = ? AND d.knowledge_base_id = ? AND d.status <> 5
 		GROUP BY d.id
-		ORDER BY d.created_at DESC
+		ORDER BY d.created_at DESC, d.id
 	`, userID, kbID).Scan(&rows).Error
 
 	if err != nil {

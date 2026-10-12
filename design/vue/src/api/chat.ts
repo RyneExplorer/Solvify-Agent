@@ -8,8 +8,6 @@ import type {
   ListMessagesResponse,
   FeedbackRequest,
   FeedbackInfo,
-  TraceSummary,
-  ChatTraceDetail,
 } from '@/types/chat'
 
 // ── Sessions ──
@@ -60,17 +58,4 @@ export function listFeedbacks(params?: { page?: number; pageSize?: number; ratin
   if (params?.pageSize !== undefined) query.set('pageSize', String(params.pageSize))
   if (params?.rating !== undefined) query.set('rating', String(params.rating))
   return request<{ feedbacks: FeedbackInfo[]; total: number }>(`/chat/feedbacks?${query.toString()}`)
-}
-
-// ── Traces ──
-
-export function getTrace(traceId: string) {
-  return request<ChatTraceDetail>(`/chat/traces/${traceId}`)
-}
-
-export function listSessionTraces(sessionId: string, params?: { page?: number; pageSize?: number }) {
-  const query = new URLSearchParams()
-  if (params?.page !== undefined) query.set('page', String(params.page))
-  if (params?.pageSize !== undefined) query.set('pageSize', String(params.pageSize))
-  return request<{ traces: TraceSummary[]; total: number }>(`/chat/sessions/${sessionId}/traces?${query.toString()}`)
 }

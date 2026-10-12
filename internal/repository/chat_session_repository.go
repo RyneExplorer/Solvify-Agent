@@ -42,7 +42,7 @@ func (r *chatSessionRepository) ListByUserID(ctx context.Context, userID string)
 	var sessions []entity.ChatSession
 	err := dbFor(ctx, r.db).
 		Where("user_id = ?", userID).
-		Order("updated_at DESC").
+		Order("updated_at DESC, id").
 		Find(&sessions).Error
 	return sessions, err
 }
@@ -81,7 +81,7 @@ func (r *chatSessionRepository) AdminList(ctx context.Context, offset, limit int
 
 	var rows []AdminSessionRow
 	if err := base.Group("s.id, u.username").
-		Order("s.updated_at DESC").
+		Order("s.updated_at DESC, s.id").
 		Offset(offset).
 		Limit(limit).
 		Find(&rows).Error; err != nil {

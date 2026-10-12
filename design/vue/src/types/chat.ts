@@ -8,6 +8,7 @@ export interface PendingCheckpointInfo {
   is_clarify?: boolean
   options?: string[]
   set_at: string
+  execution_plan?: ExecutionPlan
 }
 
 export interface ChatSession {
@@ -53,6 +54,27 @@ export interface ReasoningStep {
   status?: string
 }
 
+export interface TaskProgress {
+  id: string
+  agent: string
+  title: string
+  depends_on?: string[]
+  status: 'pending' | 'running' | 'success' | 'error' | 'canceled' | 'waiting'
+  summary?: string
+  added_version?: number
+}
+
+export interface ExecutionPlan {
+  id: string
+  version?: number
+  phase?: string
+  replan_reason?: string
+  round?: number
+  strategy: string
+  status: string
+  tasks: TaskProgress[]
+}
+
 export interface ChatMessage {
   id: string
   session_id: string
@@ -63,6 +85,7 @@ export interface ChatMessage {
   knowledge_base_ids?: string[]
   sources?: SourceInfo[]
   reasoning_steps?: ReasoningStep[]
+  execution_plan?: ExecutionPlan
   created_at: string
 }
 
@@ -74,7 +97,8 @@ export interface SendMessageRequest {
   search_mode: string
   model_id: string
   model_type: string
-  /** 用户启用的 MCP 工具配置 ID 列表（可多选，空表示使用全部已启用的） */
+  /** 用户选中的 MCP 工具配置 ID 列表；空数组=本次不使用任何 MCP 工具。
+   *  字段缺省（undefined）才表示「未做选择」，后端沿用历史行为=全部已启用。 */
   mcp_user_config_ids?: string[]
 }
 
@@ -106,6 +130,19 @@ export interface StreamEvent {
   checkpoint_id?: string
   interrupt_id?: string
   interrupt_info?: Record<string, unknown>
+  plan_id?: string
+  plan_version?: number
+  phase?: string
+  replan_reason?: string
+  round?: number
+  task_id?: string
+  parent_task_id?: string
+  agent_name?: string
+  task_status?: string
+  task_index?: number
+  task_total?: number
+  plan?: ExecutionPlan
+  task?: TaskProgress
 }
 
 // ── 审批请求状态（前端本地） ──
@@ -153,97 +190,6 @@ export interface FeedbackInfo {
   comment?: string
   is_quick_reply: boolean
   created_at: string
-}
-
-// ── Traces & Spans (Observability) ──
-
-export type SpanStatus = 'ok' | 'error' | 'canceled' | 'unknown'
-export type Component =
-  | 'http'
-  | 'service_chat'
-  | 'service_context'
-  | 'service_rag'
-  | 'service_agent'
-  | 'llm'
-  | 'rag_retriever'
-  | 'rag_reranker'
-  | 'agent_engine'
-  | 'tool'
-  | 'db'
-  | 'other'
-
-export interface SpanEvent {
-  name: string
-  time: string
-  attrs?: Record<string, unknown>
-}
-
-export interface ChatSpan {
-  trace_id: string
-  span_id: string
-  parent_id?: string
-  name: string
-  component: Component | string
-  start_at: string
-  end_at?: string
-  duration_ms?: number
-  status: SpanStatus | string
-  error?: string
-  attrs?: Record<string, unknown>
-  events?: SpanEvent[]
-  children?: ChatSpan[]
-}
-
-export interface TraceSummary {
-  id: string
-  request_id?: string
-  user_id?: string
-  session_id?: string
-  sample_rate: number
-  sampled: boolean
-  duration_ms: number
-  status: SpanStatus | string
-  error?: string
-  attrs?: Record<string, unknown>
-  created_at: string
-  search_mode?: 'quick' | 'deep' | 'unknown' | string
-}
-
-export interface ChatTraceDetail extends TraceSummary {
-  span_tree?: ChatSpan
-}
-
-// ── Metrics Snapshot ──
-
-export interface MetricCounterSample {
-  labels?: Record<string, string>
-  value: number
-}
-export interface MetricGaugeSample {
-  labels?: Record<string, string>
-  value: number
-}
-export interface HistogramBucket {
-  le: number
-  count: number
-}
-export interface MetricHistogramSample {
-  labels?: Record<string, string>
-  count: number
-  sum: number
-  buckets: HistogramBucket[]
-}
-
-export interface MetricsSnapshot {
-  ts: string
-  counters: Array<{ name: string; help?: string; samples: MetricCounterSample[] }>
-  gauges: Array<{ name: string; help?: string; samples: MetricGaugeSample[] }>
-  histograms: Array<{ name: string; help?: string; samples: MetricHistogramSample[] }>
-  sampling_rate: number
-  label_cardinality_limit: number
-  buffer_dropped_total: number
-  pii_masked_total: number
-  label_cardinality_dropped_total: number
 }
 
 // ── Admin Session ──

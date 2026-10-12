@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	einoCompose "github.com/cloudwego/eino/compose"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 
@@ -19,10 +18,9 @@ import (
 	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/cache"
-	"solvify-agent/pkg/config"
 	apperrors "solvify-agent/pkg/errors"
 	"solvify-agent/pkg/logger"
-	"solvify-agent/pkg/tokenutil"
+	"solvify-agent/pkg/traceid"
 )
 
 const (
@@ -34,64 +32,41 @@ const (
 type chatService struct {
 	sessionRepo         repository.ChatSessionRepo
 	messageRepo         repository.ChatMessageRepo
-	retriever           rag.Retriever
-	einoRetriever       *rag.EinoRetrieverAdapter
 	modelRepo           repository.ModelRepo
 	userModelConfigRepo repository.UserModelConfigRepo
 	userRepo            repository.UserRepository
 	userCache           *cache.RedisCache
-	agentEngine         *agent.Engine
+	agentEngine         agent.AgentInterface
 	contextSvc          ContextServiceInterface
 	prefSvc             UserPreferenceService
-	obs                 observability.Recorder
-	obsRepo             repository.ObservabilityRepo
+	tracer              *observability.Tracer
+	feedbackRepo        repository.FeedbackRepo
 	txMgr               repository.TxManager
-	embedClient         *llm.EmbeddingClient
-
-	// quickGraph 快速模式检索链路：启动期 build + Compile 一次，请求期只把请求级变量
-	// （ChatModel / 改写结果）装进 quickGraphInput 再 Invoke，不再经 context 注入。
-	// 图结构静态，因此「编译失败」被前移到启动期，请求期不存在该路径。
-	quickGraph einoCompose.Runnable[*quickGraphInput, *quickGraphOutput]
+	// embedFn 复用 app.initEmbedding 的向量化函数（两级缓存 + singleflight），
+	// 不是裸客户端：同一段文本重复向量化会直接打 API。
+	embedFn rag.EmbeddingFunc
 }
 
 // NewChatService 创建聊天业务服务。
-//
-// 依赖全部显式声明：旧版本把 obs/obsRepo 塞在 extra ...interface{} 里再靠类型 switch
-// 分派，漏传或传错类型都不会报错，只会在运行时静默丢链路（s.obs == nil）。
 func NewChatService(
 	sessionRepo repository.ChatSessionRepo,
 	messageRepo repository.ChatMessageRepo,
 	txMgr repository.TxManager,
-	retriever rag.Retriever,
 	modelRepo repository.ModelRepo,
 	userModelConfigRepo repository.UserModelConfigRepo,
 	userRepo repository.UserRepository,
 	userCache *cache.RedisCache,
-	agentEngine *agent.Engine,
+	agentEngine agent.AgentInterface,
 	contextSvc ContextServiceInterface,
 	prefSvc UserPreferenceService,
-	obs observability.Recorder,
-	obsRepo repository.ObservabilityRepo,
-) (ChatServiceInterface, error) {
-	defaultTopK := 10
-	if cfg := config.Get(); cfg != nil && cfg.RAG.TopK > 0 {
-		defaultTopK = cfg.RAG.TopK
-	}
-	einoRetriever := rag.NewEinoRetrieverAdapter(retriever, defaultTopK)
-
-	// 快速模式的 Graph 在这里就编译好：装配错误只可能变成启动错误。
-	quickGraph, err := compileQuickGraph(einoRetriever, obs)
-	if err != nil {
-		return nil, fmt.Errorf("编译快速检索链路失败: %w", err)
-	}
-
+	tracer *observability.Tracer,
+	feedbackRepo repository.FeedbackRepo,
+	embedFn rag.EmbeddingFunc,
+) ChatServiceInterface {
 	return &chatService{
 		sessionRepo:         sessionRepo,
 		messageRepo:         messageRepo,
 		txMgr:               txMgr,
-		retriever:           retriever,
-		einoRetriever:       einoRetriever,
-		quickGraph:          quickGraph,
 		modelRepo:           modelRepo,
 		userModelConfigRepo: userModelConfigRepo,
 		userRepo:            userRepo,
@@ -99,9 +74,10 @@ func NewChatService(
 		agentEngine:         agentEngine,
 		contextSvc:          contextSvc,
 		prefSvc:             prefSvc,
-		obs:                 obs,
-		obsRepo:             obsRepo,
-	}, nil
+		tracer:              tracer,
+		feedbackRepo:        feedbackRepo,
+		embedFn:             embedFn,
+	}
 }
 
 // SendMessage 发送消息并获取流式响应
@@ -123,48 +99,31 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 		searchMode = "quick"
 	}
 
-	var traceID string
-	if s.obs != nil {
-		ctx = s.obs.WithTraceRoot(ctx, observability.TraceRootAttrs{
-			UserID:     userID,
-			SessionID:  sessionID,
-			MessageID:  userMsgID,
-			RequestID:  requestIDFromCtx(ctx),
-			SearchMode: searchMode,
-			ModelID:    req.ModelID,
-		})
-		traceID = observability.TraceIDFromContext(ctx)
-	}
-
-	// 如果启用了可观测性 DB：先创建一个 agent_tasks 行，
-	//   task_id = trace_id，trace_id/session_id/user_id/search_mode/model_id 全初始化
-	//   这样即使中间任何环节崩了，前端仍能在详情页看到 task 基本信息 + 已写入的 agent_task_steps
-	if s.obsRepo != nil && traceID != "" {
-		_ = s.obsRepo.CreateAgentTask(ctx, &entity.AgentTask{
-			ID:         traceID,
-			TraceID:    traceID,
-			SessionID:  sessionID,
-			UserID:     userID,
-			ModelID:    req.ModelID,
-			SearchMode: searchMode,
-			StartedAt:  time.Now(),
-			Status:     "running",
-		})
-	}
+	// 本次请求的关联 id：先落进 ctx，Tracer.Start 会拿它当平台侧的 traceID，
+	// 于是「SSE / 消息 metadata 里的 id」与「平台上的 traceID」一定是同一个值。
+	//
+	// ⚠️ 这一步与「有没有接三方」无关：它是我们自己的关联标识，前端要靠它把助手消息
+	// 与平台上的链路对上，所以本地不配凭据时同样要生成（Tracer 为 nil 时 Start 原样返回 ctx）。
+	ctx, _ = traceid.Ensure(ctx)
+	ctx = s.tracer.Start(ctx, observability.TraceRootAttrs{
+		UserID:     userID,
+		SessionID:  sessionID,
+		MessageID:  userMsgID,
+		RequestID:  requestIDFromCtx(ctx),
+		SearchMode: searchMode,
+		ModelID:    req.ModelID,
+		// 用户提问原文 → 三方平台 trace 级 input。脱敏由官方 MaskFunc 负责，
+		// 这里不做本地截断（见 TraceRootAttrs.Input 注释）。
+		Input: req.Content,
+	})
 
 	eventCh := make(chan dto.StreamEvent, 100)
 	go func() {
 		defer close(eventCh)
-		status := "ok"
-		abortReason := ""
-		errorSummary := ""
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					logger.Errorf("SendMessage goroutine panic 已恢复: sessionID=%s, err=%v", sessionID, r)
-					status = "error"
-					errorSummary = fmt.Sprintf("panic: %v", r)
-					abortReason = "runtime_panic"
 				}
 			}()
 
@@ -187,14 +146,7 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string,
 			}
 
 			getModeHandler(searchMode).Handle(ctx, s, userID, sessionID, userMsgID, req, eventCh)
-			if s.obs != nil {
-				s.obs.FlushTrace(ctx, userID, sessionID, userMsgID)
-			}
 		}()
-		// 结束 agent_tasks 行（无论成功/失败）
-		if s.obsRepo != nil && traceID != "" {
-			_ = s.obsRepo.MarkEnded(context.Background(), traceID, status, abortReason, errorSummary, 0, 0, 0.0, nil)
-		}
 	}()
 
 	return eventCh, nil
@@ -344,10 +296,7 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 	maxCtx := llm.GetEffectiveMaxContextLength(modelID, client.MaxContextLength())
 	toolsTokens := 0
 	if len(toolsTokensReserve) > 0 {
-		toolsTokens = toolsTokensReserve[0]
-		if toolsTokens < 0 {
-			toolsTokens = 0
-		}
+		toolsTokens = max(toolsTokensReserve[0], 0)
 	}
 	historyBudget, retrievalBudget, memoryBudget := calculateContextBudgets(maxCtx, toolsTokens)
 
@@ -389,19 +338,21 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 		prefCh <- r
 	}()
 
-	// goroutine C: BuildContext（内部自己已经是 4 路并行：summary/memories/recent/relevant）
+	// goroutine D: 当前问题的向量（语义召回的查询侧）。
+	// 单独一个 goroutine 是为了跟用户/偏好加载重叠 —— 这次调用是一次远程 API 往返，
+	// 串在 BuildContext 前面就等于把首字延迟直接加上。
+	queryEmbCh := make(chan []float64, 1)
+	go func() {
+		queryEmbCh <- s.queryEmbedding(ctx, currentQuery)
+	}()
+
+	// goroutine C: BuildContext（内部自己已经是 5 路并行：summary/memories/recent/关键词召回/语义召回）
 	go func() {
 		var r ctxLoadResult
 		if s.contextSvc != nil {
-			enhancedCtx, bErr := s.contextSvc.BuildContext(ctx, userID, sessionID, currentQuery, BuildContextConfig{
-				MaxTokens:         historyBudget,
-				MaxMemories:       10,
-				MaxRecentMessages: 20,
-				RetrievalBudget:   retrievalBudget,
-				MemoryBudget:      memoryBudget,
-				ModelName:         modelName,
-				ToolsTokens:       toolsTokens,
-			}, client.ChatModel())
+			enhancedCtx, bErr := s.contextSvc.BuildContext(ctx, userID, sessionID, currentQuery,
+				buildContextParams(historyBudget, retrievalBudget, memoryBudget, modelName, toolsTokens, <-queryEmbCh),
+				client.ChatModel())
 			if bErr != nil {
 				logger.Warnf("构建增强上下文失败，降级为传统方式: %v", bErr)
 			}
@@ -453,63 +404,6 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 		enhancedCtx.RetrievalBudget, toolsTokens, enhancedCtx.Summary != nil, maxCtx, enhancedCtx.UserCtx.Username,
 		enhancedCtx.Preference != nil)
 
-	// P1-⑨：分块 token 指标（Prometheus /metrics 直接聚合可看"到底是哪一块把窗口撑爆了"）
-	if s.obs != nil {
-		obs := s.obs
-		labels := map[string]string{
-			"model_id":   modelID,
-			"model_name": modelName,
-		}
-		// System prompt 骨架 + 摘要 + 记忆 + 用户上下文：快速/深度两模式都走 PromptBuilder.BuildSystem()
-		systemTokens := tokenutil.CountTokens(
-			NewPromptBuilder(PromptModeQuick, quickModeAgentSystemPrompt, enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx).
-				WithProfile(enhancedCtx.Profile).WithPreference(enhancedCtx.Preference).
-				BuildSystem(),
-			modelName,
-		)
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "system"}), float64(systemTokens))
-
-		// 摘要块单独打一个，方便看"摘要越长，爆窗口风险越高"趋势
-		summaryTokens := 0
-		if enhancedCtx.Summary != nil {
-			summaryTokens = tokenutil.CountTokens(enhancedCtx.Summary.Summary, modelName)
-		}
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "summary"}), float64(summaryTokens))
-
-		// 记忆块
-		memoryText := strings.Builder{}
-		for _, m := range enhancedCtx.Memories {
-			memoryText.WriteString(m.Content)
-			memoryText.WriteByte('\n')
-		}
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "memory"}), float64(tokenutil.CountTokens(memoryText.String(), modelName)))
-
-		// 用户画像+偏好（已经在 system 里，但单独打一个方便看 profile 模板是否膨胀）
-		profileText := strings.Builder{}
-		if enhancedCtx.Profile != nil {
-			profileText.WriteString(enhancedCtx.Profile.Department)
-			profileText.WriteByte(' ')
-			profileText.WriteString(enhancedCtx.Profile.Position)
-			profileText.WriteByte(' ')
-			profileText.WriteString(enhancedCtx.Profile.Expertise)
-		}
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "profile"}), float64(tokenutil.CountTokens(profileText.String(), modelName)))
-
-		// 历史块
-		historyText := strings.Builder{}
-		for _, m := range enhancedCtx.History {
-			historyText.WriteString(m.Content)
-			historyText.WriteByte('\n')
-		}
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "history"}), float64(tokenutil.CountTokens(historyText.String(), modelName)))
-
-		// 检索块预算（真实占用要等 buildDocsContextBlock 后才知道，这里先记录"给了多少预算"）
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "retrieval_budget"}), float64(enhancedCtx.RetrievalBudget))
-
-		// 工具定义块（深度模式才会有值）
-		obs.Observe(ctx, "ctx_prompt_tokens_by_block", mergeStrMap(labels, map[string]string{"block": "tools"}), float64(toolsTokens))
-	}
-
 	logger.Infof("[Timing] initContext 总耗时: cost=%dms", time.Since(t0).Milliseconds())
 	return client, enhancedCtx, nil
 }
@@ -548,15 +442,6 @@ func (s *chatService) resolveClient(ctx context.Context, userID, modelID, modelT
 		return nil, fmt.Errorf("不支持的模型类型: %s", modelType)
 	}
 
-	// 登记 modelID → 供应商：
-	// cfg.Provider 此时是「API 协议格式」（openai/anthropic），不是厂商名 ——
-	// 混用的后果是平台上所有模型都归到 openai，故先用 llm.ProviderLabel
-	// 从 base_url 还原真实服务方。
-	// eino 回调的 CallbackInput.Config 不带 provider，
-	// 而 gen_ai.provider.name 是三方追踪平台的必需属性，只能在这里（唯一解析模型配置的地方）登记一次，
-	// 之后由 observability 的 eino 回调按 model_id 反查。
-	observability.RegisterGenAIProvider(cfg.ModelID, llm.ProviderLabel(cfg.ModelID, cfg.Provider, cfg.BaseURL))
-
 	return llm.NewClientFromModelConfig(ctx, cfg)
 }
 
@@ -586,6 +471,9 @@ func (s *chatService) saveUserMessage(ctx context.Context, sessionID string, req
 	if err := s.messageRepo.Create(ctx, &userMsg); err != nil {
 		return "", err
 	}
+	// 提问也要有向量：只有答案有向量时，多轮指代（「你刚说的那个再展开下」）在
+	// 语义召回里永远命中不了 —— 召回的是答案，匹配的是新问题，两边对不上。
+	s.bgComputeEmbedding(ctx, userMsg.ID, userMsg.Content)
 	return userMsg.ID, nil
 }
 
@@ -609,14 +497,18 @@ func (s *chatService) saveAssistantMessage(ctx context.Context, sessionID, msgID
 }
 
 // bgComputeEmbedding 后台为消息计算向量表示，失败不阻塞主流程。
+//
+// ⚠️ 写失败是 Error 而不是 Warn：向量写不进去 ⇒ 这条消息在语义召回里**永远查不到**，
+// 而聊天本身照常工作，没有任何用户可见症状。dim 一并打出来，维度不匹配一眼可见
+// （系统性的维度错配由启动期 EnsureEmbeddingColumnDimension 兜住）。
 func (s *chatService) bgComputeEmbedding(ctx context.Context, messageID, content string) {
-	if s.embedClient == nil || strings.TrimSpace(content) == "" {
+	if s.embedFn == nil || strings.TrimSpace(content) == "" {
 		return
 	}
 	go func() {
 		embedCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		vec, err := s.embedClient.Embed(embedCtx, content)
+		vec, err := s.embedFn(embedCtx, content)
 		if err != nil {
 			logger.Warnf("消息向量计算失败: messageID=%s, err=%v", messageID, err)
 			return
@@ -626,9 +518,49 @@ func (s *chatService) bgComputeEmbedding(ctx context.Context, messageID, content
 			f32[i] = float32(v)
 		}
 		if err := s.messageRepo.UpdateEmbedding(embedCtx, messageID, f32); err != nil {
-			logger.Warnf("消息向量更新失败: messageID=%s, err=%v", messageID, err)
+			logger.Errorf("消息向量写入失败（该消息将无法被语义召回）: messageID=%s, dim=%d, err=%v",
+				messageID, len(f32), err)
 		}
 	}()
+}
+
+// buildContextParams 是 initContext 传给 BuildContext 的那份配置的唯一组装点。
+//
+// 抽出来的唯一原因是可测：initContext 整体要真 llm 客户端 + 真模型配置，
+// 而「查询向量有没有真的接进 BuildContextConfig」这一步是纯组装 ——
+// 它一旦漏掉，语义召回整个退化成死通道，而单测全绿（BuildContext 的用例自己传
+// QueryEmbedding，压根不经过这段接线）。
+func buildContextParams(historyBudget, retrievalBudget, memoryBudget int, modelName string, toolsTokens int, queryEmbedding []float64) BuildContextConfig {
+	return BuildContextConfig{
+		MaxTokens:         historyBudget,
+		MaxMemories:       10,
+		MaxRecentMessages: 20,
+		RetrievalBudget:   retrievalBudget,
+		MemoryBudget:      memoryBudget,
+		ModelName:         modelName,
+		ToolsTokens:       toolsTokens,
+		QueryEmbedding:    queryEmbedding,
+	}
+}
+
+// queryEmbedding 同步算当前问题的向量，供语义召回当查询条件。
+//
+// 与 bgComputeEmbedding 分成两个函数而不是共用一个，是因为等待策略相反：
+// 那份是写库，失败只影响「以后还能不能被召回」，所以丢后台；这份是本次请求的
+// 召回条件，拿不到就只能靠关键词通道，这里必须等得起。失败返回 nil，
+// BuildContext 会自动关闭语义通道 —— 召回是补充通道，不该拖垮整轮聊天。
+func (s *chatService) queryEmbedding(ctx context.Context, query string) []float64 {
+	if s.embedFn == nil || strings.TrimSpace(query) == "" {
+		return nil
+	}
+	embedCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	vec, err := s.embedFn(embedCtx, query)
+	if err != nil {
+		logger.Warnf("当前问题向量化失败，本次仅走关键词召回: err=%v", err)
+		return nil
+	}
+	return vec
 }
 
 // truncateHistoryByTokens 按真 BPE token 预算从尾部向前保留"完整轮对"。

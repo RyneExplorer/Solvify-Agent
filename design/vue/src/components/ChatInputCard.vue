@@ -192,7 +192,7 @@
               >
                 <div class="px-4 py-3 border-b border-slate-100">
                   <div class="text-sm font-semibold text-slate-900">MCP 服务器</div>
-                  <div class="text-xs text-slate-400 mt-0.5">勾选要在本次对话启用的服务器；全部不勾选=使用全部</div>
+                  <div class="text-xs text-slate-400 mt-0.5">勾选要在本次对话启用的服务器；全部不勾选=不使用任何 MCP</div>
                 </div>
                 <!-- 搜索框：≥ 7 台时显示 -->
                 <div v-if="showMCPSearch" class="px-3 py-2 border-b border-slate-100">
@@ -223,7 +223,7 @@
                       'text-xs px-2 py-1 rounded-md border border-slate-200 transition-colors',
                       localMCPIds.length === 0 ? 'bg-emerald-50 text-emerald-600' : 'text-slate-500 hover:bg-slate-50'
                     ]"
-                  >清空(=全部)</button>
+                  >清空(不用)</button>
                 </div>
                 <div class="max-h-[260px] overflow-y-auto py-1">
                   <div v-if="filteredMCPOpts.length === 0" class="px-4 py-6 text-center text-xs text-slate-400">
@@ -345,14 +345,14 @@ const filteredMCPOpts = computed(() => {
 const mcpTooltip = computed(() => {
   if (!mcpOpts.value.length) return ''
   const total = mcpOpts.value.length
-  if (!localMCPIds.value.length) return `使用全部 ${total} 台 MCP：\n${mcpOpts.value.map(o => '· ' + o.name).join('\n')}`
+  if (!localMCPIds.value.length) return `本次不使用任何 MCP（共 ${total} 台可用）`
   const names = mcpOpts.value.filter(o => localMCPIds.value.includes(o.id)).map(o => o.name)
   return `已选择 ${names.length}/${total} 台 MCP：\n${names.map(n => '· ' + n).join('\n')}`
 })
 
 const mcpLabel = computed(() => {
   if (!mcpOpts.value.length) return 'MCP 服务器'
-  if (!localMCPIds.value.length) return '全部 MCP'
+  if (!localMCPIds.value.length) return '不使用 MCP'
   const names = mcpOpts.value.filter(o => localMCPIds.value.includes(o.id)).map(o => o.name)
   if (names.length <= 2) return names.join('、') || '选择 MCP'
   return `${names[0]} +${names.length - 1}`
@@ -473,6 +473,7 @@ function selectAllMCP() {
   showMCPDropdown.value = false
 }
 
+// 清空选择 = 本次对话不使用任何 MCP 工具（不再回退成「全部」）
 function clearMCP() {
   localMCPIds.value = []
   emit('update:selectedMcpIds', [])

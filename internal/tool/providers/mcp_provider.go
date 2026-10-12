@@ -14,7 +14,7 @@ import (
 )
 
 // MCPProvider MCP 供应商
-// 通过 MCP 协议（stdio/sse/http）连接 MCP Server，一个 Server 可提供多个工具
+// 通过 MCP 协议（sse/http）连接 MCP Server，一个 Server 可提供多个工具
 type MCPProvider struct {
 	pool *MCPClientPool
 }
@@ -114,7 +114,7 @@ func (p *MCPProvider) GetTools(ctx context.Context, providerConfig *tool.Provide
 
 	// 3. 刷新缓存
 	//    包装成 leasedTool：每次调用期间借用连接池条目，
-	//    保证 sweep 不会在 tools/call 执行过程中把连接（及其 stdio 子进程）关掉。
+	//    保证 sweep 不会在 tools/call 执行过程中把连接关掉。
 	wrapped := make([]einoTool.BaseTool, 0, len(mcpTools))
 	for _, mt := range mcpTools {
 		wrapped = append(wrapped, &leasedTool{BaseTool: mt, entry: entry})

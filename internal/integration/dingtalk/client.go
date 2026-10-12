@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"solvify-agent/internal/observability"
 	"solvify-agent/pkg/config"
 	apperrors "solvify-agent/pkg/errors"
 	"strings"
@@ -40,12 +39,11 @@ type Client struct {
 func NewClient(cfg config.DingTalkConfig) *Client {
 	// 用独立 client 而不是 http.DefaultClient：DefaultClient 是全局单例，
 	// 直接改它的 Transport 会波及进程内所有未显式指定客户端的调用。
-	// base 传 nil 表示沿用 http.DefaultTransport，行为与原来一致，只多出追踪能力。
-	tracedClient := &http.Client{Transport: observability.HTTPTransport(nil)}
+	// 这里不给 Transport 赋值，即沿用 http.DefaultTransport。
 	return &Client{
 		appKey:         strings.TrimSpace(cfg.AppKey),
 		appSecret:      strings.TrimSpace(cfg.AppSecret),
-		httpClient:     tracedClient,
+		httpClient:     &http.Client{},
 		accessTokenURL: defaultAccessTokenURL,
 		apiBaseURL:     defaultAPIBaseURL,
 	}

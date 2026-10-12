@@ -2,71 +2,13 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/goccy/go-yaml"
 	"github.com/mitchellh/mapstructure"
 )
-
-// TestParseHeaderList 覆盖 OTEL_HEADERS 环境变量的解析，重点是含 '=' 的取值不被截断。
-func TestParseHeaderList(t *testing.T) {
-	cases := []struct {
-		name string
-		raw  string
-		want map[string]string
-	}{
-		{
-			name: "空字符串返回 nil",
-			raw:  "",
-			want: nil,
-		},
-		{
-			name: "单个键值",
-			raw:  "Authorization=Bearer token",
-			want: map[string]string{"Authorization": "Bearer token"},
-		},
-		{
-			name: "多个键值并去除两端空格",
-			raw:  " Authorization = Bearer token , x-byteapm-appkey = abc ",
-			want: map[string]string{"Authorization": "Bearer token", "x-byteapm-appkey": "abc"},
-		},
-		{
-			name: "取值里的等号不被截断",
-			raw:  "Authorization=Basic dXNlcjpwYXNz==",
-			want: map[string]string{"Authorization": "Basic dXNlcjpwYXNz=="},
-		},
-		{
-			name: "缺少等号的条目被忽略",
-			raw:  "no-equals,Authorization=ok",
-			want: map[string]string{"Authorization": "ok"},
-		},
-		{
-			name: "等号开头视为非法",
-			raw:  "=value",
-			want: nil,
-		},
-		{
-			name: "全部非法时返回 nil",
-			raw:  ",,=",
-			want: nil,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := parseHeaderList(tc.raw)
-			if len(got) != len(tc.want) {
-				t.Fatalf("条目数不符: got=%v want=%v", got, tc.want)
-			}
-			for k, v := range tc.want {
-				if got[k] != v {
-					t.Fatalf("键 %q 的取值不符: got=%q want=%q", k, got[k], v)
-				}
-			}
-		})
-	}
-}
 
 // exampleConfigPath 指向仓库中被 git 跟踪的示例配置。
 // 测试的工作目录是 pkg/config，所以要相对走回仓库根。
@@ -103,8 +45,8 @@ func decodeStrict(raw any, out any) error {
 
 // TestExampleConfigKeysMatchStruct 守住示例配置的键名与结构体保持一致。
 //
-// 为什么需要这条：mapstructure 对不认识的键静默忽略 —— 把 otel_otlp_endpoint 写成
-// otel_otlp_endpont，服务照常启动、日志照常打印，字段却停在默认值，「配了等于没配」，
+// 为什么需要这条：mapstructure 对不认识的键静默忽略 —— 把 otel_exporter 写成
+// otel_exporters，服务照常启动、日志照常打印，字段却停在默认值，「配了等于没配」，
 // 只能靠抓包或读源码才能发现。而示例配置是全项目唯一面向使用者的配置文档，
 // 最容易随结构体演进而腐烂（结构体改了键名、示例没改，谁都发现不了）。
 // 这里用严格解码，任何对不上的键都直接让测试失败。
@@ -140,74 +82,13 @@ func TestExampleConfigObservabilitySection(t *testing.T) {
 		t.Fatalf("observability 段里有结构体不认识的键: %v", err)
 	}
 
-	// 自研轨道
-	if !got.Enabled {
-		t.Error("observability.enabled 没有解到 true")
-	}
-	if got.SamplingRate != 0.2 {
-		t.Errorf("observability.sampling_rate 期望 0.2，实际 %v", got.SamplingRate)
-	}
-	if !got.ErrorAlwaysSample {
-		t.Error("observability.error_always_sample 没有解到 true")
-	}
-	if got.SlowThresholdMs != 5000 {
-		t.Errorf("observability.slow_threshold_ms 期望 5000，实际 %d", got.SlowThresholdMs)
-	}
-	if !got.FeedbackAlwaysSample {
-		t.Error("observability.feedback_always_sample 没有解到 true")
-	}
-	if !got.TraceTableEnabled {
-		t.Error("observability.trace_table_enabled 没有解到 true")
-	}
-	if !got.ExportLogEnabled {
-		t.Error("observability.export_log_enabled 没有解到 true")
-	}
-	if got.MetricsFormat != "json" {
-		t.Errorf("observability.metrics_format 期望 json，实际 %q", got.MetricsFormat)
-	}
-	if got.SinkBufferSize != 1024 {
-		t.Errorf("observability.sink_buffer_size 期望 1024，实际 %d", got.SinkBufferSize)
-	}
-	if got.SinkBatchSize != 50 {
-		t.Errorf("observability.sink_batch_size 期望 50，实际 %d", got.SinkBatchSize)
-	}
-	if got.SinkFlushIntervalMs != 200 {
-		t.Errorf("observability.sink_flush_interval_ms 期望 200，实际 %d", got.SinkFlushIntervalMs)
-	}
-	if got.PIIContentMaxChars != 200 {
-		t.Errorf("observability.pii_content_max_chars 期望 200，实际 %d", got.PIIContentMaxChars)
-	}
+	// 自研可观测性模块已整体移除，observability 段只剩「eino → Langfuse」这条
+	// 三方链路用得到的键 + 脱敏开关，这里逐个断言它们真的解到了。
 	if !got.PIIMaskSecret {
 		t.Error("observability.pii_mask_secret 没有解到 true")
 	}
-	if !got.FeedbackEnabled {
-		t.Error("observability.feedback_enabled 没有解到 true")
-	}
-	if len(got.WhiteListUserIDs) != 0 {
-		t.Errorf("observability.whitelist_user_ids 期望空列表，实际 %v", got.WhiteListUserIDs)
-	}
-	if got.MaxCardinalityLabels != 500 {
-		t.Errorf("observability.max_cardinality_labels 期望 500，实际 %d", got.MaxCardinalityLabels)
-	}
-
-	// OTel 三方导出
-	if got.OTelExporter != "noop" {
-		t.Errorf("observability.otel_exporter 期望 noop，实际 %q", got.OTelExporter)
-	}
-	if got.OTelOTLPEndpoint != "localhost:4317" {
-		t.Errorf("observability.otel_otlp_endpoint 期望 localhost:4317，实际 %q", got.OTelOTLPEndpoint)
-	}
 	if got.OTelServiceName != "solvify-agent" {
 		t.Errorf("observability.otel_service_name 期望 solvify-agent，实际 %q", got.OTelServiceName)
-	}
-	if got.OTelSamplingRate != 1.0 {
-		t.Errorf("observability.otel_sampling_rate 期望 1.0，实际 %v", got.OTelSamplingRate)
-	}
-	if !got.OTelInsecure {
-		t.Error("observability.otel_insecure 没有解到 true")
-	}
-	if len(got.OTelHeaders) != 0 {
-		t.Errorf("observability.otel_headers 期望空的键值对（示例里不能出现真实凭据），实际 %v", got.OTelHeaders)
 	}
 }
 
@@ -251,13 +132,6 @@ func TestExampleConfigHasNoRealSecrets(t *testing.T) {
 				"若确为占位符请显式加入白名单", path)
 		}
 	}
-
-	// otel_headers 里不能有任何条目：示例只给注释形态的例子。
-	if headers, found := lookupPath(values, "observability.otel_headers"); found {
-		if m, ok := headers.(map[string]any); ok && len(m) > 0 {
-			t.Errorf("示例配置 observability.otel_headers 必须为空（凭据只放本地或环境变量），实际 %v", m)
-		}
-	}
 }
 
 // lookupPath 按 "a.b.c" 逐段下钻取值，任一段缺失都会返回 found=false。
@@ -274,4 +148,46 @@ func lookupPath(values map[string]any, path string) (any, bool) {
 		}
 	}
 	return cur, true
+}
+
+// TestRAGCandidateMultiplierSurvivesMissingKey 守住「新增配置项缺键不能静默变 0」。
+//
+// 为什么这条必须有：configs/config.yaml 是 gitignore 的，线上每台机器的 yaml 都是旧版本，
+// 所以**新增配置项上线时必然是「结构体里有、yaml 里没有」**。Load 的写法是先 `Default()`
+// 再往它上面解码，缺键因此保留默认值 —— 这条测试就是钉住这个性质。
+//
+// 刻意走**真的 Load()**，而不是在测试里自己拼一遍 Default()+Decode：后者验的是
+// mapstructure 这个库的行为。一旦有人把 Load 改成 `cfg := &Config{}`（先零值再解码），
+// 手拼版照样全绿，而线上所有新配置项会一起静默失效 —— 断言就白写了。
+//
+// 取值本身也被钉住：候选放大系数默认 1 来自 2026-09-23 的 A/B 实测
+// （精度 82.1% → 95.7%、含噪率 17.9% → 4.3%，hit@1/hit@3/MRR 不变），
+// 见 test1/rag_eval/AB-对比结论-20260923.md。要改回 2，请先说明那份报告哪里不成立。
+func TestRAGCandidateMultiplierSurvivesMissingKey(t *testing.T) {
+	if got := Default().RAG.CandidateMultiplier; got != 1 {
+		t.Fatalf("Default() 的 rag.candidate_multiplier 期望 1（A/B 实测结论），实际 %d", got)
+	}
+
+	// 真实形态：yaml 的 rag 段写了别的键，就是没写 candidate_multiplier。
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	const body = "rag:\n  top_k: 5\n  score_threshold: 0.6\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("写临时配置失败: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if cfg.RAG.CandidateMultiplier != 1 {
+		t.Errorf("yaml 缺 candidate_multiplier 时应保留默认 1，实际 %d（新配置项会静默失效）",
+			cfg.RAG.CandidateMultiplier)
+	}
+	// 对照组：写了的键必须真的解到，否则上一条断言可能只是「整个 rag 段都没解进来」。
+	if cfg.RAG.TopK != 5 {
+		t.Errorf("rag.top_k 应解到 5，实际 %d（整个 rag 段都没解进来？）", cfg.RAG.TopK)
+	}
+	if cfg.RAG.ScoreThreshold != 0.6 {
+		t.Errorf("rag.score_threshold 应解到 0.6，实际 %v", cfg.RAG.ScoreThreshold)
+	}
 }

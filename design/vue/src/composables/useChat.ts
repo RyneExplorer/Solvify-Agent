@@ -7,8 +7,8 @@ import * as modelApi from '@/api/model'
 import * as authApi from '@/api/auth'
 import * as toolApi from '@/api/tool'
 import { request } from '@/api/client'
-import type { ChatSession, FeedbackRequest, PendingApproval } from '@/types/chat'
-import type { StreamEvent } from '@/types/chat'
+import type { ChatSession, ExecutionPlan, FeedbackRequest, PendingApproval, StreamEvent } from '@/types/chat'
+import { applyExecutionPlanEvent, finishExecutionPlan } from './chatExecutionPlan'
 import type { ToolTemplate, UserToolConfigInfo } from '@/types/tool'
 
 // ── UI 展示用的本地类型 ──
@@ -30,6 +30,7 @@ interface DisplayMessage {
   sources?: StreamEvent['sources']
   timeline?: TimelineStep[]
   trace_id?: string
+  execution_plan?: ExecutionPlan
   feedback_rating?: 1 | -1
   feedback_reasons?: string[]
   feedback_comment?: string
@@ -91,6 +92,7 @@ export function useChat() {
   const streamContent = ref('')
   const streamSources = ref<DisplayMessage['sources']>([])
   const streamTimeline = ref<TimelineStep[]>([])
+  const streamPlan = ref<ExecutionPlan | null>(null)
   const progressText = ref('')
 
   // ── 选择器 ──
@@ -109,7 +111,7 @@ export function useChat() {
   const mcpUserConfigs = ref<UserToolConfigInfo[]>([])
   const mcpLoading = ref(true)
   const MCP_SELECTION_KEY = 'solvify:mcp-selection'
-  /** 对话级选中的 MCP user config ids（空=使用全部已启用） */
+  /** 对话级选中的 MCP user config ids；空数组=不使用任何 MCP（不再是「全部」） */
   const selectedMCPConfigIds = ref<string[]>([])
 
   /** 用户已启用的 MCP 服务器列表（用于选择器展示） */
@@ -203,15 +205,17 @@ export function useChat() {
       if (userToolConfigRes?.code === 0) {
         mcpUserConfigs.value = userToolConfigRes.data?.configs ?? []
       }
-      // 从 localStorage 恢复上次的 MCP 选择（若持久化的 ID 均仍存在则用；否则回退空=全部）
+      // 从 localStorage 恢复上次的 MCP 选择（空数组也要恢复：它表示「上次选了不使用任何 MCP」，
+      // 若当成「没存过」而跳过，用户的「一个都不用」会被静默重置成全选）
       try {
         const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(MCP_SELECTION_KEY) : null
-        if (saved) {
+        if (saved !== null) {
           const parsed = JSON.parse(saved) as string[]
-          if (Array.isArray(parsed) && parsed.length) {
+          if (Array.isArray(parsed)) {
             const availableIds = new Set(enabledMCPOptions.value.map(o => o.id))
             const valid = parsed.filter(x => availableIds.has(x))
-            if (valid.length) selectedMCPConfigIds.value = valid
+            // 注意：valid 为空是合法结果（=不使用任何 MCP），不能因空而回退
+            selectedMCPConfigIds.value = valid
           }
         }
       } catch { /* 解析失败静默忽略 */ }
@@ -261,6 +265,7 @@ export function useChat() {
   async function loadMessages(sessionId: string) {
     try {
       const res = await chatApi.getMessages(sessionId)
+      if (activeSessionId.value !== sessionId) return
       if (res.code === 0) {
         const serverMessages = (res.data.messages ?? []).map((m) => ({
           id: m.id,
@@ -272,6 +277,7 @@ export function useChat() {
             detail: s.detail,
             status: s.status ?? 'success',
           })),
+          execution_plan: m.execution_plan,
         }))
 
         // 保留未持久化的临时用户消息（ID 以 u- 开头）
@@ -302,6 +308,9 @@ export function useChat() {
 
   // 选中指定会话并加载消息
   function selectSession(sessionId: string) {
+    if (isLoading.value) return
+    interruptedAssistantId = ''
+    streamPlan.value = null
     activeSessionId.value = sessionId
     loadMessages(sessionId)
   }
@@ -312,6 +321,10 @@ export function useChat() {
     (sess) => {
       const pc = sess?.pending_checkpoint
       if (pc && pc.checkpoint_id) {
+        streamPlan.value = pc.execution_plan ?? null
+        if (pc.execution_plan || pc.checkpoint_id.startsWith('deeppe-v1-')) {
+          searchMode.value = 'smart-reasoning'
+        }
         pendingApproval.value = {
           checkpoint_id: pc.checkpoint_id,
           interrupt_id: pc.interrupt_id,
@@ -359,6 +372,7 @@ export function useChat() {
     progressText.value = ''
     streamContent.value = ''
     streamTimeline.value = []
+    if (!isResume) streamPlan.value = null
 
     // 自动创建会话
     if (isNewSession) {
@@ -388,8 +402,10 @@ export function useChat() {
     let assistantId = ''
     let finalContent = ''
     let finalSources: StreamEvent['sources'] = []
+    let traceId: string | undefined
+    let reader: Awaited<ReturnType<typeof chatApi.sendMessage>> | undefined
 
-    const safetyTimer = setTimeout(() => {
+    const onStreamTimeout = () => {
       if (isLoading.value) {
         abortController?.abort()
         messages.value.push({
@@ -399,26 +415,31 @@ export function useChat() {
           retryable: true,
         })
       }
-    }, 120000)
+    }
+    let safetyTimer = setTimeout(onStreamTimeout, 120000)
 
     try {
-      const reader = await chatApi.sendMessage(activeSessionId.value, {
+      reader = await chatApi.sendMessage(activeSessionId.value, {
       content,
       model_id: selectedModel.value,
       model_type: modelOpt?.modelType ?? 'system',
       search_mode: searchMode.value,
       knowledge_base_ids: selectedKBs.value.length ? selectedKBs.value : knowledgeBases.value.map(k => k.id),
-      mcp_user_config_ids: selectedMCPConfigIds.value.length ? selectedMCPConfigIds.value : undefined,
+      // 恒发数组：空数组 = 用户「不选」，语义是本次不使用任何 MCP 工具。
+      // 不再用 undefined 兜底成「全部」—— 那会让「全部不勾选」被后端误读成全选。
+      mcp_user_config_ids: selectedMCPConfigIds.value,
     }, abortController.signal)
 
-    const traceId = reader._meta?.trace_id
+    traceId = reader._meta?.trace_id
 
     const decoder = new TextDecoder()
     let buffer = ''
 
       while (true) {
         const { done, value } = await reader.read()
-        if (done) break
+        if (done) throw new Error('响应流意外结束，请重试')
+        clearTimeout(safetyTimer)
+        safetyTimer = setTimeout(onStreamTimeout, 120000)
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
@@ -447,6 +468,11 @@ export function useChat() {
                 break
 
               case 'plan':
+              case 'task_created':
+              case 'task_updated':
+              case 'task_result':
+                streamPlan.value = applyExecutionPlanEvent(streamPlan.value, evt)
+                break
               case 'tool_call':
               case 'tool_result':
               case 'warning':
@@ -508,12 +534,14 @@ export function useChat() {
 
               case 'error':
                 isLoading.value = false
+                streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
                 messages.value.push({
                   id: 'e-' + Date.now(),
                   role: 'error',
                   content: evt.title || '未知错误',
                   detail: evt.detail,
                   retryable: evt.retryable !== false,
+                  execution_plan: streamPlan.value ?? undefined,
                 })
                 return
 
@@ -533,7 +561,7 @@ export function useChat() {
                     detail: evt.clarify?.question ?? evt.detail ?? '',
                     tool_name: '',
                     target_ref: '',
-                    reason: evt.clarify?.context ?? '',
+                    reason: '',
                     options: evt.clarify?.options ?? [],
                     is_clarify: true,
                   }
@@ -557,6 +585,9 @@ export function useChat() {
               }
 
               case 'done':
+                if (evt.content) finalContent = evt.content
+                if (evt.plan) streamPlan.value = applyExecutionPlanEvent(streamPlan.value, { ...evt, type: 'plan' })
+                streamPlan.value = finishExecutionPlan(streamPlan.value, 'success')
                 streamTimeline.value.forEach(
                   (s) => s.status === 'running' && (s.status = 'success'),
                 )
@@ -575,6 +606,7 @@ export function useChat() {
                     content: finalContent,
                     sources: finalSources.length > 0 ? finalSources : updated[existingIdx].sources,
                     timeline: doneTimeline ?? updated[existingIdx].timeline,
+                    execution_plan: streamPlan.value ?? undefined,
                     trace_id: traceId,
                   }
                   messages.value = updated
@@ -586,6 +618,7 @@ export function useChat() {
                     content: finalContent,
                     sources: finalSources,
                     timeline: doneTimeline,
+                    execution_plan: streamPlan.value ?? undefined,
                     trace_id: traceId,
                   })
                   if (doneTimeline) collapsedTimelines.value.add(messages.value.length - 1)
@@ -604,32 +637,39 @@ export function useChat() {
       const isAbort = e instanceof DOMException && e.name === 'AbortError'
       if (isAbort) {
         // 用户中断——保存已有的部分内容 / 推理步骤 / 来源
-        if (finalContent || streamContent.value || streamTimeline.value.length || streamSources.value?.length) {
+        if (finalContent || streamContent.value || streamTimeline.value.length || streamSources.value?.length || streamPlan.value) {
+          streamPlan.value = finishExecutionPlan(streamPlan.value, 'canceled')
           messages.value.push({
             id: assistantId || 'a-' + Date.now(),
             role: 'assistant',
             content: streamContent.value || finalContent,
             sources: finalSources.length ? finalSources : (streamSources.value?.length ? [...streamSources.value] : undefined),
             timeline: streamTimeline.value.length ? [...streamTimeline.value] : undefined,
+            execution_plan: streamPlan.value ?? undefined,
             trace_id: traceId,
           })
         }
       } else {
         const msg = e instanceof Error ? e.message : '请求失败'
+        streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
         messages.value.push({
           id: 'e-' + Date.now(),
           role: 'error',
           content: msg,
           retryable: true,
+          execution_plan: streamPlan.value ?? undefined,
         })
       }
     } finally {
       clearTimeout(safetyTimer)
+      await reader?.cancel().catch(() => {})
+      reader?.releaseLock()
       abortController = null
       isLoading.value = false
       streamContent.value = ''
       streamSources.value = []
       streamTimeline.value = []
+      if (!pendingApproval.value) streamPlan.value = null
       progressText.value = ''
     }
   }
@@ -716,10 +756,40 @@ export function useChat() {
 
   // ── 审批 / 澄清追问统一入口 ──
   function approvePending(resolution: string) {
-    if (!pendingApproval.value) return
+    if (!pendingApproval.value || isLoading.value || !resolution.trim()) return
+    if (!selectedModel.value) {
+      ElMessage.warning('请先选择一个模型')
+      return
+    }
+    // 审批恢复原执行流程，不能随输入框切换到快速模式。
+    if (streamPlan.value || pendingApproval.value.checkpoint_id.startsWith('deeppe-v1-')) {
+      searchMode.value = 'smart-reasoning'
+    }
     input.value = resolution
+    const approval = pendingApproval.value
+    const plan = streamPlan.value
     pendingApproval.value = null
-    void sendMessage(undefined, true)
+    const sessionId = activeSessionId.value
+    void sendMessage(undefined, true).then(async () => {
+      if (activeSessionId.value !== sessionId) return
+      // 后端已消费的 checkpoint 不可再次审批；请求失败后重新核对可信状态。
+      if (!pendingApproval.value && messages.value.at(-1)?.role === 'error') {
+        try {
+          const res = await chatApi.getSession(sessionId!)
+          if (activeSessionId.value !== sessionId) return
+          if (activeSession.value) activeSession.value.pending_checkpoint = res.data.pending_checkpoint
+          if (res.data.pending_checkpoint?.checkpoint_id === approval.checkpoint_id) {
+            pendingApproval.value = approval
+            streamPlan.value = res.data.pending_checkpoint.execution_plan ?? plan
+          }
+        } catch { /* 状态未知时保留原审批入口，便于用户重试读取失败的请求 */
+          pendingApproval.value = approval
+          streamPlan.value = plan
+        }
+      } else if (!pendingApproval.value && activeSession.value) {
+        activeSession.value.pending_checkpoint = null
+      }
+    })
   }
 
   function cancelApproval() {
@@ -861,12 +931,16 @@ export function useChat() {
 
   // 重置聊天状态，开始新会话
   function newChat() {
+    if (isLoading.value) return
+    pendingApproval.value = null
+    interruptedAssistantId = ''
     activeSessionId.value = null
     messages.value = []
     collapsedTimelines.value = new Set()
     isLoading.value = false
     streamContent.value = ''
     streamTimeline.value = []
+    streamPlan.value = null
     progressText.value = ''
     input.value = ''
   }
@@ -883,7 +957,7 @@ export function useChat() {
     isLoading,
     streamContent,
     streamSources,
-    streamTimeline,
+    streamTimeline, streamPlan,
     progressText,
     modelOptions,
     knowledgeBases,

@@ -4,24 +4,25 @@ import "time"
 
 // PendingCheckpointInfo 前端恢复审批/澄清状态用
 type PendingCheckpointInfo struct {
-	CheckpointID string    `json:"checkpoint_id"`
-	InterruptID  string    `json:"interrupt_id"`
-	Question     string    `json:"question,omitempty"`
-	ToolName     string    `json:"tool_name,omitempty"`
-	IsClarify    bool      `json:"is_clarify,omitempty"`
-	Options      []string  `json:"options,omitempty"`
-	SetAt        time.Time `json:"set_at"`
+	CheckpointID  string         `json:"checkpoint_id"`
+	InterruptID   string         `json:"interrupt_id"`
+	Question      string         `json:"question,omitempty"`
+	ToolName      string         `json:"tool_name,omitempty"`
+	IsClarify     bool           `json:"is_clarify,omitempty"`
+	Options       []string       `json:"options,omitempty"`
+	SetAt         time.Time      `json:"set_at"`
+	ExecutionPlan *ExecutionPlan `json:"execution_plan,omitempty"`
 }
 
 // SessionResponse 描述聊天会话响应
 type SessionResponse struct {
-	ID               string                `json:"id"`
-	Title            string                `json:"title"`
-	ModelID          string                `json:"model_id"`
-	Status           string                `json:"status"`
+	ID                string                 `json:"id"`
+	Title             string                 `json:"title"`
+	ModelID           string                 `json:"model_id"`
+	Status            string                 `json:"status"`
 	PendingCheckpoint *PendingCheckpointInfo `json:"pending_checkpoint,omitempty"`
-	CreatedAt        time.Time             `json:"created_at"`
-	UpdatedAt        time.Time             `json:"updated_at"`
+	CreatedAt         time.Time              `json:"created_at"`
+	UpdatedAt         time.Time              `json:"updated_at"`
 }
 
 // MessageResponse 描述聊天消息响应
@@ -35,7 +36,29 @@ type MessageResponse struct {
 	KnowledgeBaseIDs []string        `json:"knowledge_base_ids,omitempty"`
 	Sources          []SourceInfo    `json:"sources,omitempty"`
 	ReasoningSteps   []ReasoningStep `json:"reasoning_steps,omitempty"`
+	ExecutionPlan    *ExecutionPlan  `json:"execution_plan,omitempty"`
 	CreatedAt        time.Time       `json:"created_at"`
+}
+
+type TaskProgress struct {
+	ID           string   `json:"id"`
+	Agent        string   `json:"agent"`
+	Title        string   `json:"title"`
+	DependsOn    []string `json:"depends_on,omitempty"`
+	Status       string   `json:"status"`
+	Summary      string   `json:"summary,omitempty"`
+	AddedVersion int      `json:"added_version,omitempty"`
+}
+
+type ExecutionPlan struct {
+	ID       string         `json:"id"`
+	Version  int            `json:"version,omitempty"`
+	Phase    string         `json:"phase,omitempty"`
+	Reason   string         `json:"replan_reason,omitempty"`
+	Round    int            `json:"round,omitempty"`
+	Strategy string         `json:"strategy"`
+	Status   string         `json:"status"`
+	Tasks    []TaskProgress `json:"tasks"`
 }
 
 // SourceInfo 描述引用来源信息（按文档分组）
@@ -71,13 +94,26 @@ type StreamEvent struct {
 	MessageID        string `json:"message_id,omitempty"`
 	Done             bool   `json:"done"`
 	Error            string `json:"error,omitempty"`
-	Retryable        bool   `json:"retryable,omitempty"` // 是否可重试
+	Retryable        bool   `json:"retryable"` // 是否可重试；false 也必须传给前端
 	// clarify 事件字段：追问
 	Clarify *ClarifyPayload `json:"clarify,omitempty"`
 	// interrupt 事件字段：中断等待用户审批
 	CheckpointID  string         `json:"checkpoint_id,omitempty"`
 	InterruptID   string         `json:"interrupt_id,omitempty"`
 	InterruptInfo map[string]any `json:"interrupt_info,omitempty"`
+	PlanID        string         `json:"plan_id,omitempty"`
+	PlanVersion   int            `json:"plan_version,omitempty"`
+	Phase         string         `json:"phase,omitempty"`
+	ReplanReason  string         `json:"replan_reason,omitempty"`
+	Round         int            `json:"round,omitempty"`
+	TaskID        string         `json:"task_id,omitempty"`
+	ParentTaskID  string         `json:"parent_task_id,omitempty"`
+	AgentName     string         `json:"agent_name,omitempty"`
+	TaskStatus    string         `json:"task_status,omitempty"`
+	TaskIndex     int            `json:"task_index,omitempty"`
+	TaskTotal     int            `json:"task_total,omitempty"`
+	Plan          *ExecutionPlan `json:"plan,omitempty"`
+	Task          *TaskProgress  `json:"task,omitempty"`
 }
 
 // ClarifyPayload 追问事件载体（need 用户补充后才能继续回答）

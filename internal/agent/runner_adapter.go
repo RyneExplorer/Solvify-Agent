@@ -9,8 +9,8 @@ import (
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 
-	"solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/tool"
+	apperrors "solvify-agent/pkg/errors"
 	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/strutil"
@@ -46,13 +46,11 @@ func (e *Engine) runWithRunner(
 		if err != nil {
 			logger.Errorf("[Agent] ResumeWithParams 失败: %v", err)
 			eventch.Send(ctx, eventCh, Event{
-				Type:      EventError,
-				Title:     "恢复执行失败",
-				Detail:    "无法从中断点恢复，请重新发起深度模式请求",
-				Error:     err.Error(),
-				Status:    "error",
-				Retryable: false,
-				Done:      true,
+				Type:   EventError,
+				Kind:   apperrors.KindResumeFailed,
+				Error:  err.Error(),
+				Status: "error",
+				Done:   true,
 			})
 			return
 		}
@@ -62,6 +60,8 @@ func (e *Engine) runWithRunner(
 
 	var fullAnswer strings.Builder
 	var interruptSent bool
+
+	// 用 defer 兜住最后一轮：正常结束、中断早返回、报错早返回三条出口都不必各自收尾。
 
 	for {
 		agentEvent, ok := iter.Next()
@@ -77,24 +77,29 @@ func (e *Engine) runWithRunner(
 			logger.Errorf("[Agent] Runner 事件错误: %v", agentEvent.Err)
 			if isToolChoiceUnsupportedError(agentEvent.Err.Error()) {
 				eventch.Send(ctx, eventCh, Event{
-					Type:      EventError,
-					Title:     "当前模型不支持工具调用",
-					Detail:    "该模型不支持工具调用功能，无法使用联网搜索、天气查询等工具。建议切换到支持工具调用的模型（如通义千问、智谱清言、DeepSeek 等），或使用快速模式。",
-					Error:     agentEvent.Err.Error(),
-					Status:    "error",
-					Retryable: false,
-					Done:      true,
+					Type:   EventError,
+					Kind:   apperrors.KindToolUnsupported,
+					Error:  agentEvent.Err.Error(),
+					Status: "error",
+					Done:   true,
 				})
 				return
 			}
+			// 种类由错误链判定（结构化哨兵优先）：迭代超限等有哨兵的错误能落到
+			// 精确种类上；判不出来时归为「Agent 执行失败」——
+			// 它是本函数握着的事实，比笼统的 unknown 更有信息量。
+			// ⚠️ 这里原本写死了「深度思考模式执行异常」，而本函数被快速模式共用
+			// （runQuickAgent 第 69 行也走这里），于是快速模式的失败显示了深度模式的文案。
+			kind := apperrors.Classify(agentEvent.Err)
+			if kind == apperrors.KindUnknown {
+				kind = apperrors.KindAgentRunFailed
+			}
 			eventch.Send(ctx, eventCh, Event{
-				Type:      EventError,
-				Title:     "深度推理失败",
-				Detail:    "深度思考模式执行异常，请重试或使用快速模式",
-				Error:     agentEvent.Err.Error(),
-				Status:    "error",
-				Retryable: true,
-				Done:      true,
+				Type:   EventError,
+				Kind:   kind,
+				Error:  agentEvent.Err.Error(),
+				Status: "error",
+				Done:   true,
 			})
 			return
 		}
@@ -192,7 +197,7 @@ func (e *Engine) runWithRunner(
 	}
 
 	// ── 收集 Sources ──
-	var sources []response.SourceInfo
+	var sources []SourceInfo
 	if len(collected) > 0 {
 		sources = collectSources(collected)
 	}
@@ -208,8 +213,12 @@ func (e *Engine) runWithRunner(
 	// Eino 框架不会在恢复完成后自动删除 CheckPointStore 中的记录（Delete 是可选接口，框架从不主动调用），
 	// 若不清理，agent_checkpoints 会无限堆积。恢复执行成功后这里主动删除，避免泄漏。
 	// 仅在正常完成（到达 EventDone）时清理：interrupt / error 早返回路径需要保留 checkpoint 供后续恢复。
-	if e.checkpointRepo != nil && checkpointID != "" {
-		if dErr := e.checkpointRepo.Delete(ctx, checkpointID); dErr != nil {
+	if checkpointID != "" {
+		store := e.buildCheckpointStore(req.SessionID)
+		deletable := store.(interface {
+			Delete(context.Context, string) error
+		})
+		if dErr := deletable.Delete(ctx, checkpointID); dErr != nil {
 			logger.Warnf("[Agent] 删除 checkpoint 字节失败（不阻塞）: checkpointID=%s, err=%v", checkpointID, dErr)
 		} else {
 			logger.Infof("[Agent] 已删除 checkpoint 字节: checkpointID=%s", checkpointID)
@@ -388,7 +397,7 @@ func mapKeys(m map[string]any) []string {
 	return out
 }
 
-// collectSources 从 KnowledgeSearchTool.CollectedSources 转换成 response.SourceInfo。
+// collectSources 从 KnowledgeSearchTool.CollectedSources 转换成 SourceInfo。
 //
 // 分组口径与 chat_service_mapper.go 的 groupDocumentsToSources 保持一致，两条关键规则：
 //  1. 按 DocumentID 分组，不按 Title。同一份文档通常会命中多个 chunk 需要并成一条来源；
@@ -396,17 +405,17 @@ func mapKeys(m map[string]any) []string {
 //     并成一条，并让后者的 chunk 挂到前者的 documentID 上 —— 前端点击引用会跳到错的文档。
 //  2. 用 docOrder 记录首次出现顺序。直接遍历 map 会打乱来源顺序，而该顺序即检索的
 //     相似度顺序，打乱后用户每次看到的引用列表顺序都不一样。
-func collectSources(sources []tool.SourceDocument) []response.SourceInfo {
+func collectSources(sources []tool.SourceDocument) []SourceInfo {
 	if len(sources) == 0 {
 		return nil
 	}
 
-	docMap := make(map[string]*response.SourceInfo, len(sources))
+	docMap := make(map[string]*SourceInfo, len(sources))
 	docOrder := make([]string, 0, len(sources))
 	for _, src := range sources {
 		info, exists := docMap[src.DocumentID]
 		if !exists {
-			info = &response.SourceInfo{
+			info = &SourceInfo{
 				DocumentID:      src.DocumentID,
 				KnowledgeBaseID: src.KnowledgeBaseID,
 				Title:           src.Title,
@@ -414,7 +423,7 @@ func collectSources(sources []tool.SourceDocument) []response.SourceInfo {
 			docMap[src.DocumentID] = info
 			docOrder = append(docOrder, src.DocumentID)
 		}
-		info.Chunks = append(info.Chunks, response.ChunkSource{
+		info.Chunks = append(info.Chunks, ChunkSource{
 			ID:      src.ID,
 			Content: src.Content,
 			Score:   src.Score,
@@ -425,7 +434,7 @@ func collectSources(sources []tool.SourceDocument) []response.SourceInfo {
 		}
 	}
 
-	result := make([]response.SourceInfo, 0, len(docOrder))
+	result := make([]SourceInfo, 0, len(docOrder))
 	for _, docID := range docOrder {
 		result = append(result, *docMap[docID])
 	}
@@ -451,21 +460,17 @@ func buildFallbackAnswer(sources []tool.SourceDocument) string {
 			continue
 		}
 		usedTitles[title] = true
-		content := strings.TrimSpace(src.Content)
-		if len(content) > 160 {
-			content = content[:160] + "…"
-		}
-		chunkID := src.ID
-		if chunkID == "" {
-			chunkID = "c" + string(rune('0'+i))
-		}
+		content := strutil.Truncate(strings.TrimSpace(src.Content), 160)
 		sb.WriteString("- ")
 		sb.WriteString(title)
-		sb.WriteString(" <kb doc=\"")
-		sb.WriteString(title)
-		sb.WriteString("\" chunk_id=\"")
-		sb.WriteString(chunkID)
-		sb.WriteString("\" />\n")
+		if src.ID != "" {
+			sb.WriteString(" <kb doc=\"")
+			sb.WriteString(title)
+			sb.WriteString("\" chunk_id=\"")
+			sb.WriteString(src.ID)
+			sb.WriteString("\" />")
+		}
+		sb.WriteString("\n")
 		if content != "" {
 			sb.WriteString("  > ")
 			sb.WriteString(content)

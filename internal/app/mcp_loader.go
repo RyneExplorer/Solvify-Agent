@@ -10,12 +10,16 @@ import (
 	"gorm.io/gorm"
 
 	"solvify-agent/internal/model/entity"
+	"solvify-agent/internal/tool"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
 )
 
 // mcpToolKey 系统预置 MCP 服务的 ToolType.ToolKey
 const mcpToolKey = "mcp"
+
+// mcpPrewarmTimeout 预热整体时限，防止个别 MCP 无响应导致预热协程长期驻留
+const mcpPrewarmTimeout = 60 * time.Second
 
 // loadSystemMCPServers 从配置文件加载系统预置 MCP 服务器到数据库
 // 启动时调用：确保 config.yaml 中配置的 MCP 服务器在数据库中存在（is_system=true）
@@ -139,4 +143,43 @@ func (a *App) loadSystemMCPServersWithTimeout() {
 	if err := a.loadSystemMCPServers(ctx); err != nil {
 		logger.Errorf("[MCPLoader] 加载系统预置 MCP 服务器失败: %v", err)
 	}
+}
+
+// prewarmMCPServersAsync 异步预热已启用 MCP 的工具列表，避免首次问答时
+// 才建连接、把冷启动卡在请求路径上。
+// best-effort：失败只告警、不阻断启动；预热未完成前若有请求进来，
+// GetOrCreate 的 initDone 会做同步等待，不会重复初始化。
+func (a *App) prewarmMCPServersAsync() {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), mcpPrewarmTimeout)
+		defer cancel()
+
+		providers, err := a.mcpProviderRepo.ListEnabledByToolTypeID(ctx, a.mcpToolTypeID)
+		if err != nil {
+			logger.Warnf("[MCPPrewarm] 查询已启用 MCP 供应商失败: %v", err)
+			return
+		}
+		if len(providers) == 0 {
+			return
+		}
+
+		logger.Infof("[MCPPrewarm] 开始预热 MCP 工具列表: count=%d", len(providers))
+		for i := range providers {
+			p := &providers[i]
+			var cfg tool.ProviderConfig
+			if len(p.ProviderConfig) == 0 {
+				continue
+			}
+			if err := json.Unmarshal(p.ProviderConfig, &cfg); err != nil || cfg.MCP == nil {
+				logger.Warnf("[MCPPrewarm] 解析供应商配置失败，跳过: name=%s", p.Name)
+				continue
+			}
+			if _, err := a.mcpProvider.GetTools(ctx, &cfg); err != nil {
+				logger.Warnf("[MCPPrewarm] 预热失败，跳过: name=%s, err=%v", p.Name, err)
+				continue
+			}
+			logger.Infof("[MCPPrewarm] 预热成功: name=%s", p.Name)
+		}
+		logger.Info("[MCPPrewarm] MCP 工具列表预热完成")
+	}()
 }

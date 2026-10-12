@@ -66,9 +66,14 @@ CREATE TABLE "public"."chat_messages" (
   "knowledge_base_ids" jsonb NOT NULL DEFAULT '[]'::jsonb,
   "sources" jsonb,
   "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb,
+  "embedding" "public"."vector"(1024),
   "created_at" timestamptz(6)
 )
 ;
+
+-- 消息向量：语义召回靠它（查询侧也走同一维度，维度由启动期
+-- EnsureChatMessageEmbeddingSchema 核对）。历史消息需要回填后才可被召回。
+COMMENT ON COLUMN "public"."chat_messages"."embedding" IS '消息向量（语义召回用，回填后可被召回）';
 
 -- ----------------------------
 -- Table structure for chat_sessions

@@ -25,7 +25,7 @@ const (
 	// defaultTimeout 默认连接超时秒数
 	defaultTimeout = 30
 	// maxIdle 空闲多久后回收。管理员改 MCP 配置会产生新的 configHash，
-	// 旧条目不会再被命中，只能靠空闲回收释放其 stdio 子进程/长连接。
+	// 旧条目不会再被命中，只能靠空闲回收释放其长连接。
 	maxIdle = 30 * time.Minute
 	// maxEntries 池中最多保留的连接数，超出后淘汰最久未使用的
 	maxEntries = 64
@@ -33,8 +33,8 @@ const (
 	// 会反复拉起子进程/重连并形成惊群；期限内直接返回上次错误。
 	failureTTL = 30 * time.Second
 	// initHardTimeout 初始化总时限兜底。
-	// stdio 的 NewStdioMCPClient 内部会拉起子进程且**不接受 ctx**，
-	// 子进程卡住时没有总时限兜底会让 initDone 永不关闭，
+	// 远端 MCP 服务无响应时，Start/Initialize 可能长时间不回，
+	// 没有总时限兜底会让 initDone 永不关闭，
 	// 进而把等它的 sweep() 和 Close() 一起挂死。
 	initHardTimeout = 60 * time.Second
 	// maxTimeoutSeconds 超时配置上限。超过后 int64 纳秒会溢出导致
@@ -107,7 +107,7 @@ func (e *mcpPoolEntry) idleFor(now time.Time) time.Duration {
 }
 
 // Acquire 借用连接。返回 false 表示条目已被回收，调用方不应再使用该连接。
-// 借用期间 sweep 不会关闭它——关闭 stdio 会直接终止子进程，中断在途的 tools/call。
+// 借用期间 sweep 不会关闭它——关闭连接会中断在途的 tools/call。
 func (e *mcpPoolEntry) Acquire() bool {
 	e.leaseMu.Lock()
 	defer e.leaseMu.Unlock()
@@ -215,7 +215,7 @@ func (p *MCPClientPool) removeIfSame(hash string, entry *mcpPoolEntry) bool {
 
 // sweep 回收空闲超时的连接，并在超过容量上限时淘汰最久未使用的连接。
 // 关键点：只回收「已摘出池子且无借用者」的条目，避免在途 tools/call 被掐断。
-// 关闭动作放在锁外执行，避免 Close（终止 stdio 子进程）阻塞其它 goroutine 取连接。
+// 关闭动作放在锁外执行，避免 Close 阻塞其它 goroutine 取连接。
 func (p *MCPClientPool) sweep() {
 	now := time.Now()
 
@@ -291,16 +291,16 @@ func (p *MCPClientPool) initClient(entry *mcpPoolEntry, cfg *tool.MCPProviderCon
 		entry.client = res.client
 		entry.initErr = res.err
 	case <-time.After(initHardTimeout):
-		// doInit 仍在跑（通常是 stdio 子进程卡住），不再等待它，
+		// doInit 仍在跑（如远端服务无响应），不再等待它，
 		// 否则等待方会一直挂在 initDone 上。initDone 仍会按时关闭，Close/sweep 得以有界返回。
 		entry.initErr = fmt.Errorf("MCP 客户端初始化耗时超过 %v 未返回", initHardTimeout)
-		logger.Warnf("[MCPClientPool] MCP 初始化超时，可能存在僵尸子进程: transport=%s, command=%s",
-			cfg.Transport, cfg.Command)
+		logger.Warnf("[MCPClientPool] MCP 初始化超时: transport=%s, url=%s",
+			cfg.Transport, cfg.URL)
 		// 兜底清理：doInit 稍后才成功返回时，这个 client 没有任何 entry 接管，
-		// 不显式关闭就会一直泄漏（含 stdio 子进程），因此在这里补收并关闭。
+		// 不显式关闭就会一直泄漏，因此在这里补收并关闭。
 		go func() {
 			if res := <-resCh; res.client != nil {
-				logger.Warnf("[MCPClientPool] 关闭初始化超时后迟到的 MCP 客户端: command=%s", cfg.Command)
+				logger.Warnf("[MCPClientPool] 关闭初始化超时后迟到的 MCP 客户端: url=%s", cfg.URL)
 				_ = res.client.Close()
 			}
 		}()
@@ -310,7 +310,7 @@ func (p *MCPClientPool) initClient(entry *mcpPoolEntry, cfg *tool.MCPProviderCon
 		entry.failedAt = time.Now()
 		return
 	}
-	logger.Infof("[MCPClientPool] MCP 客户端初始化成功: transport=%s, command=%s", cfg.Transport, cfg.Command)
+	logger.Infof("[MCPClientPool] MCP 客户端初始化成功: transport=%s, url=%s", cfg.Transport, cfg.URL)
 }
 
 // doInit 真正创建并握手 MCP 客户端，任何失败路径都要保证已创建的资源被清理
@@ -322,15 +322,6 @@ func (p *MCPClientPool) doInit(cfg *tool.MCPProviderConfig) (*client.Client, err
 	var c *client.Client
 	var err error
 	switch cfg.Transport {
-	case "stdio":
-		// client.NewStdioMCPClient 内部会自动调用 Start（启动子进程），不受 ctx 约束
-		envSlice := make([]string, 0, len(cfg.Env))
-		for k, v := range cfg.Env {
-			envSlice = append(envSlice, k+"="+v)
-		}
-		if c, err = client.NewStdioMCPClient(cfg.Command, envSlice, cfg.Args...); err != nil {
-			return nil, fmt.Errorf("创建 stdio MCP 客户端失败: %w", err)
-		}
 	case "sse":
 		if c, err = client.NewSSEMCPClient(cfg.URL); err != nil {
 			return nil, fmt.Errorf("创建 SSE MCP 客户端失败: %w", err)
@@ -392,21 +383,19 @@ func (p *MCPClientPool) Close() error {
 }
 
 // validateMCPConfig 校验 MCP 配置
+// 仅支持 sse/http：stdio 会拉起本机子进程，只在「本地客户端」形态下有意义，
+// 本服务是网页版（进程在服务端），配了只会连到服务端自己的文件系统，故直接拒绝。
 func validateMCPConfig(cfg *tool.MCPProviderConfig) error {
 	if cfg.Transport == "" {
 		return fmt.Errorf("transport 不能为空")
 	}
 	switch cfg.Transport {
-	case "stdio":
-		if cfg.Command == "" {
-			return fmt.Errorf("stdio 模式下 command 不能为空")
-		}
 	case "sse", "http":
 		if cfg.URL == "" {
 			return fmt.Errorf("%s 模式下 url 不能为空", cfg.Transport)
 		}
 	default:
-		return fmt.Errorf("不支持的 transport 类型: %s（仅支持 stdio/sse/http）", cfg.Transport)
+		return fmt.Errorf("不支持的 transport 类型: %s（仅支持 sse/http）", cfg.Transport)
 	}
 	return nil
 }

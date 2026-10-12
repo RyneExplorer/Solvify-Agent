@@ -45,12 +45,24 @@ func TestEffectiveTopK(t *testing.T) {
 }
 
 func TestCandidateLimit(t *testing.T) {
-	if got := (Query{TopK: 3}).candidateLimit(); got != 3*candidateMultiplier {
-		t.Errorf("candidateLimit(TopK=3)=%d 期望 %d", got, 3*candidateMultiplier)
+	if got := (Query{TopK: 3}).candidateLimitWith(defaultCandidateMultiplier); got != 3*defaultCandidateMultiplier {
+		t.Errorf("candidateLimitWith(TopK=3, 默认系数)=%d 期望 %d", got, 3*defaultCandidateMultiplier)
 	}
 	// 兜底必须发生在乘系数**之前**，否则 0*2 仍是 0。
-	if got := (Query{TopK: 0}).candidateLimit(); got != defaultTopK*candidateMultiplier {
-		t.Errorf("candidateLimit(TopK=0)=%d 期望 %d（兜底没生效？）", got, defaultTopK*candidateMultiplier)
+	if got := (Query{TopK: 0}).candidateLimitWith(defaultCandidateMultiplier); got != defaultTopK*defaultCandidateMultiplier {
+		t.Errorf("candidateLimitWith(TopK=0)=%d 期望 %d（兜底没生效？）", got, defaultTopK*defaultCandidateMultiplier)
+	}
+	// 系数 <= 0 必须回落到默认值，而不是让 LIMIT 变成 0（恒空）。
+	// 这一条守的是"没配置"与"配成 0"不能同归一处理。
+	for _, m := range []int{0, -1} {
+		if got := (Query{TopK: 3}).candidateLimitWith(m); got != 3*defaultCandidateMultiplier {
+			t.Errorf("candidateLimitWith(TopK=3, 系数=%d)=%d 期望回落 %d（否则 LIMIT 0 恒空）",
+				m, got, 3*defaultCandidateMultiplier)
+		}
+	}
+	// 收紧候选池：系数 1 ⇒ 只取 TopK 条
+	if got := (Query{TopK: 3}).candidateLimitWith(1); got != 3 {
+		t.Errorf("candidateLimitWith(TopK=3, 系数=1)=%d 期望 3", got)
 	}
 }
 
@@ -71,8 +83,16 @@ func TestSearchArgsCarryEffectiveLimit(t *testing.T) {
 		return v
 	}
 
+	// 参数组装是 *HybridRetriever 的方法（它要用 r.candidateMultiplier），所以要先造一个检索器。
+	// 这里只能走公开构造器：直接写 &HybridRetriever{} 会绕过 `<= 0 回落默认值` 那一步，
+	// 而"没配置"和"配成 0"恰恰是本组要区分的两件事。
+	newRetriever := func(multiplier int) *HybridRetriever {
+		return NewHybridRetriever(HybridRetrieverConfig{CandidateMultiplier: multiplier})
+	}
+
 	t.Run("向量检索", func(t *testing.T) {
-		args := vectorSearchArgs(Query{TopK: 3, KnowledgeBaseIDs: []string{"kb-1"}, UserID: "u-1"}, "VEC")
+		r := newRetriever(defaultCandidateMultiplier)
+		args := r.vectorSearchArgs(Query{TopK: 3, KnowledgeBaseIDs: []string{"kb-1"}, UserID: "u-1"}, "VEC")
 		if len(args) != 5 {
 			t.Errorf("vectorSearchArgs 参数个数=%d 期望 5（与 SQL 里 ? 的个数一致）", len(args))
 		}
@@ -87,27 +107,44 @@ func TestSearchArgsCarryEffectiveLimit(t *testing.T) {
 		if args[2] != "u-1" {
 			t.Errorf("第 3 个参数应是 user_id，实际 %v", args[2])
 		}
-		if got := lastInt(t, "vectorSearchArgs", args); got != 6 {
-			t.Errorf("LIMIT=%d 期望 6", got)
+		if got := lastInt(t, "vectorSearchArgs", args); got != 3*defaultCandidateMultiplier {
+			t.Errorf("LIMIT=%d 期望 %d", got, 3*defaultCandidateMultiplier)
 		}
 		// 回归点：漏传 TopK 时必须是兜底值，不能是 0
-		args = vectorSearchArgs(Query{}, "VEC")
-		if got := lastInt(t, "vectorSearchArgs", args); got != defaultTopK*candidateMultiplier {
-			t.Errorf("漏传 TopK 时 LIMIT=%d 期望 %d（退化回 LIMIT 0 恒空）", got, defaultTopK*candidateMultiplier)
+		args = r.vectorSearchArgs(Query{}, "VEC")
+		if got := lastInt(t, "vectorSearchArgs", args); got != defaultTopK*defaultCandidateMultiplier {
+			t.Errorf("漏传 TopK 时 LIMIT=%d 期望 %d（退化回 LIMIT 0 恒空）", got, defaultTopK*defaultCandidateMultiplier)
+		}
+	})
+
+	t.Run("向量检索_LIMIT跟系数走", func(t *testing.T) {
+		// 收紧候选池（B 方案）就是把这个系数调成 1。
+		// 若某天有人把 `r.candidateMultiplier` 硬编回常量，本断言变红。
+		for _, m := range []int{1, 3} {
+			args := newRetriever(m).vectorSearchArgs(Query{TopK: 4}, "VEC")
+			if got := lastInt(t, "vectorSearchArgs", args); got != 4*m {
+				t.Errorf("系数=%d、TopK=4 时 LIMIT=%d 期望 %d", m, got, 4*m)
+			}
 		}
 	})
 
 	t.Run("关键词检索", func(t *testing.T) {
-		args := keywordSearchArgs(Query{TopK: 3, KnowledgeBaseIDs: []string{"kb-1"}, UserID: "u-1"}, "{a,b}")
-		if len(args) != 6 {
-			t.Errorf("keywordSearchArgs 参数个数=%d 期望 6（与 SQL 里 ? 的个数一致）", len(args))
+		r := newRetriever(defaultCandidateMultiplier)
+		args := r.keywordSearchArgs(Query{TopK: 3, KnowledgeBaseIDs: []string{"kb-1"}, UserID: "u-1"}, "{a,b}")
+		if len(args) != 8 {
+			t.Errorf("keywordSearchArgs 参数个数=%d 期望 8（与 SQL 里 ? 的个数一致）", len(args))
 		}
 		// 逐个对齐 keywordSearchSQL 里 ? 的出现顺序 —— 位置参数一旦错位，
 		// 轻则查不到、重则把 user_id 当知识库 id 用，且只有跑真库才会暴露。
-		//   ?1 打分分母 cardinality(?::text[])   ?2 ANY(?::text[])
-		//   ?3 knowledge_base_id IN (?)          ?4 keywords && ?::text[]
-		//   ?5 user_id = ?                       ?6 LIMIT ?
-		want := []any{"{a,b}", "{a,b}", []string{"kb-1"}, "{a,b}", "u-1", 6}
+		//   ?1 权重模式开关 ?::boolean           ?2 CTE 统计 df 的知识库范围
+		//   ?3 CTE 的 user_id                    ?4 CTE 的词项 unnest(?::text[])
+		//   ?5 knowledge_base_id IN (?)          ?6 keywords && ?::text[]
+		//   ?7 user_id = ?                       ?8 LIMIT ?
+		//
+		// ⚠️ 前 4 个参数全在 CTE 里，写错**不会报错**：例如把 ?1 的布尔和 ?3 的 user_id 调换，
+		// SQL 依然能跑，只是权重要么恒 1、要么按 df 算但 df 算错 —— 两种都静默。
+		want := []any{false, []string{"kb-1"}, "u-1", "{a,b}", []string{"kb-1"}, "{a,b}", "u-1",
+			3 * defaultCandidateMultiplier}
 		for i, w := range want {
 			got := args[i]
 			if s, ok := w.([]string); ok {
@@ -122,9 +159,25 @@ func TestSearchArgsCarryEffectiveLimit(t *testing.T) {
 			}
 		}
 		// 回归点：漏传 TopK 时末位必须是兜底值，不能是 0
-		args = keywordSearchArgs(Query{}, "{a,b}")
-		if got := lastInt(t, "keywordSearchArgs", args); got != defaultTopK*candidateMultiplier {
-			t.Errorf("漏传 TopK 时 LIMIT=%d 期望 %d", got, defaultTopK*candidateMultiplier)
+		args = r.keywordSearchArgs(Query{}, "{a,b}")
+		if got := lastInt(t, "keywordSearchArgs", args); got != defaultTopK*defaultCandidateMultiplier {
+			t.Errorf("漏传 TopK 时 LIMIT=%d 期望 %d", got, defaultTopK*defaultCandidateMultiplier)
+		}
+	})
+
+	t.Run("关键词检索_权重开关跟着配置走", func(t *testing.T) {
+		// A 方案（给罕见词加权）就是把这个开关翻转。
+		// 断言它真的被传进 SQL —— 否则"打开了开关"只是改了个没人读的字段。
+		for _, want := range []bool{false, true} {
+			r := NewHybridRetriever(HybridRetrieverConfig{KeywordIDFWeighted: want})
+			args := r.keywordSearchArgs(Query{TopK: 3}, "{a,b}")
+			got, ok := args[0].(bool)
+			if !ok {
+				t.Fatalf("第 1 个参数应是权重模式开关 bool，实际 %T", args[0])
+			}
+			if got != want {
+				t.Errorf("KeywordIDFWeighted=%v 但传给 SQL 的是 %v", want, got)
+			}
 		}
 	})
 }
@@ -197,5 +250,70 @@ func TestKeywordSearchSQLDoesNotRequireEmbedding(t *testing.T) {
 func TestVectorSearchSQLRequiresEmbedding(t *testing.T) {
 	if !strings.Contains(vectorSearchSQL, "dc.embedding IS NOT NULL") {
 		t.Errorf("向量检索必须要求 chunk 有向量:\n%s", vectorSearchSQL)
+	}
+}
+
+// TestRetrievedChunkVisibilityBoundaryHasSingleSource 断言本包的可见性常量只是
+// entity 那份的**引用**，不是第二份定义。
+//
+// 回归价值：若有人在 rag 里重新写一份 `fmt.Sprintf(... status = 5 ...)`，
+// 两份定义会各自漂移（改一处忘一处），而所有"内容像不像"的断言都看不出有几份。
+func TestRetrievedChunkVisibilityBoundaryHasSingleSource(t *testing.T) {
+	if retrievedChunkVisibilitySQL != entity.RetrievedChunkVisibilitySQL {
+		t.Errorf("rag 的可见性边界与 entity.RetrievedChunkVisibilitySQL 不一致 —— 边界出现了第二个来源")
+	}
+}
+
+// TestReciprocalRankFusionIsTotallyOrdered 用**行为**证明融合段的比较函数是全序：
+// 两条融合分完全相等的结果，返回顺序必须每次都一样，且按 id 裁决。
+//
+// 为什么必须用行为证明：入参来自 map 迭代，顺序本身就随机；纯文本断言看不出
+// "等分时会不会翻"。这里跑 200 次，任何一次顺序不同即失败。
+func TestReciprocalRankFusionIsTotallyOrdered(t *testing.T) {
+	// 两侧权重取同一个值，才能造出真正的等分：两条各在单侧排第 1 ⇒ 融合分相同。
+	r := NewHybridRetriever(HybridRetrieverConfig{VectorWeight: 1, KeywordWeight: 1})
+
+	vectorSide := []scoredChunk{{ID: "zzz"}}
+	keywordSide := []scoredChunk{{ID: "aaa"}}
+
+	first := ""
+	for i := 0; i < 200; i++ {
+		got := r.reciprocalRankFusion(vectorSide, keywordSide)
+		if len(got) != 2 {
+			t.Fatalf("期望 2 条结果，实际 %d 条", len(got))
+		}
+		// 前置条件：两条真的等分。不等分的话这条测试证明不了"等分时确定"。
+		if got[0].Score != got[1].Score {
+			t.Fatalf("前置条件不成立：两条应当等分，实际 %.6f vs %.6f", got[0].Score, got[1].Score)
+		}
+		order := got[0].ID + "," + got[1].ID
+		if i == 0 {
+			first = order
+			continue
+		}
+		if order != first {
+			t.Fatalf("等分时返回顺序不可复现：第 %d 次得到 %s，第 1 次是 %s", i+1, order, first)
+		}
+	}
+	if first != "aaa,zzz" {
+		t.Errorf("等分时应按 id 升序裁决，实际顺序 %s", first)
+	}
+}
+
+// TestReciprocalRankFusionPrefersScoreOverID 是上一条的**对照组**：
+// 分数不同时必须按分数降序，而不是按 id。
+//
+// 没有它，上一条断言可能退化成一个更弱的命题（"结果按 id 排序"）而照样全绿：
+// 这里让 id 更大（zzz）的排在更前的位置，若实现改成按 id 排，本测试立刻变红。
+func TestReciprocalRankFusionPrefersScoreOverID(t *testing.T) {
+	r := NewHybridRetriever(HybridRetrieverConfig{VectorWeight: 1, KeywordWeight: 1})
+
+	// 同侧第 1 名与第 2 名 ⇒ 分数不同；且第 1 名的 id 在字典序上更大。
+	got := r.reciprocalRankFusion([]scoredChunk{{ID: "zzz"}, {ID: "aaa"}}, nil)
+	if len(got) != 2 {
+		t.Fatalf("期望 2 条结果，实际 %d 条", len(got))
+	}
+	if got[0].ID != "zzz" {
+		t.Errorf("分数不同时应按分数降序，首条应为 zzz，实际 %s（是不是变成按 id 排序了？）", got[0].ID)
 	}
 }

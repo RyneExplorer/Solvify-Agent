@@ -68,13 +68,13 @@ func (r *toolProviderRepository) GetByProviderKey(ctx context.Context, toolTypeI
 
 func (r *toolProviderRepository) ListByToolTypeID(ctx context.Context, toolTypeID string) ([]entity.ToolProvider, error) {
 	var providers []entity.ToolProvider
-	err := dbFor(ctx, r.db).Where("tool_type_id = ?", toolTypeID).Order("name ASC").Find(&providers).Error
+	err := dbFor(ctx, r.db).Where("tool_type_id = ?", toolTypeID).Order("name ASC, id").Find(&providers).Error
 	return providers, err
 }
 
 func (r *toolProviderRepository) ListEnabledByToolTypeID(ctx context.Context, toolTypeID string) ([]entity.ToolProvider, error) {
 	var providers []entity.ToolProvider
-	err := dbFor(ctx, r.db).Where("tool_type_id = ? AND is_enabled = ?", toolTypeID, true).Order("name ASC").Find(&providers).Error
+	err := dbFor(ctx, r.db).Where("tool_type_id = ? AND is_enabled = ?", toolTypeID, true).Order("name ASC, id").Find(&providers).Error
 	return providers, err
 }
 
@@ -97,7 +97,7 @@ type MCPServerRow struct {
 func (r *toolProviderRepository) ListMCPProviders(ctx context.Context) ([]MCPServerRow, error) {
 	db := dbFor(ctx, r.db)
 	var providers []entity.ToolProvider
-	if err := db.Where("provider_type = ?", "mcp").Order("name ASC").Find(&providers).Error; err != nil {
+	if err := db.Where("provider_type = ?", "mcp").Order("name ASC, id").Find(&providers).Error; err != nil {
 		return nil, err
 	}
 	if len(providers) == 0 {
