@@ -308,7 +308,7 @@ export function useChat() {
 
   // 选中指定会话并加载消息
   function selectSession(sessionId: string) {
-    if (isLoading.value) return
+    if (isLoading.value || activeSessionId.value === sessionId) return
     interruptedAssistantId = ''
     streamPlan.value = null
     activeSessionId.value = sessionId
