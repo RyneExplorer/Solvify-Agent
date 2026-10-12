@@ -37,10 +37,13 @@ type Client struct {
 
 // NewClient 创建钉钉开放平台客户端
 func NewClient(cfg config.DingTalkConfig) *Client {
+	// 用独立 client 而不是 http.DefaultClient：DefaultClient 是全局单例，
+	// 直接改它的 Transport 会波及进程内所有未显式指定客户端的调用。
+	// 这里不给 Transport 赋值，即沿用 http.DefaultTransport。
 	return &Client{
 		appKey:         strings.TrimSpace(cfg.AppKey),
 		appSecret:      strings.TrimSpace(cfg.AppSecret),
-		httpClient:     http.DefaultClient,
+		httpClient:     &http.Client{},
 		accessTokenURL: defaultAccessTokenURL,
 		apiBaseURL:     defaultAPIBaseURL,
 	}

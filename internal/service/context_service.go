@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -12,71 +11,35 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
-	"solvify-agent/internal/llm"
 	"solvify-agent/internal/model/entity"
-	"solvify-agent/internal/observability"
+	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/logger"
-	"solvify-agent/pkg/stopwords"
 	"solvify-agent/pkg/tokenutil"
 )
 
-// tokenRegexp 用于切分中英文关键词的正则
-var tokenRegexp = regexp.MustCompile(`[\x{4e00}-\x{9fff}]+|[a-zA-Z0-9]+`)
 // contextService 上下文管理服务实现
-
 type contextService struct {
 	messageRepo repository.ChatMessageRepo
 	memoryRepo  repository.UserMemoryRepo
 	summaryRepo repository.SummaryRepo
-	obs         observability.Recorder
-	embedClient *llm.EmbeddingClient
-// NewContextService 创建上下文管理服务
 }
 
+// NewContextService 创建上下文管理服务。
 func NewContextService(
 	messageRepo repository.ChatMessageRepo,
 	memoryRepo repository.UserMemoryRepo,
 	summaryRepo repository.SummaryRepo,
-	obs ...observability.Recorder,
 ) ContextServiceInterface {
-	s := &contextService{
+	return &contextService{
 		messageRepo: messageRepo,
 		memoryRepo:  memoryRepo,
 		summaryRepo: summaryRepo,
 	}
-	if len(obs) > 0 && obs[0] != nil {
-		s.obs = obs[0]
-	}
-	return s
-}
-
-// SetObservability 注入可观测性记录器
-func (s *contextService) SetObservability(obs observability.Recorder) {
-	s.obs = obs
-}
-// SetEmbedClient 注入向量客户端，用于语义相关历史检索
-func (s *contextService) SetEmbedClient(client *llm.EmbeddingClient) {
-	s.embedClient = client
 }
 
 // BuildContext 构建增强后的对话上下文
 func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, currentQuery string, cfg BuildContextConfig, chatModel model.BaseChatModel) (*EnhancedContext, error) {
-	obsOk := s.obs != nil
-	var span *observability.Span
-	if obsOk {
-		// 接住 StartSpan 返回的 newCtx：后面 messageRepo/SummaryRepo 再开子 span 时能正确找到 ctx.build 当 parent。
-		// 之前写成 _, span = StartSpan(ctx, …)，newCtx 被丢了，上下文子链只能靠 span.parent 碰巧挂到根。
-		ctx, span = s.obs.StartSpan(ctx, "ctx.build", observability.ComponentServiceContext, observability.Attrs{
-			"session_id": sessionID,
-			"has_query":  fmt.Sprintf("%t", currentQuery != ""),
-		})
-		defer func() {
-			if span != nil {
-				s.obs.EndSpan(ctx, span, observability.SpanStatusOK, nil, nil)
-			}
-		}()
-	}
 	if cfg.MaxTokens <= 0 {
 		cfg.MaxTokens = 1500
 	}
@@ -94,23 +57,21 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 	}
 
 	type loadResult struct {
-		summary  *entity.ChatSummary
-		memories []entity.UserMemory
-		recent   []entity.ChatMessage
-		relevant []entity.ChatMessage
-		err      error
+		summary   *entity.ChatSummary
+		memories  []entity.UserMemory
+		recent    []entity.ChatMessage
+		kwRecall  []entity.ChatMessage
+		vecRecall []entity.ChatMessage
+		err       error
 	}
 
 	// 提前算好关键词——纯计算，直接在主线程做
 	var keywords []string
 	if currentQuery != "" {
-		keywords = cfg.PreExtractedKeywords
-		if len(keywords) == 0 {
-			keywords = extractKeywords(currentQuery)
-		}
+		keywords = extractKeywords(currentQuery)
 	}
 
-	resultCh := make(chan loadResult, 4)
+	resultCh := make(chan loadResult, 5)
 
 	go func() {
 		summary, err := s.summaryRepo.GetBySessionID(ctx, sessionID)
@@ -131,21 +92,41 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 		var relevant []entity.ChatMessage
 		if len(keywords) > 0 {
 			var err error
-			relevant, err = s.messageRepo.SearchRecentByKeywords(ctx, sessionID, keywords, 5)
+			relevant, err = s.messageRepo.SearchRecentByKeywords(ctx, sessionID, keywords, recallTopK)
 			if err != nil {
-				logger.Warnf("检索相关历史失败: %v", err)
+				logger.Warnf("关键词召回失败: %v", err)
 			}
 		}
-		resultCh <- loadResult{relevant: relevant}
+		resultCh <- loadResult{kwRecall: relevant}
+	}()
+
+	// 语义召回通道：查询侧向量由调用方传入（决策 ① = 当前问题）。
+	// 两路都失败时只剩近期对话，仍能正常回答 —— 召回是补充通道，不是主通道。
+	go func() {
+		var recalled []entity.ChatMessage
+		if len(cfg.QueryEmbedding) > 0 {
+			vec := make([]float32, len(cfg.QueryEmbedding))
+			for i, v := range cfg.QueryEmbedding {
+				vec[i] = float32(v)
+			}
+			matched, err := s.messageRepo.SearchRecentByVector(ctx, sessionID, vec, recallTopK, 0)
+			if err != nil {
+				logger.Warnf("语义召回失败（关键词通道不受影响）: %v", err)
+			} else {
+				recalled = matched
+			}
+		}
+		resultCh <- loadResult{vecRecall: recalled}
 	}()
 
 	var (
-		summary  *entity.ChatSummary
-		memories []entity.UserMemory
-		recent   []entity.ChatMessage
-		relevant []entity.ChatMessage
+		summary   *entity.ChatSummary
+		memories  []entity.UserMemory
+		recent    []entity.ChatMessage
+		kwRecall  []entity.ChatMessage
+		vecRecall []entity.ChatMessage
 	)
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 5; i++ {
 		r := <-resultCh
 		if r.err != nil {
 			logger.Warnf("加载上下文组件失败: %v", r.err)
@@ -160,35 +141,116 @@ func (s *contextService) BuildContext(ctx context.Context, userID, sessionID, cu
 		if r.recent != nil {
 			recent = r.recent
 		}
-		if r.relevant != nil {
-			relevant = r.relevant
+		if r.kwRecall != nil {
+			kwRecall = r.kwRecall
+		}
+		if r.vecRecall != nil {
+			vecRecall = r.vecRecall
 		}
 	}
 
-	history := mergeMessages(recent, relevant)
-	history = s.applySummary(history, summary)
-	history = truncateHistoryByTokens(history, cfg.MaxTokens, cfg.ModelName)
+	// ── 两个容器各自裁剪，不合并后再裁 ──
+	// 旧顺序是「合并 → 摘要过滤 → 从尾部裁」，而召回的必然是老消息（排在头部），
+	// 于是每次都被第一个裁掉：语义召回接上了也没有实际效果。
+	recentBudget, recallBudget := splitHistoryBudget(cfg.MaxTokens)
+	history := truncateHistoryByTokens(s.applySummary(recent, summary), recentBudget, cfg.ModelName)
+	recall := buildRecallContainer(kwRecall, vecRecall, recallBudget, cfg.ModelName)
 	memories = truncateMemoriesByTokens(memories, cfg.MemoryBudget, cfg.ModelName)
-
-	if obsOk && span != nil {
-		if span.Attrs == nil {
-			span.Attrs = observability.Attrs{}
-		}
-		span.Attrs["history_n"] = len(history)
-		span.Attrs["memories_n"] = len(memories)
-		span.Attrs["has_summary"] = summary != nil
-	}
 
 	return &EnhancedContext{
 		History:         history,
+		RecallHistory:   recall,
 		Summary:         summary,
 		Memories:        memories,
-		HistoryBudget:   cfg.MaxTokens,
+		HistoryBudget:   recentBudget,
+		RecallBudget:    recallBudget,
 		RetrievalBudget: cfg.RetrievalBudget,
 	}, nil
 }
-// SummarizeSession 对会话生成或更新摘要
 
+// recallTopK 单条召回通道取多少条候选。两条通道的候选合并去重后再按预算裁。
+const recallTopK = 5
+
+// summaryTailKeep 摘要永远不覆盖末尾这么多条消息（它们以原文留在历史里）。
+const summaryTailKeep = 5
+
+// summaryMinSegment 少于这么多条就不值得摘要：压缩损耗大于收益。
+const summaryMinSegment = 5
+
+// summaryMaxInputTokens 送进摘要模型的那段对话的 token 上限。
+//
+// 超了必须截，原因是硬性的：SummarizeSession 跑在**请求关键路径之外的**后台协程里，
+// 而它调用的是与主链路同一个 chatModel。一段 30000 token 的对话摘要请求会把模型
+// 打到接近窗口上限，既可能直接报错，也会和用户的正常请求抢配额 —— 表现为
+// 「用户问得好好的，突然收到一次上下文超长的错误」。
+//
+// 截断策略是**保留最近的一段**（用户刚说的内容比几十轮前的更重要），
+// 与 truncateHistoryByTokens 的取舍一致。
+const summaryMaxInputTokens = 6000
+
+// recallBudgetRatio 是「相关历史」容器占历史总预算的比例。
+// 近期对话是必留的（当前这轮的问题与紧跟其后的答案），召回只是补充，所以大头留给近期；
+// 剩下的这一份在默认预算下够放 5~8 条片段。
+const recallBudgetRatio = 0.35
+
+// splitHistoryBudget 把历史总预算拆成「近期对话 + 相关历史」两份。
+func splitHistoryBudget(total int) (recent, recall int) {
+	if total <= 0 {
+		return 0, 0
+	}
+	recall = int(float64(total) * recallBudgetRatio)
+	if recall < 1 && total > 1 {
+		recall = 1
+	}
+	if recall >= total {
+		recall = total / 2
+	}
+	return total - recall, recall
+}
+
+// buildRecallContainer 合并关键词与语义两路召回结果，按自己的预算裁剪。
+//
+// 与近期对话分开预算的原因只有一个：老消息在「按时间从尾部裁」里必然先被裁。
+// 这里反过来——**按相关度保留最靠前的**，被裁掉的永远是最不相关的那几条。
+func buildRecallContainer(kw, vec []entity.ChatMessage, budget int, modelName string) []entity.ChatMessage {
+	if budget <= 0 {
+		return nil
+	}
+	// 语义召回在前、关键词在后：语义分更可信，同一条被两路命中时靠前者胜出。
+	merged := dedupMessages(append(append([]entity.ChatMessage{}, vec...), kw...))
+	if len(merged) == 0 {
+		return nil
+	}
+
+	// 逐条累加，超预算即停（保留的是最相关的前缀）。
+	out := make([]entity.ChatMessage, 0, len(merged))
+	total := 0
+	for _, m := range merged {
+		cost := tokenutil.CountTokens(m.Content, modelName)
+		if total+cost > budget {
+			break
+		}
+		total += cost
+		out = append(out, m)
+	}
+	return out
+}
+
+// dedupMessages 按 ID 去重并按时间正序排列（同值时按 ID 裁决，保证全序）。
+func dedupMessages(msgs []entity.ChatMessage) []entity.ChatMessage {
+	seen := make(map[string]struct{}, len(msgs))
+	out := make([]entity.ChatMessage, 0, len(msgs))
+	for _, m := range msgs {
+		if _, ok := seen[m.ID]; ok {
+			continue
+		}
+		seen[m.ID] = struct{}{}
+		out = append(out, m)
+	}
+	return sortMessagesByTime(out)
+}
+
+// SummarizeSession 对会话生成或更新摘要
 func (s *contextService) SummarizeSession(ctx context.Context, sessionID string, chatModel model.BaseChatModel) (summary *entity.ChatSummary, retErr error) {
 	if s == nil {
 		return nil, nil
@@ -210,22 +272,6 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 		ctx = context.Background()
 	}
 
-	obsOk := s.obs != nil
-	var span *observability.Span
-	if obsOk {
-		ctx, span = s.obs.StartSpan(ctx, "ctx.summarize", observability.ComponentServiceContext, observability.Attrs{"session_id": sessionID})
-		defer func() {
-			if span != nil {
-				status := observability.SpanStatusOK
-				var errVal error
-				if retErr != nil {
-					status = observability.SpanStatusError
-					errVal = retErr
-				}
-				s.obs.EndSpan(ctx, span, status, errVal, nil)
-			}
-		}()
-	}
 	messages, err := s.messageRepo.FindBySessionIDForContext(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("加载会话消息失败: %w", err)
@@ -254,25 +300,38 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 		return existing, nil
 	}
 
-	endIdx := len(messages) - 5
+	// 覆盖边界：**摘要只覆盖 [startIdx, endIdx)**，末尾 5 条永远留在明文历史里。
+	//
+	// 为什么要留尾巴：摘要是对话的低保真压缩，最近几轮的具体措辞（用户刚给的参数、
+	// 上一句的指代对象）经过一次压缩就会失真，而这几轮恰恰是模型最该看到原文的。
+	// 留 5 条 ≈ 最近 2~3 轮，是个经验值：少于 2 轮接不上话，多了摘要就名存实亡。
+	//
+	// ⚠️ 这里用 endIdx（开区间）而不是「最后一条的下标」：写错一个 off-by-one 会让
+	// 最后一条消息既在摘要里、又在明文历史里，模型看到同一段对话出现两次。
+	// CoveredCount 记的是区间长度，与 LastMessageID 指向的**那条**保持一致。
+	endIdx := len(messages) - summaryTailKeep
 	if endIdx <= startIdx {
-		endIdx = len(messages)
+		// 尾部就够长时没有可摘要的区间 —— 直接返回已有摘要，不做无意义的重算
+		return existing, nil
 	}
 	if endIdx > len(messages) {
 		endIdx = len(messages)
 	}
 
 	summaryMessages := messages[startIdx:endIdx]
-	if len(summaryMessages) < 5 {
+	if len(summaryMessages) < summaryMinSegment {
 		return existing, nil
 	}
 
-	dialogue := buildDialogueText(summaryMessages)
+	dialogue, ok := clampSummaryInput(buildDialogueText(summaryMessages))
+	if !ok {
+		// 截完连一行都放不下：与其发一次必然失败的请求，不如跳过这一轮，
+		// 等更多消息进来后区间自然变大。
+		logger.Warnf("[Summary] 会话 %s 的待摘要文本在 %d token 内放不下，本轮跳过", sessionID, summaryMaxInputTokens)
+		return existing, nil
+	}
 	summaryText, err := s.generateSummary(ctx, chatModel, dialogue, existing)
 	if err != nil {
-		if obsOk {
-			s.obs.Incr(ctx, "ctx_summary_errors_total", nil, 1)
-		}
 		return nil, fmt.Errorf("生成摘要失败: %w", err)
 	}
 
@@ -294,14 +353,47 @@ func (s *contextService) SummarizeSession(ctx context.Context, sessionID string,
 	if err := s.summaryRepo.Upsert(ctx, newSummary); err != nil {
 		return nil, fmt.Errorf("保存摘要失败: %w", err)
 	}
-	if obsOk {
-		s.obs.Incr(ctx, "ctx_summary_updates_total", nil, 1)
-	}
-
 	return newSummary, nil
-// ExtractMemories 从消息中提取用户长期记忆
 }
 
+// clampSummaryInput 把待摘要的对话文本压到 summaryMaxInputTokens 以内。
+//
+// 保留**尾部**（最近的说法）而不是头部：一轮对话里用户最新的要求、模型最后给的
+// 结论，信息量集中在末尾；开头常常是已被后续内容推翻的中间结论。
+//
+// 返回 false 表示「压完已经不成其为文本」，调用方应当跳过这一轮而不是发空请求 ——
+// 与其让摘要请求必然失败（并把同一个错误报到用户那次聊天的日志里），不如等
+// 区间自然变大再摘要。
+//
+// ⚠️ 按 rune 而不是按 token 估：tokenutil 的精确切分要求能定位 token 边界，
+// 而这里是在**已拼好的对话文本**上截断，从中间切断会把一句话劈成两半；
+// 用 0.75 的比例给「rune→token」的波动留余量，宁可少截也不让请求超窗。
+func clampSummaryInput(dialogue string) (string, bool) {
+	const runeToTokenRatio = 0.75
+
+	if strings.TrimSpace(dialogue) == "" {
+		return "", false
+	}
+	if tokenutil.CountTokens(dialogue, "") <= summaryMaxInputTokens {
+		return dialogue, true
+	}
+
+	runes := []rune(dialogue)
+	keep := int(float64(summaryMaxInputTokens) * runeToTokenRatio)
+	if keep < 1 {
+		keep = 1
+	}
+	if keep >= len(runes) {
+		return dialogue, true
+	}
+	cut := strings.TrimSpace(string(runes[len(runes)-keep:]))
+	if cut == "" {
+		return "", false
+	}
+	return cut, true
+}
+
+// ExtractMemories 从消息中提取用户长期记忆
 func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID string, messages []entity.ChatMessage, chatModel model.BaseChatModel) (memories []entity.UserMemory, retErr error) {
 	if s == nil {
 		return nil, nil
@@ -323,25 +415,6 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 		ctx = context.Background()
 	}
 
-	obsOk := s.obs != nil
-	var span *observability.Span
-	if obsOk {
-		ctx, span = s.obs.StartSpan(ctx, "ctx.extract_memories", observability.ComponentServiceContext, observability.Attrs{
-			"user_id": userID,
-			"msgs_n":  fmt.Sprintf("%d", len(messages)),
-		})
-		defer func() {
-			if span != nil {
-				status := observability.SpanStatusOK
-				var errVal error
-				if retErr != nil {
-					status = observability.SpanStatusError
-					errVal = retErr
-				}
-				s.obs.EndSpan(ctx, span, status, errVal, nil)
-			}
-		}()
-	}
 	if len(messages) == 0 {
 		return nil, nil
 	}
@@ -349,9 +422,6 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 	dialogue := buildDialogueText(messages)
 	rawMemories, err := s.generateMemories(ctx, chatModel, dialogue)
 	if err != nil {
-		if obsOk {
-			s.obs.Incr(ctx, "ctx_memory_errors_total", nil, 1)
-		}
 		return nil, fmt.Errorf("提取记忆失败: %w", err)
 	}
 
@@ -372,10 +442,6 @@ func (s *contextService) ExtractMemories(ctx context.Context, userID, sessionID 
 		}
 		result = append(result, m)
 	}
-	if obsOk {
-		s.obs.Incr(ctx, "ctx_memory_extracted_total", nil, int64(len(result)))
-	}
-
 	return result, nil
 }
 
@@ -518,58 +584,25 @@ func buildDialogueText(messages []entity.ChatMessage) string {
 	return sb.String()
 }
 
-// extractKeywords 从查询中提取关键词，过滤停用词
+// maxHistoryKeywords 「相关历史」通道最多使用的关键词条数：每个词项都会变成一个 ILIKE 条件
+const maxHistoryKeywords = 5
+
+// extractKeywords 提取「相关历史」通道用的关键词。
+//
+// 必须复用 rag.ExtractKeywords（gse 分词），不要在这里另写一套切词规则：
+// 旧实现用 tokenRegexp = [\x{4e00}-\x{9fff}]+ 切分，会把一整段连续中文当成**一个**词项，
+// 于是 SearchRecentByKeywords 真正执行的是 content ILIKE '%那网络安全这块你们是怎么做的%'
+// —— 历史消息里不可能出现这么长的整串，一条都匹配不上，「相关历史」通道等于空转；
+// gse 切出的短词（"网络安全"）才可能命中。
+//
+// 第二个理由是口径统一：关键词召回与知识库检索用的是同一套切词规则，
+// 两条通道的「词」才是一回事；否则同一个词在两路里指不同的东西。
 func extractKeywords(query string) []string {
-	parts := tokenRegexp.FindAllString(query, -1)
-
-	seen := make(map[string]struct{})
-	var keywords []string
-	for _, p := range parts {
-		p = strings.TrimSpace(strings.ToLower(p))
-		if p == "" {
-			continue
-		}
-		if stopwords.IsStopWord(p) {
-			continue
-		}
-		if len([]rune(p)) < 2 {
-			continue
-		}
-		if isChineseString(p) && allRunesAreStopWord(p) {
-			continue
-		}
-		if _, ok := seen[p]; ok {
-			continue
-		}
-		seen[p] = struct{}{}
-		keywords = append(keywords, p)
-	}
-
-	// 最多返回 5 个关键词
-	if len(keywords) > 5 {
-		keywords = keywords[:5]
+	keywords := rag.ExtractKeywords(query)
+	if len(keywords) > maxHistoryKeywords {
+		keywords = keywords[:maxHistoryKeywords]
 	}
 	return keywords
-}
-
-// isChineseString 判断字符串是否全部由中文组成
-func isChineseString(s string) bool {
-	for _, r := range s {
-		if r < '\u4e00' || r > '\u9fff' {
-			return false
-		}
-	}
-	return true
-}
-
-// allRunesAreStopWord 判断字符串中每个 rune（单字）是否都是停用词
-func allRunesAreStopWord(s string) bool {
-	for _, r := range s {
-		if !stopwords.IsStopWord(string(r)) {
-			return false
-		}
-	}
-	return true
 }
 
 // truncateMemoriesByTokens 按真 BPE token 预算截断记忆，优先保留"重要度+更新时间"综合靠前的。
@@ -639,27 +672,12 @@ func truncateMemoriesByTokens(memories []entity.UserMemory, maxTokens int, model
 }
 
 // mergeMessages 合并两组消息并去重，按时间排序
+//
+// 已无生产调用者（相关历史改成独立容器后由 dedupMessages 承担），
+// 仅保留给既有测试 —— 删掉它会让「同创建时间按 ID 裁决」这条规则失去唯一的测试锚点。
 func mergeMessages(a, b []entity.ChatMessage) []entity.ChatMessage {
-	seen := make(map[string]struct{})
-	var result []entity.ChatMessage
-
-	add := func(msgs []entity.ChatMessage) {
-		for _, m := range msgs {
-			if _, ok := seen[m.ID]; ok {
-				continue
-			}
-			seen[m.ID] = struct{}{}
-			result = append(result, m)
-		}
-	}
-
-	add(a)
-	add(b)
-
-	// 按创建时间排序
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].CreatedAt.Before(result[j].CreatedAt)
-	})
-
-	return result
+	merged := make([]entity.ChatMessage, 0, len(a)+len(b))
+	merged = append(merged, a...)
+	merged = append(merged, b...)
+	return dedupMessages(merged)
 }

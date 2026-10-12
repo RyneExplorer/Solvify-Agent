@@ -23,6 +23,7 @@ type DocumentServiceInterface interface {
 	VersionDetail(ctx context.Context, userID, documentID, versionID string) (dto.DocumentVersionDetailResponse, error)
 	CreateVersion(ctx context.Context, userID, documentID string, req requestdto.CreateDocumentVersionRequest) (dto.DocumentProcessingJobResponse, error)
 	Reindex(ctx context.Context, userID, documentID string) (dto.DocumentProcessingJobResponse, error)
+	ChunkDetail(ctx context.Context, userID, chunkID string) (dto.ChunkDetailResponse, error)
 }
 
 // DocumentPreview 描述原始文件预览信息

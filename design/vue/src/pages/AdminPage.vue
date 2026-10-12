@@ -144,7 +144,10 @@
     <div v-if="activeTab === 'tools'">
       <div class="flex justify-between mb-4">
         <SearchInput v-model="toolSearch" placeholder="搜索工具类型..." wrapper-class="w-80" />
-        <AppButton @click="openToolTypeModal()">+ 添加工具类型</AppButton>
+        <div class="flex gap-2">
+          <AppButton variant="secondary" @click="cleanupEmptyToolTypes">清理空工具类型</AppButton>
+          <AppButton @click="openToolTypeModal()">+ 添加工具类型</AppButton>
+        </div>
       </div>
       <AppCard class="!p-0 overflow-hidden">
         <table class="w-full text-sm border-collapse">
@@ -192,7 +195,8 @@
             <tr class="bg-slate-50 border-b border-slate-200">
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">名称</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">Provider Key</th>
-              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">描述</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">类型</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">来源</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">状态</th>
               <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">操作</th>
             </tr>
@@ -201,13 +205,39 @@
             <tr v-for="p in toolProviders" :key="p.id" class="border-b border-slate-100 last:border-b-0">
               <td class="px-4 py-3 font-medium text-slate-900">{{ p.name }}</td>
               <td class="px-4 py-3 text-slate-900">{{ p.provider_key }}</td>
-              <td class="px-4 py-3 text-slate-900">{{ p.description || '-' }}</td>
+              <td class="px-4 py-3">
+                <AppBadge :variant="providerTypeBadgeVariant(p.provider_type)">{{ providerTypeText(p.provider_type) }}</AppBadge>
+              </td>
+              <td class="px-4 py-3">
+                <AppBadge v-if="p.is_system" variant="blue">系统预置</AppBadge>
+                <AppBadge v-else variant="neutral">管理员配置</AppBadge>
+              </td>
               <td class="px-4 py-3"><AppBadge :variant="p.is_enabled ? 'success' : 'neutral'">{{ p.is_enabled ? '启用' : '停用' }}</AppBadge></td>
               <td class="px-4 py-3">
                 <div class="flex items-center gap-1">
-                  <AppButton variant="ghost" size="sm" @click="openToolProviderModal(p)">编辑</AppButton>
-                  <AppButton variant="ghost" size="sm" @click="toggleToolProviderEnabled(p)">{{ p.is_enabled ? '停用' : '启用' }}</AppButton>
-                  <AppButton variant="ghost" size="sm" class="text-red-600 hover:text-red-700 hover:bg-red-50" @click="deleteToolProvider(p.id)">删除</AppButton>
+                  <AppButton
+                    variant="ghost" size="sm"
+                    :disabled="p.is_system"
+                    :title="p.is_system ? '系统预置供应商不支持编辑' : ''"
+                    @click="openToolProviderModal(p)"
+                  >编辑</AppButton>
+                  <AppButton
+                    variant="ghost" size="sm"
+                    :disabled="p.is_system"
+                    :title="p.is_system ? '系统预置供应商不支持启停（由配置文件管理）' : ''"
+                    @click="toggleToolProviderEnabled(p)"
+                  >{{ p.is_enabled ? '停用' : '启用' }}</AppButton>
+                  <AppButton
+                    variant="ghost" size="sm"
+                    @click="quickTestToolProvider(p)"
+                  >测试</AppButton>
+                  <AppButton
+                    variant="ghost" size="sm"
+                    :disabled="p.is_system"
+                    :title="p.is_system ? '系统预置供应商不支持删除（修改配置文件后会自动删除）' : ''"
+                    class="text-red-600 hover:text-red-700 hover:bg-red-50 disabled:!text-slate-300 disabled:hover:!bg-transparent"
+                    @click="deleteToolProvider(p.id)"
+                  >删除</AppButton>
                 </div>
               </td>
             </tr>
@@ -216,280 +246,74 @@
       </AppCard>
     </div>
 
-    <!-- Observability tab -->
-    <div v-if="activeTab === 'observability'">
-      <div class="flex border-b border-slate-200 mb-6">
-        <button
-          v-for="t in obsTabs" :key="t.key"
-          @click="activeObsTab = t.key"
-          :class="[
-            'px-4 py-2.5 text-sm border-b-2 transition-colors cursor-pointer whitespace-nowrap',
-            activeObsTab === t.key
-              ? 'text-slate-900 font-medium border-slate-900'
-              : 'text-slate-400 border-transparent hover:text-slate-600'
-          ]"
-        >{{ t.label }}</button>
+    <!-- MCP 服务器管理 -->
+    <div v-if="activeTab === 'mcpServers'">
+      <div class="flex justify-between mb-4">
+        <span class="text-sm text-slate-500">全部 MCP 供应商（含其所属工具类型与工具清单）</span>
+        <AppButton variant="secondary" size="sm" @click="loadMCPServers">刷新</AppButton>
       </div>
-
-      <!-- 指标 -->
-      <div v-if="activeObsTab === 'metrics'">
-        <div class="flex justify-between items-center mb-4">
-          <div>
-            <h2 class="text-sm font-semibold text-slate-900">实时指标快照</h2>
-            <p class="text-xs text-slate-400 mt-0.5">采集时间：{{ obsMetrics?.ts ? formatDate(obsMetrics.ts) : '-' }}</p>
-          </div>
-          <AppButton size="sm" @click="loadObsMetrics" :loading="obsMetricsLoading">刷新</AppButton>
-        </div>
-        <div class="grid grid-cols-4 gap-4 mb-6">
-          <StatCard
-            title="总请求数"
-            :value="metricsTotalRequestsText"
-            hint="累计请求计数（requests_total 等指标）"
-            accent="blue"
-          />
-          <StatCard
-            title="错误率"
-            :value="metricsErrorRateText"
-            hint="错误请求占总请求的比例"
-            accent="rose"
-          />
-          <StatCard
-            title="P95 平均耗时"
-            :value="metricsP95Text + (metricsP95Text !== '-' ? ' ms' : '')"
-            hint="95% 请求的耗时上限估算"
-            accent="amber"
-          />
-          <StatCard
-            title="采样率"
-            :value="metricsSamplingRateText"
-            hint="Traces 默认采样比例"
-            accent="emerald"
-          />
-        </div>
-        <div class="space-y-5">
-          <section>
-            <div class="flex items-center justify-between mb-2">
-              <h3 class="text-[13px] font-semibold text-slate-700">Counters (累计计数)</h3>
-              <span class="text-xs text-slate-400">{{ obsMetrics?.counters?.length || 0 }} 个</span>
-            </div>
-            <AppCard class="!p-0 overflow-hidden">
-              <table v-if="obsMetrics?.counters?.length" class="w-full text-sm border-collapse">
-                <thead>
-                  <tr class="bg-slate-50 border-b border-slate-200">
-                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">指标名</th>
-                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">标签</th>
-                    <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">当前值</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <template v-for="m in obsMetrics.counters" :key="m.name">
-                    <tr v-for="(s, i) in m.samples" :key="m.name + '_' + i" class="border-b border-slate-100 last:border-b-0 hover:bg-slate-50/40">
-                      <td v-if="i === 0" :rowspan="m.samples.length" class="px-4 py-2.5 font-mono text-xs align-top text-slate-700">
-                        <div class="font-medium text-slate-900">{{ m.name }}</div>
-                        <div v-if="m.help" class="mt-1 text-[11px] text-slate-400">{{ m.help }}</div>
-                      </td>
-                      <td class="px-4 py-2.5 text-xs text-slate-600 align-top">
-                        <div v-if="s.labels && Object.keys(s.labels).length" class="flex flex-wrap gap-1">
-                          <span v-for="(v, k) in s.labels" :key="k" class="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 font-mono text-[11px]">{{ k }}={{ v }}</span>
-                        </div>
-                        <span v-else class="text-slate-300">-</span>
-                      </td>
-                      <td class="px-4 py-2.5 text-right text-slate-900 font-mono tabular-nums">{{ s.value }}</td>
-                    </tr>
-                  </template>
-                </tbody>
-              </table>
-              <div v-else class="px-4 py-10 text-center text-sm text-slate-400">暂无 Counters</div>
-            </AppCard>
-          </section>
-
-          <section>
-            <div class="flex items-center justify-between mb-2">
-              <h3 class="text-[13px] font-semibold text-slate-700">Gauges (瞬时值)</h3>
-              <span class="text-xs text-slate-400">{{ obsMetrics?.gauges?.length || 0 }} 个</span>
-            </div>
-            <AppCard class="!p-0 overflow-hidden">
-              <table v-if="obsMetrics?.gauges?.length" class="w-full text-sm border-collapse">
-                <thead>
-                  <tr class="bg-slate-50 border-b border-slate-200">
-                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">指标名</th>
-                    <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">标签</th>
-                    <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">当前值</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <template v-for="m in obsMetrics.gauges" :key="m.name">
-                    <tr v-for="(s, i) in m.samples" :key="m.name + '_' + i" class="border-b border-slate-100 last:border-b-0 hover:bg-slate-50/40">
-                      <td v-if="i === 0" :rowspan="m.samples.length" class="px-4 py-2.5 font-mono text-xs align-top text-slate-700">
-                        <div class="font-medium text-slate-900">{{ m.name }}</div>
-                        <div v-if="m.help" class="mt-1 text-[11px] text-slate-400">{{ m.help }}</div>
-                      </td>
-                      <td class="px-4 py-2.5 text-xs text-slate-600 align-top">
-                        <div v-if="s.labels && Object.keys(s.labels).length" class="flex flex-wrap gap-1">
-                          <span v-for="(v, k) in s.labels" :key="k" class="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 font-mono text-[11px]">{{ k }}={{ v }}</span>
-                        </div>
-                        <span v-else class="text-slate-300">-</span>
-                      </td>
-                      <td class="px-4 py-2.5 text-right text-slate-900 font-mono tabular-nums">{{ s.value }}</td>
-                    </tr>
-                  </template>
-                </tbody>
-              </table>
-              <div v-else class="px-4 py-10 text-center text-sm text-slate-400">暂无 Gauges</div>
-            </AppCard>
-          </section>
-
-          <section>
-            <div class="flex items-center justify-between mb-2">
-              <h3 class="text-[13px] font-semibold text-slate-700">Histograms (分布)</h3>
-              <span class="text-xs text-slate-400">{{ obsMetrics?.histograms?.length || 0 }} 个</span>
-            </div>
-            <div v-if="obsMetrics?.histograms?.length" class="space-y-3">
-              <AppCard v-for="m in obsMetrics.histograms" :key="m.name">
-                <div class="flex items-start justify-between mb-3">
-                  <div>
-                    <div class="font-mono text-sm font-semibold text-slate-900">{{ m.name }}</div>
-                    <div v-if="m.help" class="text-[11px] text-slate-400 mt-0.5">{{ m.help }}</div>
-                  </div>
-                  <div class="text-right">
-                    <div class="text-[11px] text-slate-400">样本总数</div>
-                    <div class="font-mono text-slate-900 tabular-nums">{{ m.samples.reduce((a, b) => a + b.count, 0) }}</div>
-                  </div>
+      <AppCard class="!p-0 overflow-hidden">
+        <table class="w-full text-sm border-collapse">
+          <thead>
+            <tr class="bg-slate-50 border-b border-slate-200">
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">名称</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">所属工具类型</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">Provider Key</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">来源</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">状态</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">工具数</th>
+              <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-3">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="s in mcpServers" :key="s.id" class="border-b border-slate-100 last:border-b-0">
+              <td class="px-4 py-3">
+                <div class="font-medium text-slate-900">{{ s.name }}</div>
+                <div class="text-xs text-slate-400 mt-0.5 max-w-xs truncate">{{ s.description || '暂无描述' }}</div>
+              </td>
+              <td class="px-4 py-3">
+                <div class="text-slate-900">{{ s.tool_type_name }}</div>
+                <div class="text-xs text-slate-400 font-mono">{{ s.tool_type_key }}</div>
+              </td>
+              <td class="px-4 py-3 text-slate-500 font-mono text-xs">{{ s.provider_key }}</td>
+              <td class="px-4 py-3">
+                <AppBadge v-if="s.is_system" variant="blue">系统预置</AppBadge>
+                <AppBadge v-else variant="neutral">管理员配置</AppBadge>
+              </td>
+              <td class="px-4 py-3"><AppBadge :variant="s.is_enabled ? 'success' : 'neutral'">{{ s.is_enabled ? '启用' : '停用' }}</AppBadge></td>
+              <td class="px-4 py-3 text-slate-900">
+                <span v-if="s.mcp_tool_manifest">{{ s.mcp_tool_manifest.length }}</span>
+                <span v-else class="text-slate-400">未探测</span>
+              </td>
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-1">
+                  <AppButton
+                    variant="ghost" size="sm"
+                    :disabled="s.is_system"
+                    :title="s.is_system ? '系统预置供应商不支持编辑' : ''"
+                    @click="openMCPServerEdit(s)"
+                  >编辑</AppButton>
+                  <AppButton
+                    variant="ghost" size="sm"
+                    :disabled="s.is_system"
+                    :title="s.is_system ? '系统预置供应商不支持启停（由配置文件管理）' : ''"
+                    @click="toggleMCPServerEnabled(s)"
+                  >{{ s.is_enabled ? '停用' : '启用' }}</AppButton>
+                  <AppButton variant="ghost" size="sm" @click="probeMCPServer(s)">探测</AppButton>
+                  <AppButton
+                    variant="ghost" size="sm"
+                    :disabled="s.is_system"
+                    :title="s.is_system ? '系统预置供应商不支持删除（修改配置文件后会自动删除）' : ''"
+                    class="text-red-600 hover:text-red-700 hover:bg-red-50 disabled:!text-slate-300 disabled:hover:!bg-transparent"
+                    @click="deleteMCPServer(s.id)"
+                  >删除</AppButton>
                 </div>
-                <div class="space-y-2">
-                  <div v-for="(s, i) in m.samples" :key="i" class="border border-slate-100 rounded-lg p-3">
-                    <div class="flex items-center justify-between mb-2">
-                      <div v-if="s.labels && Object.keys(s.labels).length" class="flex flex-wrap gap-1">
-                        <span v-for="(v, k) in s.labels" :key="k" class="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 font-mono text-[11px]">{{ k }}={{ v }}</span>
-                      </div>
-                      <div class="flex items-center gap-3 text-xs text-slate-500">
-                        <span>总和: <span class="font-mono text-slate-800 tabular-nums">{{ s.sum }}</span></span>
-                        <span>样本数: <span class="font-mono text-slate-800 tabular-nums">{{ s.count }}</span></span>
-                      </div>
-                    </div>
-                    <div class="grid grid-cols-5 gap-1">
-                      <div
-                        v-for="(b, bi) in s.buckets"
-                        :key="bi"
-                        class="flex flex-col items-center justify-center h-16 rounded-md border border-slate-200"
-                        :style="{ background: `linear-gradient(to top, rgba(16, 185, 129, 0.22) ${Math.min(100, s.count ? (b.count / s.count) * 100 : 0)}%, transparent 0)` }"
-                      >
-                        <div class="text-[10px] text-slate-400">≤ {{ b.le }}</div>
-                        <div class="text-[11px] font-mono text-slate-800 tabular-nums">{{ b.count }}</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </AppCard>
-            </div>
-            <div v-else class="AppCard px-4 py-10 text-center text-sm text-slate-400">暂无 Histograms</div>
-          </section>
-        </div>
-      </div>
-
-      <!-- Traces -->
-      <div v-if="activeObsTab === 'traces'">
-        <div class="flex justify-between items-center mb-4">
-          <div class="flex gap-2 items-center flex-wrap">
-            <input
-              v-model="traceQuerySessionId"
-              placeholder="Session ID（留空=全局查询最新）"
-              class="w-[320px] rounded-lg border border-slate-200 bg-slate-50 text-sm px-3 py-2 text-slate-800 outline-none focus:border-slate-800"
-            />
-            <AppButton size="sm" @click="loadSessionTraces" :loading="obsTracesLoading">{{ traceQuerySessionId ? '查询会话' : '拉取最新 Traces' }}</AppButton>
-            <div class="mx-2 w-px h-5 bg-slate-200" />
-            <input
-              v-model="traceQueryTraceId"
-              placeholder="输入 Trace ID 查看详情..."
-              class="w-[320px] rounded-lg border border-slate-200 bg-slate-50 text-sm px-3 py-2 text-slate-800 outline-none focus:border-slate-800"
-            />
-            <AppButton size="sm" variant="outline" @click="openTraceById" :disabled="!traceQueryTraceId">查看 Trace</AppButton>
-          </div>
-        </div>
-        <AppCard class="!p-0 overflow-hidden">
-          <table v-if="obsTraces.length" class="w-full text-sm border-collapse">
-            <thead>
-              <tr class="bg-slate-50 border-b border-slate-200">
-                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">模式</th>
-                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">状态</th>
-                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">链路ID</th>
-                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">用户ID</th>
-                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">会话ID</th>
-                <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">总耗时(ms)</th>
-                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">采样率</th>
-                <th class="text-left uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">创建时间</th>
-                <th class="text-right uppercase tracking-wider text-xs font-medium text-slate-400 px-4 py-2.5">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="t in obsTraces" :key="t.id" class="border-b border-slate-100 last:border-b-0 hover:bg-slate-50/60">
-                <td class="px-4 py-3">
-                  <AppBadge :variant="searchModeBadgeVariant(getSearchMode(t))">{{ searchModeText(getSearchMode(t)) }}</AppBadge>
-                </td>
-                <td class="px-4 py-3">
-                  <AppBadge :variant="traceStatusBadge(t.status)">{{ traceStatusText(t.status, t.error) }}</AppBadge>
-                </td>
-                <td class="px-4 py-3 font-mono text-xs text-slate-700">{{ t.id }}</td>
-                <td class="px-4 py-3 text-xs text-slate-500">{{ t.user_id || '-' }}</td>
-                <td class="px-4 py-3 text-xs text-slate-500">{{ t.session_id || '-' }}</td>
-                <td class="px-4 py-3 text-right font-mono tabular-nums text-slate-800">{{ t.duration_ms }}</td>
-                <td class="px-4 py-3 text-xs text-slate-600">
-                  <AppBadge :variant="t.sampled ? 'success' : 'neutral'">{{ t.sampled ? '✓ 采样' : '✗ 丢弃' }}</AppBadge>
-                  <span class="ml-2 text-slate-400">{{ formatSampleRate(t.sample_rate) }}</span>
-                </td>
-                <td class="px-4 py-3 text-xs text-slate-500">{{ formatDate(t.created_at) }}</td>
-                <td class="px-4 py-3 text-right"><AppButton size="sm" variant="ghost" @click="openTraceDetail(t.id)">查看详情</AppButton></td>
-              </tr>
-            </tbody>
-          </table>
-          <div v-else class="px-4 py-12 text-center text-sm text-slate-400">暂无 Traces，请输入 Session ID 查询</div>
-        </AppCard>
-        <div v-if="obsTracesTotal > obsTracePageSize" class="flex justify-end mt-4">
-          <el-pagination v-model:current-page="obsTracePage" :page-size="obsTracePageSize" :total="obsTracesTotal" layout="prev, pager, next" background />
-        </div>
-      </div>
-    </div>
-
-    <!-- Trace Detail Dialog -->
-    <div v-if="traceDetailVisible" class="fixed inset-0 z-50 flex items-center justify-center">
-      <div class="absolute inset-0 bg-black/30" @click="traceDetailVisible = false" />
-      <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 w-[980px] max-h-[88vh] flex flex-col">
-        <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200 shrink-0">
-          <div>
-            <h3 class="text-lg font-semibold text-slate-900">Trace 详情</h3>
-            <div v-if="obsTraceDetail" class="text-xs text-slate-400 mt-1">
-              <span class="font-mono">{{ obsTraceDetail.id }}</span>
-              <span class="mx-2 text-slate-300">·</span>
-              Session：{{ obsTraceDetail.session_id || '-' }}
-              <span class="mx-2 text-slate-300">·</span>
-              耗时：{{ obsTraceDetail.duration_ms }} ms
-              <span class="mx-2 text-slate-300">·</span>
-              <AppBadge size="sm" :variant="traceStatusBadge(obsTraceDetail.status)">{{ traceStatusText(obsTraceDetail.status, obsTraceDetail.error) }}</AppBadge>
-            </div>
-          </div>
-          <div class="flex items-center gap-2">
-            <button type="button" class="text-xl leading-none text-slate-400 hover:text-slate-600" @click="traceDetailVisible = false">×</button>
-          </div>
-        </div>
-        <div class="p-6 overflow-y-auto">
-          <div v-if="obsTraceDetailLoading" class="py-16 text-center text-sm text-slate-400">加载中...</div>
-          <div v-else-if="!obsTraceDetail" class="py-16 text-center text-sm text-slate-400">未找到该 Trace</div>
-          <div v-else>
-            <div v-if="obsTraceDetail.error" class="mb-4 rounded-xl bg-red-50 border border-red-200 text-red-700 px-4 py-3 text-sm whitespace-pre-wrap">{{ obsTraceDetail.error }}</div>
-            <div class="mb-4">
-              <div class="text-xs text-slate-400 mb-1">Root Attrs</div>
-              <pre class="rounded-lg bg-slate-50 border border-slate-200 p-3 text-[11px] text-slate-700 overflow-auto">{{ JSON.stringify(obsTraceDetail.attrs || {}, null, 2) }}</pre>
-            </div>
-            <div>
-              <div class="text-xs text-slate-400 mb-2">Span Tree</div>
-              <div v-if="obsTraceDetail.span_tree" class="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
-                <trace-root-provider :root="obsTraceDetail.span_tree" />
-              </div>
-              <div v-else class="text-sm text-slate-400 px-3 py-8 text-center rounded-lg bg-slate-50">该 Trace 未记录 span_tree（可能未采样或采样后未写入）</div>
-            </div>
-          </div>
-        </div>
-      </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="!mcpServers.length" class="px-4 py-8 text-center text-sm text-slate-400">暂无 MCP 供应商</div>
+      </AppCard>
     </div>
 
     <!-- 模型弹窗 -->
@@ -639,6 +463,116 @@
             </div>
           </div>
 
+          <!-- MCP 配置 -->
+          <div v-if="toolProviderForm.provider_type === 'mcp'">
+            <div class="flex items-center justify-between mb-1.5">
+              <label class="block text-[13px] font-medium text-slate-600">MCP 服务器配置 <span class="text-red-500">*</span></label>
+              <span v-if="editingToolProvider?.is_system" class="text-xs text-amber-600 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">系统预置</span>
+            </div>
+            <div class="space-y-3 border border-slate-200 rounded-xl p-3 bg-slate-50">
+              <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">传输方式 <span class="text-red-500">*</span></label>
+                <AppSelect v-model="mcpForm.transport" class="w-full">
+                  <el-option value="stdio" label="Stdio (本地进程)" />
+                  <el-option value="sse" label="SSE (远程 HTTP 流)" />
+                  <el-option value="http" label="HTTP (同步接口)" />
+                </AppSelect>
+              </div>
+
+              <!-- Stdio -->
+              <template v-if="mcpForm.transport === 'stdio'">
+                <div>
+                  <label class="block text-xs font-medium text-slate-500 mb-1">启动命令 <span class="text-red-500">*</span></label>
+                  <input v-model="mcpForm.command" placeholder="如：uvx 或 python" class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                </div>
+                <div>
+                  <div class="flex items-center justify-between mb-1">
+                    <label class="text-xs font-medium text-slate-500">命令参数</label>
+                    <button type="button" @click="addMCPStdioArg" class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-0.5 rounded-md hover:bg-slate-50">+ 添加</button>
+                  </div>
+                  <div v-if="!mcpForm.args.length" class="text-xs text-slate-400 px-3 py-2 bg-white rounded-lg border border-slate-200 border-dashed text-center">暂无参数</div>
+                  <div v-for="(a, idx) in mcpForm.args" :key="idx" class="flex items-center gap-2 mb-2">
+                    <input v-model="mcpForm.args[idx]" placeholder="如：mcp-server-gmail" class="flex-1 rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                    <button type="button" @click="removeMCPStdioArg(idx)" class="text-xs text-red-600 hover:text-red-700 px-1">删除</button>
+                  </div>
+                </div>
+                <div>
+                  <div class="flex items-center justify-between mb-1">
+                    <label class="text-xs font-medium text-slate-500">环境变量</label>
+                    <button type="button" @click="addKV(mcpForm.env_rows)" class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-0.5 rounded-md hover:bg-slate-50">+ 添加</button>
+                  </div>
+                  <div v-if="!mcpForm.env_rows.length" class="text-xs text-slate-400 px-3 py-2 bg-white rounded-lg border border-slate-200 border-dashed text-center">暂无</div>
+                  <div v-for="(row, idx) in mcpForm.env_rows" :key="idx" class="flex items-center gap-2 mb-2">
+                    <input v-model="row.key" placeholder="API_KEY" class="flex-1 rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                    <input v-model="row.value" placeholder="value" class="flex-1 rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                    <button type="button" @click="removeKV(mcpForm.env_rows, idx)" class="text-xs text-red-600 hover:text-red-700 px-1">删除</button>
+                  </div>
+                </div>
+              </template>
+
+              <!-- SSE / HTTP -->
+              <template v-else>
+                <div>
+                  <label class="block text-xs font-medium text-slate-500 mb-1">服务端点 URL <span class="text-red-500">*</span></label>
+                  <input
+                    v-model="mcpForm.url"
+                    :placeholder="mcpForm.transport === 'sse' ? 'https://mcp.example.com/sse' : 'https://mcp.example.com/mcp'"
+                    class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900"
+                  />
+                </div>
+                <div>
+                  <div class="flex items-center justify-between mb-1">
+                    <label class="text-xs font-medium text-slate-500">请求 Headers（可选）</label>
+                    <button type="button" @click="addKV(mcpForm.headers_rows)" class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-0.5 rounded-md hover:bg-slate-50">+ 添加</button>
+                  </div>
+                  <div v-if="!mcpForm.headers_rows.length" class="text-xs text-slate-400 px-3 py-2 bg-white rounded-lg border border-slate-200 border-dashed text-center">暂无</div>
+                  <div v-for="(row, idx) in mcpForm.headers_rows" :key="idx" class="flex items-center gap-2 mb-2">
+                    <input v-model="row.key" placeholder="Authorization" class="flex-1 rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                    <input v-model="row.value" placeholder="Bearer xxx" class="flex-1 rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                    <button type="button" @click="removeKV(mcpForm.headers_rows, idx)" class="text-xs text-red-600 hover:text-red-700 px-1">删除</button>
+                  </div>
+                </div>
+              </template>
+
+              <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">超时时间（秒，可选）</label>
+                <input
+                  v-model.number="mcpForm.timeout"
+                  type="number"
+                  min="1"
+                  max="300"
+                  placeholder="默认 30"
+                  class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900"
+                />
+              </div>
+            </div>
+          </div>
+
+          <!-- MCP 工具清单（该 MCP 连接后提供的工具） -->
+          <div v-if="toolProviderForm.provider_type === 'mcp'" class="border border-slate-200 rounded-xl p-3 bg-slate-50">
+            <div class="flex items-center justify-between mb-1">
+              <label class="block text-[13px] font-medium text-slate-600">该 MCP 提供的工具</label>
+              <button
+                type="button"
+                :disabled="mcpProbing"
+                class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-0.5 rounded-md hover:bg-slate-50"
+                @click="autoProbeCurrentMCP(true)"
+              >{{ mcpProbing ? '探测中...' : '重新探测' }}</button>
+            </div>
+            <p class="text-xs text-slate-400 mb-2">打开编辑框时自动探测并保存，展示该 MCP 服务器提供的能力</p>
+            <div v-if="mcpProbing" class="text-xs text-slate-400 py-2">正在连接 MCP 服务器探测工具...</div>
+            <div v-else-if="mcpManifest.length" class="space-y-1 max-h-[200px] overflow-y-auto pr-1">
+              <div v-for="t in mcpManifest" :key="t.name"
+                   class="px-2 py-1.5 rounded-md bg-white border border-slate-200 text-slate-800 text-xs">
+                <div class="font-medium">{{ t.name }}</div>
+                <div v-if="t.description" class="opacity-60 font-normal mt-0.5">{{ t.description }}</div>
+              </div>
+            </div>
+            <div v-else class="text-xs text-slate-400 px-3 py-3 rounded-lg border border-slate-200 border-dashed text-center">
+              尚未探测到工具。点上方“重新探测”，或保存后再次打开会自动探测。
+            </div>
+          </div>
+
           <!-- Config Schema Builder -->
           <div>
             <div class="flex items-center justify-between mb-1.5">
@@ -708,6 +642,18 @@
               <div v-if="toolTestResult.response_time_ms" class="text-xs opacity-70">响应时间: {{ toolTestResult.response_time_ms }}ms</div>
               <div v-if="toolTestResult.error" class="text-xs mt-1 opacity-70">错误: {{ toolTestResult.error }}</div>
               <div v-if="toolTestResult.details" class="text-xs mt-1 opacity-70">详情: {{ toolTestResult.details }}</div>
+
+              <!-- MCP 工具清单 -->
+              <div v-if="toolTestResult.mcp_tool_count" class="mt-3 border-t border-green-200/60 pt-2">
+                <div class="text-xs font-medium opacity-80 mb-1.5">发现 {{ toolTestResult.mcp_tool_count }} 个工具：</div>
+                <div class="flex flex-wrap gap-1.5">
+                  <div v-for="t in toolTestResult.mcp_tools" :key="t.name"
+                       class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/70 border border-green-200 text-green-900 text-xs">
+                    <span class="font-medium">{{ t.name }}</span>
+                    <span v-if="t.description" class="opacity-60 font-normal truncate max-w-[180px]" :title="t.description">・{{ t.description }}</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -715,6 +661,44 @@
           <AppButton variant="secondary" @click="toolProviderModalVisible = false">取消</AppButton>
           <AppButton variant="outline" :disabled="!toolProviderFormValid" :loading="toolTesting" @click="testToolProvider">{{ toolTesting ? '测试中...' : '测试连接' }}</AppButton>
           <AppButton :disabled="!toolProviderFormValid" @click="saveToolProvider">保存</AppButton>
+        </div>
+      </div>
+    </div>
+
+    <!-- 快速测试结果弹窗 -->
+    <div v-if="quickTestModalVisible" class="fixed inset-0 z-50 flex items-center justify-center">
+      <div class="absolute inset-0 bg-black/30" @click="quickTestModalVisible = false" />
+      <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-[520px] max-h-[80vh] overflow-y-auto">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-lg font-semibold text-slate-900">测试连接 · {{ quickTestProviderName }}</h3>
+          <button type="button" class="text-xl leading-none text-slate-400 hover:text-slate-600" @click="quickTestModalVisible = false">×</button>
+        </div>
+        <div v-if="quickTestLoading" class="py-8 text-center text-sm text-slate-400">正在连接 MCP 服务器...</div>
+        <div v-else-if="quickTestResult">
+          <div :class="['p-3 rounded-xl text-sm', quickTestResult.success ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800']">
+            <div class="flex items-center gap-2 mb-1">
+              <span>{{ quickTestResult.success ? '✓' : '✗' }}</span>
+              <span class="font-medium">{{ quickTestResult.message }}</span>
+            </div>
+            <div v-if="quickTestResult.response_time_ms" class="text-xs opacity-70">响应时间: {{ quickTestResult.response_time_ms }}ms</div>
+            <div v-if="quickTestResult.error" class="text-xs mt-1 opacity-70 break-words">错误: {{ quickTestResult.error }}</div>
+            <div v-if="quickTestResult.details" class="text-xs mt-1 opacity-70 break-words">详情: {{ quickTestResult.details }}</div>
+
+            <div v-if="quickTestResult.mcp_tool_count" class="mt-3 border-t border-green-200/60 pt-2">
+              <div class="text-xs font-medium opacity-80 mb-1.5">发现 {{ quickTestResult.mcp_tool_count }} 个工具：</div>
+              <div class="space-y-1 max-h-[240px] overflow-y-auto pr-1">
+                <div v-for="t in quickTestResult.mcp_tools" :key="t.name"
+                     class="px-2 py-1.5 rounded-md bg-white/70 border border-green-200 text-green-900 text-xs">
+                  <div class="font-medium">{{ t.name }}</div>
+                  <div v-if="t.description" class="opacity-60 font-normal mt-0.5">{{ t.description }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-else class="py-8 text-center text-sm text-slate-400">等待测试...</div>
+        <div class="flex justify-end gap-2 mt-6">
+          <AppButton variant="secondary" @click="quickTestModalVisible = false">关闭</AppButton>
         </div>
       </div>
     </div>
@@ -781,7 +765,7 @@
 </template>
 
 <script setup lang="ts">
-import { provide, ref, computed, onMounted, watch } from 'vue'
+import { provide, ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AppCard from '../components/ui/AppCard.vue'
 import AppButton from '../components/ui/AppButton.vue'
@@ -789,11 +773,9 @@ import AppBadge from '../components/ui/AppBadge.vue'
 import AppAvatar from '../components/ui/AppAvatar.vue'
 import AppSelect from '../components/ui/AppSelect.vue'
 import SearchInput from '../components/ui/SearchInput.vue'
-import StatCard from '../components/StatCard.vue'
-import TraceRootProvider from '../components/TraceRootProvider.vue'
 import type { ModelInfo, ModelTestResult } from '@/types/model'
-import type { ToolTypeInfo, ToolProviderInfo } from '@/types/tool'
-import type { AdminSession, TraceSummary, ChatTraceDetail, MetricsSnapshot } from '@/types/chat'
+import type { ToolTypeInfo, ToolProviderInfo, ToolTestResult, MCPToolInfo, MCPConfig, MCPServerInfo } from '@/types/tool'
+import type { AdminSession } from '@/types/chat'
 import {
   adminListUsers,
   adminCreateUser,
@@ -812,12 +794,15 @@ import {
   adminCreateToolProvider,
   adminUpdateToolProvider,
   adminDeleteToolProvider,
+  adminListProviderTypes,
+  adminTestTool,
+  adminProbeTool,
+  adminListMCPServers,
+  adminDeleteMCPServer,
+  adminCleanupEmptyToolTypes,
   adminListSessions,
   adminDeleteSession,
   adminCleanupSessions,
-  adminGetObservabilityMetrics,
-  adminListTraces,
-  adminGetTrace,
 } from '@/api/admin'
 import type { AdminUser } from '@/types/auth'
 
@@ -836,30 +821,11 @@ const adminTabs = [
   { key: 'sessions', label: '会话管理' },
   { key: 'models', label: '模型管理' },
   { key: 'tools', label: '工具管理' },
-  { key: 'observability', label: '可观测性' },
+  { key: 'mcpServers', label: 'MCP 服务器' },
 ]
 
 const users = ref<AdminUser[]>([])
 const sessions = ref<AdminSession[]>([])
-
-// ── Observability state ──
-const obsTabs = [
-  { key: 'metrics', label: '指标 Metrics' },
-  { key: 'traces', label: '链路 Traces' },
-]
-const activeObsTab = ref<'metrics' | 'traces'>('metrics')
-const obsMetrics = ref<MetricsSnapshot | null>(null)
-const obsMetricsLoading = ref(false)
-const obsTraces = ref<TraceSummary[]>([])
-const obsTracePage = ref(1)
-const obsTracePageSize = ref(50)
-const obsTracesTotal = ref(0)
-const obsTracesLoading = ref(false)
-const traceQuerySessionId = ref('')
-const traceQueryTraceId = ref('')
-const traceDetailVisible = ref(false)
-const obsTraceDetailLoading = ref(false)
-const obsTraceDetail = ref<ChatTraceDetail | null>(null)
 
 const sessionStatusOptions = [
   { value: '', label: '全部状态' },
@@ -1204,14 +1170,144 @@ const toolProviderForm = ref<{
   response_mapping_rows: KVRow[]
 }>({ name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] })
 const toolProviderFormValid = computed(() => toolProviderForm.value.name.trim() && toolProviderForm.value.provider_key.trim() && toolProviderForm.value.provider_type.trim())
-const toolTestResult = ref<{
-  success: boolean
-  message: string
-  error?: string
-  response_time_ms: number
-  details?: string
-} | null>(null)
+const toolTestResult = ref<ToolTestResult | null>(null)
 const toolTesting = ref(false)
+// MCP 供应商探测到的工具清单（持久化 + 本次探测结果），用于在 MCP 配置区下方固定展示
+const mcpManifest = ref<MCPToolInfo[]>([])
+const mcpProbing = ref(false)
+// 弹窗关闭时清空 MCP 探测状态，避免下次打开残留
+watch(toolProviderModalVisible, (open) => {
+  if (!open) {
+    mcpManifest.value = []
+    mcpProbing.value = false
+  }
+})
+
+// ── MCP 专用表单状态 ──
+interface MCPFormState {
+  transport: MCPConfig['transport']
+  command: string
+  args: string[]
+  env_rows: KVRow[]
+  url: string
+  headers_rows: KVRow[]
+  timeout: number
+}
+function createEmptyMCPForm(): MCPFormState {
+  return {
+    transport: 'stdio',
+    command: '',
+    args: [],
+    env_rows: [],
+    url: '',
+    headers_rows: [],
+    timeout: 30,
+  }
+}
+const mcpForm = reactive<MCPFormState>(createEmptyMCPForm())
+function addMCPStdioArg() { mcpForm.args.push('') }
+function removeMCPStdioArg(idx: number) { mcpForm.args.splice(idx, 1) }
+
+// 从 JSON 解析 MCP 配置（支持两种格式：{mcp:{...}} 或 裸 {...}）
+function mcpFromJSON(json: string | object | null): MCPFormState {
+  const form = createEmptyMCPForm()
+  if (!json) return form
+  try {
+    const obj = typeof json === 'string' ? JSON.parse(json) : json
+    const cfg: Record<string, unknown> = obj && typeof obj === 'object' && 'mcp' in obj && (obj as any).mcp ? (obj as any).mcp : (obj as any)
+    if (cfg.transport === 'stdio' || cfg.transport === 'sse' || cfg.transport === 'http') form.transport = cfg.transport
+    form.command = cfg.command ? String(cfg.command) : ''
+    form.args = Array.isArray(cfg.args) ? cfg.args.map(String) : []
+    form.env_rows = []
+    if (cfg.env && typeof cfg.env === 'object') {
+      for (const [k, v] of Object.entries(cfg.env as Record<string, unknown>)) {
+        form.env_rows.push({ key: k, value: String(v) })
+      }
+    }
+    form.url = cfg.url ? String(cfg.url) : ''
+    form.headers_rows = []
+    if (cfg.headers && typeof cfg.headers === 'object') {
+      for (const [k, v] of Object.entries(cfg.headers as Record<string, unknown>)) {
+        form.headers_rows.push({ key: k, value: String(v) })
+      }
+    }
+    form.timeout = typeof cfg.timeout === 'number' ? cfg.timeout : 30
+  } catch { /* ignore */ }
+  return form
+}
+
+// 构建 MCP provider_config（裸配置格式，后端自动包装）
+function buildMCPProviderConfig(form: MCPFormState): Record<string, unknown> | undefined {
+  const base: Record<string, unknown> = {
+    transport: form.transport,
+  }
+  if (form.timeout && form.timeout !== 30) base.timeout = form.timeout
+  if (form.transport === 'stdio') {
+    if (!form.command.trim()) return undefined
+    base.command = form.command.trim()
+    if (form.args.length) {
+      const args = form.args.map(s => s.trim()).filter(Boolean)
+      if (args.length) base.args = args
+    }
+    const env = parseKVRows(form.env_rows)
+    if (env) base.env = env
+  } else {
+    if (!form.url.trim()) return undefined
+    base.url = form.url.trim()
+    const headers = parseKVRows(form.headers_rows)
+    if (headers) base.headers = headers
+  }
+  return base
+}
+
+// ── 快速测试（列表行测试） ──
+const quickTestModalVisible = ref(false)
+const quickTestLoading = ref(false)
+const quickTestResult = ref<ToolTestResult | null>(null)
+const quickTestProviderName = ref('')
+
+async function quickTestToolProvider(p: ToolProviderInfo) {
+  quickTestProviderName.value = p.name
+  quickTestModalVisible.value = true
+  quickTestLoading.value = true
+  quickTestResult.value = null
+  try {
+    // provider_config 从 ToolProviderInfo.provider_config 取已经是标准格式
+    const pcfg = p.provider_config && typeof p.provider_config === 'object'
+      ? (p.provider_config as unknown as Record<string, unknown>)
+      : undefined
+    const res = await adminTestTool({
+      provider_type: p.provider_type,
+      provider_config: pcfg,
+      admin_config: p.admin_config ? (p.admin_config as Record<string, unknown>) : undefined,
+      tool_input: {},
+    })
+    quickTestResult.value = res.data
+  } catch (e: any) {
+    quickTestResult.value = {
+      success: false,
+      message: '测试失败',
+      error: e.message || '未知错误',
+      response_time_ms: 0,
+    }
+  } finally {
+    quickTestLoading.value = false
+  }
+}
+
+// Provider 类型显示文本 & 颜色
+function providerTypeText(t: string): string {
+  if (t === 'http') return 'HTTP'
+  if (t === 'mcp') return 'MCP'
+  if (t === 'custom') return '自定义'
+  return t || '-'
+}
+function providerTypeBadgeVariant(t: string): 'blue' | 'success' | 'warning' | 'neutral' {
+  if (t === 'mcp') return 'blue'
+  if (t === 'http') return 'success'
+  if (t === 'custom') return 'warning'
+  return 'neutral'
+}
 
 function addSchemaField() {
   toolProviderForm.value.schema_fields.push({ key: '', title: '', type: 'string', description: '', default_value: '', required: true, secret: false })
@@ -1368,6 +1464,8 @@ async function loadToolProviders(toolTypeId: string) {
 function openToolProviderModal(provider?: ToolProviderInfo) {
   editingToolProvider.value = provider ?? null
   const providerConfig = provider?.provider_config ? providerConfigFromJSON(provider.provider_config) : null
+  // 载入 MCP 配置
+  Object.assign(mcpForm, provider?.provider_type === 'mcp' ? mcpFromJSON(provider.provider_config) : createEmptyMCPForm())
   if (provider) {
     toolProviderForm.value = {
       name: provider.name,
@@ -1386,13 +1484,54 @@ function openToolProviderModal(provider?: ToolProviderInfo) {
   } else {
     toolProviderForm.value = { name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] }
   }
+  toolTestResult.value = null
+  mcpManifest.value = (provider?.provider_type === 'mcp' && provider?.mcp_tool_manifest) ? [...provider.mcp_tool_manifest] : []
+  mcpProbing.value = false
   toolProviderModalVisible.value = true
+
+  // 编辑已有 MCP 供应商：打开即自动探测并持久化工具清单
+  if (provider?.provider_type === 'mcp' && provider.id && provider.provider_config) {
+    autoProbeCurrentMCP(false)
+  }
+}
+
+// 探测当前 MCP 供应商的工具清单；编辑已有供应商时传 provider_id 让后端持久化
+async function autoProbeCurrentMCP(force: boolean) {
+  const provider = editingToolProvider.value
+  if (mcpProbing.value) return
+  try {
+    mcpProbing.value = true
+    const providerConfig = provider?.provider_config && typeof provider.provider_config === 'object'
+      ? provider.provider_config as unknown as Record<string, unknown>
+      : buildMCPProviderConfig(mcpForm)
+    const res = await adminProbeTool({
+      provider_type: 'mcp',
+      provider_id: provider?.id,
+      provider_config: providerConfig,
+    })
+    const data = res.data
+    if (data?.mcp_tools) {
+      mcpManifest.value = data.mcp_tools
+    } else if (force && data) {
+      ElMessage.warning(data.message || '未探测到工具')
+    }
+  } catch (e: any) {
+    ElMessage.error(e.message || '探测 MCP 工具失败')
+  } finally {
+    mcpProbing.value = false
+  }
 }
 
 async function saveToolProvider() {
   if (!currentToolType.value) return
   try {
-    const providerConfig = buildProviderConfig(toolProviderForm.value)
+    let providerConfig: Record<string, unknown> | undefined
+    if (toolProviderForm.value.provider_type === 'mcp') {
+      providerConfig = buildMCPProviderConfig(mcpForm)
+      if (!providerConfig) throw new Error('MCP 配置不完整，请检查必填项')
+    } else {
+      providerConfig = buildProviderConfig(toolProviderForm.value)
+    }
     if (editingToolProvider.value) {
       const payload: Parameters<typeof adminUpdateToolProvider>[2] = {
         name: toolProviderForm.value.name,
@@ -1431,14 +1570,25 @@ async function testToolProvider() {
   try {
     toolTesting.value = true
     toolTestResult.value = null
-    const providerConfig = buildProviderConfig(toolProviderForm.value)
+    let providerConfig: Record<string, unknown> | undefined
+    if (toolProviderForm.value.provider_type === 'mcp') {
+      providerConfig = buildMCPProviderConfig(mcpForm)
+      if (!providerConfig) throw new Error('MCP 配置不完整，请检查必填项')
+    } else {
+      providerConfig = buildProviderConfig(toolProviderForm.value)
+    }
     const res = await adminTestTool({
       provider_type: toolProviderForm.value.provider_type,
+      provider_id: editingToolProvider.value?.id,
       provider_config: providerConfig,
       admin_config: parseKVRows(toolProviderForm.value.admin_config_rows),
       tool_input: {},
     })
     toolTestResult.value = res.data
+    // MCP 且后端返回了工具清单时，同步刷新固定展示区
+    if (toolProviderForm.value.provider_type === 'mcp' && res.data?.mcp_tools) {
+      mcpManifest.value = res.data.mcp_tools
+    }
   } catch (e: any) {
     toolTestResult.value = {
       success: false,
@@ -1476,165 +1626,97 @@ async function deleteToolProvider(id: string) {
   }
 }
 
-// ── Observability methods ──
-/** 采样率统一格式化：NaN/非有限值/undefined → '-'，0~1 转百分比；同时接收 number（后端默认值 0/1=0%/100%）或 string */
-function formatSampleRate(sr?: number | string | null): string {
-  if (sr === null || sr === undefined || sr === '') return '-'
-  const n = typeof sr === 'number' ? sr : Number(sr)
-  if (!Number.isFinite(n)) return '-'
-  // 后端 sampling_rate 语义：0.0 ~ 1.0（比例）。如果 sr >= 1.5，说明后端已经是百分比（例如返回 100 表示 100%），直接用原值
-  const pct = n >= 1.5 ? n : n * 100
-  return `${pct.toFixed(0)}%`
-}
-/** 指标快照卡片上的采样率文案（兜底避免 NaN%） */
-const metricsSamplingRateText = computed(() => formatSampleRate(obsMetrics.value?.sampling_rate))
+// ── MCP 服务器管理 ──
+const mcpServers = ref<MCPServerInfo[]>([])
 
-const metricsTotalRequests = computed<number | null>(() => {
-  const m = obsMetrics.value
-  if (!m?.counters?.length) return null
-  const preferredNames = ['requests_total', 'http_requests_total', 'chat_requests_total', 'query_total']
-  let total = 0
-  let hit = false
-  for (const c of m.counters) {
-    if (preferredNames.includes(c.name) || /(request|query|chat).*total/i.test(c.name)) {
-      for (const s of c.samples) total += s.value || 0
-      hit = true
+async function loadMCPServers() {
+  try {
+    const res = await adminListMCPServers()
+    if (res.code === 0) mcpServers.value = res.data.servers || []
+  } catch (e: any) {
+    ElMessage.error(e.message || '加载 MCP 服务器失败')
+  }
+}
+
+// 把 MCP 服务器行映射成供应商编辑弹窗所需的工具类型上下文
+function mcpServerToolTypeContext(s: MCPServerInfo): ToolTypeInfo {
+  return {
+    id: s.tool_type_id,
+    name: s.tool_type_name,
+    tool_key: s.tool_type_key,
+    description: '',
+    execution_mode: 'sync',
+    input_schema: null,
+    is_enabled: true,
+    provider_count: 0,
+  }
+}
+
+async function openMCPServerEdit(s: MCPServerInfo) {
+  try {
+    const res = await adminListToolProviders(s.tool_type_id)
+    if (res.code !== 0) return
+    const provider = res.data.providers?.find((p: ToolProviderInfo) => p.id === s.id)
+    if (!provider) {
+      ElMessage.error('未找到该供应商详情')
+      return
     }
+    currentToolType.value = mcpServerToolTypeContext(s)
+    openToolProviderModal(provider)
+  } catch (e: any) {
+    ElMessage.error(e.message || '加载供应商详情失败')
   }
-  if (!hit) return null
-  return total
-})
-const metricsTotalRequestsText = computed(() => {
-  const v = metricsTotalRequests.value
-  return v === null ? '-' : String(v)
-})
+}
 
-const metricsErrorRateText = computed(() => {
-  const m = obsMetrics.value
-  if (!m?.counters?.length) return '-'
-  let total = 0
-  let errors = 0
-  for (const c of m.counters) {
-    const isErr = /error|fail|5\d{2}/i.test(c.name)
-    const isTotal = /(request|query|chat).*total|requests_total/i.test(c.name)
-    if (isTotal) for (const s of c.samples) total += s.value || 0
-    if (isErr) for (const s of c.samples) errors += s.value || 0
+async function toggleMCPServerEnabled(s: MCPServerInfo) {
+  try {
+    await adminUpdateToolProvider(s.tool_type_id, s.id, { is_enabled: !s.is_enabled })
+    await loadMCPServers()
+    ElMessage.success(s.is_enabled ? '停用成功' : '启用成功')
+  } catch (e: any) {
+    ElMessage.error(e.message || '操作失败')
   }
-  if (!total) return '-'
-  const rate = (errors / total) * 100
-  return `${rate.toFixed(2)}%`
-})
+}
 
-const metricsP95Text = computed(() => {
-  const m = obsMetrics.value
-  if (!m?.histograms?.length) return '-'
-  for (const h of m.histograms) {
-    if (/(duration|latency|time)/i.test(h.name) && h.samples?.length) {
-      const s = h.samples[0]
-      if (s.buckets?.length) {
-        const target = (s.count || 0) * 0.95
-        let acc = 0
-        for (const b of s.buckets) {
-          acc += b.count || 0
-          if (acc >= target) {
-            return `${Number(b.le).toFixed(0)}`
-          }
-        }
-        return `${Number(s.sum / (s.count || 1)).toFixed(0)}`
-      }
+async function probeMCPServer(s: MCPServerInfo) {
+  try {
+    const res = await adminProbeTool({ provider_type: 'mcp', provider_id: s.id })
+    const tools = res.data?.mcp_tools
+    if (tools?.length) {
+      ElMessage.success(`探测到 ${tools.length} 个工具`)
+      await loadMCPServers()
+    } else {
+      ElMessage.warning(res.data?.message || '未探测到工具')
     }
-  }
-  return '-'
-})
-function traceStatusBadge(status?: string): 'success' | 'danger' | 'warning' | 'neutral' {
-  switch (status) {
-    case 'ok': return 'success'
-    case 'error': return 'danger'
-    case 'canceled':
-    case 'cancelled':
-    case 'slow': return 'warning'
-    default: return 'neutral'
-  }
-}
-function traceStatusText(status?: string, error?: string): string {
-  if (status === 'error' && error) return `失败 · ${error.split('\n')[0]?.slice(0, 40) || '请求失败'}`
-  switch (status) {
-    case 'ok': return '正常'
-    case 'error': return '失败'
-    case 'slow': return '慢请求'
-    case 'canceled':
-    case 'cancelled': return '已取消'
-    default: return '未知'
-  }
-}
-function searchModeBadgeVariant(mode?: string): 'success' | 'default' | 'ghost' {
-  switch (mode) {
-    case 'quick': return 'success'
-    case 'deep': return 'default'
-    default: return 'ghost'
-  }
-}
-function searchModeText(mode?: string): string {
-  switch (mode) {
-    case 'quick': return '快速检索'
-    case 'deep': return '深度思考'
-    case 'unknown': return '未知'
-    default: return mode ? mode : '—'
-  }
-}
-function getSearchMode(t: TraceSummary): string | undefined {
-  return t.search_mode ?? (t.attrs?.search_mode as string | undefined)
-}
-
-async function loadObsMetrics() {
-  obsMetricsLoading.value = true
-  try {
-    const res = await adminGetObservabilityMetrics()
-    // request 返回 ApiResponse<MetricsSnapshot>，真实数据在 res.data
-    obsMetrics.value = res.data
   } catch (e: any) {
-    ElMessage.error(e.message || '加载指标失败')
-  } finally {
-    obsMetricsLoading.value = false
+    ElMessage.error(e.message || '探测失败')
   }
 }
 
-async function loadSessionTraces() {
-  obsTracesLoading.value = true
+async function deleteMCPServer(id: string) {
   try {
-    const res = await adminListTraces({
-      session_id: traceQuerySessionId.value || undefined,
-      page: obsTracePage.value,
-      pageSize: obsTracePageSize.value,
-    })
-    // request 返回 ApiResponse<{traces,total,page,page_size}>，真实 data 在 res.data
-    obsTraces.value = res.data?.traces || []
-    obsTracesTotal.value = res.data?.total ?? 0
+    await ElMessageBox.confirm('确定删除这台 MCP 服务器吗？若其所属工具类型因此变空且非 MCP 容器类型，将一并删除。', '提示', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
+    await adminDeleteMCPServer(id)
+    await loadMCPServers()
+    await loadToolTypes()
+    ElMessage.success('删除成功')
   } catch (e: any) {
-    ElMessage.error(e.message || '加载 Traces 失败')
-  } finally {
-    obsTracesLoading.value = false
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '删除失败')
   }
 }
 
-async function openTraceDetail(traceId: string) {
-  traceDetailVisible.value = true
-  obsTraceDetailLoading.value = true
-  obsTraceDetail.value = null
+async function cleanupEmptyToolTypes() {
   try {
-    const res = await adminGetTrace(traceId)
-    obsTraceDetail.value = res.data
+    await ElMessageBox.confirm('确定清理所有无供应商的工具类型吗？（不含 MCP 容器类型）', '提示', { confirmButtonText: '清理', cancelButtonText: '取消', type: 'warning' })
+    const res = await adminCleanupEmptyToolTypes()
+    await loadToolTypes()
+    await loadMCPServers()
+    ElMessage.success(`已清理 ${res.data?.deleted ?? 0} 个空工具类型`)
   } catch (e: any) {
-    ElMessage.error(e.message || '加载 Trace 详情失败')
-  } finally {
-    obsTraceDetailLoading.value = false
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '清理失败')
   }
-}
-
-function openTraceById() {
-  const id = traceQueryTraceId.value.trim()
-  if (!id) return
-  openTraceDetail(id)
 }
 
 watch(activeTab, (tab) => {
@@ -1642,31 +1724,17 @@ watch(activeTab, (tab) => {
   if (tab === 'sessions') loadSessions()
   if (tab === 'models') loadModels()
   if (tab === 'tools') loadToolTypes()
-  if (tab === 'observability' && !obsMetrics.value) loadObsMetrics()
-})
-
-// 切换「链路 Traces」子 tab 时自动拉取最新 traces（而不是等用户手动点按钮）
-watch(activeObsTab, (tab) => {
-  if (tab === 'traces' && obsTraces.value.length === 0) {
-    loadSessionTraces()
-  }
+  if (tab === 'mcpServers') loadMCPServers()
 })
 
 watch(userSearch, () => loadUsers())
 watch([sessionSearch, sessionStatus, sessionPage], () => loadSessions())
-watch(obsTracePage, () => loadSessionTraces())
 
 onMounted(() => {
   if (activeTab.value === 'users') loadUsers()
   if (activeTab.value === 'sessions') loadSessions()
   if (activeTab.value === 'models') loadModels()
   if (activeTab.value === 'tools') loadToolTypes()
-  if (activeTab.value === 'observability') {
-    loadObsMetrics()
-    // 如果用户默认打开就是链路 Traces tab，也自动拉一次
-    if (activeObsTab.value === 'traces' && obsTraces.value.length === 0) {
-      loadSessionTraces()
-    }
-  }
+  if (activeTab.value === 'mcpServers') loadMCPServers()
 })
 </script>

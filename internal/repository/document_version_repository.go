@@ -26,9 +26,9 @@ func NewDocumentVersionRepository(db *gorm.DB) DocumentVersionRepository {
 // ListByDocument 查询文档版本列表
 func (r *documentVersionRepository) ListByDocument(ctx context.Context, userID, documentID string) ([]entity.DocumentVersion, error) {
 	var items []entity.DocumentVersion
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND document_id = ?", userID, documentID).
-		Order("version_no DESC").
+		Order("version_no DESC, id").
 		Find(&items).Error
 	return items, err
 }
@@ -36,7 +36,7 @@ func (r *documentVersionRepository) ListByDocument(ctx context.Context, userID, 
 // FindByID 查询文档版本详情
 func (r *documentVersionRepository) FindByID(ctx context.Context, userID, documentID, versionID string) (entity.DocumentVersion, bool, error) {
 	var version entity.DocumentVersion
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("id = ? AND user_id = ? AND document_id = ?", versionID, userID, documentID).
 		First(&version).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -48,9 +48,9 @@ func (r *documentVersionRepository) FindByID(ctx context.Context, userID, docume
 // FindLatestByDocument 查询文档最新版本
 func (r *documentVersionRepository) FindLatestByDocument(ctx context.Context, userID, documentID string) (entity.DocumentVersion, bool, error) {
 	var version entity.DocumentVersion
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("user_id = ? AND document_id = ?", userID, documentID).
-		Order("version_no DESC").
+		Order("version_no DESC, id").
 		First(&version).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return entity.DocumentVersion{}, false, nil
@@ -60,7 +60,7 @@ func (r *documentVersionRepository) FindLatestByDocument(ctx context.Context, us
 
 // SaveVersionAndReindex 保存新版本并重建文档分块
 func (r *documentVersionRepository) SaveVersionAndReindex(ctx context.Context, doc entity.Document, job *entity.DocumentProcessingJob, version *entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus, successJobStatus int, finishedAt time.Time) error {
-	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := dbFor(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		nextVersionNo, err := r.nextVersionNo(tx, doc.UserID, doc.ID)
 		if err != nil {
 			return err
@@ -79,7 +79,7 @@ func (r *documentVersionRepository) SaveVersionAndReindex(ctx context.Context, d
 
 // ReindexVersion 基于指定版本重建文档分块
 func (r *documentVersionRepository) ReindexVersion(ctx context.Context, doc entity.Document, job *entity.DocumentProcessingJob, version entity.DocumentVersion, chunks []entity.DocumentChunk, readyStatus, successJobStatus int, finishedAt time.Time) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return dbFor(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		return r.replaceChunksAndFinishJob(tx, doc, job, version.ID, chunks, readyStatus, successJobStatus, finishedAt)
 	})
 }
@@ -89,7 +89,7 @@ func (r *documentVersionRepository) nextVersionNo(tx *gorm.DB, userID, documentI
 	var latest entity.DocumentVersion
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("user_id = ? AND document_id = ?", userID, documentID).
-		Order("version_no DESC").
+		Order("version_no DESC, id").
 		First(&latest).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return 1, nil

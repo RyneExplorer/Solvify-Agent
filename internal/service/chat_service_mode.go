@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,146 +17,127 @@ import (
 	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
-	"solvify-agent/internal/observability"
+	apperrors "solvify-agent/pkg/errors"
+	"solvify-agent/pkg/eventch"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/traceid"
 )
 
-// ─── 深度思考模式 ───────────────────────────────────────────
+// ─── Agent 模式（快速 / 深度共用） ──────────────────────────
 
-// processDeepMode 深度思考模式处理流程
-// 使用 eino ReAct Agent，自动管理 Think → Act → Observe 循环
-func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, userMsgID string, req requestdto.SendMessageRequest, eventCh chan<- dto.StreamEvent) {
-	obsOk := s.obs != nil
-	var span *observability.Span
-	if obsOk {
-		ctx, span = s.obs.StartSpan(ctx, "chat.deep", observability.ComponentAgentEngine, observability.Attrs{
-			"session_id":  sessionID,
-			"user_id":     userID,
-			"model_id":    req.ModelID,
-			"search_mode": "deep",
-		})
-		defer func() {
-			status := observability.SpanStatusOK
-			var errVal error
-			if r := recover(); r != nil {
-				status = observability.SpanStatusError
-				errVal = fmt.Errorf("panic: %v", r)
-				s.obs.MarkTraceError(ctx, errVal)
-				eventCh <- dto.StreamEvent{Type: "error", Detail: "处理过程中发生未预期错误", Done: true}
-			}
-			s.obs.EndSpan(ctx, span, status, errVal, nil)
-		}()
-		s.obs.Incr(ctx, "chat_deep_requests_total", map[string]string{"model_id": req.ModelID}, 1)
-	}
+// processAgentMode 是快速与深度两个模式共用的 Agent 执行流程。
+// 快速模式使用 ReAct，深度模式使用 Plan-and-Execute；
+// 两个模式的差异都在 Agent 层，
+// 这里只靠 profile 决定工具 token 预估口径与收尾判据。
+func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, userMsgID string, req requestdto.SendMessageRequest, profile agent.Profile, eventCh chan<- dto.StreamEvent) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Errorf("[%s] processAgentMode panic 已恢复: %v", profile, r)
+			msg := messageFor(apperrors.KindUnhandled, profile)
+			eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "error", Title: msg.Title, Detail: msg.Detail, Retryable: msg.Retryable, Done: true})
+		}
+	}()
 
 	assistantMsgID := uuid.New().String()
-	if obsOk {
-		s.obs.AddRootAttrs(ctx, observability.Attrs{"assistant_message_id": assistantMsgID})
-	}
 
 	// P0-④ 关键修复：在 initContext 之前，先把"将发送给模型的工具定义"预构建并按真 BPE 算总 token，
 	// 之后把 toolsTokens 传给 initContext，calculateContextBudgets 会先从 maxCtx 扣除，
 	// 避免工具定义悄悄吃掉历史/检索预算，导致最终请求超上下文长度。
-	sendProgressEvent(eventCh, "正在加载上下文...")
-	t0 := time.Now()
+	sendProgressEvent(ctx, eventCh, "正在加载上下文...")
 	preToolsTokens := 0
-	deepCtx := ctx
+	agentCtx := ctx
 	if s.agentEngine != nil {
 		var tErr error
 		// 先用"仅创建客户端拿到 modelName"解析出 ModelName，再交给 PrebuildTools 估算工具 token。
 		client, cErr := s.resolveClient(ctx, userID, req.ModelID, req.ModelType)
 		if cErr == nil {
 			modelName := client.ModelName()
-			if obsOk {
-				s.obs.AddRootAttrs(ctx, observability.Attrs{"model_name": modelName})
-			}
-			preToolsTokens, deepCtx, tErr = s.agentEngine.EstimateToolsTokens(ctx, userID, req.KnowledgeBaseIDs, modelName)
+			preToolsTokens, agentCtx, tErr = s.agentEngine.EstimateToolsTokens(ctx, userID, req.KnowledgeBaseIDs, modelName, profile, req.MCPDisabled(), req.MCPIDs()...)
 			if tErr != nil {
 				logger.Warnf("预估算工具定义 token 失败，按 0 处理: %v", tErr)
 				preToolsTokens = 0
-				deepCtx = ctx
+				agentCtx = ctx
 			}
 		}
 	}
 
 	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content, preToolsTokens)
 	if err != nil {
-		if obsOk {
-			s.obs.Incr(ctx, "chat_deep_errors_total", map[string]string{"stage": "init_ctx"}, 1)
-			s.obs.MarkTraceError(ctx, err)
-		}
-		sendErrorEvent(eventCh, err, err.Error())
+		sendErrorEvent(ctx, eventCh, err, profile)
 		return
 	}
-	history := excludeByMessageID(enhancedCtx.History, userMsgID)
+	history := s.modelHistory(enhancedCtx, userMsgID)
 	chatModel := client.ChatModel()
-	modelName := client.ModelName()
-	if obsOk {
-		s.obs.AddRootAttrs(ctx, observability.Attrs{
-			"model_name":       modelName,
-			"tools_tokens":     fmt.Sprintf("%d", preToolsTokens),
-			"history_budget":   fmt.Sprintf("%d", enhancedCtx.HistoryBudget),
-			"retrieval_budget": fmt.Sprintf("%d", enhancedCtx.RetrievalBudget),
-		})
-		s.obs.Observe(ctx, "chat_deep_init_ctx_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t0).Seconds())
+	eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "start", MessageID: assistantMsgID})
+
+	progress := "正在深度推理..."
+	if profile == agent.ProfileQuick {
+		progress = "正在快速分析..."
 	}
-
-	eventCh <- dto.StreamEvent{Type: "start", MessageID: assistantMsgID}
-
-	sendProgressEvent(eventCh, "正在深度推理...")
-	agentPB := NewPromptBuilder(PromptModeDeep, "", enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx).
+	sendProgressEvent(ctx, eventCh, progress)
+	agentPB := NewPromptBuilder("", enhancedCtx.Summary, enhancedCtx.Memories, enhancedCtx.UserCtx).
 		WithProfile(enhancedCtx.Profile).
 		WithPreference(enhancedCtx.Preference)
-	agentReq := agentPB.BuildAgentRequestFields(userID, req.Content, req.ModelID, req.ModelType, req.KnowledgeBaseIDs, history)
+	agentReq := agentPB.BuildAgentRequestFields(userID, req.Content, req.ModelID, req.ModelType, req.KnowledgeBaseIDs, req.MCPIDs(), req.MCPDisabled(), history)
 	agentReq.SessionID = sessionID
+	agentReq.Profile = profile
+	// agent 层拿不到 llm 客户端，预算检查需要的窗口与模型名由这里带过去。
+	agentReq.ModelName = client.ModelName()
+	agentReq.MaxContextLength = client.MaxContextLength()
 
-	// ── 恢复流程：session 有待恢复 checkpoint 且用户带了审批结果 ──
-	session2, _ := s.sessionRepo.FindByID(ctx, sessionID)
-	if session2 != nil && session2.HasPendingCheckpoint() {
-		pc, _ := session2.GetPendingCheckpoint()
-		if pc != nil {
-			logger.Infof("[ChatService] 检测到 pending checkpoint: checkpointID=%s, interruptID=%s", pc.CheckpointID, pc.InterruptID)
-			if req.Content != "" {
-				agentReq.CheckpointID = pc.CheckpointID
-				agentReq.ResumeData = map[string]any{
-					pc.InterruptID: req.Content,
-				}
-				logger.Infof("[ChatService] 设置恢复参数: checkpointID=%s, resumeKeys=%v", pc.CheckpointID, []string{pc.InterruptID})
-			} else {
-				logger.Warnf("[ChatService] 有 pending checkpoint 但用户未提供审批内容，走首次执行")
-				_ = s.sessionRepo.ClearPendingCheckpoint(ctx, sessionID)
-				_ = s.sessionRepo.ClearPendingClarify(ctx, sessionID)
-			}
-		}
+	if err := s.applyResumeParams(ctx, sessionID, req, &agentReq); err != nil {
+		sendErrorEvent(ctx, eventCh, err, profile)
+		return
 	}
-	t1 := time.Now()
-	agentEventCh, err := s.agentEngine.Execute(deepCtx, agentReq, chatModel)
+	agentEventCh, err := s.agentEngine.Execute(agentCtx, agentReq, chatModel)
 	if err != nil {
-		if obsOk {
-			s.obs.Incr(ctx, "chat_deep_errors_total", map[string]string{"stage": "agent_execute"}, 1)
-			s.obs.MarkTraceError(ctx, err)
-		}
 		logger.Errorf("Agent 执行失败, sessionID=%s: %v", sessionID, err)
-		llm.ReduceContextBudgetOnError(req.ModelID, err)
-		sendErrorEvent(eventCh, err, "Agent 执行失败")
+		llm.ReduceContextBudgetOnError(req.ModelID, apperrors.Classify(err))
+		sendErrorEvent(ctx, eventCh, err, profile)
 		return
 	}
 
 	var fullContent string
 	var agentSources []dto.SourceInfo
 	var reasoningSteps []dto.ReasoningStep
-	toolCallsN := 0
-	toolErrorsN := 0
+	var executionPlan *dto.ExecutionPlan
 	toolEventSeen := false
 	agentErrorSeen := false
+	var failureDetail string
 
 	for agentEvent := range agentEventCh {
+		if agentEvent.Type == agent.EventPlan && agentEvent.Plan != nil {
+			if executionPlan != nil && executionPlan.ID == agentEvent.Plan.ID && agentEvent.Plan.Version < executionPlan.Version {
+				continue
+			}
+			nextPlan := agentPlanToDTO(agentEvent.Plan)
+			if executionPlan != nil && executionPlan.ID == nextPlan.ID {
+				for i := range nextPlan.Tasks {
+					for _, previous := range executionPlan.Tasks {
+						if previous.ID == nextPlan.Tasks[i].ID {
+							nextPlan.Tasks[i].AddedVersion = previous.AddedVersion
+							break
+						}
+					}
+				}
+			}
+			executionPlan = nextPlan
+		}
+		if (agentEvent.Type == agent.EventTaskCreated || agentEvent.Type == agent.EventTaskUpdated || agentEvent.Type == agent.EventTaskResult) && executionPlan != nil {
+			if (agentEvent.PlanID != "" && agentEvent.PlanID != executionPlan.ID) || agentEvent.PlanVersion < executionPlan.Version {
+				continue
+			}
+			upsertTaskProgress(executionPlan, agentEvent)
+		}
 		if agentEvent.Type == agent.EventDone {
 			if agentEvent.Content != "" {
 				fullContent = agentEvent.Content
 			}
 			if len(agentEvent.Sources) > 0 {
-				agentSources = agentEvent.Sources
+				agentSources = agentSourcesToDTO(agentEvent.Sources)
+			}
+			if executionPlan != nil {
+				executionPlan.Status = "success"
 			}
 			continue
 		}
@@ -172,9 +154,17 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 					Options:      agentEvent.ClarifyOptions,
 					SetAt:        time.Now(),
 				}
+				if executionPlan != nil {
+					pcData.ExecutionPlan = datatypes.JSON(mustMarshal(executionPlan))
+				}
+				if toolName, ok := agentEvent.InterruptInfo["tool_name"].(string); ok {
+					pcData.ToolName = toolName
+				}
 				raw, _ := json.Marshal(pcData)
 				if sErr := s.sessionRepo.SetPendingCheckpoint(ctx, sessionID, raw); sErr != nil {
 					logger.Errorf("存储 pending checkpoint 失败: %v", sErr)
+					sendErrorEvent(ctx, eventCh, fmt.Errorf("保存待审批状态失败: %w", sErr), profile)
+					return
 				} else {
 					logger.Infof("[ChatService] 已存储 pending checkpoint: sessionID=%s", sessionID)
 				}
@@ -192,7 +182,7 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 					}
 				}
 			}
-			eventCh <- toStreamEvent(agentEvent)
+			eventch.Send(ctx, eventCh, toStreamEvent(agentEvent, profile))
 			return
 		}
 
@@ -201,27 +191,60 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		}
 		if agentEvent.Type == agent.EventToolCall {
 			toolEventSeen = true
-			toolCallsN++
 		}
 		if agentEvent.Type == agent.EventToolResult {
 			toolEventSeen = true
-			if agentEvent.Status == "error" {
-				toolErrorsN++
-			}
 		}
 		if agentEvent.Type == agent.EventError {
 			agentErrorSeen = true
-			llm.ReduceContextBudgetOnError(req.ModelID, fmt.Errorf("%s", agentEvent.Error))
+			// 在错误发送前清理：前端收到错误即查询状态，不能读到已消费的澄清卡。
+			if agentReq.CheckpointID != "" {
+				clearCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				s.clearPendingResume(clearCtx, sessionID)
+				cancel()
+			}
+			// 失败原因只认种类，不再拿错误文本去撞关键词表 ——
+			// 此前把 agentEvent.Error 原样喂给关键词表，裸词 "exceeds" 让
+			// 「exceeds max iterations」也被判成上下文超长，把模型窗口从 64000 砍到 8192。
+			failureDetail = messageFor(agentEvent.Kind, profile).Detail
+			llm.ReduceContextBudgetOnError(req.ModelID, agentEvent.Kind)
 		}
 
-		eventCh <- toStreamEvent(agentEvent)
+		eventch.Send(ctx, eventCh, toStreamEvent(agentEvent, profile))
 
 		if len(agentEvent.Sources) > 0 {
-			agentSources = agentEvent.Sources
+			agentSources = agentSourcesToDTO(agentEvent.Sources)
 		}
 		applyReasoningStep(&reasoningSteps, agentEvent)
 	}
 
+	if agentErrorSeen || ctx.Err() != nil {
+		if !agentErrorSeen && agentReq.CheckpointID != "" {
+			clearCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			s.clearPendingResume(clearCtx, sessionID)
+			cancel()
+		}
+		if executionPlan != nil {
+			executionPlan.Status, executionPlan.Phase = agent.TaskError, "failed"
+			// 客户端收到错误终态后会关闭 SSE；不能用随后的连接取消覆盖真实失败。
+			if ctx.Err() != nil && !agentErrorSeen {
+				executionPlan.Status = agent.TaskCanceled
+				failureDetail = "执行已取消"
+			}
+			for i := range executionPlan.Tasks {
+				if status := executionPlan.Tasks[i].Status; status == agent.TaskPending || status == agent.TaskRunning || status == agent.TaskWaiting {
+					executionPlan.Tasks[i].Status = agent.TaskCanceled
+				}
+			}
+			metadata := datatypes.JSON(mustMarshal(map[string]any{"execution_plan": executionPlan, "reasoning_steps": reasoningSteps, "execution_error": failureDetail}))
+			saveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := s.saveAssistantMessage(saveCtx, sessionID, assistantMsgID, "深度任务未完成："+failureDetail, req, agentSources, metadata); err != nil {
+				logger.Errorf("保存深度任务失败记录失败: sessionID=%s, err=%v", sessionID, err)
+			}
+			cancel()
+		}
+		return
+	}
 	// ── 执行成功后清除 pending 状态 ──
 	if agentReq.CheckpointID != "" {
 		if cErr := s.sessionRepo.ClearPendingCheckpoint(ctx, sessionID); cErr != nil {
@@ -231,45 +254,29 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 		}
 		_ = s.sessionRepo.ClearPendingClarify(ctx, sessionID)
 	}
-	if obsOk {
-		s.obs.Observe(ctx, "chat_deep_agent_seconds", map[string]string{"model_id": req.ModelID}, time.Since(t1).Seconds())
-		s.obs.Incr(ctx, "agent_runs_total", map[string]string{
-			"error_seen": fmt.Sprintf("%t", agentErrorSeen),
-			"tool_calls": fmt.Sprintf("%d", toolCallsN),
-		}, 1)
-		s.obs.AddRootAttrs(ctx, observability.Attrs{
-			"tool_calls":      toolCallsN,
-			"tool_errors":     toolErrorsN,
-			"steps_n":         len(reasoningSteps),
-			"rag_docs_n":      len(agentSources),
-			"agent_error":     agentErrorSeen,
-			"tool_used":       toolEventSeen,
-			"assistant_chars": len([]rune(fullContent)),
-		})
-	}
-
-	if agentErrorSeen {
-		if obsOk {
-			s.obs.MarkTraceError(ctx, fmt.Errorf("agent 执行过程中发生错误"))
-		}
-		return
-	}
-	if !toolEventSeen && looksLikeExecutionPlan(fullContent) {
+	// 深度模式要求真的产生工具调用；快速模式允许直接回答（寒暄/常识等），不适用这条判据。
+	if profile == agent.ProfileDeep && !toolEventSeen && looksLikeExecutionPlan(fullContent) {
 		logger.Warnf("深度模式未产生工具调用，仅返回执行计划，sessionID=%s, content=%q", sessionID, fullContent)
-		if obsOk {
-			s.obs.Incr(ctx, "agent_plan_without_tool_total", nil, 1)
-			s.obs.MarkTraceError(ctx, fmt.Errorf("深度模式未产生工具调用"))
-		}
-		eventCh <- dto.StreamEvent{
+		msg := messageFor(apperrors.KindToolNotInvoked, profile)
+		eventch.Send(ctx, eventCh, dto.StreamEvent{
 			Type:      "error",
-			Title:     "深度推理未完成",
-			Detail:    "当前模型没有正确发起工具调用，请重试或切换支持工具调用的模型",
-			Retryable: true,
+			Title:     msg.Title,
+			Detail:    msg.Detail,
+			Retryable: msg.Retryable,
 			Done:      true,
-		}
+		})
 		return
 	}
-	if fullContent == "" && len(reasoningSteps) == 0 {
+	// 空回答守卫（与快速模式共用 rejectEmptyAnswer，口径一致）。
+	//
+	// 旧实现这里是裸 return：不落库，但也不发任何终态事件，SSE 流就此断掉，
+	// 前端只收到 start 和中间事件、永远等不到 done 或 error，只能一直停在「正在生成」。
+	// 更糟的是原条件里的 len(reasoningSteps) == 0 —— 「有推理步骤但没正文」的空回答
+	// 会直接穿过该分支，被下面的 emitDoneAndSave 当成功收尾：用户看到空白气泡，
+	// 且空 assistant 消息进入后续 history（部分厂商对空 content 直接 400），
+	// 一次空回答污染该会话之后每一轮。
+	if rejectEmptyAnswer(ctx, eventCh, string(profile), sessionID, req.ModelID, assistantMsgID,
+		fullContent, fmt.Sprintf("sources=%d, steps=%d", len(agentSources), len(reasoningSteps))) {
 		return
 	}
 
@@ -278,13 +285,19 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 	if len(reasoningSteps) > 0 {
 		metaMap["reasoning_steps"] = reasoningSteps
 	}
-	if obsOk {
-		metaMap["trace_id"] = observability.TraceIDFromContext(ctx)
+	if profile == agent.ProfileDeep {
+		if executionPlan != nil {
+			executionPlan.Status = "success"
+			metaMap["execution_plan"] = executionPlan
+		}
+	}
+	if traceID := traceid.FromContext(ctx); traceID != "" {
+		metaMap["trace_id"] = traceID
 	}
 	if len(metaMap) > 0 {
 		metadata = datatypes.JSON(mustMarshal(metaMap))
 	}
-	s.emitDoneAndSave(eventCh, sessionID, assistantMsgID, fullContent, req, agentSources, metadata, nil)
+	s.emitDoneAndSave(ctx, eventCh, sessionID, assistantMsgID, fullContent, req, agentSources, metadata, nil)
 
 	s.refreshContextAsync(ctx, userID, sessionID, enhancedCtx.History, chatModel)
 }
@@ -294,61 +307,40 @@ func (s *chatService) processDeepMode(ctx context.Context, userID, sessionID, us
 // 关键修复（P1-① 幂等+重试）：
 //   - 旧实现 fire-and-forget，数据库抖动就把摘要写丢，下次 BuildContext 拿 existing=nil
 //     → 历史越跑越长真的爆窗口。现在 SummarizeSession / ExtractMemories 各自独立 3 次指数退避。
-//   - 任何一步失败都记 Obs 指标（summary_refresh_errors_total / memory_extract_errors_total），
-//     后面上线可从 /metrics 直接看成功率。
 func (s *chatService) refreshContextAsync(ctx context.Context, userID, sessionID string, history []entity.ChatMessage, chatModel model.BaseChatModel) {
 	if s == nil || s.contextSvc == nil {
 		return
 	}
-	obsOk := s.obs != nil
+
+	// 后台刷新要脱离请求 ctx（响应已返回，不能被请求取消掐断），
+	// 但也不该换成 context.Background()：那会把 ctx 上的值（含本次请求的关联 id）一起丢掉。
+	// context.WithoutCancel 只切断取消信号、保留全部值，正好是这里要的语义。
+	// 在 goroutine 外先取一次，避免与父 ctx 结束产生竞态。
+	baseCtx := context.WithoutCancel(ctx)
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.Errorf("refreshContextAsync panic 已恢复: sessionID=%s, err=%v", sessionID, r)
-				if obsOk {
-					s.obs.Incr(context.Background(), "ctx_refresh_panic_total", nil, 1)
-				}
 			}
 		}()
 
-		if obsOk {
-			s.obs.Incr(context.Background(), "ctx_refresh_requests_total", nil, 1)
-		}
-
-		summaryOK := true
 		if err := runWithRetry(3, "ctx.summary", func(attempt int) error {
-			refreshCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second+time.Duration(attempt*15)*time.Second)
+			refreshCtx, cancel := context.WithTimeout(baseCtx, 45*time.Second+time.Duration(attempt*15)*time.Second)
 			defer cancel()
 			_, err := s.contextSvc.SummarizeSession(refreshCtx, sessionID, chatModel)
 			return err
 		}); err != nil {
-			summaryOK = false
 			logger.Warnf("生成会话摘要失败（已重试 3 次）: sessionID=%s, err=%v", sessionID, err)
-			if obsOk {
-				s.obs.Incr(context.Background(), "ctx_summary_refresh_errors_total", nil, 1)
-			}
 		}
 
-		memoryOK := true
 		if err := runWithRetry(3, "ctx.memory", func(attempt int) error {
-			refreshCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second+time.Duration(attempt*15)*time.Second)
+			refreshCtx, cancel := context.WithTimeout(baseCtx, 45*time.Second+time.Duration(attempt*15)*time.Second)
 			defer cancel()
 			_, err := s.contextSvc.ExtractMemories(refreshCtx, userID, sessionID, history, chatModel)
 			return err
 		}); err != nil {
-			memoryOK = false
 			logger.Warnf("提取用户记忆失败（已重试 3 次）: sessionID=%s, err=%v", sessionID, err)
-			if obsOk {
-				s.obs.Incr(context.Background(), "ctx_memory_extract_errors_total", nil, 1)
-			}
-		}
-
-		if obsOk {
-			labels := map[string]string{
-				"summary_ok": ctxBoolLabel(summaryOK),
-				"memory_ok":  ctxBoolLabel(memoryOK),
-			}
-			s.obs.Incr(context.Background(), "ctx_refresh_runs_total", labels, 1)
 		}
 	}()
 }
@@ -378,18 +370,12 @@ func runWithRetry(maxAttempts int, tag string, fn func(attempt int) error) error
 	return lastErr
 }
 
-func ctxBoolLabel(b bool) string {
-	if b {
-		return "ok"
-	}
-	return "fail"
-}
-
 // ─── 共享辅助方法 ───────────────────────────────────────────
 
-// emitDoneAndSave 发送 done 事件并异步保存助手消息
+// emitDoneAndSave 发送 done 事件并异步保存助手消息。
+// ctx 已取消（客户端断连）时 done 事件被丢弃、不阻塞（见 pkg/eventch）；落库仍走独立超时 ctx，不受影响。
 // 注意：保存失败只记日志，禁止再向 eventCh 写事件（外层 defer close 后会 panic）
-func (s *chatService) emitDoneAndSave(eventCh chan<- dto.StreamEvent, sessionID, msgID, content string, req requestdto.SendMessageRequest, sources []dto.SourceInfo, metadata datatypes.JSON, metaHook func(map[string]any)) {
+func (s *chatService) emitDoneAndSave(ctx context.Context, eventCh chan<- dto.StreamEvent, sessionID, msgID, content string, req requestdto.SendMessageRequest, sources []dto.SourceInfo, metadata datatypes.JSON, metaHook func(map[string]any)) {
 	finalMeta := metadata
 	if metaHook != nil && len(metadata) == 0 {
 		m := map[string]any{}
@@ -404,7 +390,14 @@ func (s *chatService) emitDoneAndSave(eventCh chan<- dto.StreamEvent, sessionID,
 			finalMeta = datatypes.JSON(mustMarshal(m))
 		}
 	}
-	eventCh <- dto.StreamEvent{Type: "done", MessageID: msgID, Content: content, Sources: sources, Done: true}
+	// 把最终答复推给三方平台（未接三方 / 答复为空时内部直接返回）。
+	//
+	// 上报点选这里，是因为这是两个模式共用的【唯一一处成功收尾】—— 错误路径、中断路径
+	// 都不会走到这里，而它们本来也没有「最终答复」可报。放到别处会变成
+	// 「收尾时回头找答复」，那是第二个来源。
+	s.tracer.End(ctx, content)
+
+	eventch.Send(ctx, eventCh, dto.StreamEvent{Type: "done", MessageID: msgID, Content: content, Sources: sources, Done: true})
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -419,12 +412,51 @@ func (s *chatService) emitDoneAndSave(eventCh chan<- dto.StreamEvent, sessionID,
 	}()
 }
 
-// providerLabel 返回 LLM 客户端的可观测性标签
-func providerLabel(client *llm.OpenAIClient) string {
-	if client == nil {
-		return "unknown"
+// modelHistory 拼出真正发给模型的那份历史：近期对话 + 召回的相关历史。
+//
+// 两个容器分别裁剪过预算（见 contextService.BuildContext），这里只做装配：
+//   - 召回项按时间插回时间线，不单独堆在末尾 —— 堆在末尾的话模型会把它当成
+//     "最后发生的事"，而它其实是几个月前聊的；
+//   - 召回项加「历史片段 + 时间」前缀，否则同一句话出现在上下文里两次
+//     （一次在近期、一 次在召回），模型会当成重复消息而忽略；
+//   - 同一 ID 只保留一份：召回结果与近期重叠是常态，不是异常。
+//
+// 只对召回项加标注：近期对话是原原本本的对话历史，加了前缀反而在污染它；
+// 而 refreshContextAsync 消费的是 enhancedCtx.History 原文，不经过这里，
+// 摘要与记忆抽取拿到的仍然是干净原文。
+func (s *chatService) modelHistory(enhancedCtx *EnhancedContext, excludeID string) []entity.ChatMessage {
+	if enhancedCtx == nil {
+		return nil
 	}
-	return "openai_compatible"
+	recent := excludeByMessageID(enhancedCtx.History, excludeID)
+
+	// 先按 ID 排除已在近期里的，再加前缀 —— 反过来做会给同一句话加两次标注。
+	inRecent := make(map[string]struct{}, len(recent))
+	for _, m := range recent {
+		inRecent[m.ID] = struct{}{}
+	}
+
+	merged := make([]entity.ChatMessage, 0, len(recent)+len(enhancedCtx.RecallHistory))
+	merged = append(merged, recent...)
+	for _, m := range excludeByMessageID(enhancedCtx.RecallHistory, excludeID) {
+		if _, dup := inRecent[m.ID]; dup {
+			continue
+		}
+		m.Content = fmt.Sprintf("[历史片段 · %s] %s", m.CreatedAt.Format("2006-01-02 15:04"), m.Content)
+		merged = append(merged, m)
+	}
+	return sortMessagesByTime(merged)
+}
+
+// sortMessagesByTime 按时间正序排列（同值按 ID 裁决，保证全序 —— 红线 26）。
+func sortMessagesByTime(msgs []entity.ChatMessage) []entity.ChatMessage {
+	sort.SliceStable(msgs, func(i, j int) bool {
+		if !msgs[i].CreatedAt.Equal(msgs[j].CreatedAt) {
+			return msgs[i].CreatedAt.Before(msgs[j].CreatedAt)
+		}
+		return msgs[i].ID < msgs[j].ID
+	})
+	return msgs
 }
 
 // excludeByMessageID 按消息 ID 剔除本轮刚落库的 user 消息
@@ -442,43 +474,6 @@ func excludeByMessageID(history []entity.ChatMessage, excludeID string) []entity
 		result = append(result, m)
 	}
 	return result
-}
-
-// toStreamEvent 将 Agent 事件转换为 SSE 流式事件
-func toStreamEvent(e agent.Event) dto.StreamEvent {
-	se := dto.StreamEvent{
-		Type:      e.Type,
-		Title:     e.Title,
-		Detail:    e.Detail,
-		Status:    e.Status,
-		Content:   e.Content,
-		Error:     e.Error,
-		Done:      e.Done,
-		Retryable: e.Retryable,
-	}
-	if len(e.Sources) > 0 {
-		se.Sources = e.Sources
-	}
-	// citation 事件的字段映射
-	if e.Type == agent.EventCitation {
-		se.CitationID = e.CitationID
-		se.CitationChunkID = e.CitationChunkID
-		se.CitationFileName = e.CitationFileName
-		se.CitationContent = e.CitationContent
-	}
-	// interrupt 事件：携带 checkpointID / interruptID / info
-	if e.Type == agent.EventInterrupt {
-		se.CheckpointID = e.CheckpointID
-		se.InterruptID = e.InterruptID
-		se.InterruptInfo = e.InterruptInfo
-		if e.IsClarify {
-			se.Clarify = &dto.ClarifyPayload{
-				Question: e.ClarifyQuestion,
-				Options:  e.ClarifyOptions,
-			}
-		}
-	}
-	return se
 }
 
 // looksLikeExecutionPlan 判断内容是否只是执行计划而没有真正调用工具

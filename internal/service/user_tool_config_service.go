@@ -41,13 +41,13 @@ func (s *userToolConfigService) Create(ctx context.Context, userID string, req r
 	// 检查工具类型是否存在
 	toolType, err := s.typeRepo.GetByID(ctx, req.ToolTypeID)
 	if err != nil {
-		return nil, apperrors.NewDefault(apperrors.CodeToolTypeNotFound)
+		return nil, apperrors.NotFoundOrInternal(apperrors.CodeToolTypeNotFound, err)
 	}
 
 	// 检查供应商是否存在
 	provider, err := s.providerRepo.GetByID(ctx, req.ProviderID)
 	if err != nil {
-		return nil, apperrors.NewDefault(apperrors.CodeToolProviderNotFound)
+		return nil, apperrors.NotFoundOrInternal(apperrors.CodeToolProviderNotFound, err)
 	}
 
 	// 检查是否已配置该供应商
@@ -109,8 +109,12 @@ func (s *userToolConfigService) Create(ctx context.Context, userID string, req r
 		return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 
-	if err := s.repo.DisableOthersByToolType(ctx, userID, req.ToolTypeID, config.ID); err != nil {
-		return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
+	// MCP 类型不执行互斥（允许用户同时启用多个 MCP Server）
+	// 其他类型保持原有互斥逻辑：同 ToolType 下只能启用一个配置
+	if toolType.ToolKey != "mcp" {
+		if err := s.repo.DisableOthersByToolType(ctx, userID, req.ToolTypeID, config.ID); err != nil {
+			return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
+		}
 	}
 
 	return s.toConfigInfo(config, toolType, provider), nil
@@ -119,7 +123,9 @@ func (s *userToolConfigService) Create(ctx context.Context, userID string, req r
 func (s *userToolConfigService) Update(ctx context.Context, userID, id string, req request.UpdateUserToolConfigRequest) (*response.UserToolConfigInfo, error) {
 	config, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return nil, apperrors.NewDefault(apperrors.CodeBadRequest)
+		// 码值沿用 CodeBadRequest 以不改动对前端的既有契约；
+		// 但「查询失败」必须分流成 500，不能再说成「请求参数错误」。
+		return nil, apperrors.NotFoundOrInternal(apperrors.CodeBadRequest, err)
 	}
 
 	// 验证归属
@@ -130,14 +136,18 @@ func (s *userToolConfigService) Update(ctx context.Context, userID, id string, r
 	// 获取当前供应商（用于后续验证）
 	currentProvider, err := s.providerRepo.GetByID(ctx, config.ProviderID)
 	if err != nil {
-		return nil, apperrors.NewDefault(apperrors.CodeToolProviderNotFound)
+		return nil, apperrors.NotFoundOrInternal(apperrors.CodeToolProviderNotFound, err)
 	}
 
 	if req.ProviderID != nil {
 		// 验证新供应商是否存在
 		newProvider, err := s.providerRepo.GetByID(ctx, *req.ProviderID)
 		if err != nil {
-			return nil, apperrors.New(apperrors.CodeToolProviderNotFound, "新供应商不存在")
+			// 保留原有文案，但同样要把「查询失败」分流成 500。
+			if apperrors.IsNotFound(err) {
+				return nil, apperrors.NewWithErr(apperrors.CodeToolProviderNotFound, "新供应商不存在", err)
+			}
+			return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 		}
 
 		// 验证新供应商是否属于同一个工具类型
@@ -200,7 +210,9 @@ func (s *userToolConfigService) Update(ctx context.Context, userID, id string, r
 		return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 
-	if config.IsEnabled {
+	// MCP 类型不执行互斥（允许用户同时启用多个 MCP Server）
+	// 其他类型保持原有互斥逻辑：同 ToolType 下只能启用一个配置
+	if config.IsEnabled && config.ToolType.ToolKey != "mcp" {
 		if err := s.repo.DisableOthersByToolType(ctx, userID, config.ToolTypeID, config.ID); err != nil {
 			return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 		}
@@ -218,7 +230,7 @@ func (s *userToolConfigService) Update(ctx context.Context, userID, id string, r
 func (s *userToolConfigService) Delete(ctx context.Context, userID, id string) error {
 	config, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return apperrors.NewDefault(apperrors.CodeBadRequest)
+		return apperrors.NotFoundOrInternal(apperrors.CodeBadRequest, err)
 	}
 
 	if config.UserID != userID {
@@ -231,7 +243,9 @@ func (s *userToolConfigService) Delete(ctx context.Context, userID, id string) e
 func (s *userToolConfigService) Get(ctx context.Context, userID, id string) (*response.UserToolConfigInfo, error) {
 	config, err := s.repo.GetByID(ctx, id)
 	if err != nil {
-		return nil, apperrors.NewDefault(apperrors.CodeBadRequest)
+		// 码值沿用 CodeBadRequest 以不改动对前端的既有契约；
+		// 但「查询失败」必须分流成 500，不能再说成「请求参数错误」。
+		return nil, apperrors.NotFoundOrInternal(apperrors.CodeBadRequest, err)
 	}
 
 	if config.UserID != userID {

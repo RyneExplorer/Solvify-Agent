@@ -3,6 +3,7 @@ package sync
 import (
 	"github.com/gin-gonic/gin"
 
+	"solvify-agent/internal/api/v1/shared"
 	"solvify-agent/internal/middleware"
 	requestdto "solvify-agent/internal/model/dto/request"
 	"solvify-agent/internal/service"
@@ -54,7 +55,7 @@ func (ctrl *Controller) ListSources(c *gin.Context) {
 
 // SourceDetail 查询同步源详情
 func (ctrl *Controller) SourceDetail(c *gin.Context) {
-	userID, sourceID, ok := ctrl.userAndSourceID(c)
+	userID, sourceID, ok := shared.UserAndUUIDParam(c, "id", "同步源")
 	if !ok {
 		return
 	}
@@ -68,7 +69,7 @@ func (ctrl *Controller) SourceDetail(c *gin.Context) {
 
 // UpdateSource 更新同步源
 func (ctrl *Controller) UpdateSource(c *gin.Context) {
-	userID, sourceID, ok := ctrl.userAndSourceID(c)
+	userID, sourceID, ok := shared.UserAndUUIDParam(c, "id", "同步源")
 	if !ok {
 		return
 	}
@@ -87,7 +88,7 @@ func (ctrl *Controller) UpdateSource(c *gin.Context) {
 
 // DeleteSource 软删除同步源
 func (ctrl *Controller) DeleteSource(c *gin.Context) {
-	userID, sourceID, ok := ctrl.userAndSourceID(c)
+	userID, sourceID, ok := shared.UserAndUUIDParam(c, "id", "同步源")
 	if !ok {
 		return
 	}
@@ -100,7 +101,7 @@ func (ctrl *Controller) DeleteSource(c *gin.Context) {
 
 // CreateJob 创建同步任务
 func (ctrl *Controller) CreateJob(c *gin.Context) {
-	userID, sourceID, ok := ctrl.userAndSourceID(c)
+	userID, sourceID, ok := shared.UserAndUUIDParam(c, "id", "同步源")
 	if !ok {
 		return
 	}
@@ -114,7 +115,7 @@ func (ctrl *Controller) CreateJob(c *gin.Context) {
 
 // ListJobs 查询同步源任务列表
 func (ctrl *Controller) ListJobs(c *gin.Context) {
-	userID, sourceID, ok := ctrl.userAndSourceID(c)
+	userID, sourceID, ok := shared.UserAndUUIDParam(c, "id", "同步源")
 	if !ok {
 		return
 	}
@@ -128,7 +129,7 @@ func (ctrl *Controller) ListJobs(c *gin.Context) {
 
 // ListItems 查询同步源文件目录
 func (ctrl *Controller) ListItems(c *gin.Context) {
-	userID, sourceID, ok := ctrl.userAndSourceID(c)
+	userID, sourceID, ok := shared.UserAndUUIDParam(c, "id", "同步源")
 	if !ok {
 		return
 	}
@@ -142,13 +143,8 @@ func (ctrl *Controller) ListItems(c *gin.Context) {
 
 // JobDetail 查询同步任务详情
 func (ctrl *Controller) JobDetail(c *gin.Context) {
-	userID, ok := middleware.CurrentUserID(c)
+	userID, jobID, ok := shared.UserAndUUIDParam(c, "id", "同步任务")
 	if !ok {
-		return
-	}
-	jobID := c.Param("id")
-	if !middleware.IsUUID(jobID) {
-		response.BadRequest(c, "同步任务 ID 格式错误")
 		return
 	}
 	output, err := ctrl.syncSvc.JobDetail(c.Request.Context(), userID, jobID)
@@ -161,13 +157,8 @@ func (ctrl *Controller) JobDetail(c *gin.Context) {
 
 // ImportItem 导入同步文件到本地文档
 func (ctrl *Controller) ImportItem(c *gin.Context) {
-	userID, ok := middleware.CurrentUserID(c)
+	userID, itemID, ok := shared.UserAndUUIDParam(c, "id", "同步文件")
 	if !ok {
-		return
-	}
-	itemID := c.Param("id")
-	if !middleware.IsUUID(itemID) {
-		response.BadRequest(c, "同步文件 ID 格式错误")
 		return
 	}
 	output, err := ctrl.syncSvc.ImportItem(c.Request.Context(), userID, itemID)
@@ -176,18 +167,4 @@ func (ctrl *Controller) ImportItem(c *gin.Context) {
 		return
 	}
 	response.Success(c, output)
-}
-
-// userAndSourceID 读取当前用户和同步源 ID
-func (ctrl *Controller) userAndSourceID(c *gin.Context) (string, string, bool) {
-	userID, ok := middleware.CurrentUserID(c)
-	if !ok {
-		return "", "", false
-	}
-	sourceID := c.Param("id")
-	if !middleware.IsUUID(sourceID) {
-		response.BadRequest(c, "同步源 ID 格式错误")
-		return "", "", false
-	}
-	return userID, sourceID, true
 }

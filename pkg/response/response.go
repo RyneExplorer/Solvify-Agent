@@ -44,7 +44,13 @@ func Error(c *gin.Context, code int, message string) {
 }
 
 // BizError 输出业务错误响应
+//
+// 它是全部错误的**唯一出口**：所有 controller 都经由它把 service 的错误转成响应体。
+// 因此底层错误的归一化（「查不到记录」→ 404 而不是 500）也收口在这里，
+// 而不是散落在各个 controller —— 新增接口忘了翻译也不会漏成假的 500。
 func BizError(c *gin.Context, err error) {
+	err = apperrors.Translate(err)
+
 	var bizErr *apperrors.BizError
 	if stderrors.As(err, &bizErr) {
 		Error(c, bizErr.Code, bizErr.Message)

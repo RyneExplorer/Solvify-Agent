@@ -44,7 +44,14 @@ cors:
 agent:
   enable_demo: true
   max_iterations: 10
+  quick_agent_max_iterations: 8 # 模型调用轮数，澄清恢复沿用剩余轮数
   score_threshold: 0.7
+  deep_plan_execute_enabled: true
+  deep_parallel_enabled: true
+  deep_max_plan_tasks: 4
+  deep_max_subagent_iterations: 3
+  deep_max_plan_execute_rounds: 8
+  deep_max_executor_iterations: 6
 
 # 默认 LLM 配置（系统级）
 llm:
@@ -75,6 +82,11 @@ rag:
   vector_weight: 0.7    # 向量检索权重
   keyword_weight: 0.3   # 关键词检索权重
   rrf_k: 60.0           # RRF 融合参数
+  # 仅「向量侧全灭」时生效：关键词结果的最低匹配比例
+  keyword_score_threshold: 0.25
+  # 每侧候选数 = top_k × 本系数。实测 1 的精度高于 2（82.1% → 95.7%、含噪 17.9% → 4.3%），
+  # 召回不变；代价是单侧排到第 4 名及以后的块拿不到。详见 test1/rag_eval/AB-对比结论-20260923.md
+  candidate_multiplier: 1
   # Rerank 重排序（可选）
   reranker:
     enabled: false
@@ -97,6 +109,22 @@ tools:
   web_search:
     api_key: ""
     base_url: ""
+  # 系统预置 MCP 服务器列表（网页版仅支持 http/sse，不支持 stdio）
+  # 启动时自动加载到数据库（is_system=true），用户可在前端勾选启用；
+  # 也可跳过此处，直接在后台管理页新增（写入数据库，无需重启）
+  mcp_servers:
+    - name: "council"
+      description: "Council of AI 公开 MCP（GSPC 测量板，只读，无需鉴权）"
+      transport: "http"
+      url: "https://councilof.ai/mcp/free"
+      timeout: 30
+    # - name: "my-remote-mcp"
+    #   description: "远程 MCP 服务器示例"
+    #   transport: "sse"
+    #   url: "https://example.com/mcp/sse"
+    #   headers:
+    #     Authorization: "Bearer xxx"
+    #   timeout: 30
 
 # 钉钉集成配置
 dingtalk:
@@ -136,3 +164,47 @@ email:
   port: 465
   username: ""
   password: ""
+
+# 可观测性配置（本项目唯一的三方链路：eino → Langfuse）
+#
+# ⚠️ 自研可观测性模块已整体删除 —— 本地 span 树、落库 chat_traces、Prometheus
+# /metrics、自研 eino callback、gin 追踪中间件、trace 查询接口与前端追踪页
+# 全部移除。本段现在只剩两件事：
+#   1. 脱敏开关与服务工作名（给官方 callback 用）；
+#   2. langfuse_* 三方凭据与导出节奏。
+#
+# 历史表 chat_traces / agent_tasks / agent_task_steps 与 messages.trace_id 列
+# 都还在库里，只是【不再写入】，方便需要时回查老数据。
+#
+# 整段都可以不写：不写时全部走 pkg/config 里的 Default()，取值与本文件标注的默认值一致。
+# 之所以还是列出来，是因为要接三方追踪平台时必须改 langfuse_* 几项，
+# 而 mapstructure 对拼错的键名是**静默忽略**的（配了等于没配，服务照常启动），
+# 有这份显式模板才好对照。pkg/config 里有一条测试会严格校验本段键名与结构体一致。
+observability:
+  pii_mask_secret: true                # 对疑似密钥的取值打码（传给官方 Config.MaskFunc）
+  otel_service_name: "solvify-agent"   # 平台按它区分服务，多环境建议带后缀
+
+  # ---- Langfuse（官方 eino callback v2，走平台 OTLP 入口）----
+  #
+  # 官方 v2 用标准 OTLP/HTTP 直发 /api/public/otel/v1/traces，
+  # 不再走已弃用的 /api/public/ingestion（平台公告 2026-11-16 关停，此后只收 score-create）。
+  # 三项填全才会注册官方 callback；任一为空则启动时跳过（本地开发默认跳过，不影响启动）。
+  # PublicKey / SecretKey 属敏感信息，只放本地 config.yaml 或环境变量，不要提交进仓库。
+  langfuse_host: ""                    # 平台根地址，例如 https://jp.cloud.langfuse.com
+  langfuse_public_key: ""              # Langfuse 项目设置里的 Public Key（pk-lf-...）
+  langfuse_secret_key: ""              # Langfuse 项目设置里的 Secret Key（sk-lf-...）
+  langfuse_max_export_batch_size: 512  # 攒够多少条 span 导出一批（官方默认 512）
+  langfuse_batch_timeout_ms: 5000      # 或最多等多久导出一批（官方默认 5s）
+  langfuse_timeout_ms: 10000           # 单次 OTLP HTTP 请求超时（官方默认 10s）
+  langfuse_sample_rate: 1.0            # 官方 handler 侧采样率（1.0 = 全采）
+  # ⚠️ release / tags 必须经 StartTrace 的选项一并下发（见 observability.langfuseOptions）：
+  # 官方 StartTrace 是「opts 覆盖 handler 默认值」，只配在 handler 上会被顶掉，平台字段为空。
+  # ⚠️ tags 只在这里配：官方 WithTags 是 append（不是覆盖），两处都给会在平台上重复。
+  langfuse_release: ""                 # 版本标识，平台侧按它筛选
+  langfuse_tags: []                    # 静态标签，例如 ["production", "jp"]
+
+  # ---- 以下两项对应官方 v2 Config 的同名字段，默认值与官方一致 ----
+  # 本地队列容量。⚠️ 队列满会丢事件，但官方 v2 会计入丢弃统计并汇总告警
+  langfuse_max_queue_size: 2048
+  # 单个 span 上由本 callback 写入的属性总量上限（字节），超限按 input → output → metadata 截断
+  langfuse_max_span_attribute_bytes: 4000000

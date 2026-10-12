@@ -199,7 +199,17 @@ export async function streamRequest(
     throw new Error(text || `HTTP ${res.status}`)
   }
 
-  const reader = res.body!.getReader() as StreamReaderWithMeta
+  // Controller 在开始 SSE 之前仍可能返回业务错误（HTTP 200 + JSON）。
+  if (res.headers.get('Content-Type')?.includes('application/json')) {
+    const data = await res.json() as ApiResponse<unknown>
+    if (data.code === 401 || data.code === 403) {
+      removeToken()
+      routerInstance?.push('/login')
+    }
+    throw new Error(data.message || '请求失败')
+  }
+  if (!res.body) throw new Error('响应流为空，请重试')
+  const reader = res.body.getReader() as StreamReaderWithMeta
   const traceId = res.headers.get('X-Trace-ID') || undefined
   const requestId = res.headers.get('X-Request-ID') || undefined
   if (traceId || requestId) {

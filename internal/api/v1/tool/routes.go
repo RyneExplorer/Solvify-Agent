@@ -15,6 +15,13 @@ func (c *Controller) RegisterRoutes(router *gin.RouterGroup) {
 	adminTypeGroup.POST("", c.CreateToolType)
 	adminTypeGroup.PUT("/:id", c.UpdateToolType)
 	adminTypeGroup.DELETE("/:id", c.DeleteToolType)
+	adminTypeGroup.POST("/cleanup-empty", c.CleanupEmptyToolTypes)
+
+	// 管理员：MCP 服务器管理
+	adminMCPGroup := router.Group("/admin/mcp-servers")
+	adminMCPGroup.Use(middleware.RequireAdmin())
+	adminMCPGroup.GET("", c.ListMCPServers)
+	adminMCPGroup.DELETE("/:providerId", c.DeleteMCPServer)
 
 	// 管理员：查看可用的供应商类型
 	adminProviderTypes := router.Group("/admin/provider-types")
@@ -33,10 +40,13 @@ func (c *Controller) RegisterRoutes(router *gin.RouterGroup) {
 	adminToolTestGroup := router.Group("/admin/tools/test")
 	adminToolTestGroup.Use(middleware.RequireAdmin())
 	adminToolTestGroup.POST("", c.TestToolProvider)
+	adminToolTestGroup.POST("/probe", c.ProbeMCPTools)
 
 	// 用户：工具模板浏览
 	toolGroup := router.Group("/user/tools")
 	toolGroup.GET("/templates", c.ListToolTemplates)
+	// 用户：探测 MCP 服务器工具清单（不执行工具；传入 provider_id 时刷新服务器工具缓存）
+	toolGroup.POST("/mcp/probe", c.ProbeMCPTools)
 
 	// 用户：工具配置管理
 	configGroup := router.Group("/user/tool-configs")

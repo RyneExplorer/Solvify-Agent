@@ -29,6 +29,12 @@ func sessionResponse(session entity.ChatSession) response.SessionResponse {
 			Options:      pc.Options,
 			SetAt:        pc.SetAt,
 		}
+		if len(pc.ExecutionPlan) > 0 {
+			var plan response.ExecutionPlan
+			if err := json.Unmarshal(pc.ExecutionPlan, &plan); err == nil {
+				resp.PendingCheckpoint.ExecutionPlan = &plan
+			}
+		}
 	}
 	return resp
 }
@@ -66,11 +72,13 @@ func messageResponse(msg entity.ChatMessage) response.MessageResponse {
 	if len(msg.Metadata) > 0 {
 		var meta struct {
 			ReasoningSteps []response.ReasoningStep `json:"reasoning_steps"`
+			ExecutionPlan  *response.ExecutionPlan  `json:"execution_plan"`
 		}
 		if err := json.Unmarshal(msg.Metadata, &meta); err != nil {
 			logger.Errorf("解析 Metadata 失败, messageID=%s: %v", msg.ID, err)
-		} else if len(meta.ReasoningSteps) > 0 {
+		} else {
 			resp.ReasoningSteps = meta.ReasoningSteps
+			resp.ExecutionPlan = meta.ExecutionPlan
 		}
 	}
 

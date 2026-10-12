@@ -71,12 +71,12 @@
           <section>
             <div class="flex items-center justify-between mb-3">
               <h2 class="text-sm font-semibold text-slate-900">可用工具</h2>
-              <span class="text-xs text-slate-400">{{ toolTemplates.length }} 个</span>
+              <span class="text-xs text-slate-400">{{ nonMCPTemplates.length }} 个</span>
             </div>
             <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
-              <div v-if="!toolTemplates.length" class="px-4 py-8 text-center text-sm text-slate-400">暂无可用的工具模板</div>
+              <div v-if="!nonMCPTemplates.length" class="px-4 py-8 text-center text-sm text-slate-400">暂无可用的工具模板</div>
               <div
-                  v-for="t in toolTemplates"
+                  v-for="t in nonMCPTemplates"
                   :key="t.id"
                   class="px-4 py-3 border-b border-slate-100 last:border-0"
               >
@@ -94,9 +94,9 @@
               <AppButton size="sm" @click="openToolCreate">添加工具</AppButton>
             </div>
             <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
-              <div v-if="!userToolConfigs.length" class="px-4 py-8 text-center text-sm text-slate-400">暂无配置的工具</div>
+              <div v-if="!nonMCPConfigs.length" class="px-4 py-8 text-center text-sm text-slate-400">暂无配置的工具</div>
               <div
-                  v-for="c in userToolConfigs"
+                  v-for="c in nonMCPConfigs"
                   :key="c.id"
                   class="flex items-center justify-between px-4 py-3 border-b border-slate-100 last:border-0"
               >
@@ -112,6 +112,74 @@
                   >{{ c.is_enabled ? '当前使用' : '设为使用' }}</button>
                   <button @click="openToolEdit(c)" class="text-xs px-2.5 py-1 rounded-md text-slate-600 hover:bg-slate-100 border border-slate-200">编辑</button>
                   <button @click="handleToolDelete(c.id)" class="text-xs px-2.5 py-1 rounded-md text-red-600 hover:bg-red-50 border border-red-200">删除</button>
+                </div>
+              </div>
+            </div>
+          </section>
+        </template>
+
+        <!-- MCP 服务器标签页 -->
+        <template v-if="activeTab === 'mcp'">
+          <section>
+            <div class="flex items-center justify-between mb-3">
+              <h2 class="text-sm font-semibold text-slate-900">可用 MCP 服务器</h2>
+              <div class="flex items-center gap-2">
+                <span class="text-xs text-slate-400">{{ mcpProviders.length }} 个</span>
+                <AppButton size="sm" variant="secondary" :disabled="probingMCP" @click="probeMCP(false)">刷新工具清单</AppButton>
+              </div>
+            </div>
+            <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <div v-if="!mcpProviders.length" class="px-4 py-8 text-center text-sm text-slate-400">
+                暂无 MCP 服务器，请等待管理员配置或在配置文件中添加系统预置服务器
+              </div>
+              <div
+                  v-for="p in mcpProviders"
+                  :key="p.id"
+                  class="px-4 py-3 border-b border-slate-100 last:border-0"
+              >
+                <div class="flex items-center justify-between">
+                  <div class="min-w-0 flex-1 mr-3">
+                    <div class="flex items-center gap-2">
+                      <div class="text-sm font-medium text-slate-900 truncate">{{ p.name }}</div>
+                      <AppBadge v-if="p.is_system" variant="blue">系统预置</AppBadge>
+                      <AppBadge v-else variant="neutral">管理员配置</AppBadge>
+                    </div>
+                    <div class="text-xs text-slate-400 mt-0.5 truncate">
+                      {{ p.description || '暂无描述' }}
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <button
+                        @click="handleMCPToggle(p)"
+                        class="text-xs px-2.5 py-1 rounded-md border"
+                        :class="isMCPEnabled(p.id) ? 'text-emerald-600 bg-emerald-50 border-emerald-200' : 'text-slate-600 hover:bg-slate-100 border-slate-200'"
+                    >{{ isMCPEnabled(p.id) ? '已启用' : '启用' }}</button>
+                  </div>
+                </div>
+
+                <!-- 工具级开关：勾选状态来自用户配置 disabled_tools -->
+                <div v-if="p.mcp_tool_manifest && p.mcp_tool_manifest.length" class="mt-2">
+                  <div class="flex items-center justify-between mb-1">
+                    <div class="text-xs text-slate-400">{{ enabledToolCount(p) }}/{{ p.mcp_tool_manifest.length }} 个工具已启用</div>
+                    <button
+                        @click="toggleMCPTools(p.id)"
+                        class="text-xs text-slate-500 hover:text-slate-700"
+                    >{{ isMCPToolsExpanded(p.id) ? '收起工具' : '展开工具' }}</button>
+                  </div>
+                  <div v-show="isMCPToolsExpanded(p.id)" class="flex flex-wrap gap-1">
+                    <button
+                        v-for="tool in p.mcp_tool_manifest"
+                        :key="tool.name"
+                        :disabled="!isMCPEnabled(p.id)"
+                        :title="tool.description || tool.name"
+                        @click="handleMCPToolToggle(p, tool.name)"
+                        class="text-[11px] px-1.5 py-0.5 rounded-md border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        :class="isMCPToolEnabled(p.id, tool.name) ? 'bg-emerald-50 border-emerald-200 text-emerald-600 hover:bg-emerald-100' : 'bg-white border-slate-200 text-slate-400 line-through hover:bg-slate-50'"
+                    >{{ tool.name }}</button>
+                  </div>
+                </div>
+                <div v-else class="mt-2 text-xs text-slate-400">
+                  {{ probingMCP ? '正在探测工具清单…' : '尚未探测工具清单，点击右上角"刷新工具清单"获取' }}
                 </div>
               </div>
             </div>
@@ -181,8 +249,13 @@
             </div>
             <div v-if="activeTab === 'search'">
               <div class="text-xs text-slate-400 mb-1">已启用工具</div>
-              <div class="text-lg font-semibold text-slate-900">{{ userToolConfigs.filter(c => c.is_enabled).length }}</div>
-              <div class="text-xs text-slate-400 mt-0.5">共 {{ userToolConfigs.length }} 个配置</div>
+              <div class="text-lg font-semibold text-slate-900">{{ nonMCPConfigs.filter(c => c.is_enabled).length }}</div>
+              <div class="text-xs text-slate-400 mt-0.5">共 {{ nonMCPConfigs.length }} 个配置</div>
+            </div>
+            <div v-if="activeTab === 'mcp'">
+              <div class="text-xs text-slate-400 mb-1">已启用 MCP</div>
+              <div class="text-lg font-semibold text-slate-900">{{ mcpEnabledCount }}</div>
+              <div class="text-xs text-slate-400 mt-0.5">共 {{ mcpProviders.length }} 个服务器</div>
             </div>
             <div v-if="activeTab === 'sync'">
               <div class="text-xs text-slate-400 mb-1">钉钉账号</div>
@@ -232,7 +305,7 @@
 
           <template v-if="modalMode === 'tool'">
             <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">显示名称</label><input v-model="tForm.display_name" placeholder="我的搜索工具" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" /></div>
-            <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">工具类型 <span class="text-red-500">*</span></label><AppSelect v-model="selToolType" placeholder="选择工具类型" class="w-full" @change="onToolTypeChange"><el-option v-for="t in toolTemplates" :key="t.id" :value="t.id" :label="t.name" /></AppSelect></div>
+            <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">工具类型 <span class="text-red-500">*</span></label><AppSelect v-model="selToolType" placeholder="选择工具类型" class="w-full" @change="onToolTypeChange"><el-option v-for="t in nonMCPTemplates" :key="t.id" :value="t.id" :label="t.name" /></AppSelect></div>
             <div v-if="selectedExistingProviderConfig" class="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
               该供应商已配置为「{{ selectedExistingProviderConfig.display_name || selectedExistingProviderConfig.provider_name }}」，请编辑现有配置。
             </div>
@@ -351,9 +424,9 @@ import AppButton from '@/components/ui/AppButton.vue'
 import AppBadge from '@/components/ui/AppBadge.vue'
 import AppSelect from '@/components/ui/AppSelect.vue'
 import type { UserModelConfigInfo, CreateUserModelConfigRequest, ModelTestResult } from '@/types/model'
-import type { UserToolConfigInfo, CreateUserToolConfigRequest, ConfigSchema } from '@/types/tool'
+import type { UserToolConfigInfo, CreateUserToolConfigRequest, ConfigSchema, ProviderBrief } from '@/types/tool'
 import { testUserModelConfig } from '@/api/model'
-import { testUserToolConfig } from '@/api/tool'
+import { testUserToolConfig, probeUserMCP } from '@/api/tool'
 import type { DingTalkBinding } from '@/types/dingtalk'
 
 // ── 标签页 ──
@@ -361,12 +434,14 @@ const activeTab = ref('model')
 const tabs = [
   { key: 'model', label: 'AI 模型' },
   { key: 'search', label: '工具配置' },
+  { key: 'mcp', label: 'MCP 服务器' },
   { key: 'sync', label: '同步配置' },
 ]
 
 // 当前标签页的提示文案
 const tabHint = computed(() => {
   if (activeTab.value === 'model') return '系统模型由管理员统一配置；自定义模型仅当前用户可用。请选择支持工具调用的模型，以配合快速检索和联网搜索功能。'
+  if (activeTab.value === 'mcp') return '在 MCP 配置页管理外部工具：启用服务器后，可对每个工具单独开启或关闭，深度模式下自动加载已启用的工具。'
   if (activeTab.value === 'sync') return '钉钉账号绑定状态与知识库页面保持一致，解绑不会删除已创建的同步知识库。'
   return '配置需要在深度模式下使用的工具。启用后，AI 将根据对话内容自动调用相应工具获取信息。'
 })
@@ -563,6 +638,178 @@ async function handleToolDelete(id: string) {
   }
 }
 
+// ── MCP 服务器 ──
+// 所有可用的 MCP 供应商（来自 tool_key === 'mcp' 的工具模板）
+const mcpProviders = computed(() => {
+  const t = toolTemplates.value.find(t => t.tool_key === 'mcp')
+  return t?.providers ?? []
+})
+
+// 通用工具模板：排除 MCP 容器模板、仅含 mcp 供应商的模板、以及无供应商的空壳模板
+const nonMCPTemplates = computed(() => toolTemplates.value.filter(t => {
+  if (t.tool_key === 'mcp') return false
+  if (t.providers.length === 0) return false
+  return !t.providers.every(p => p.provider_type === 'mcp')
+}))
+
+// 当前用户已启用的 MCP 配置（按 provider_id 索引）
+const mcpUserConfigsByProvider = computed(() => {
+  const map = new Map<string, UserToolConfigInfo>()
+  for (const c of userToolConfigs.value) {
+    if (c.tool_type_key === 'mcp') map.set(c.provider_id, c)
+  }
+  return map
+})
+
+// 判断某个 MCP 供应商是否已启用
+function isMCPEnabled(providerId: string): boolean {
+  const c = mcpUserConfigsByProvider.value.get(providerId)
+  return !!c && c.is_enabled
+}
+
+// 已启用的 MCP 服务器数量
+const mcpEnabledCount = computed(() => {
+  let n = 0
+  for (const p of mcpProviders.value) {
+    if (isMCPEnabled(p.id)) n++
+  }
+  return n
+})
+
+// MCP 工具类型 ID（用于创建用户配置）
+const mcpToolTypeId = computed(() => {
+  const t = toolTemplates.value.find(t => t.tool_key === 'mcp')
+  return t?.id ?? ''
+})
+
+// 启用/禁用 MCP 服务器
+// MCP 无需用户填写 config（连接信息在供应商上），config 传空对象即可
+// 后端已对 mcp 类型放开互斥限制，可同时启用多个
+async function handleMCPToggle(p: { id: string; name: string }) {
+  const existing = mcpUserConfigsByProvider.value.get(p.id)
+  try {
+    if (existing) {
+      // 切换启用状态
+      const newEnabled = !existing.is_enabled
+      await updateTool(existing.id, { is_enabled: newEnabled })
+      await loadTools()
+      ElMessage.success(newEnabled ? `已启用 ${p.name}` : `已停用 ${p.name}`)
+    } else {
+      // 首次启用：创建配置（config 为空对象）
+      if (!mcpToolTypeId.value) {
+        throw new Error('未找到 MCP 工具类型')
+      }
+      await createTool({
+        tool_type_id: mcpToolTypeId.value,
+        provider_id: p.id,
+        display_name: p.name,
+        config: {},
+      })
+      await loadTools()
+      ElMessage.success(`已启用 ${p.name}`)
+    }
+  } catch (e: unknown) {
+    ElMessage.error(e instanceof Error ? e.message : '操作失败')
+  }
+}
+
+// 工具配置页只展示非 MCP：MCP 服务器与工具统一收敛到 MCP 标签页管理
+const nonMCPConfigs = computed(() => userToolConfigs.value.filter(c => c.tool_type_key !== 'mcp'))
+
+// ── MCP 工具级开关 ──
+
+// 工具清单展开状态（默认收起，展开按钮控制显示隐藏）
+const expandedMCPTools = ref<Record<string, boolean>>({})
+
+function isMCPToolsExpanded(providerId: string): boolean {
+  return !!expandedMCPTools.value[providerId]
+}
+
+function toggleMCPTools(providerId: string) {
+  expandedMCPTools.value[providerId] = !expandedMCPTools.value[providerId]
+}
+
+// 用户配置中的 config 对象（后端返回 RawMessage，正常为对象；容错字符串形态）
+function mcpConfigOf(providerId: string): Record<string, unknown> | null {
+  const c = mcpUserConfigsByProvider.value.get(providerId)
+  if (!c) return null
+  const raw = c.config
+  if (!raw) return null
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw) as Record<string, unknown>
+    } catch {
+      return null
+    }
+  }
+  return raw
+}
+
+// 某个 MCP 服务器当前被停用的工具名集合
+function disabledToolsFor(providerId: string): Set<string> {
+  const cfg = mcpConfigOf(providerId)
+  const list = cfg?.['disabled_tools']
+  if (!Array.isArray(list)) return new Set()
+  return new Set(list.filter((v): v is string => typeof v === 'string'))
+}
+
+// 判断某个 MCP 工具是否启用（未配置视为启用）
+function isMCPToolEnabled(providerId: string, toolName: string): boolean {
+  return !disabledToolsFor(providerId).has(toolName)
+}
+
+// 服务器下已启用的工具数
+function enabledToolCount(p: ProviderBrief): number {
+  const manifest = p.mcp_tool_manifest
+  if (!manifest || !manifest.length) return 0
+  const disabled = disabledToolsFor(p.id)
+  return manifest.filter(t => !disabled.has(t.name)).length
+}
+
+// 切换单个 MCP 工具：写入用户配置 config.disabled_tools
+async function handleMCPToolToggle(p: { id: string; name: string }, toolName: string) {
+  const existing = mcpUserConfigsByProvider.value.get(p.id)
+  if (!existing) {
+    ElMessage.warning('请先启用该 MCP 服务器')
+    return
+  }
+  try {
+    const cfg = mcpConfigOf(p.id) ?? {}
+    const disabled = disabledToolsFor(p.id)
+    if (disabled.has(toolName)) disabled.delete(toolName)
+    else disabled.add(toolName)
+    await updateTool(existing.id, { config: { ...cfg, disabled_tools: [...disabled] } })
+    ElMessage.success(disabled.has(toolName) ? `已停用 ${toolName}` : `已启用 ${toolName}`)
+  } catch (e: unknown) {
+    ElMessage.error(e instanceof Error ? e.message : '操作失败')
+  }
+}
+
+// 探测 MCP 工具清单（onlyMissing=true 时仅探测尚无清单的服务器，用于进入标签页时自动补齐）
+const probingMCP = ref(false)
+async function probeMCP(onlyMissing: boolean) {
+  const targets = mcpProviders.value.filter(p => {
+    if (!onlyMissing) return true
+    return !p.mcp_tool_manifest || p.mcp_tool_manifest.length === 0
+  })
+  if (!targets.length) return
+  probingMCP.value = true
+  const failed: string[] = []
+  try {
+    for (const p of targets) {
+      try {
+        await probeUserMCP(p.id)
+      } catch {
+        failed.push(p.name)
+      }
+    }
+    await loadTools()
+    if (failed.length) ElMessage.warning(`以下服务器探测失败: ${failed.join('、')}`)
+  } finally {
+    probingMCP.value = false
+  }
+}
+
 // 保存配置
 async function doSave() {
   try {
@@ -727,4 +974,9 @@ watch(activeTab, value => {
 })
 
 onMounted(() => { loadModels(); loadTools() })
+
+// 进入 MCP 标签页时自动补齐缺失的工具清单
+watch(activeTab, (tab) => {
+  if (tab === 'mcp') probeMCP(true)
+})
 </script>

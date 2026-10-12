@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	apperrors "solvify-agent/pkg/errors"
 	"solvify-agent/pkg/logger"
 )
 
@@ -157,18 +158,16 @@ func ResetEffectiveMaxContextLength(modelID string) {
 	delete(effectiveContextLengths, modelID)
 }
 
-// contextLengthErrorKeywords 用于识别上下文长度超限错误。
-var contextLengthErrorKeywords = []string{
-	"context length", "context_length", "maximum context length",
-	"token limit", "token_limit", "max tokens", "max_tokens",
-	"too long", "request too large", "exceeds", "exceed",
-	"context window", "上下文长度", "token 数超过", "超出最大长度",
-	"tokens limit", "input length", "prompt is too long",
-}
-
-// ReduceContextBudgetOnError 当模型返回上下文长度相关错误时，降低该模型的有效预算。
-func ReduceContextBudgetOnError(modelID string, err error) {
-	if err == nil || !looksLikeContextLengthError(err) {
+// ReduceContextBudgetOnError 当模型确实因为「上下文太长」而失败时，降低该模型的有效预算。
+//
+// 判据是**失败种类**，不再拿错误文本去撞关键词表。此前关键词表里有裸词 "exceeds"，
+// 于是 eino 的「exceeds max iterations」（迭代轮次用尽，与上下文长度毫无关系）
+// 也被判成上下文超长 —— 一次迭代超限就把模型有效窗口从 64000 降到 8192，
+// 而且这个降级在进程内持续生效，此后每个请求都受影响。
+//
+// 种类判定唯一收口在 pkg/errors.Classify（结构化哨兵优先，文本只作兜底）。
+func ReduceContextBudgetOnError(modelID string, kind apperrors.Kind) {
+	if kind != apperrors.KindContextLength {
 		return
 	}
 
@@ -191,19 +190,6 @@ func ReduceContextBudgetOnError(modelID string, err error) {
 
 	effectiveContextLengths[modelID] = newValue
 	logger.Warnf("模型 %s 再次触发上下文长度错误，有效上下文窗口已降低为 %d", modelID, newValue)
-}
-
-func looksLikeContextLengthError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	for _, kw := range contextLengthErrorKeywords {
-		if strings.Contains(msg, strings.ToLower(kw)) {
-			return true
-		}
-	}
-	return false
 }
 
 // ─── /v1/models 接口探测 ───────────────────────────────────────────

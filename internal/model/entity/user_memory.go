@@ -17,7 +17,7 @@ type UserMemory struct {
 	Confidence    float64 `gorm:"type:float;default:1.0"`
 	IsActive      bool    `gorm:"default:true;index:idx_user_memories_user_active,priority:2"`
 	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	UpdatedAt     time.Time `gorm:"index:idx_user_memories_user_active,priority:3"`
 }
 
 // BeforeCreate 在创建前自动生成 UUID

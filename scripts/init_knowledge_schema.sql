@@ -66,9 +66,14 @@ CREATE TABLE "public"."chat_messages" (
   "knowledge_base_ids" jsonb NOT NULL DEFAULT '[]'::jsonb,
   "sources" jsonb,
   "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb,
+  "embedding" "public"."vector"(1024),
   "created_at" timestamptz(6)
 )
 ;
+
+-- 消息向量：语义召回靠它（查询侧也走同一维度，维度由启动期
+-- EnsureChatMessageEmbeddingSchema 核对）。历史消息需要回填后才可被召回。
+COMMENT ON COLUMN "public"."chat_messages"."embedding" IS '消息向量（语义召回用，回填后可被召回）';
 
 -- ----------------------------
 -- Table structure for chat_sessions
@@ -112,6 +117,7 @@ CREATE TABLE "public"."chat_traces" (
   "request_id" varchar(128) COLLATE "pg_catalog"."default",
   "user_id" varchar(64) COLLATE "pg_catalog"."default",
   "session_id" varchar(64) COLLATE "pg_catalog"."default",
+  "otel_trace_id" varchar(32) COLLATE "pg_catalog"."default",
   "sample_rate" float8 NOT NULL DEFAULT 0,
   "sampled" bool NOT NULL DEFAULT false,
   "duration_ms" int8 NOT NULL DEFAULT 0,
@@ -777,6 +783,9 @@ CREATE INDEX "idx_chat_traces_session_id" ON "public"."chat_traces" USING btree 
 );
 CREATE INDEX "idx_chat_traces_user_id" ON "public"."chat_traces" USING btree (
   "user_id" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST
+);
+CREATE INDEX "idx_chat_traces_otel_trace_id" ON "public"."chat_traces" USING btree (
+  "otel_trace_id" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST
 );
 
 -- ----------------------------

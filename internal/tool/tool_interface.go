@@ -28,5 +28,7 @@ type ToolTypeStore interface {
 
 // ToolFactory 工具工厂接口
 type ToolFactory interface {
-	CreateAgentTools(ctx context.Context, userID string) []einoTool.BaseTool
+	// CreateAgentTools 根据用户配置创建 Agent 工具列表
+	// 可选 userConfigIDs: 非空时仅加载指定 ID 的配置（仍需满足 enabled 条件）
+	CreateAgentTools(ctx context.Context, userID string, userConfigIDs ...string) []einoTool.BaseTool
 }

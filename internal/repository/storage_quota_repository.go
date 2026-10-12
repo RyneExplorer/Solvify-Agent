@@ -23,7 +23,7 @@ func NewStorageQuotaRepository(db *gorm.DB) StorageQuotaRepository {
 // FindByUserID 查询用户存储配额
 func (r *storageQuotaRepository) FindByUserID(ctx context.Context, userID string) (entity.StorageQuota, bool, error) {
 	var quota entity.StorageQuota
-	err := r.db.WithContext(ctx).Where("user_id = ?", userID).First(&quota).Error
+	err := dbFor(ctx, r.db).Where("user_id = ?", userID).First(&quota).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return entity.StorageQuota{}, false, nil
 	}
@@ -37,7 +37,7 @@ func (r *storageQuotaRepository) AddUsedStorage(ctx context.Context, userID stri
 		MaxStorageBytes:  maxStorageBytes,
 		UsedStorageBytes: addBytes,
 	}
-	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+	return dbFor(ctx, r.db).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "user_id"}},
 		DoUpdates: clause.Assignments(map[string]any{
 			"used_storage_bytes": gorm.Expr("storage_quotas.used_storage_bytes + ?", addBytes),

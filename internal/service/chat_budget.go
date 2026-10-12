@@ -2,14 +2,25 @@ package service
 
 import (
 	"solvify-agent/internal/model/entity"
+	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/tokenutil"
 )
+
+// truncationMarker 是上下文预算裁剪时追加在消息末尾的标记。
+//
+// 它描述的是「预算不够、这条消息被裁过」这件事，不是用户原始内容。
+// 任何二次消费历史文本的地方（例如构造检索 query、抽实体）都必须先剥掉它，
+// 否则标记里的「内容/过长/截断」会被当成正文词汇混进检索条件 —— 见 stripTruncationMarker。
+const truncationMarker = "\n\n（内容过长，已截断）"
 
 // calculateContextBudgets 根据模型最大上下文窗口 + 工具定义占用，分配历史、检索、记忆的 token 预算。
 //
 // P0-④ 关键修复：toolsTokens (深度模式/多工具场景的工具 JSON Schema 真 token 数) 必须先从总窗口
 // 扣除，再分配回复预留和固定预留，否则多工具时直接把历史 + 检索预算挤成负数或零。
 // 同时所有预算最终都按 0.95*maxCtx 的安全顶封顶，给偶发的角色名/special token 留余量。
+//
+// 保底规则：**只在剩余额度装得下时才保底**。硬抬保底会突破 safeCap ——
+// 窗口极小（工具定义几乎吃满）时历史曾被无条件抬到 500，等于凭空超发。
 func calculateContextBudgets(maxContextLength int, toolsTokens ...int) (historyBudget, retrievalBudget, memoryBudget int) {
 	toolReserve := 0
 	if len(toolsTokens) > 0 && toolsTokens[0] > 0 {
@@ -21,8 +32,7 @@ func calculateContextBudgets(maxContextLength int, toolsTokens ...int) (historyB
 	// 0.95 的安全顶：角色标记、特殊 token、工具结果 JSON 序列化扩展，都容易让"算刚好"爆。
 	safeCap := int(float64(maxContextLength) * 0.95)
 	if toolReserve >= safeCap {
-		// 工具定义已经吃掉整个窗口（极端异常配置）：给历史留 200 保底，其他归零
-		return 200, 0, 0
+		return 0, 0, 0
 	}
 	remaining := safeCap - toolReserve
 
@@ -36,13 +46,18 @@ func calculateContextBudgets(maxContextLength int, toolsTokens ...int) (historyB
 	}
 	remaining -= completionReserved
 
-	// 2. 固定预留：System Prompt 基础骨架 + 当前 user question 包装 + 安全边距
+	// 2. 固定预留：System Prompt 基础骨架 + 当前 user question 包装 + 安全边距。
+	// ⚠️ 必须封顶到 remaining：过去这里没有上限，remaining < 300 时仍被抬到 300，
+	// 于是 remaining 变负并一路传导，最后把历史保底成一笔超发额度。
 	fixedReserved := 1500
 	if remaining-fixedReserved < 500 {
 		fixedReserved = remaining / 4
-		if fixedReserved < 300 {
+		if fixedReserved < 300 && remaining >= 300 {
 			fixedReserved = 300
 		}
+	}
+	if fixedReserved > remaining {
+		fixedReserved = remaining
 	}
 	remaining -= fixedReserved
 
@@ -74,20 +89,20 @@ func calculateContextBudgets(maxContextLength int, toolsTokens ...int) (historyB
 	}
 	remaining -= memoryBudget
 
-	// 5. 历史消息预算：剩下的全给历史，保底 500，封顶 6000（防止过大的上下文拖慢模型推理）
-	historyBudget = remaining
-	historyBudget = max(historyBudget, 500)
-	if historyBudget > 6000 {
-		historyBudget = 6000
+	// 5. 历史消息预算：剩下的全给历史。
+	// ⚠️ 不再有「保底 500」—— 它只可能有害：remaining ≥ 500 时是空操作，
+	// remaining < 500 时把额度抬到超过实有，直接超发 safeCap。
+	// ⚠️ 也不再有一刀切的 6000 封顶 —— 那个数字与模型窗口无关：
+	// 128k 窗口的历史预算本来有 8 万+，被它砍到 6000 后用户实际能带进上下文的历史
+	// 只有 6000 token（约 20~30 轮中文），而且**砍掉的额度就此浪费**（不会分给任何人）。
+	// 真正的刹车是 agent 层的 budgetGuard：它按「剩余窗口水位」逐轮压缩，
+	// 能压到刚好装得下，而不是不管窗口多大都砍到同一个数字。
+	if remaining <= 0 {
+		logger.Warnf("[Budget] 预算已耗尽，历史预算归零: 模型窗口=%d 工具定义=%d 检索=%d 记忆=%d",
+			maxContextLength, toolReserve, retrievalBudget, memoryBudget)
 	}
+	historyBudget = max(remaining, 0)
 	return
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // truncateHistoryByTokens 按轮对（user + assistant 配对）从尾部保留历史消息，
@@ -151,7 +166,7 @@ func truncateHistoryByTokens(messages []entity.ChatMessage, maxTokens int, model
 				m := messages[u]
 				cut, actual := truncateContentHeadByTokens(m.Content, modelName, remain)
 				if actual > 0 {
-					m.Content = cut + "\n\n（内容过长，已截断）"
+					m.Content = cut + truncationMarker
 					pairs = append(pairs, []entity.ChatMessage{m})
 				}
 			}

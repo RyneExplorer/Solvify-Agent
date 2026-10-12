@@ -23,7 +23,7 @@ func NewDingTalkBindingRepository(db *gorm.DB) DingTalkBindingRepository {
 // FindByUserID 查询用户钉钉绑定
 func (r *dingtalkBindingRepository) FindByUserID(ctx context.Context, userID string) (entity.DingTalkUserBinding, bool, error) {
 	var binding entity.DingTalkUserBinding
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("user_id = ?", userID).
 		First(&binding).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -35,7 +35,7 @@ func (r *dingtalkBindingRepository) FindByUserID(ctx context.Context, userID str
 // FindByUnionID 查询钉钉 unionId 绑定
 func (r *dingtalkBindingRepository) FindByUnionID(ctx context.Context, unionID string) (entity.DingTalkUserBinding, bool, error) {
 	var binding entity.DingTalkUserBinding
-	err := r.db.WithContext(ctx).
+	err := dbFor(ctx, r.db).
 		Where("ding_union_id = ?", unionID).
 		First(&binding).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -46,7 +46,7 @@ func (r *dingtalkBindingRepository) FindByUnionID(ctx context.Context, unionID s
 
 // UpsertByUserID 按系统用户保存或更新钉钉绑定
 func (r *dingtalkBindingRepository) UpsertByUserID(ctx context.Context, binding entity.DingTalkUserBinding) error {
-	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+	return dbFor(ctx, r.db).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "user_id"}},
 		DoUpdates: clause.Assignments(map[string]any{
 			"ding_open_id":  gorm.Expr("COALESCE(NULLIF(EXCLUDED.ding_open_id, ''), dingtalk_user_bindings.ding_open_id)"),
@@ -61,7 +61,7 @@ func (r *dingtalkBindingRepository) UpsertByUserID(ctx context.Context, binding 
 
 // DeleteByUserID 删除用户钉钉绑定
 func (r *dingtalkBindingRepository) DeleteByUserID(ctx context.Context, userID string) (bool, error) {
-	result := r.db.WithContext(ctx).
+	result := dbFor(ctx, r.db).
 		Where("user_id = ?", userID).
 		Delete(&entity.DingTalkUserBinding{})
 	if result.Error != nil {

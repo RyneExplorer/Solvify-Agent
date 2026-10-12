@@ -31,6 +31,7 @@ logs/
 .idea/
 .vscode/
 *.iml
+.trae/
 .DS_Store
 Thumbs.db
 
@@ -50,3 +51,9 @@ design/solvify-prototype
 design/vue/node_modules/
 .claude/
 leetcode/
+
+# 本地专用（不入库）
+.workbuddy/
+test1/
+# 根目录一份零散的中文笔记，未收纳进 docs/
+/1

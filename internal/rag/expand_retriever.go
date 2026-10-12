@@ -8,6 +8,7 @@ import (
 
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // ExpandRetriever 装饰器：检索后扩展相邻分块并去重
@@ -90,7 +91,7 @@ func (r *ExpandRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 	logger.Infof("[Expand] 内层检索返回 %d 条", len(result.Documents))
 	for i, doc := range result.Documents {
 		logger.Infof("[Expand]   输入#%d: [%s] score=%.4f chunk#%d title=%q content=%q",
-			i, doc.DocumentID, doc.Score, doc.ChunkIndex, doc.Title, truncate(doc.Content, 60))
+			i, doc.DocumentID, doc.Score, doc.ChunkIndex, doc.Title, strutil.Truncate(doc.Content, 60))
 	}
 
 	// 按 document_id 分组
@@ -113,7 +114,7 @@ func (r *ExpandRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 		}
 		logger.Infof("[Expand]   文档 %s: %d 条 → %d 条", docID, len(docs), len(expandedDocs))
 		for j, doc := range expandedDocs {
-			logger.Infof("[Expand]     扩展#%d: chunk#%d content=%q", j, doc.ChunkIndex, truncate(doc.Content, 80))
+			logger.Infof("[Expand]     扩展#%d: chunk#%d content=%q", j, doc.ChunkIndex, strutil.Truncate(doc.Content, 80))
 		}
 		expanded = append(expanded, expandedDocs...)
 	}
@@ -128,7 +129,7 @@ func (r *ExpandRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 		len(result.Documents), len(expanded), len(deduped))
 	for i, doc := range deduped {
 		logger.Infof("[Expand]   最终#%d: [%s] score=%.4f chunk#%d title=%q content=%q",
-			i, doc.DocumentID, doc.Score, doc.ChunkIndex, doc.Title, truncate(doc.Content, 80))
+			i, doc.DocumentID, doc.Score, doc.ChunkIndex, doc.Title, strutil.Truncate(doc.Content, 80))
 	}
 
 	return Result{
@@ -136,6 +137,27 @@ func (r *ExpandRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 		Documents: deduped,
 	}, nil
 }
+
+// expandAdjacentChunksSQL 读取「已命中文档」的相邻分块。
+//
+// 它同样拼上 retrievedChunkVisibilitySQL：虽然此处已按 document_id 限定在命中文档内，
+// 而命中文档必然已通过入口的可见性过滤，但**留一条不设边界的 chunk 出口就是在复制
+// 这次缺陷的成因模式**（“这条路径忘了设边界，因为没人知道它也要”）——
+// 可见性是每个「把 chunk 内容交出去」的出口的共同约束，不是某两条 SQL 的局部修补。
+//
+// ⚠️ `, dc.id` 同样是**全序**兜底：本查询按 (knowledge_base_id, document_id) 限定、
+// 按 chunk_index 排序，而表上的唯一索引是 (version_id, chunk_index) ——
+// 一旦同一文档出现第二个版本，chunk_index 就会重名、排序退化成非全序。
+// 今天库里还没有多版本文档（实测 0 条），但这不是结构保证。
+// 守卫：TestAllChunkReadSQLsAreTotallyOrdered。
+var expandAdjacentChunksSQL = `
+		SELECT dc.id, dc.chunk_index, dc.content
+		FROM document_chunks dc
+		WHERE dc.knowledge_base_id = ?
+			AND dc.document_id = ?
+			AND dc.chunk_index >= ?
+			AND dc.chunk_index <= ?` + retrievedChunkVisibilitySQL + `
+		ORDER BY dc.chunk_index, dc.id`
 
 // expandDocumentChunks 扩展单个文档的相邻分块
 func (r *ExpandRetriever) expandDocumentChunks(ctx context.Context, knowledgeBaseID, documentID string, docs []Document) ([]Document, error) {
@@ -165,15 +187,8 @@ func (r *ExpandRetriever) expandDocumentChunks(ctx context.Context, knowledgeBas
 
 	// 查询相邻分块
 	var adjacentChunks []adjacentChunk
-	err := r.db.WithContext(ctx).Raw(`
-		SELECT id, chunk_index, content
-		FROM document_chunks
-		WHERE knowledge_base_id = ?
-			AND document_id = ?
-			AND chunk_index >= ?
-			AND chunk_index <= ?
-		ORDER BY chunk_index
-	`, knowledgeBaseID, documentID, expandMin, expandMax).Scan(&adjacentChunks).Error
+	err := r.db.WithContext(ctx).Raw(expandAdjacentChunksSQL,
+		knowledgeBaseID, documentID, expandMin, expandMax).Scan(&adjacentChunks).Error
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +198,7 @@ func (r *ExpandRetriever) expandDocumentChunks(ctx context.Context, knowledgeBas
 		if hitIndices[c.ChunkIndex] {
 			hitMark = "*"
 		}
-		logger.Infof("[Expand]     %s chunk#%d: %q", hitMark, c.ChunkIndex, truncate(c.Content, 60))
+		logger.Infof("[Expand]     %s chunk#%d: %q", hitMark, c.ChunkIndex, strutil.Truncate(c.Content, 60))
 	}
 
 	// 按连续区间分组并合并

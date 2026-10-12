@@ -10,6 +10,7 @@ import (
 
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 )
 
 // ToolResponse 所有工具的统一返回结构。
@@ -53,7 +54,7 @@ func runGrepChunks(ctx context.Context, chunkRepo repository.DocumentChunkReposi
 		grepResults = append(grepResults, GrepResult{
 			DocumentID: r.DocumentID,
 			Title:      r.Title,
-			Snippet:    truncateRunes(r.Content, 200),
+			Snippet:    strutil.Truncate(r.Content, 200),
 		})
 	}
 

@@ -50,6 +50,7 @@ type LogConfig struct {
 	MaxAge     int    `mapstructure:"max_age"`
 	Compress   bool   `mapstructure:"compress"`
 }
+
 // CORSConfig 描述跨域资源共享配置
 type CORSConfig struct {
 	Enabled          bool     `mapstructure:"enabled"`
@@ -63,12 +64,18 @@ type CORSConfig struct {
 
 // AgentConfig 描述 Agent 行为开关
 type AgentConfig struct {
-	EnableDemo              bool    `mapstructure:"enable_demo"`
-	MaxIterations           int     `mapstructure:"max_iterations"`
-	ScoreThreshold          float64 `mapstructure:"score_threshold"`
+	EnableDemo     bool    `mapstructure:"enable_demo"`
+	MaxIterations  int     `mapstructure:"max_iterations"`
+	ScoreThreshold float64 `mapstructure:"score_threshold"`
 	// QuickAgentMaxIterations 指定快速模式（eino ChatModelAgent）最多执行几个
-	// ReAct 循环，默认 2（最多 1 次工具调用+出答案）。
-	QuickAgentMaxIterations int `mapstructure:"quick_agent_max_iterations"`
+	// 模型调用，默认 8，澄清和最终回答均计入轮数，恢复不重置计数。
+	QuickAgentMaxIterations   int  `mapstructure:"quick_agent_max_iterations"`
+	DeepPlanExecuteEnabled    bool `mapstructure:"deep_plan_execute_enabled"`
+	DeepParallelEnabled       bool `mapstructure:"deep_parallel_enabled"`
+	DeepMaxPlanTasks          int  `mapstructure:"deep_max_plan_tasks"`
+	DeepMaxSubagentIterations int  `mapstructure:"deep_max_subagent_iterations"`
+	DeepMaxPlanExecuteRounds  int  `mapstructure:"deep_max_plan_execute_rounds"`
+	DeepMaxExecutorIterations int  `mapstructure:"deep_max_executor_iterations"`
 }
 
 // LLMConfig 描述模型调用配置
@@ -96,15 +103,28 @@ type EmbeddingConfig struct {
 
 // RAGConfig 描述检索增强配置
 type RAGConfig struct {
-	Enabled        bool           `mapstructure:"enabled"`
-	TopK           int            `mapstructure:"top_k"`
-	RecallK        int            `mapstructure:"recall_k"` // 混合检索召回量（Rerank 前），默认 TopK*5
-	ScoreThreshold float64        `mapstructure:"score_threshold"`
-	VectorWeight   float64        `mapstructure:"vector_weight"`
-	KeywordWeight  float64        `mapstructure:"keyword_weight"`
-	RRFK           float64        `mapstructure:"rrf_k"`
-	Reranker       RerankerConfig `mapstructure:"reranker"`
-	Expander       ExpanderConfig `mapstructure:"expander"`
+	Enabled        bool    `mapstructure:"enabled"`
+	TopK           int     `mapstructure:"top_k"`
+	RecallK        int     `mapstructure:"recall_k"` // 混合检索召回量（Rerank 前），默认 TopK*5
+	ScoreThreshold float64 `mapstructure:"score_threshold"`
+	VectorWeight   float64 `mapstructure:"vector_weight"`
+	KeywordWeight  float64 `mapstructure:"keyword_weight"`
+	// KeywordScoreThreshold 是「向量侧全灭时」关键词结果的最低匹配比例。
+	// 之前这个字段没有配置入口，构造器只能吃硬编码默认值 0.25。
+	KeywordScoreThreshold float64 `mapstructure:"keyword_score_threshold"`
+	RRFK                  float64 `mapstructure:"rrf_k"`
+	// CandidateMultiplier 是检索候选池的放大系数：两侧各取 TopK×N 条候选，
+	// 融合 / 过滤后再收敛到 TopK。默认 1（即只取 TopK 条）。
+	//
+	// 为什么默认 1：2026-09-23 的 A/B 实测（test1/rag_eval/AB-对比结论-20260923.md）
+	// 把每侧候选从 6 收到 3，精度 82.1% → 95.7%、含噪率 17.9% → 4.3%，
+	// 而 hit@1 / hit@3 / MRR 全部持平（都已满分）。
+	// ≤ 0 时由检索器回落到默认值（不会变成 LIMIT 0 恒空）。
+	// ⚠️ 与 rag 的 min-max 归一化耦合：归一化把每侧最后一名压成 0、交叉过滤又丢掉
+	// 单源且 0 的结果 ⇒ 每侧最后一名必然出局，实际存活 = TopK-1。改归一化前先读报告。
+	CandidateMultiplier int            `mapstructure:"candidate_multiplier"`
+	Reranker            RerankerConfig `mapstructure:"reranker"`
+	Expander            ExpanderConfig `mapstructure:"expander"`
 }
 
 // RerankerConfig 描述重排序配置
@@ -128,14 +148,28 @@ type ExpanderConfig struct {
 
 // ToolsConfig 描述工具调用配置
 type ToolsConfig struct {
-	Enabled   bool            `mapstructure:"enabled"`
-	WebSearch WebSearchConfig `mapstructure:"web_search"`
+	Enabled    bool                    `mapstructure:"enabled"`
+	WebSearch  WebSearchConfig         `mapstructure:"web_search"`
+	MCPServers []SystemMCPServerConfig `mapstructure:"mcp_servers"`
 }
 
 // WebSearchConfig 描述网络搜索工具配置
 type WebSearchConfig struct {
 	APIKey  string `mapstructure:"api_key"`
 	BaseURL string `mapstructure:"base_url"`
+}
+
+// SystemMCPServerConfig 系统预置 MCP 服务器配置
+type SystemMCPServerConfig struct {
+	Name        string            `mapstructure:"name" json:"name"`
+	Description string            `mapstructure:"description" json:"description"`
+	Transport   string            `mapstructure:"transport" json:"transport"`       // stdio | sse | http
+	Command     string            `mapstructure:"command" json:"command,omitempty"` // stdio
+	Args        []string          `mapstructure:"args" json:"args,omitempty"`       // stdio
+	Env         map[string]string `mapstructure:"env" json:"env,omitempty"`         // stdio
+	URL         string            `mapstructure:"url" json:"url,omitempty"`         // sse/http
+	Headers     map[string]string `mapstructure:"headers" json:"headers,omitempty"` // sse/http
+	Timeout     int               `mapstructure:"timeout" json:"timeout,omitempty"` // 默认 30
 }
 
 // DingTalkConfig 描述钉钉开放平台配置
@@ -200,32 +234,67 @@ type EmailConfig struct {
 	Password string `mapstructure:"password"`
 }
 
-// ObservabilityConfig 描述可观测配置
+// ObservabilityConfig 描述「eino → Langfuse」这条三方链路的配置。
+//
+// ⚠️ 本结构体已随自研可观测性模块整体裁剪，只剩下面这些 —— 采样率 / 慢查询阈值 /
+// 落库开关 / 指标格式 / sink 批量参数 / 本地 OTel 出口 / 白名单 / 基数上限 全部移除，
+// 因为它们描述的是「自研 span 树 + 落库 + Prometheus 出口」，那些已经不存在了。
+// 保留下来的键都有唯一消费点：observability.NewTracer（internal/observability）。
 type ObservabilityConfig struct {
-	Enabled              bool     `mapstructure:"enabled"`
-	SamplingRate         float64  `mapstructure:"sampling_rate"`
-	ErrorAlwaysSample    bool     `mapstructure:"error_always_sample"`
-	SlowThresholdMs      int      `mapstructure:"slow_threshold_ms"`
-	FeedbackAlwaysSample bool     `mapstructure:"feedback_always_sample"`
-	TraceTableEnabled    bool     `mapstructure:"trace_table_enabled"`
-	ExportLogEnabled     bool     `mapstructure:"export_log_enabled"`
-	MetricsFormat        string   `mapstructure:"metrics_format"`
-	SinkBufferSize       int      `mapstructure:"sink_buffer_size"`
-	SinkBatchSize        int      `mapstructure:"sink_batch_size"`
-	SinkFlushIntervalMs  int      `mapstructure:"sink_flush_interval_ms"`
-	PIIContentMaxChars   int      `mapstructure:"pii_content_max_chars"`
-	PIIMaskSecret        bool     `mapstructure:"pii_mask_secret"`
-	FeedbackEnabled      bool     `mapstructure:"feedback_enabled"`
-	WhiteListUserIDs     []string `mapstructure:"whitelist_user_ids"`
-	MaxCardinalityLabels int      `mapstructure:"max_cardinality_labels"`
+	// PIIMaskSecret 控制官方 Config.MaskFunc 是否连「密钥 / Token 形态」一起打码。
+	// 凭据类必须打，生产上应当为 true。
+	PIIMaskSecret bool `mapstructure:"pii_mask_secret"`
 
-	// OTel 配置（阶段 1.1 新增）：Trace 走 OpenTelemetry SDK
-	// Exporter: stdout（开发期控制台打印）/ otlp（生产期 OTLP gRPC）/ noop（不导出）
-	OTelExporter  string  `mapstructure:"otel_exporter"`
-	OTelOTLPEndpoint string  `mapstructure:"otel_otlp_endpoint"`
-	OTelServiceName string  `mapstructure:"otel_service_name"`
-	// OTelSamplingRate 头采样概率 0~1，0 = 不采样，1 = 全采样
-	OTelSamplingRate float64 `mapstructure:"otel_sampling_rate"`
+	// OTelServiceName 同时作为官方 Config.ServiceName 与 trace 名（langfuse name）。
+	OTelServiceName string `mapstructure:"otel_service_name"`
+
+	// ── Langfuse（官方 eino callback v2，走平台 OTLP 入口）──
+	//
+	// 本项目只有这一条三方链路：官方 eino callback →
+	// 平台 /api/public/otel/v1/traces。
+	//
+	// 官方 v2 走【标准 OTLP/HTTP】，不再用已弃用的 /api/public/ingestion 事件接口
+	// （那条通道平台已公告 2026-11-16 关停，此后只收 score-create）。
+	//
+	// Host / PublicKey / SecretKey 任一为空即视为未配置，启动时跳过官方 callback。
+	// 凭据属敏感信息，只放本地 config.yaml（已 gitignore）或环境变量。
+	LangfuseHost      string `mapstructure:"langfuse_host"`
+	LangfusePublicKey string `mapstructure:"langfuse_public_key"`
+	LangfuseSecretKey string `mapstructure:"langfuse_secret_key"`
+
+	// MaxExportBatchSize / BatchTimeoutMs 控制 OTLP 批量导出节奏，
+	// 对应官方 Config.MaxExportBatchSize / Config.BatchTimeout。
+	LangfuseMaxExportBatchSize int `mapstructure:"langfuse_max_export_batch_size"`
+	LangfuseBatchTimeoutMs     int `mapstructure:"langfuse_batch_timeout_ms"`
+	// TimeoutMs 是单次 OTLP HTTP 请求超时，对应官方 Config.Timeout（官方默认 10s）。
+	LangfuseTimeoutMs int `mapstructure:"langfuse_timeout_ms"`
+	// SampleRate 是官方 handler 自己的采样率（官方默认 1.0 = 全采）。
+	LangfuseSampleRate float64 `mapstructure:"langfuse_sample_rate"`
+	// Release / Tags 用于平台侧按版本、环境筛选。
+	//
+	// ⚠️ 这两个值必须由 observability.langfuseOptions 经 StartTrace 的选项一并下发：
+	// 官方 StartTrace 是「opts 覆盖 handler 默认值」，只配在 handler 上会被顶掉。
+	// ⚠️ Tags 只在这里配：官方 WithTags 是 append（不是覆盖），两处都给会在平台上重复。
+	LangfuseRelease string   `mapstructure:"langfuse_release"`
+	LangfuseTags    []string `mapstructure:"langfuse_tags"`
+
+	// MaxQueueSize 是 OTel BatchSpanProcessor 的本地队列容量。
+	// ⚠️ 队列满时事件会被丢弃，但官方 v2 会计入丢弃统计并按 DropLogInterval 汇总告警
+	// （v1 是静默丢弃），所以别设太小。
+	LangfuseMaxQueueSize int `mapstructure:"langfuse_max_queue_size"`
+	// MaxSpanAttributeBytes 是「单个 span 上由本 callback 写入的属性」总量上限，
+	// 对应官方 Config.MaxSpanAttributeBytes；超限时按 input → output → metadata
+	// 从大到小依次截断（官方默认 4_000_000）。
+	LangfuseMaxSpanAttributeBytes int `mapstructure:"langfuse_max_span_attribute_bytes"`
+}
+
+// LangfuseEnabled 判断官方 eino → Langfuse callback 是否具备启用条件。
+//
+// 判据「三项凭据齐全」只在这里定义一次，且只有一处消费点（observability.NewTracer，
+// 决定是否建 handler）；判据不成立就返回 nil Tracer，调用点靠 nil 接收者空转。
+// 若再在别处写第二个判据，就会出现「handler 没注册、但每条请求都在开 trace」的错位。
+func (c ObservabilityConfig) LangfuseEnabled() bool {
+	return c.LangfuseHost != "" && c.LangfusePublicKey != "" && c.LangfuseSecretKey != ""
 }
 
 var globalConfig *Config
@@ -297,10 +366,16 @@ func Default() *Config {
 			Compress:   true,
 		},
 		Agent: AgentConfig{
-			EnableDemo:              true,
-			MaxIterations:           4,
-			ScoreThreshold:          0.7,
-			QuickAgentMaxIterations: 2,
+			EnableDemo:                true,
+			MaxIterations:             4,
+			ScoreThreshold:            0.7,
+			QuickAgentMaxIterations:   8,
+			DeepPlanExecuteEnabled:    true,
+			DeepParallelEnabled:       true,
+			DeepMaxPlanTasks:          4,
+			DeepMaxSubagentIterations: 3,
+			DeepMaxPlanExecuteRounds:  8,
+			DeepMaxExecutorIterations: 6,
 		},
 		LLM: LLMConfig{
 			Provider:    "mock",
@@ -317,10 +392,11 @@ func Default() *Config {
 			Timeout:   15,
 		},
 		RAG: RAGConfig{
-			Enabled:        true,
-			TopK:           3,
-			RecallK:        20,
-			ScoreThreshold: 0.7,
+			Enabled:             true,
+			TopK:                3,
+			RecallK:             20,
+			ScoreThreshold:      0.7,
+			CandidateMultiplier: 1,
 			Reranker: RerankerConfig{
 				Enabled:        false,
 				TopN:           3,
@@ -370,26 +446,17 @@ func Default() *Config {
 			},
 		},
 		Observability: ObservabilityConfig{
-			Enabled:              true,
-			SamplingRate:         0.2,
-			ErrorAlwaysSample:    true,
-			SlowThresholdMs:      5000,
-			FeedbackAlwaysSample: true,
-			TraceTableEnabled:    true,
-			ExportLogEnabled:     true,
-			MetricsFormat:        "json",
-			SinkBufferSize:       1024,
-			SinkBatchSize:        50,
-			SinkFlushIntervalMs:  200,
-			PIIContentMaxChars:   200,
-			PIIMaskSecret:        true,
-			FeedbackEnabled:      true,
-			MaxCardinalityLabels: 500,
-			// OTel 默认值：noop 不打印 span，开发期可改 stdout 调试，生产期改 otlp
-		OTelExporter:     "noop",
-			OTelOTLPEndpoint: "localhost:4317",
-			OTelServiceName:  "solvify-agent",
-			OTelSamplingRate: 1.0,
+			PIIMaskSecret:   true,
+			OTelServiceName: "solvify-agent",
+			// Langfuse 官方 callback（v2 / OTLP）：下列数值与官方默认值一致
+			// （队列 2048 / 每批 512 / 批次超时 5s / 单次请求 10s）。
+			// ⚠️ BatchTimeoutMs 决定「低流量时最晚多久上报」：本地开发嫌慢就调小它。
+			LangfuseMaxExportBatchSize:    512,
+			LangfuseBatchTimeoutMs:        5000,
+			LangfuseTimeoutMs:             10000,
+			LangfuseSampleRate:            1.0,
+			LangfuseMaxQueueSize:          2048,
+			LangfuseMaxSpanAttributeBytes: 4_000_000,
 		},
 	}
 }
@@ -447,39 +514,14 @@ func (c *Config) Validate() error {
 	if c.Agent.MaxIterations <= 0 {
 		return errors.New("agent.max_iterations 必须大于 0")
 	}
-	if c.Observability.Enabled {
-		if c.Observability.SamplingRate < 0 || c.Observability.SamplingRate > 1 {
-			return errors.New("observability.sampling_rate 必须在 0 到 1 之间")
-		}
-		if c.Observability.SinkBufferSize <= 0 {
-			return errors.New("observability.sink_buffer_size 必须大于 0")
-		}
-		if c.Observability.SinkBatchSize <= 0 {
-			return errors.New("observability.sink_batch_size 必须大于 0")
-		}
-		if c.Observability.SinkFlushIntervalMs <= 0 {
-			return errors.New("observability.sink_flush_interval_ms 必须大于 0")
-		}
-		if c.Observability.PIIContentMaxChars < 0 {
-			return errors.New("observability.pii_content_max_chars 不能小于 0")
-		}
-		if c.Observability.MaxCardinalityLabels <= 0 {
-			return errors.New("observability.max_cardinality_labels 必须大于 0")
-		}
-		switch c.Observability.MetricsFormat {
-		case "json", "prometheus", "both", "none":
-		default:
-			return errors.New("observability.metrics_format 只支持 json/prometheus/both/none")
-		}
-		// OTel 校验
-		switch c.Observability.OTelExporter {
-		case "stdout", "otlp", "noop", "":
-		default:
-			return errors.New("observability.otel_exporter 只支持 stdout/otlp/noop")
-		}
-		if c.Observability.OTelSamplingRate < 0 || c.Observability.OTelSamplingRate > 1 {
-			return errors.New("observability.otel_sampling_rate 必须在 0 到 1 之间")
-		}
+	if c.Agent.DeepPlanExecuteEnabled && (c.Agent.DeepMaxPlanExecuteRounds <= 0 || c.Agent.DeepMaxPlanExecuteRounds > 32 || c.Agent.DeepMaxExecutorIterations <= 0 || c.Agent.DeepMaxExecutorIterations > 32) {
+		return errors.New("深度模式执行轮次与 Executor 迭代上限必须在 1 到 32 之间")
+	}
+	if c.Agent.DeepPlanExecuteEnabled && (c.Agent.DeepMaxPlanTasks <= 0 || c.Agent.DeepMaxPlanTasks > 16) {
+		return errors.New("agent.deep_max_plan_tasks 必须在 1 到 16 之间")
+	}
+	if c.Agent.DeepPlanExecuteEnabled && c.Agent.DeepMaxSubagentIterations <= 0 {
+		return errors.New("agent.deep_max_subagent_iterations 必须大于 0")
 	}
 	return nil
 }
@@ -629,62 +671,31 @@ func applyEnv(cfg *Config) {
 		cfg.Log.Compress = parseBool(value, cfg.Log.Compress)
 	}
 
-	// Observability 配置
-	if value := os.Getenv("OBSERVABILITY_ENABLED"); value != "" {
-		cfg.Observability.Enabled = parseBool(value, cfg.Observability.Enabled)
-	}
-	if value := os.Getenv("OBSERVABILITY_SAMPLING_RATE"); value != "" {
-		cfg.Observability.SamplingRate = parseFloat(value, cfg.Observability.SamplingRate)
-	}
-	if value := os.Getenv("OBSERVABILITY_ERROR_ALWAYS_SAMPLE"); value != "" {
-		cfg.Observability.ErrorAlwaysSample = parseBool(value, cfg.Observability.ErrorAlwaysSample)
-	}
-	if value := os.Getenv("OBSERVABILITY_SLOW_THRESHOLD_MS"); value != "" {
-		cfg.Observability.SlowThresholdMs = parseInt(value, cfg.Observability.SlowThresholdMs)
-	}
-	if value := os.Getenv("OBSERVABILITY_FEEDBACK_ALWAYS_SAMPLE"); value != "" {
-		cfg.Observability.FeedbackAlwaysSample = parseBool(value, cfg.Observability.FeedbackAlwaysSample)
-	}
-	if value := os.Getenv("OBSERVABILITY_TRACE_TABLE_ENABLED"); value != "" {
-		cfg.Observability.TraceTableEnabled = parseBool(value, cfg.Observability.TraceTableEnabled)
-	}
-	if value := os.Getenv("OBSERVABILITY_EXPORT_LOG_ENABLED"); value != "" {
-		cfg.Observability.ExportLogEnabled = parseBool(value, cfg.Observability.ExportLogEnabled)
-	}
-	if v := os.Getenv("OBSERVABILITY_METRICS_FORMAT"); v != "" {
-		cfg.Observability.MetricsFormat = v
-	}
-	if value := os.Getenv("OBSERVABILITY_SINK_BUFFER_SIZE"); value != "" {
-		cfg.Observability.SinkBufferSize = parseInt(value, cfg.Observability.SinkBufferSize)
-	}
-	if value := os.Getenv("OBSERVABILITY_SINK_BATCH_SIZE"); value != "" {
-		cfg.Observability.SinkBatchSize = parseInt(value, cfg.Observability.SinkBatchSize)
-	}
-	if value := os.Getenv("OBSERVABILITY_SINK_FLUSH_INTERVAL_MS"); value != "" {
-		cfg.Observability.SinkFlushIntervalMs = parseInt(value, cfg.Observability.SinkFlushIntervalMs)
-	}
-	if value := os.Getenv("OBSERVABILITY_PII_CONTENT_MAX_CHARS"); value != "" {
-		cfg.Observability.PIIContentMaxChars = parseInt(value, cfg.Observability.PIIContentMaxChars)
-	}
+	// Observability 配置（只剩「eino → Langfuse」这条三方链路用得到的项）
 	if value := os.Getenv("OBSERVABILITY_PII_MASK_SECRET"); value != "" {
 		cfg.Observability.PIIMaskSecret = parseBool(value, cfg.Observability.PIIMaskSecret)
 	}
-	if value := os.Getenv("OBSERVABILITY_FEEDBACK_ENABLED"); value != "" {
-		cfg.Observability.FeedbackEnabled = parseBool(value, cfg.Observability.FeedbackEnabled)
-	}
-	if value := os.Getenv("OBSERVABILITY_MAX_CARDINALITY_LABELS"); value != "" {
-		cfg.Observability.MaxCardinalityLabels = parseInt(value, cfg.Observability.MaxCardinalityLabels)
-	}
-
-	// OTel 配置（阶段 1.1 新增）
-	cfg.Observability.OTelExporter = getEnv("OTEL_EXPORTER", cfg.Observability.OTelExporter)
-	cfg.Observability.OTelOTLPEndpoint = getEnv("OTEL_OTLP_ENDPOINT", cfg.Observability.OTelOTLPEndpoint)
 	cfg.Observability.OTelServiceName = getEnv("OTEL_SERVICE_NAME", cfg.Observability.OTelServiceName)
-	if value := os.Getenv("OTEL_SAMPLING_RATE"); value != "" {
-		cfg.Observability.OTelSamplingRate = parseFloat(value, cfg.Observability.OTelSamplingRate)
-	}
 
 	// Agent 行为开关
+	if value := os.Getenv("AGENT_DEEP_PLAN_EXECUTE_ENABLED"); value != "" {
+		cfg.Agent.DeepPlanExecuteEnabled = parseBool(value, cfg.Agent.DeepPlanExecuteEnabled)
+	}
+	if value := os.Getenv("AGENT_DEEP_MAX_PLAN_EXECUTE_ROUNDS"); value != "" {
+		cfg.Agent.DeepMaxPlanExecuteRounds = parseInt(value, cfg.Agent.DeepMaxPlanExecuteRounds)
+	}
+	if value := os.Getenv("AGENT_DEEP_MAX_EXECUTOR_ITERATIONS"); value != "" {
+		cfg.Agent.DeepMaxExecutorIterations = parseInt(value, cfg.Agent.DeepMaxExecutorIterations)
+	}
+	if value := os.Getenv("AGENT_DEEP_PARALLEL_ENABLED"); value != "" {
+		cfg.Agent.DeepParallelEnabled = parseBool(value, cfg.Agent.DeepParallelEnabled)
+	}
+	if value := os.Getenv("AGENT_DEEP_MAX_PLAN_TASKS"); value != "" {
+		cfg.Agent.DeepMaxPlanTasks = parseInt(value, cfg.Agent.DeepMaxPlanTasks)
+	}
+	if value := os.Getenv("AGENT_DEEP_MAX_SUBAGENT_ITERATIONS"); value != "" {
+		cfg.Agent.DeepMaxSubagentIterations = parseInt(value, cfg.Agent.DeepMaxSubagentIterations)
+	}
 	if value := os.Getenv("AGENT_QUICK_MAX_ITERATIONS"); value != "" {
 		cfg.Agent.QuickAgentMaxIterations = parseInt(value, cfg.Agent.QuickAgentMaxIterations)
 	}

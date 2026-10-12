@@ -17,13 +17,3 @@ func requestIDFromCtx(ctx context.Context) string {
 	return uuid.New().String()
 }
 
-func mergeStrMap(a, b map[string]string) map[string]string {
-	out := make(map[string]string, len(a)+len(b))
-	for k, v := range a {
-		out[k] = v
-	}
-	for k, v := range b {
-		out[k] = v
-	}
-	return out
-}
