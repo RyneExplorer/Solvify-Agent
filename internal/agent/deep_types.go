@@ -29,6 +29,7 @@ type ExecutionPlan struct {
 var supportedDeepAgents = map[string]struct{}{
 	"knowledge_research": {},
 	"web_research":       {},
+	"document_operation": {},
 	"synthesis_review":   {},
 }
 

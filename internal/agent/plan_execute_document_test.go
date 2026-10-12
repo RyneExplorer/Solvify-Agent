@@ -35,10 +35,10 @@ func TestPlanExecuteDocumentOperationWithMCPDisabledAndApproval(t *testing.T) {
 	engine.RegisterInternal("delete_document", 1, true, DomainDocMgmt, func(_ context.Context, user string, kb []string) einoTool.BaseTool {
 		return peDocumentTool{calls: &calls, user: user, kb: kb}
 	})
-	model := peModel(`{"strategy":"sequential","tasks":[{"id":"d","agent":"web_research","title":"删除指定文档"},{"id":"f","agent":"synthesis_review","title":"汇总","depends_on":["d"]}]}`, &research)
+	model := peModel(`{"strategy":"sequential","tasks":[{"id":"d","agent":"document_operation","title":"删除指定文档"},{"id":"f","agent":"synthesis_review","title":"汇总","depends_on":["d"]}]}`, &research)
 	base := model.respond
 	model.respond = func(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
-		if strings.Contains(messages[0].Content, "使用已挂载的外部工具") {
+		if strings.Contains(messages[0].Content, "仅执行已挂载的文档管理工具") {
 			for _, message := range messages {
 				if message.Role == schema.Tool {
 					return schema.AssistantMessage("操作完成", nil), nil

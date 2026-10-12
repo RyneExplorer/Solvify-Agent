@@ -251,7 +251,7 @@ func (a *peTaskAgent) buildAgent(ctx context.Context, req Request) (*adk.ChatMod
 		}
 		buckets = copyBuckets
 	}
-	if req.AgentName == "web_research" {
+	if req.AgentName == "web_research" || req.AgentName == "document_operation" {
 		// 从可信任务请求重建操作工具；恢复不沿用新请求的工具选择或权限范围。
 		operations := e.buildToolsByDomain(ctx, sorted, req.UserID, req.KnowledgeBaseIDs, []ToolDomain{DomainDocMgmt}, false)
 		operations[DomainExternal] = buckets[DomainExternal]

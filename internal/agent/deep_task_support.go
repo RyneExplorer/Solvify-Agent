@@ -13,7 +13,10 @@ import (
 // 深度任务共享的能力白名单、证据输入与过程事件；供当前编排和旧 checkpoint 恢复使用。
 func taskToolDomains(agentName string) []ToolDomain {
 	if agentName == "web_research" {
-		return []ToolDomain{DomainDocMgmt, DomainExternal}
+		return []ToolDomain{DomainExternal}
+	}
+	if agentName == "document_operation" {
+		return []ToolDomain{DomainDocMgmt}
 	}
 	if agentName == "synthesis_review" {
 		return []ToolDomain{}

@@ -46,7 +46,7 @@ function statusLabel(status: string) {
   return ({ pending: '等待依赖', running: '执行中', success: '已完成', error: '失败', waiting: '等待审批', canceled: '已取消' } as Record<string, string>)[status] ?? '待执行'
 }
 function agentLabel(agent: string) {
-  return ({ knowledge_research: '知识库研究', web_research: '外部工具研究', synthesis_review: '汇总与校验' } as Record<string, string>)[agent] ?? '任务处理'
+  return ({ knowledge_research: '知识库研究', web_research: '外部工具研究', document_operation: '文档操作', synthesis_review: '汇总与校验' } as Record<string, string>)[agent] ?? '任务处理'
 }
 function dependencyTitle(id: string) {
   return props.plan.tasks.find(task => task.id === id)?.title ?? id

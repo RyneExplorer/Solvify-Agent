@@ -24,6 +24,8 @@ type peRuntime struct {
 	request       Request
 	external      bool
 	externalNames []string
+	document      bool
+	documentNames []string
 	state         *peState
 }
 
@@ -52,7 +54,7 @@ func (r *peRuntime) session(ctx context.Context) (*peState, error) {
 					buckets[DomainExternal] = bundle.Buckets[DomainExternal]
 				}
 			}
-			if err := r.describeExternalTools(ctx, toolsInDomains(r.engine.sortedInternalTools(), buckets, DomainDocMgmt, DomainExternal)); err != nil {
+			if err := r.describeTools(ctx, buckets); err != nil {
 				return nil, err
 			}
 		}

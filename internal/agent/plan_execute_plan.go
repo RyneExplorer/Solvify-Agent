@@ -94,6 +94,9 @@ func (r *peRuntime) installPlan(s *peState, next *pePlan) error {
 		if strings.TrimSpace(t.Title) == "" {
 			return fmt.Errorf("任务标题不能为空")
 		}
+		if t.Agent == "document_operation" && !r.document {
+			return fmt.Errorf("未配置文档操作工具")
+		}
 		if t.Agent == "web_research" && !r.external {
 			return fmt.Errorf("未配置外部工具")
 		}
@@ -120,7 +123,7 @@ func (r *peRuntime) installPlan(s *peState, next *pePlan) error {
 			if t.Agent != "synthesis_review" {
 				newResearch = true
 			}
-			if s.Denied && t.Agent == "web_research" {
+			if s.Denied && (t.Agent == "web_research" || t.Agent == "document_operation") {
 				return fmt.Errorf("审批已拒绝，不允许重新委派外部操作")
 			}
 		}
