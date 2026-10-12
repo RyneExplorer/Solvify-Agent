@@ -5,6 +5,7 @@ ARG NODE_VERSION=22
 FROM node:${NODE_VERSION}-alpine AS builder
 
 WORKDIR /app
+ENV npm_config_registry=https://registry.npmmirror.com
 
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \

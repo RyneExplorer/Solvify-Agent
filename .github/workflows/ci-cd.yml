@@ -59,115 +59,47 @@ jobs:
         run: npm run build
 
   deployment-check:
-    name: 部署配置检查
+    name: 部署配置检查（k3s 清单）
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
         uses: actions/checkout@v6
 
       - name: 检查 Shell 语法
-        run: bash -n deploy/deploy.sh deploy/server-bootstrap.sh
+        run: bash -n deploy/k3s/apply.sh
 
-      - name: 准备 Compose 检查配置
-        env:
-          VALIDATION_ROOT: ${{ runner.temp }}/solvify-agent
+      - name: 校验 k3s 清单（YAML 语法 + 结构，无需集群）
         run: |
-          mkdir -p "$VALIDATION_ROOT/shared"
-          cp deploy/.env.production.example "$VALIDATION_ROOT/shared/.env"
-          cp deploy/config.production.yaml.example "$VALIDATION_ROOT/shared/config.yaml"
-          sed -i 's/CHANGE_ME_POSTGRES_PASSWORD/ci-postgres-password/' "$VALIDATION_ROOT/shared/.env"
-          sed -i 's/CHANGE_ME_REDIS_PASSWORD/ci-redis-password/' "$VALIDATION_ROOT/shared/.env"
-          sed -i 's/CHANGE_ME_JWT_SECRET/ci-jwt-secret/' "$VALIDATION_ROOT/shared/config.yaml"
-          {
-            echo "BACKEND_IMAGE=ghcr.io/example/solvify-agent-backend:ci"
-            echo "FRONTEND_IMAGE=ghcr.io/example/solvify-agent-frontend:ci"
-            echo "RELEASE_SHA=0000000000000000000000000000000000000000"
-            echo "SOLVIFY_ROOT=$VALIDATION_ROOT"
-          } > "$VALIDATION_ROOT/shared/.release.env"
+          # kubectl apply 即使 --validate=false 仍会连 API Server 做 discovery，runner 无集群会失败；
+          # 这里改用 PyYAML 纯本地解析，校验每个清单可解析且含 apiVersion/kind。
+          python3 -m venv /tmp/solvify-venv
+          /tmp/solvify-venv/bin/pip install --quiet pyyaml
+          /tmp/solvify-venv/bin/python - <<'PY'
+          import glob, sys, yaml
+          files = sorted(glob.glob("deploy/k3s/*.yaml"))
+          if not files:
+              print("错误：deploy/k3s 下没有 .yaml 清单")
+              sys.exit(1)
+          total = 0
+          for f in files:
+              with open(f, encoding="utf-8") as fh:
+                  docs = [d for d in yaml.safe_load_all(fh) if d is not None]
+              for d in docs:
+                  if not (isinstance(d, dict) and d.get("apiVersion") and d.get("kind")):
+                      print(f"错误：{f} 存在缺少 apiVersion/kind 的文档")
+                      sys.exit(1)
+                  print(f"OK  {f}  ->  {d['apiVersion']}  {d['kind']}")
+                  total += 1
+          print(f"共校验 {len(files)} 个文件 / {total} 个资源，全部通过")
+          PY
 
-      - name: 检查 Compose 配置
-        env:
-          VALIDATION_ROOT: ${{ runner.temp }}/solvify-agent
-        run: |
-          docker compose \
-            --env-file "$VALIDATION_ROOT/shared/.env" \
-            --env-file "$VALIDATION_ROOT/shared/.release.env" \
-            --file deploy/compose.prod.yaml \
-            config --quiet
-
-  images:
-    name: 构建并发布镜像
+  deploy:
+    name: 部署生产环境（服务器本地构建）
     runs-on: ubuntu-latest
     needs:
       - go-check
       - frontend-check
       - deployment-check
-    permissions:
-      contents: read
-      packages: write
-    outputs:
-      backend-image: ${{ steps.image-names.outputs.backend }}
-      frontend-image: ${{ steps.image-names.outputs.frontend }}
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v6
-
-      - name: 生成镜像名称
-        id: image-names
-        shell: bash
-        run: |
-          repository="${GITHUB_REPOSITORY,,}"
-          echo "backend=ghcr.io/${repository}-backend" >> "$GITHUB_OUTPUT"
-          echo "frontend=ghcr.io/${repository}-frontend" >> "$GITHUB_OUTPUT"
-
-      - name: 登录 GHCR
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 配置 Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: 构建后端镜像
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: deploy/Dockerfile
-          platforms: linux/amd64
-          push: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
-          tags: |
-            ${{ steps.image-names.outputs.backend }}:${{ github.sha }}
-            ${{ steps.image-names.outputs.backend }}:latest
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,scope=backend,mode=max
-
-      - name: 构建前端镜像
-        uses: docker/build-push-action@v7
-        with:
-          context: design/vue
-          file: design/vue/Dockerfile
-          platforms: linux/amd64
-          push: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
-          tags: |
-            ${{ steps.image-names.outputs.frontend }}:${{ github.sha }}
-            ${{ steps.image-names.outputs.frontend }}:latest
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=frontend
-          cache-to: type=gha,scope=frontend,mode=max
-
-  deploy:
-    name: 部署生产环境
-    runs-on: ubuntu-latest
-    needs:
-      - images
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     environment:
       name: production
@@ -194,9 +126,16 @@ jobs:
           test -n "$DEPLOY_KNOWN_HOSTS"
 
           install -d -m 0700 "$HOME/.ssh"
-          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/solvify_deploy"
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          # 去除 Windows CRLF（\r）：否则 OpenSSH 加载私钥报 "error in libcrypto"、known_hosts 也可能对不上
+          printf '%s\n' "$DEPLOY_SSH_KEY" | tr -d '\r' > "$HOME/.ssh/solvify_deploy"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" | tr -d '\r' > "$HOME/.ssh/known_hosts"
           chmod 0600 "$HOME/.ssh/solvify_deploy" "$HOME/.ssh/known_hosts"
+
+          # 校验私钥可被 OpenSSH 解析（失败给出清晰提示，而非后面模糊的 publickey）
+          ssh-keygen -y -P "" -f "$HOME/.ssh/solvify_deploy" > /dev/null 2>&1 || {
+            echo "DEPLOY_SSH_KEY 私钥无法解析：请确认完整粘贴了私钥（含 -----BEGIN/END----- 两行、中间无多余换行/空格）"
+            exit 1
+          }
 
           {
             echo "Host solvify-production"
@@ -208,46 +147,39 @@ jobs:
             echo "  BatchMode yes"
             echo "  StrictHostKeyChecking yes"
             echo "  UserKnownHostsFile $HOME/.ssh/known_hosts"
+            echo "  ServerAliveInterval 30"
+            echo "  ServerAliveCountMax 20"
           } > "$HOME/.ssh/config"
           chmod 0600 "$HOME/.ssh/config"
 
           ssh solvify-production "printf 'SSH 连接成功\n'"
 
-      - name: 组装部署包
-        env:
-          PACKAGE_DIR: ${{ runner.temp }}/solvify-deploy-package
+      - name: 同步源码到服务器
         run: |
-          mkdir -p "$PACKAGE_DIR/postgres/init"
-          cp deploy/compose.prod.yaml "$PACKAGE_DIR/"
-          cp deploy/deploy.sh "$PACKAGE_DIR/"
-          cp deploy/server-bootstrap.sh "$PACKAGE_DIR/"
-          cp deploy/.env.production.example "$PACKAGE_DIR/"
-          cp deploy/config.production.yaml.example "$PACKAGE_DIR/"
-          cp scripts/init_knowledge_schema.sql "$PACKAGE_DIR/postgres/init/001-init-schema.sql"
-          tar -C "$PACKAGE_DIR" -czf "${{ runner.temp }}/solvify-deploy-package.tar.gz" .
+          tar --exclude='.git' --exclude='design/vue/node_modules' -czf "${{ runner.temp }}/solvify-src.tar.gz" .
+          scp "${{ runner.temp }}/solvify-src.tar.gz" "solvify-production:/tmp/solvify-src.tar.gz"
+          ssh solvify-production "sudo mkdir -p /opt/solvify-agent/src && sudo tar -xzf /tmp/solvify-src.tar.gz -C /opt/solvify-agent/src && sudo rm -f /tmp/solvify-src.tar.gz"
 
-      - name: 上传部署包
-        env:
-          RELEASE_DIR: /opt/solvify-agent/releases/${{ github.sha }}
+      - name: 应用基础设施清单
         run: |
-          ssh solvify-production "mkdir -p '$RELEASE_DIR'"
-          scp "${{ runner.temp }}/solvify-deploy-package.tar.gz" \
-            "solvify-production:$RELEASE_DIR/package.tar.gz"
-          ssh solvify-production \
-            "tar -xzf '$RELEASE_DIR/package.tar.gz' -C '$RELEASE_DIR' \
-            && rm -f '$RELEASE_DIR/package.tar.gz' \
-            && chmod 0755 '$RELEASE_DIR/deploy.sh' '$RELEASE_DIR/server-bootstrap.sh'"
+          ssh solvify-production "bash -s" <<'EOF'
+            set -e
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            sudo KUBECONFIG="$KUBECONFIG" kubectl apply -f /opt/solvify-agent/src/deploy/k3s/00-namespace.yaml
+            # 密钥只在首次（集群里还不存在时）创建，避免覆盖手动设置的真实密钥。
+            if ! sudo KUBECONFIG="$KUBECONFIG" kubectl -n solvify-agent get secret solvify-secrets >/dev/null 2>&1; then
+              sudo KUBECONFIG="$KUBECONFIG" kubectl -n solvify-agent apply -f /opt/solvify-agent/src/deploy/k3s/01-secrets.yaml
+            else
+              echo "secret solvify-secrets 已存在，跳过（不覆盖手动设置的真实密钥）"
+            fi
+            sudo KUBECONFIG="$KUBECONFIG" kubectl -n solvify-agent apply -f /opt/solvify-agent/src/deploy/k3s/02-configmap.yaml
+            sudo KUBECONFIG="$KUBECONFIG" kubectl -n solvify-agent apply -f /opt/solvify-agent/src/deploy/k3s/03-postgres.yaml
+            sudo KUBECONFIG="$KUBECONFIG" kubectl -n solvify-agent apply -f /opt/solvify-agent/src/deploy/k3s/04-redis.yaml
+          EOF
 
-      - name: 执行部署
-        env:
-          BACKEND_IMAGE: ${{ needs.images.outputs.backend-image }}:${{ github.sha }}
-          FRONTEND_IMAGE: ${{ needs.images.outputs.frontend-image }}:${{ github.sha }}
-          RELEASE_SHA: ${{ github.sha }}
+      - name: 服务器本地构建并部署 backend/frontend
         run: |
-          ssh solvify-production \
-            "SOLVIFY_ROOT=/opt/solvify-agent \
-            bash '/opt/solvify-agent/releases/$RELEASE_SHA/deploy.sh' \
-            '$BACKEND_IMAGE' '$FRONTEND_IMAGE' '$RELEASE_SHA'"
+          ssh solvify-production "sudo bash /opt/solvify-agent/src/deploy/build-on-server.sh"
 
       - name: 外部健康检查
         env:

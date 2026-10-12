@@ -1,0 +1,54 @@
+# 前端 Vue/Nginx。镜像由 CI/CD 注入（${FRONTEND_IMAGE} 占位）。
+# Service 使用 LoadBalancer：k3s 内置 ServiceLB（Klipper）会把节点 IP 绑定到 18888，
+# 即 http://<节点IP>:18888 直接对外。若不想用 LoadBalancer，可改为 type: NodePort。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: solvify-agent
+  labels:
+    app: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: "docker.io/library/solvify-agent-frontend:local"
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 10
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "300m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: solvify-agent
+spec:
+  type: LoadBalancer
+  selector:
+    app: frontend
+  ports:
+    - port: 18888
+      targetPort: 80

@@ -15,6 +15,8 @@ data/
 .env
 .env.local
 .config.yaml
+# 本地真实密钥（含随机强密码，切勿提交；由 CI 外的手动步骤 apply）
+deploy/k3s/01-secrets.local.yaml
 
 
 # 本地 Go 缓存
@@ -28,9 +30,13 @@ logs/
 # IDE 与系统文件
 .idea/
 .vscode/
+*.iml
 .trae/
 .DS_Store
 Thumbs.db
+
+# WorkBuddy 记忆目录（含本地记忆，不入库）
+.workbuddy/
 
 # 临时文件
 tmp/

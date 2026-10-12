@@ -5,6 +5,7 @@ ARG GO_VERSION=1.26.2
 FROM golang:${GO_VERSION}-bookworm AS builder
 
 WORKDIR /src
+ENV GOPROXY=https://goproxy.cn,direct GOSUMDB=off
 
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
@@ -38,6 +39,7 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY pkg/documentparser/python/requirements.txt /tmp/requirements.txt
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
 RUN pip install --no-cache-dir --disable-pip-version-check -r /tmp/requirements.txt \
     && rm -f /tmp/requirements.txt
 
