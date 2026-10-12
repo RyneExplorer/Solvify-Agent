@@ -1,12 +1,12 @@
 # 开发指南
 
-本文说明在 Solvify-Agent 中新增或维护功能时应遵循的本地开发流程。项目采用 **Go + Gin + GORM + Eino（ReAct Agent）+ PostgreSQL（pgvector）+ Redis**。
+本文说明 Solvify-Agent 的开发步骤。开发约束统一见 [AGENTS.md](../AGENTS.md)，架构见 [architecture.md](architecture.md)。项目采用 **Go + Gin + GORM + Eino + PostgreSQL（pgvector）+ Redis**；现状描述不表示已满足全部新增约束。
 
 ## 本地准备
 
 ### 环境依赖
 
-- Go 1.26+
+- Go 最低版本以 `go.mod` 为准（当前 1.25.0）；部署镜像当前默认 1.26.2，调整版本时同步检查 CI、镜像和兼容性
 - Python 3.10+（docx/pdf 文档解析）
 - PostgreSQL 15+（需启用 pgvector 扩展）
 - Redis 7+
@@ -16,15 +16,17 @@
 
 ```bash
 # 安装依赖
-go mod tidy
+go mod download
 pip install -r pkg/documentparser/python/requirements.txt
 
-# 初始化数据库（创建表结构 + 种子数据）
-go run cmd/seed/main.go
+# 对新数据库执行初始化脚本（替换连接参数）
+psql -h localhost -U <数据库用户> -d <数据库名> -f scripts/init_knowledge_schema.sql
 
 # 启动服务
-go run cmd/server/main.go
+go run ./cmd/server
 ```
+
+当前没有 `cmd/seed` 入口。已有数据库升级需单独确认升级 SQL，不能将新库初始化等同于迁移；依赖变更后再运行 `go mod tidy` 并检查 diff。
 
 ### 常用检查
 
@@ -54,7 +56,7 @@ go vet ./...
 
 ### Service（`internal/service`）
 
-每个 Service 有接口文件（`xxx_service_interface.go`）和实现文件（`xxx_service.go`）：
+Service 实现文件使用 `xxx_service.go`；需要独立接口文件时使用 `xxx_interface.go`。接口按真实消费需求设计，具体约束见 AGENTS.md。
 
 - 执行业务校验
 - 调用 Repository、Agent 或外部能力适配器
@@ -92,10 +94,10 @@ go vet ./...
 
 | 包 | 职责 |
 |----|------|
-| `internal/agent` | eino ReAct 编排（引擎、执行、回调、提示词、类型定义） |
+| `internal/agent` | 快速 Agent 与深度 plan-execute 编排（引擎、执行、回调、提示词、类型定义） |
 | `internal/rag` | RAG 检索管线（Retriever 接口 → HybridRetriever → 装饰器链） |
 | `internal/tool` | 工具系统（Provider 注册表 → HTTP Provider → AgentTool 适配器） |
-| `internal/llm` | LLM 客户端工厂（OpenAI 兼容，连接池复用，sync.Map 缓存） |
+| `internal/llm` | LLM 客户端工厂（OpenAI 兼容，连接池复用，有界 LRU 客户端缓存） |
 
 Controller **不直接调用**这些包，业务入口统一经过 Service。
 
@@ -152,7 +154,7 @@ type KnowledgeBaseRepo interface {
 
 // internal/repository/knowledge_base_repository.go
 func (r *KnowledgeBaseRepository) Create(ctx context.Context, kb *entity.KnowledgeBase) error {
-    return r.db.WithContext(ctx).Create(kb).Error
+    return dbFor(ctx, r.db).Create(kb).Error
 }
 ```
 
@@ -188,11 +190,12 @@ func (ctrl *Controller) RegisterRoutes(router *gin.RouterGroup) {
 
 ### 7. 接入应用装配
 
-在 `internal/app/app.go` 的 `initDependencies()` 中：
+在 App 的依赖装配处创建服务，再交给 Router/Controller。以下为局部示意：
 
 ```go
-knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.db)
-a.knowledgeBaseService = service.NewKnowledgeBaseService(knowledgeBaseRepo)
+knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
+knowledgeBaseSvc := service.NewKnowledgeBaseService(knowledgeBaseRepo)
+// 将 knowledgeBaseSvc 传给路由构造函数，参数以当前 Router 定义为准。
 ```
 
 在 `internal/api/router.go` 中添加 Controller 字段并注册路由。
@@ -201,9 +204,9 @@ a.knowledgeBaseService = service.NewKnowledgeBaseService(knowledgeBaseRepo)
 
 ### 认证模块（`internal/api/v1/auth`）
 
-- 路由：`POST /api/v1/auth/register`、`POST /api/v1/auth/login`、`POST /api/v1/auth/refresh`、`POST /api/v1/auth/logout`、`POST /api/v1/auth/captcha`、`POST /api/v1/auth/send-email-code`、`POST /api/v1/auth/reset-password`
-- JWT Blacklist：登出时 TokenID 写入 Redis，24h 过期
-- 验证码：内存存储，5 分钟有效期
+- 路由：`POST /api/v1/auth/register`、`POST /api/v1/auth/login`、`POST /api/v1/auth/refresh`、`POST /api/v1/auth/logout`、`GET /api/v1/auth/captcha`、`POST /api/v1/auth/email/code`、`POST /api/v1/auth/password/reset`
+- JWT Blacklist：登出时 Token 的 SHA-256 摘要写入 Redis，TTL 为 Token 剩余有效期；刷新与用户状态的撤销闭环仍需按规范完善
+- 图形验证码：内存存储；邮箱验证码：Redis 存储，5 分钟有效期
 - 密码：bcrypt 加密
 
 ### 用户模块（`internal/api/v1/user`）
@@ -236,8 +239,8 @@ a.knowledgeBaseService = service.NewKnowledgeBaseService(knowledgeBaseRepo)
 
 ### 智能问答（`internal/api/v1/chat`）
 
-- 快速模式（`search_mode=quick`）：Query Rewrite + RAG 并行 → LLM 流式生成
-- 深度模式（`search_mode=smart-reasoning`）：eino ReAct Agent → 多步推理 → 工具调用 → SSE 事件流
+- 快速模式（`search_mode=quick`）：快速 Agent 执行，按工具能力检索与生成，输出 SSE 事件流
+- 深度模式（`search_mode=smart-reasoning`）：计划生成 → 任务执行/必要重规划 → 汇总，支持工具审批与 checkpoint 恢复
 - 来源标注：`<kb>` 蓝色知识库，`<web>` 绿色网络
 - 上下文传递：历史消息 + 模型配置 + 知识库 ID
 
@@ -246,7 +249,7 @@ a.knowledgeBaseService = service.NewKnowledgeBaseService(knowledgeBaseRepo)
 - 系统模型：管理员 CRUD（`model_service.go`）
 - 用户自定义模型：用户 CRUD（`user_model_config_service.go`）
 - 支持厂商：OpenAI / DeepSeek / 智谱 / 通义 等 OpenAI 兼容 API
-- LLM 客户端：sync.Map 缓存，HTTP 连接池复用
+- LLM 客户端：有界 LRU 缓存，HTTP 连接池复用
 - Redis 缓存：ModelRepositoryCached、UserModelConfigRepositoryCached
 
 ### 钉钉集成（`internal/api/v1/dingtalk`）
@@ -279,7 +282,7 @@ a.knowledgeBaseService = service.NewKnowledgeBaseService(knowledgeBaseRepo)
 
 - 管理员：ToolType CRUD → ToolProvider CRUD（关联 ProviderRegistry 校验）
 - 用户：查看模板 → 创建/管理 UserToolConfig
-- Provider 类型：`http`（Template 驱动，无需代码变更即可添加新工具）
+- Provider 类型：`http`（Template 驱动）、`mcp`（连接池与工具发现）
 
 ### 后台管理（`internal/api/v1/chat` admin routes）
 
@@ -304,11 +307,13 @@ a.knowledgeBaseService = service.NewKnowledgeBaseService(knowledgeBaseRepo)
 | `sync_items` | 同步文件项表 |
 | `dingtalk_user_bindings` | 钉钉用户绑定表 |
 
-GORM AutoMigrate 功能已注释，建表请使用 SQL 脚本或 `cmd/seed/main.go`。
+新库使用初始化 SQL；已有库升级按明确的 schema 升级步骤执行。启动时有部分 schema/索引检查，不应将这些检查视为完整迁移体系。
 
 ## 响应和错误
 
 API 统一使用 `pkg/response`：
+
+当前业务错误使用 HTTP 200 + 响应体业务码，测试与监控需检查业务码。改变该契约需单独规划客户端迁移。
 
 ```go
 response.Success(ctx, data)
@@ -380,3 +385,15 @@ go test ./...
 - 使用 `httptest.NewServer` mock 外部 API（参考 `internal/integration/dingtalk/client_test.go`）
 
 **不要**为覆盖率写无意义测试，**不要**对实现细节做脆弱断言。
+
+## Agent 变更验证流程
+
+专项规则见 [AGENTS.md 的应用 Agent 运行约束](../AGENTS.md#应用-agent-运行约束)。修改 Agent 时按以下步骤交付：
+
+1. 固定代码、模型、提示词、工具配置和评估样本基线，说明修改目标与允许变化的行为。
+2. 用模拟模型和工具验证正常路径、非法输出、预算耗尽、权限失败、取消、审批拒绝与重复恢复；新增持久状态用独立进程验证。
+3. 修改并发或共享状态时运行相关 `go test -race`；完成 Go 变更后运行 `go test ./...`、`go vet ./...` 并检查 diff。
+4. 提示词、模型或检索策略改动比较固定样本上的正确性、引用、召回、耗时和消耗；真实模型结果记录配置与随机性，不替代离线行为测试。
+5. 明确实际执行的检查及未覆盖的数据库、外部模型、重启和生产副作用行为；仅修改文档时检查事实、链接和 diff。
+
+现有 CI 已执行 race 测试、vet、构建和部署配置检查；新增质量门禁需落实为可运行的命令，不能仅在文档中宣称存在。
