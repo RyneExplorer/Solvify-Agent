@@ -359,7 +359,7 @@ CREATE TABLE "public"."models" (
   "updated_at" timestamptz(6),
   "base_url" varchar(500) COLLATE "pg_catalog"."default",
   "api_key" varchar(500) COLLATE "pg_catalog"."default",
-  "max_context_length" int4 NOT NULL DEFAULT 8192
+  "max_context_length" int4 NOT NULL
 )
 ;
 COMMENT ON COLUMN "public"."models"."max_context_length" IS '模型最大上下文 token 长度，用于计算历史消息和检索预算';
@@ -601,7 +601,7 @@ CREATE TABLE "public"."user_model_configs" (
   "config" jsonb,
   "created_at" timestamptz(6),
   "updated_at" timestamptz(6),
-  "max_context_length" int4 NOT NULL DEFAULT 8192
+  "max_context_length" int4 NOT NULL
 )
 ;
 COMMENT ON COLUMN "public"."user_model_configs"."max_context_length" IS '用户自定义模型的最大上下文 token 长度';

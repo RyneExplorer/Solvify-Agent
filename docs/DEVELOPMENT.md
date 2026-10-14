@@ -397,3 +397,27 @@ go test ./...
 5. 明确实际执行的检查及未覆盖的数据库、外部模型、重启和生产副作用行为；仅修改文档时检查事实、链接和 diff。
 
 现有 CI 已执行 race 测试、vet、构建和部署配置检查；新增质量门禁需落实为可运行的命令，不能仅在文档中宣称存在。
+
+## 模型配置升级
+
+模型能力契约、旧记录确认步骤与可重复 schema 升级见 [模型配置说明](model-configuration.md)。上线前补齐使用中的系统/用户模型能力，不回填猜测窗口；真实模型能力验收与离线协议测试分开。
+
+## 上下文稳定性专项测试
+
+聊天发送入口限制单条 `content` 最多4000个Unicode码点（中文、英文字母和单码点表情各计1），完整JSON请求体最多64KiB。超限返回HTTP200、业务码400和中文提示，在建立SSE、保存消息、摘要、向量化或模型调用之前拒绝；Service直接调用也执行字符上限校验。正常消息不截断、不改写。该上限不等同于模型token额度，合法输入仍须在历史压缩/裁剪后重新核算完整模型输入及输出预留。
+
+`TestContextConversationLiveHTTP` 的第12轮原58525字符样本现在应在入口拒绝，不进入上下文并且不新增持久消息；此前JSON/HTML记录仍是未限制版本的历史证据。本轮入口限制的离线回归不会自动重新运行收费的13轮真实模型评估。
+
+普通测试包含 24 并发、192 请求的用户隔离与超限终态检查，以及最终模型输入的精确边界、Service 提示和 HTTP SSE 错误帧检查。模型使用模拟实现或本地 HTTP 服务，不访问真实模型。
+
+120 轮连续会话与 1000 轮历史测试耗时较长，需显式启用（PowerShell）：
+
+```powershell
+$env:SOLVIFY_CONTEXT_STRESS_TEST = '1'
+go test -p 1 -count=1 ./internal/agent -run '^TestContextStability' -v -timeout 300s
+Remove-Item Env:SOLVIFY_CONTEXT_STRESS_TEST
+```
+
+上述大历史测试覆盖 quick 与默认旧式 deep 执行路径，不代表 PlanExecute、真实数据库负载或真实模型回答质量验收。并发样本使用分行文本；连续无分隔长中文的 token 计数仍存在性能风险。真实模型摘要延迟需要单独验证，不能以离线通过代替。
+
+单会话真实 HTTP 联调入口为 `TestContextConversationLiveHTTP`，显式设置 `SOLVIFY_CONTEXT_CONVERSATION_LIVE_TEST=1` 后运行 `go test -race -p 1 -count=1 ./internal/api/v1/chat -run '^TestContextConversationLiveHTTP$' -v -timeout 1000s`。它使用真实 DeepSeek、数据库和 Redis，创建并清理临时 schema/key，在同一会话连续提问 13 次，逐轮通过 HTTP 读回原文，保存过程到 `tmp/context-conversation-live.json`。窗口局部限制为8192、输出1024以触发压力，不更改生产配置；真实调用有费用，普通CI默认跳过。第11轮压力样本可能因预算不足拒绝，事实和回答质量断言可能失败，必须记录实际结果，不能以工程门禁通过替代真实验收。
