@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
@@ -28,7 +29,7 @@ type budgetGuard struct {
 	adk.BaseChatModelAgentMiddleware
 
 	modelID     string
-	declaredCtx int // 模型声明窗口；有效值再过 GetEffectiveMaxContextLength 收敛
+	declaredCtx int // 用户确认的模型总窗口
 	modelName   string
 	profile     Profile
 
@@ -37,6 +38,7 @@ type budgetGuard struct {
 	// 不传进来预算就会漏掉最大的一块固定开销。
 	// 模型包装器接收最终消息，instruction 为空；不靠 role 猜测去重。
 	instruction         string
+	inputLimit          int
 	outputLimit         int
 	policy              config.ContextPolicy
 	finalCheckElsewhere bool
@@ -55,6 +57,7 @@ const (
 func newBudgetGuard(req Request, instruction string) *budgetGuard {
 	return &budgetGuard{
 		modelID:     req.ModelID,
+		inputLimit:  req.InputLimit,
 		outputLimit: req.OutputLimit,
 		policy:      config.ContextDefaults(),
 		declaredCtx: req.MaxContextLength,
@@ -88,6 +91,7 @@ func (g *budgetGuard) BeforeModelRewriteState(
 		}
 		return ctx, state, err
 	}
+	budget = budget.WithInputLimit(g.inputLimit)
 	// Handler 明确收到不含 Instruction 的状态；模型包装器的 instruction 为空，接收最终消息。
 	fixed := llm.ToolsTokens(state.ToolInfos, g.modelName)
 	if g.instruction != "" {
@@ -136,7 +140,7 @@ func dropOldConversation(msgs []*schema.Message) ([]*schema.Message, bool) {
 			continue
 		}
 		if start < 0 {
-			if m.Role == schema.User {
+			if m.Role == schema.User && !strings.HasPrefix(m.Content, runtimeSummaryPrefix) {
 				start = i
 			}
 			continue

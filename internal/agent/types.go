@@ -56,8 +56,8 @@ type Request struct {
 	// ModelName 是 ModelID 解析后的真实模型名（如 "deepseek-chat"，不是 uuid）。
 	// budgetGuard 据此选 token 编码 —— 传 ModelID 会一路 fallback 到 cl100k_base。
 	ModelName string
-	// MaxContextLength 是模型**声明**的上下文窗口；预算检查再用
-	// llm.GetEffectiveMaxContextLength 收敛到运行时有效值。
+	// MaxContextLength 是用户确认的总窗口，不按模型名或错误猜测。
+	InputLimit       int // 模型声明的独立输入上限，纳入快照及压缩水位
 	OutputLimit      int // 本次实际默认输出上限，调用级覆盖由最终模型保护处理
 	MaxContextLength int
 	Summary          *entity.ChatSummary // 会话摘要（长对话压缩内容）— 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段

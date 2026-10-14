@@ -18,7 +18,7 @@ type UserModelConfig struct {
 	ModelID          string         `gorm:"type:varchar(100);not null" json:"model_id"`
 	APIKey           string         `gorm:"type:varchar(500)" json:"api_key,omitempty"` // 可选，本地模型不需要
 	Config           datatypes.JSON `gorm:"type:jsonb" json:"config,omitempty"`
-	MaxContextLength int            `gorm:"default:8192" json:"max_context_length"`
+	MaxContextLength int            `json:"max_context_length"`
 	CreatedAt        time.Time      `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt        time.Time      `gorm:"autoUpdateTime" json:"updated_at"`
 }

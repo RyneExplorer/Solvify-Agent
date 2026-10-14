@@ -26,6 +26,7 @@ func testModelConfig(mutate func(*ModelConfig)) ModelConfig {
 		BaseURL:          "https://example.invalid/v1",
 		APIKey:           "sk-test-key",
 		MaxContextLength: 8192,
+		Config:           []byte(`{"max_input_tokens":8192,"max_output_tokens":8192,"max_completion_tokens":4096,"output_token_field":"max_completion_tokens","tool_calling":true,"reasoning_capability":"none","reasoning_mode":"default"}`),
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -37,9 +38,11 @@ func testModelConfig(mutate func(*ModelConfig)) ModelConfig {
 func newTestClient(t *testing.T, model string) *OpenAIClient {
 	t.Helper()
 	client, err := NewOpenAIClient(context.Background(), OpenAIClientConfig{
-		APIKey:  "sk-test-key",
-		BaseURL: "https://example.invalid/v1",
-		Model:   model,
+		APIKey:           "sk-test-key",
+		BaseURL:          "https://example.invalid/v1",
+		Model:            model,
+		MaxContextLength: 8192,
+		Config:           []byte(`{"max_input_tokens":8192,"max_output_tokens":8192,"max_completion_tokens":4096,"output_token_field":"max_completion_tokens","tool_calling":true,"reasoning_capability":"none","reasoning_mode":"default"}`),
 	})
 	if err != nil {
 		t.Fatalf("构造测试客户端失败(model=%s): %v", model, err)
@@ -55,7 +58,7 @@ func newTestClient(t *testing.T, model string) *OpenAIClient {
 func TestPrewarmThenRequestHitsSameClient(t *testing.T) {
 	resetClientCache(t)
 	cfg := testModelConfig(func(c *ModelConfig) {
-		c.Config = []byte(`{"temperature":0.3}`)
+		c.Config = []byte(`{"max_input_tokens":8192,"max_output_tokens":8192,"max_completion_tokens":4096,"output_token_field":"max_completion_tokens","tool_calling":true,"reasoning_capability":"none","reasoning_mode":"default","temperature":0.3}`)
 	})
 
 	PrewarmClients(context.Background(), []ModelConfig{cfg})
@@ -87,7 +90,7 @@ func TestPrewarmCoversEveryConfiguredModel(t *testing.T) {
 		testModelConfig(func(c *ModelConfig) { c.ModelID = "m-empty-config" }),
 		testModelConfig(func(c *ModelConfig) {
 			c.ModelID = "m-with-config"
-			c.Config = []byte(`{"timeout":30}`)
+			c.Config = []byte(`{"max_input_tokens":8192,"max_output_tokens":8192,"max_completion_tokens":4096,"output_token_field":"max_completion_tokens","tool_calling":true,"reasoning_capability":"none","reasoning_mode":"default","timeout":30}`)
 		}),
 	}
 	PrewarmClients(context.Background(), models)

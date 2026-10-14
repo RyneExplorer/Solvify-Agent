@@ -4,12 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"time"
 
 	"gorm.io/datatypes"
 
-	"solvify-agent/internal/llm"
 	requestdto "solvify-agent/internal/model/dto/request"
 	responsedto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
@@ -51,6 +48,12 @@ func NewUserModelConfigService(repo repository.UserModelConfigRepo) UserModelCon
 
 // Create 创建用户模型配置
 func (s *userModelConfigService) Create(ctx context.Context, userID string, req requestdto.CreateUserModelConfigRequest) (responsedto.UserModelConfigInfo, error) {
+	if err := validateModelSettings(req.MaxContextLength, req.Config); err != nil {
+		return responsedto.UserModelConfigInfo{}, err
+	}
+	if req.APIFormat != "openai" {
+		return responsedto.UserModelConfigInfo{}, apperrors.New(apperrors.CodeInvalidParam, "仅支持OpenAI兼容协议")
+	}
 	// 检查 model_id 是否已存在
 	exists, err := s.repo.ExistsByModelID(ctx, userID, req.ModelID, "")
 	if err != nil {
@@ -68,9 +71,12 @@ func (s *userModelConfigService) Create(ctx context.Context, userID string, req 
 		ModelID:          req.ModelID,
 		APIKey:           req.APIKey,
 		Config:           toJSONB(req.Config),
-		MaxContextLength: llm.InferMaxContextLength(req.ModelID, req.MaxContextLength),
+		MaxContextLength: req.MaxContextLength,
 	}
 
+	if err := verifyModelForSave(ctx, requestdto.TestModelRequest{Provider: config.APIFormat, ModelID: config.ModelID, BaseURL: config.BaseURL, APIKey: config.APIKey, MaxContextLength: config.MaxContextLength, Config: decodeSettings(config.Config)}); err != nil {
+		return responsedto.UserModelConfigInfo{}, err
+	}
 	if err := s.repo.Create(ctx, config); err != nil {
 		return responsedto.UserModelConfigInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
@@ -89,6 +95,9 @@ func (s *userModelConfigService) Update(ctx context.Context, userID string, conf
 	}
 
 	// 如果修改了 model_id，检查是否重复
+	candidateIdentityModel, candidateIdentityURL, candidateIdentityProtocol := config.ModelID, config.BaseURL, config.APIFormat
+	candidate := *config
+	config = &candidate
 	if req.ModelID != nil && *req.ModelID != config.ModelID {
 		exists, err := s.repo.ExistsByModelID(ctx, userID, *req.ModelID, configID)
 		if err != nil {
@@ -114,20 +123,40 @@ func (s *userModelConfigService) Update(ctx context.Context, userID string, conf
 		config.BaseURL = *req.BaseURL
 	}
 	if req.Config != nil {
+		if err := validateModelDraftSettings(0, req.Config); err != nil {
+			return responsedto.UserModelConfigInfo{}, err
+		}
 		config.Config = toJSONB(req.Config)
 	}
 	if req.MaxContextLength != nil {
 		config.MaxContextLength = *req.MaxContextLength
-	} else if req.ModelID != nil {
-		config.MaxContextLength = llm.InferMaxContextLength(*req.ModelID, 0)
+	}
+	if config.ModelID != candidateIdentityModel || config.BaseURL != candidateIdentityURL || config.APIFormat != candidateIdentityProtocol {
+		if req.ReconfirmCapabilities {
+			if req.Config == nil || req.MaxContextLength == nil {
+				return responsedto.UserModelConfigInfo{}, apperrors.New(apperrors.CodeInvalidParam, "重新确认需要完整能力配置")
+			}
+			if err := validateModelSettings(config.MaxContextLength, req.Config); err != nil {
+				return responsedto.UserModelConfigInfo{}, err
+			}
+		} else {
+			config.MaxContextLength = 0
+			config.Config = toJSONB(map[string]interface{}{})
+		}
+	}
+	if err := validateModelDraft(config.MaxContextLength, config.Config); err != nil {
+		return responsedto.UserModelConfigInfo{}, apperrors.New(apperrors.CodeInvalidParam, err.Error())
+	}
+	if config.APIFormat != "openai" {
+		return responsedto.UserModelConfigInfo{}, apperrors.New(apperrors.CodeInvalidParam, "仅支持OpenAI兼容协议")
 	}
 
+	if err := verifyModelForSave(ctx, requestdto.TestModelRequest{Provider: config.APIFormat, ModelID: config.ModelID, BaseURL: config.BaseURL, APIKey: config.APIKey, MaxContextLength: config.MaxContextLength, Config: decodeSettings(config.Config)}); err != nil {
+		return responsedto.UserModelConfigInfo{}, err
+	}
 	if err := s.repo.Update(ctx, config); err != nil {
 		return responsedto.UserModelConfigInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
-
-	// 配置更新后重置运行时上下文窗口保护，允许使用新的声明值
-	llm.ResetEffectiveMaxContextLength(config.ModelID)
 
 	return toModelConfigInfo(config), nil
 }
@@ -155,7 +184,9 @@ func (s *userModelConfigService) Get(ctx context.Context, userID string, configI
 		return responsedto.UserModelConfigInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 
-	return toModelConfigInfo(config), nil
+	info := toModelConfigInfo(config)
+	info.APIKey = config.APIKey
+	return info, nil
 }
 
 // List 列出用户所有模型配置
@@ -191,67 +222,19 @@ func (s *userModelConfigService) ResolveModelConfig(ctx context.Context, userID 
 
 // Test 测试用户模型连接
 func (s *userModelConfigService) Test(ctx context.Context, req requestdto.TestModelRequest) (responsedto.TestResult, error) {
-	start := time.Now()
-
-	configJSON, _ := json.Marshal(req.Config)
-
-	client, err := llm.NewOpenAIClientDirect(ctx, llm.OpenAIClientConfig{
-		APIKey:  req.APIKey,
-		BaseURL: req.BaseURL,
-		Model:   req.ModelID,
-		Config:  configJSON,
-	})
-	if err != nil {
-		elapsed := time.Since(start)
-		return responsedto.TestResult{
-			Success:      false,
-			Message:      "模型连接失败",
-			Error:        err.Error(),
-			ResponseTime: elapsed.Milliseconds(),
-		}, nil
-	}
-
-	// 真正发送请求验证连接
-	testCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	if err := client.TestConnection(testCtx); err != nil {
-		elapsed := time.Since(start)
-		return responsedto.TestResult{
-			Success:      false,
-			Message:      "模型连接失败",
-			Error:        err.Error(),
-			ResponseTime: elapsed.Milliseconds(),
-		}, nil
-	}
-
-	elapsed := time.Since(start)
-
-	// 尝试通过 /v1/models 探测真实上下文窗口
-	detectedCtx, detectErr := llm.DetectContextLengthViaAPI(ctx, req.BaseURL, req.APIKey, req.ModelID)
-	details := "已发送测试请求并收到响应"
-	if detectErr == nil && detectedCtx > 0 {
-		details = fmt.Sprintf("已发送测试请求并收到响应；探测到上下文窗口 %d", detectedCtx)
-	}
-
-	return responsedto.TestResult{
-		Success:                  true,
-		Message:                  "模型连接成功",
-		ResponseTime:             elapsed.Milliseconds(),
-		Details:                  details,
-		DetectedMaxContextLength: detectedCtx,
-	}, nil
+	return testModelSettings(ctx, req)
 }
 
 // toModelConfigInfo 把实体转为响应 DTO
 func toModelConfigInfo(config *entity.UserModelConfig) responsedto.UserModelConfigInfo {
 	info := responsedto.UserModelConfigInfo{
+		CapabilityStatus: modelCapabilityStatus(config.Config, config.MaxContextLength),
 		ID:               config.ID,
 		DisplayName:      config.DisplayName,
 		APIFormat:        config.APIFormat,
 		ModelID:          config.ModelID,
 		BaseURL:          config.BaseURL,
-		APIKey:           config.APIKey,
+		APIKey:           maskAPIKey(config.APIKey),
 		MaxContextLength: config.MaxContextLength,
 		CreatedAt:        config.CreatedAt,
 		UpdatedAt:        config.UpdatedAt,

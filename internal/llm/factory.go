@@ -36,7 +36,7 @@ func (cfg ModelConfig) openAIConfig() OpenAIClientConfig {
 // supportsProvider 判断该服务商是否走 OpenAI 兼容客户端路径。
 //
 // 所有分支最终都由 NewOpenAIClient 构建，故服务商本身不参与缓存 key（不改变客户端本体）。
-func supportsProvider(provider string) bool {
+func SupportsProvider(provider string) bool {
 	switch provider {
 	case "openai", "deepseek", "zhipu", "tongyi":
 		return true
@@ -52,7 +52,7 @@ func NewOpenAIClientDirect(ctx context.Context, cfg OpenAIClientConfig) (*OpenAI
 
 // NewClientFromModelConfig 根据模型配置动态创建 LLM 客户端（带缓存）
 func NewClientFromModelConfig(ctx context.Context, cfg ModelConfig) (*OpenAIClient, error) {
-	if !supportsProvider(cfg.Provider) {
+	if !SupportsProvider(cfg.Provider) {
 		return nil, fmt.Errorf("不支持的 LLM 提供商: %s", cfg.Provider)
 	}
 	return getOrCreateClient(ctx, cfg)

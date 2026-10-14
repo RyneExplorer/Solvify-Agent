@@ -39,7 +39,7 @@ var errorMessages = map[apperrors.Kind]kindMessage{
 	// ── 模型配置 ──
 	apperrors.KindModelConfig: {ErrorMessage: ErrorMessage{
 		Title:  "模型加载失败",
-		Detail: "请在设置中检查模型配置，或选择其他模型",
+		Detail: "请在模型设置中确认输入、输出额度与工具能力，或选择其他模型",
 	}},
 	apperrors.KindModelConfigQuery: {ErrorMessage: ErrorMessage{
 		Title:  "模型配置查询失败",

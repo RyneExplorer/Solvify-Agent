@@ -39,13 +39,7 @@ func ResolveContextBudget(modelID, modelName string, declared, output int, quick
 	if err := policy.Validate(); err != nil {
 		return ContextBudget{}, fmt.Errorf("%w: %v", ErrContextConfig, err)
 	}
-	if declared <= 0 {
-		declared = modelContextRegistry[modelName]
-		if declared <= 0 {
-			declared = parseContextFromName(modelName)
-		}
-	}
-	limit := GetEffectiveMaxContextLength(modelID, declared)
+	limit := declared
 	if limit <= 0 || output <= 0 {
 		return ContextBudget{}, fmt.Errorf("%w: 窗口=%d 输出=%d", ErrContextConfig, limit, output)
 	}
@@ -59,6 +53,16 @@ func ResolveContextBudget(modelID, modelName string, declared, output int, quick
 		soft, target = policy.QuickSoftRatio, policy.QuickTargetRatio
 	}
 	return ContextBudget{limit, output, margin, hard, int(float64(hard) * soft), int(float64(hard) * target)}, nil
+}
+
+// WithInputLimit 将模型独立输入限制同步到硬预算与软水位。
+func (b ContextBudget) WithInputLimit(limit int) ContextBudget {
+	if limit > 0 && limit < b.Hard {
+		b.Soft = int(float64(b.Soft) * float64(limit) / float64(b.Hard))
+		b.Target = int(float64(b.Target) * float64(limit) / float64(b.Hard))
+		b.Hard = limit
+	}
+	return b
 }
 
 func (b ContextBudget) Check(used int) error {

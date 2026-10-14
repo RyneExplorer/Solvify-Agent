@@ -13,7 +13,6 @@ import (
 	"gorm.io/datatypes"
 
 	"solvify-agent/internal/agent"
-	"solvify-agent/internal/llm"
 	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
@@ -82,6 +81,11 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 	agentReq.SessionID = sessionID
 	agentReq.Profile = profile
 	// agent 层拿不到 llm 客户端，预算检查需要的窗口与模型名由这里带过去。
+	if err := client.CheckAgentTools(); err != nil {
+		sendErrorEvent(ctx, eventCh, err, profile)
+		return
+	}
+	agentReq.InputLimit = client.InputLimit()
 	agentReq.OutputLimit = client.OutputLimit()
 	agentReq.ModelName = client.ModelName()
 	agentReq.MaxContextLength = client.MaxContextLength()
@@ -93,7 +97,6 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 	agentEventCh, err := s.agentEngine.Execute(agentCtx, agentReq, chatModel)
 	if err != nil {
 		logger.Errorf("Agent 执行失败, sessionID=%s: %v", sessionID, err)
-		llm.ReduceContextBudgetOnError(req.ModelID, apperrors.Classify(err))
 		sendErrorEvent(ctx, eventCh, err, profile)
 		return
 	}
@@ -208,7 +211,6 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 			// 此前把 agentEvent.Error 原样喂给关键词表，裸词 "exceeds" 让
 			// 「exceeds max iterations」也被判成上下文超长，把模型窗口从 64000 砍到 8192。
 			failureDetail = messageFor(agentEvent.Kind, profile).Detail
-			llm.ReduceContextBudgetOnError(req.ModelID, agentEvent.Kind)
 		}
 
 		eventch.Send(ctx, eventCh, toStreamEvent(agentEvent, profile))

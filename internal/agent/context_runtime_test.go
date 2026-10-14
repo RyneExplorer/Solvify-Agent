@@ -176,6 +176,11 @@ func runContextTest(t *testing.T, values map[string]any, run func(context.Contex
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	runContextTestInContext(t, ctx, values, run)
+}
+
+func runContextTestInContext(t *testing.T, ctx context.Context, values map[string]any, run func(context.Context) error) {
+	t.Helper()
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: &contextTestAgent{run: run}})
 	iter := runner.Run(ctx, []*schema.Message{schema.UserMessage("问题")}, adk.WithSessionValues(values))
 	for {
@@ -233,7 +238,7 @@ func TestRuntimeSummaryBoundedImmutableAndFailure(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				if scenario == "success" {
+				if scenario == "success" || scenario == "quick" {
 					if next == state || len(next.Messages) != 4 || next.Messages[0].Role != schema.User || next.Messages[1].Content != "保留当前问题" {
 						return errors.New("摘要未保持问题/最新组")
 					}
@@ -241,16 +246,13 @@ func TestRuntimeSummaryBoundedImmutableAndFailure(t *testing.T) {
 						return errors.New("原消息被修改")
 					}
 				} else if next != state {
-					return errors.New("失败或快速模式不应替换状态")
+					return errors.New("失败不应替换状态")
 				}
 				_, _, err = m.BeforeModelRewriteState(ctx, state, nil)
 				if err != nil {
 					return err
 				}
 				expected := 1
-				if scenario == "quick" {
-					expected = 0
-				}
 				if calls != expected {
 					return fmt.Errorf("摘要次数=%d，期望%d", calls, expected)
 				}
@@ -259,7 +261,7 @@ func TestRuntimeSummaryBoundedImmutableAndFailure(t *testing.T) {
 				if json.Unmarshal([]byte(raw.(string)), &snapshot) != nil {
 					return errors.New("快照未发布")
 				}
-				if scenario == "success" && (snapshot.Revision != 1 || len(snapshot.CoveredGroups) != 1) {
+				if (scenario == "success" || scenario == "quick") && (snapshot.Revision != 1 || len(snapshot.CoveredGroups) != 1) {
 					return errors.New("覆盖范围未记录")
 				}
 				return nil

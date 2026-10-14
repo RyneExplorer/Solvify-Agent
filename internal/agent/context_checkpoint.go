@@ -109,12 +109,14 @@ func (e *Engine) restoreContextRequest(ctx context.Context, req Request) (Reques
 	if old.UserID != req.UserID || old.SessionID != req.SessionID {
 		return req, fmt.Errorf("上下文恢复归属不匹配")
 	}
-	if old.ModelID != req.ModelID || old.ModelName != req.ModelName || old.ModelType != req.ModelType || old.MaxContextLength != req.MaxContextLength || old.OutputLimit != req.OutputLimit {
+	if old.ModelID != req.ModelID || old.ModelName != req.ModelName || old.ModelType != req.ModelType || old.MaxContextLength != req.MaxContextLength || old.OutputLimit != req.OutputLimit || (old.InputLimit != 0 && old.InputLimit != req.InputLimit) {
 		return req, fmt.Errorf("恢复模型或窗口已变化，请使用原模型继续或重新发起任务")
 	}
 	if cp.Policy != config.ContextDefaults() || cp.RuntimePolicy != e.runtimePolicy() {
 		return req, fmt.Errorf("上下文策略已变化，无法安全恢复")
 	}
+	// 旧快照未记录独立输入限制；沿用本次已确认限制，不猜测模型能力。
+	old.InputLimit = req.InputLimit
 	old.ResumeData = req.ResumeData
 	old.CheckpointID = req.CheckpointID
 	return old, nil

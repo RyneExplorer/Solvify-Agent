@@ -36,6 +36,9 @@ func (e *Engine) Execute(ctx context.Context, req Request, chatModel model.ToolC
 		if limits, ok := chatModel.(interface{ OutputLimit() int }); ok {
 			req.OutputLimit = limits.OutputLimit()
 		}
+		if limits, ok := chatModel.(interface{ InputLimit() int }); ok {
+			req.InputLimit = limits.InputLimit()
+		}
 		var restoreErr error
 		req, restoreErr = e.restoreContextRequest(ctx, req)
 		if restoreErr != nil {

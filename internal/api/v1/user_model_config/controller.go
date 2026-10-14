@@ -59,6 +59,7 @@ func (ctrl *Controller) Create(ctx *gin.Context) {
 
 // Get 获取单个用户模型配置
 func (ctrl *Controller) Get(ctx *gin.Context) {
+	ctx.Header("Cache-Control", "no-store")
 	userID, ok := middleware.CurrentUserID(ctx)
 	if !ok {
 		return

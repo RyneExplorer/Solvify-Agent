@@ -83,6 +83,9 @@ func NewChatService(
 
 // SendMessage 发送消息并获取流式响应
 func (s *chatService) SendMessage(ctx context.Context, userID, sessionID string, req requestdto.SendMessageRequest) (<-chan dto.StreamEvent, error) {
+	if err := req.ValidateContent(); err != nil {
+		return nil, apperrors.New(apperrors.CodeBadRequest, err.Error())
+	}
 	if err := s.validateSession(ctx, userID, sessionID); err != nil {
 		return nil, err
 	}
@@ -288,13 +291,13 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 	logger.Infof("[Timing] resolveClient: modelID=%s, cost=%dms", modelID, time.Since(t1).Milliseconds())
 	if err != nil {
 		logger.Errorf("模型解析失败, modelID=%s, modelType=%s: %v", modelID, modelType, err)
-		return nil, nil, fmt.Errorf("模型配置无效或无权访问")
+		return nil, nil, fmt.Errorf("模型配置无效或无权访问；请确认输入、输出与能力设置: %w", err)
 	}
 	modelName := client.ModelName()
 
 	// 2. 根据模型上下文窗口计算各组件预算
-	// 优先使用运行时有效值（若曾触发上下文长度错误会被降低）
-	maxCtx := llm.GetEffectiveMaxContextLength(modelID, client.MaxContextLength())
+	// 只使用用户确认的窗口，不根据一次供应商错误猜测新上限。
+	maxCtx := client.MaxContextLength()
 	toolsTokens := 0
 	if len(toolsTokensReserve) > 0 {
 		toolsTokens = max(toolsTokensReserve[0], 0)
@@ -302,7 +305,7 @@ func (s *chatService) initContext(ctx context.Context, userID, sessionID, modelI
 	if _, err := llm.ResolveContextBudget(modelID, modelName, maxCtx, client.OutputLimit(), false, config.ContextDefaults()); err != nil {
 		return nil, nil, err
 	}
-	historyBudget, retrievalBudget, memoryBudget := calculateContextBudgetsWithOutput(maxCtx, client.OutputLimit(), toolsTokens)
+	historyBudget, retrievalBudget, memoryBudget := calculateContextBudgetsWithInput(maxCtx, client.OutputLimit(), client.InputLimit(), toolsTokens)
 
 	// 3. 并行加载：BuildContext / 用户信息 / 用户偏好 —— 三者无依赖，全部 goroutine
 	type userLoadResult struct {

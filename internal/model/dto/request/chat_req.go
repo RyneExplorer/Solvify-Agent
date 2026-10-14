@@ -1,5 +1,12 @@
 package request
 
+import (
+	"fmt"
+	"unicode/utf8"
+)
+
+const MaxChatMessageChars = 4000
+
 // CreateSessionRequest 创建聊天会话请求
 type CreateSessionRequest struct {
 	Title   string `json:"title" binding:"max=200"`
@@ -25,6 +32,13 @@ type SendMessageRequest struct {
 	// ⚠️ 必须用指针：Go 的 []string 无法区分「字段没传」与「显式传了空数组」，
 	// 二者反序列化后都是 len==0，那样「全部不勾选」会被误判成「默认全选」。
 	MCPUserConfigIDs *[]string `json:"mcp_user_config_ids,omitempty"`
+}
+
+func (input SendMessageRequest) ValidateContent() error {
+	if utf8.RuneCountInString(input.Content) > MaxChatMessageChars {
+		return fmt.Errorf("单条消息不能超过%d个字符，请缩短后重试", MaxChatMessageChars)
+	}
+	return nil
 }
 
 // MCPIDs 返回要挂载的 MCP 配置 ID 白名单。

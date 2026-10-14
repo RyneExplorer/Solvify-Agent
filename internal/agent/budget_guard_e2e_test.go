@@ -125,6 +125,9 @@ func TestQuickAgentBudgetGuardOnFirstRunAndResume(t *testing.T) {
 	var seen [][]*schema.Message
 	var calls int32
 	model := &deepTestModel{respond: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
+		if strings.HasPrefix(msgs[0].Content, "总结已完成交互") {
+			return schema.AssistantMessage("旧检索已完成，继续使用最新检索结果。", nil), nil
+		}
 		snap := make([]*schema.Message, len(msgs))
 		copy(snap, msgs)
 		seen = append(seen, snap)

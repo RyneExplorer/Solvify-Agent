@@ -31,8 +31,8 @@ func TestContextBudgetHardAndSoft(t *testing.T) {
 	if _, err = ResolveContextBudget("test", "unknown", 0, 4096, false, p); !errors.Is(err, ErrContextConfig) {
 		t.Fatal("未知窗口应拒绝")
 	}
-	if _, err = ResolveContextBudget("test", "gpt-4o", 0, 4096, false, p); err != nil {
-		t.Fatal("注册窗口不可解析", err)
+	if _, err = ResolveContextBudget("test", "gpt-4o", 0, 4096, false, p); !errors.Is(err, ErrContextConfig) {
+		t.Fatal("不能从模型名猜测窗口", err)
 	}
 	if apperrors.Classify(b.Check(b.Hard+1)) != apperrors.KindContextBudget {
 		t.Fatal("本地拒绝不得误判供应商超窗")
@@ -65,7 +65,7 @@ func TestContextModelChecksActualPayloadBeforeHTTP(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"test","object":"chat.completion","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"正常"},"finish_reason":"stop"}]}`))
 	}))
 	defer server.Close()
-	client, err := NewOpenAIClient(context.Background(), OpenAIClientConfig{Model: "gpt-4o", APIKey: "test", BaseURL: server.URL + "/v1", MaxContextLength: 8192})
+	client, err := NewOpenAIClient(context.Background(), OpenAIClientConfig{Model: "gpt-4o", APIKey: "test", BaseURL: server.URL + "/v1", MaxContextLength: 8192, Config: []byte(`{"max_input_tokens":8192,"max_output_tokens":8192,"max_completion_tokens":4096,"output_token_field":"max_completion_tokens","tool_calling":true,"reasoning_capability":"none","reasoning_mode":"default"}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,11 +128,10 @@ func TestContextModelChecksActualPayloadBeforeHTTP(t *testing.T) {
 func TestActualBudgetUsesBusinessModelWindow(t *testing.T) {
 	policy := config.DefaultContextPolicy()
 	m := &contextModel{modelName: "gpt-4o", declared: 64000, output: 4096, policy: policy}
-	ctx := WithBudgetIdentity(context.Background(), "business-model-budget-test", 64000)
-	ReduceContextBudgetOnError("business-model-budget-test", apperrors.KindContextLength)
-	t.Cleanup(func() { ResetEffectiveMaxContextLength("business-model-budget-test") })
+	ctx := WithBudgetIdentity(context.Background(), "business-model-budget-test", 8192)
+
 	raw, _ := json.Marshal(map[string]any{"model": "gpt-4o", "max_completion_tokens": 4096, "messages": []map[string]string{{"role": "user", "content": strings.Repeat("问题", 5000)}}})
 	if _, err := m.checkPayload(ctx, nil, raw); !errors.Is(err, ErrContextBudget) {
-		t.Fatal("遗漏运行时窗口修正", err)
+		t.Fatal("遗漏本次业务模型窗口", err)
 	}
 }

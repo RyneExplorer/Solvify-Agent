@@ -111,3 +111,14 @@ func (ctrl *Controller) Test(ctx *gin.Context) {
 	}
 	response.Success(ctx, result)
 }
+
+// GetForEdit 管理员编辑详情包含凭据，不允许响应缓存。
+func (ctrl *Controller) GetForEdit(ctx *gin.Context) {
+	ctx.Header("Cache-Control", "no-store")
+	output, err := ctrl.modelService.GetForEdit(ctx.Request.Context(), ctx.Param("id"))
+	if err != nil {
+		response.BizError(ctx, err)
+		return
+	}
+	response.Success(ctx, output)
+}

@@ -29,6 +29,7 @@ func (e *Engine) resumeLegacyDeepOrchestrator(ctx context.Context, req Request, 
 			e.emitPlanError(ctx, eventCh, fmt.Errorf("深度任务中断点无效或已过期"))
 			return
 		}
+		state.Request.InputLimit = req.InputLimit
 		state.Request.ResumeData = req.ResumeData
 		if state.Request.RunID == "" {
 			state.Request.RunID = legacyContextRunID(state.Request, state.Plan.ID)

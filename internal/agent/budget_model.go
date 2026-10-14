@@ -15,6 +15,8 @@ type budgetModel struct {
 	tools []*schema.ToolInfo
 }
 
+func (m *budgetModel) OutputLimit() int { return m.guard.outputLimit }
+
 func (m *budgetModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	inner, err := m.inner.WithTools(tools)
 	if err != nil {

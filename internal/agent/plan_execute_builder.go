@@ -14,18 +14,20 @@ import (
 )
 
 func (r *peRuntime) describeTools(ctx context.Context, buckets map[ToolDomain][]einoTool.BaseTool) error {
-	r.externalNames, r.documentNames = nil, nil
-	for _, domain := range []ToolDomain{DomainExternal, DomainDocMgmt} {
+	r.knowledgeNames, r.externalNames, r.documentNames = nil, nil, nil
+	for _, domain := range []ToolDomain{DomainKnowledge, DomainExternal, DomainDocMgmt} {
 		for _, t := range buckets[domain] {
 			info, err := t.Info(ctx)
 			if err != nil {
-				return fmt.Errorf("读取外部工具描述失败: %w", err)
+				return fmt.Errorf("读取规划工具描述失败: %w", err)
 			}
 			if info == nil || info.Name == "" {
-				return fmt.Errorf("操作工具描述无效")
+				return fmt.Errorf("规划工具描述无效")
 			}
 			description := info.Name + "：" + info.Desc
-			if domain == DomainExternal {
+			if domain == DomainKnowledge {
+				r.knowledgeNames = append(r.knowledgeNames, description)
+			} else if domain == DomainExternal {
 				r.externalNames = append(r.externalNames, description)
 			} else {
 				r.documentNames = append(r.documentNames, description)
@@ -39,13 +41,14 @@ func (r *peRuntime) describeTools(ctx context.Context, buckets map[ToolDomain][]
 func (r *peRuntime) plannerInstruction() string {
 	return fmt.Sprintf(`你是 Solvify Planner，只规划，不执行研究。必须调用 plan 工具提交结构化计划，不得用普通文本回答。可用角色 knowledge_research、synthesis_review；web_research 可用=%t。
 角色职责：knowledge_research 仅查询知识库；web_research 仅使用用户配置的外部工具；document_operation 仅使用系统文档管理工具；synthesis_review 仅生成文本与汇总，不具备工具权限，不能执行工具操作或触发审批。
+知识检索工具（名称与用途）：%s。需要这些工具取得的事实必须安排 knowledge_research，再由依赖该结果的 synthesis_review 汇总。
 用户配置工具（名称与用途）：%s。只有用途支持联网查询的工具才可安排联网研究；用户工具非空不代表有联网能力。
 系统文档操作可用=%t，工具：%s。文档操作分配 document_operation，之后安排依赖该结果的 synthesis_review。缺少对应能力时汇总中明确说明限制，不安排虚假的研究或无工具重试。
 每版最多 %d 个待执行任务，并行允许=%t。strategy 为 direct/sequential/parallel。
 每个任务必须输出 depends_on，无依赖填 []，汇总填写所依赖的研究任务 ID；依赖必须存在且无环；最后一个汇总必须覆盖全部有效研究。
-简单问题只有 synthesis_review。任务 ID 唯一且稳定；历史终态任务不可改写，重试或新汇总用新 ID。
+无需检索或工具的简单问题只有 synthesis_review；明确要求工具取得的事实不能直接汇总。任务 ID 唯一且稳定；历史终态任务不可改写，重试或新汇总用新 ID。
 重规划必须填写 replan_reason，保留已成功任务的原描述和依赖，移除不再需要的待执行任务。
-不得规划文档、视频或 PPT 等未实现功能。`, r.external, strings.Join(r.externalNames, "、"), r.document, strings.Join(r.documentNames, "、"), deepMaxPlanTasks(r.engine.cfg), r.engine.cfg.DeepParallelEnabled)
+不得规划文档、视频或 PPT 等未实现功能。`, r.external, strings.Join(r.knowledgeNames, "、"), strings.Join(r.externalNames, "、"), r.document, strings.Join(r.documentNames, "、"), deepMaxPlanTasks(r.engine.cfg), r.engine.cfg.DeepParallelEnabled)
 }
 
 func (r *peRuntime) build(ctx context.Context) (adk.ResumableAgent, error) {

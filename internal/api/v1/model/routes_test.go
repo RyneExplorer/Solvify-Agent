@@ -63,6 +63,24 @@ func (s *stubModelService) GetByID(context.Context, string) (responsedto.ModelIn
 	return responsedto.ModelInfo{ID: "m-1", Name: "gpt-5.5", APIKey: "sk-****1b0c"}, nil
 }
 
+func (s *stubModelService) GetForEdit(context.Context, string) (responsedto.ModelInfo, error) {
+	return responsedto.ModelInfo{ID: "m-1", APIKey: "synthetic-edit-key"}, nil
+}
+
+func TestModelRoutes_EditCredentialsAdminOnly(t *testing.T) {
+	for _, role := range []int{0, roleUser, roleAdmin} {
+		w := send(newTestRouter(&stubModelService{}, role), http.MethodGet, "/api/v1/models/m-1/edit", "")
+		e := decode(t, w)
+		if role != roleAdmin {
+			if e.Code != apperrors.CodeForbidden || strings.Contains(w.Body.String(), "synthetic-edit-key") {
+				t.Fatal("编辑凭据越权")
+			}
+		} else if e.Code != apperrors.CodeSuccess || !strings.Contains(w.Body.String(), "synthetic-edit-key") || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("管理员不能编辑已有凭据")
+		}
+	}
+}
+
 func (s *stubModelService) Create(context.Context, requestdto.CreateModelRequest) (responsedto.ModelInfo, error) {
 	s.createCalled++
 	return responsedto.ModelInfo{ID: "m-new", APIKey: "sk-****1b0c"}, nil
@@ -229,6 +247,21 @@ func TestModelRoutes_Test_AllowsAdmin(t *testing.T) {
 	}
 	if svc.testCalled != 1 {
 		t.Fatalf("管理员请求未触达服务层，testCalled=%d", svc.testCalled)
+	}
+}
+
+func TestModelRoutes_CapabilityOperationValidation(t *testing.T) {
+	for _, operation := range []string{"capabilities", "invalid"} {
+		svc := &stubModelService{}
+		body := `{"provider":"openai","model_id":"m","base_url":"https://example.com","operation":"` + operation + `"}`
+		w := send(newTestRouter(svc, roleAdmin), http.MethodPost, "/api/v1/models/test", body)
+		e := decode(t, w)
+		if operation == "capabilities" && (e.Code != apperrors.CodeSuccess || svc.testCalled != 1) {
+			t.Fatal(e)
+		}
+		if operation == "invalid" && (e.Code == apperrors.CodeSuccess || svc.testCalled != 0) {
+			t.Fatal("非法操作到达Service")
+		}
 	}
 }
 

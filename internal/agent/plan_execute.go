@@ -18,15 +18,16 @@ import (
 const peSessionKey = "SolvifyPlanExecuteV1"
 
 type peRuntime struct {
-	mu            sync.Mutex
-	engine        *Engine
-	model         model.ToolCallingChatModel
-	request       Request
-	external      bool
-	externalNames []string
-	document      bool
-	documentNames []string
-	state         *peState
+	mu             sync.Mutex
+	engine         *Engine
+	model          model.ToolCallingChatModel
+	request        Request
+	knowledgeNames []string
+	external       bool
+	externalNames  []string
+	document       bool
+	documentNames  []string
+	state          *peState
 }
 
 func (r *peRuntime) session(ctx context.Context) (*peState, error) {
@@ -46,7 +47,7 @@ func (r *peRuntime) session(ctx context.Context) (*peState, error) {
 		// 恢复时采用可信状态中的工具选择，刷新后的新消息选项不改变原流程。
 		// 工具工厂会重新查询当前启用配置及权限。
 		if len(r.request.ResumeData) > 0 {
-			buckets := r.engine.buildToolsByDomain(ctx, r.engine.sortedInternalTools(), s.Request.UserID, s.Request.KnowledgeBaseIDs, []ToolDomain{DomainDocMgmt}, false)
+			buckets := r.engine.buildToolsByDomain(ctx, r.engine.sortedInternalTools(), s.Request.UserID, s.Request.KnowledgeBaseIDs, []ToolDomain{DomainKnowledge, DomainDocMgmt}, false)
 			if !s.Request.MCPDisabled {
 				if r.engine.toolFactory != nil {
 					buckets[DomainExternal] = r.engine.toolFactory.CreateAgentTools(ctx, s.Request.UserID, s.Request.UserToolConfigIDs...)

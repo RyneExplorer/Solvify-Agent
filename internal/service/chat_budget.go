@@ -28,6 +28,10 @@ func calculateContextBudgets(maxContextLength int, toolsTokens ...int) (historyB
 }
 
 func calculateContextBudgetsWithOutput(maxContextLength, output int, toolsTokens ...int) (historyBudget, retrievalBudget, memoryBudget int) {
+	return calculateContextBudgetsWithInput(maxContextLength, output, 0, toolsTokens...)
+}
+
+func calculateContextBudgetsWithInput(maxContextLength, output, input int, toolsTokens ...int) (historyBudget, retrievalBudget, memoryBudget int) {
 	toolReserve := 0
 	if len(toolsTokens) > 0 && toolsTokens[0] > 0 {
 		toolReserve = toolsTokens[0]
@@ -39,6 +43,7 @@ func calculateContextBudgetsWithOutput(maxContextLength, output int, toolsTokens
 	if err != nil {
 		return 0, 0, 0
 	}
+	budget = budget.WithInputLimit(input)
 	remaining := max(budget.Hard-toolReserve, 0)
 	// 2. 固定预留：System Prompt 基础骨架 + 当前 user question 包装 + 安全边距。
 	// ⚠️ 必须封顶到 remaining：过去这里没有上限，remaining < 300 时仍被抬到 300，

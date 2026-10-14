@@ -46,7 +46,7 @@ func TestContextCheckpointIntegrityOwnershipAndLegacy(t *testing.T) {
 func TestContextRestoreFreezesMaterialsAndRejectsModelChanges(t *testing.T) {
 	e := deepTestEngine()
 	ctx := context.Background()
-	original := Request{UserID: "u", SessionID: "s", RunID: "r", Query: "冻结的问题", SystemPrompt: "冻结的指令", ModelID: "m", ModelName: "gpt-4o", MaxContextLength: 64000, OutputLimit: 4096, UserToolConfigIDs: []string{"old-tool"}}
+	original := Request{UserID: "u", SessionID: "s", RunID: "r", Query: "冻结的问题", SystemPrompt: "冻结的指令", ModelID: "m", ModelName: "gpt-4o", MaxContextLength: 64000, OutputLimit: 4096, InputLimit: 32000, UserToolConfigIDs: []string{"old-tool"}}
 	if err := e.contextStore(original).Set(ctx, "cp", []byte("eino-state")); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestContextRestoreFreezesMaterialsAndRejectsModelChanges(t *testing.T) {
 	if err != nil || restored.Query != original.Query || restored.SystemPrompt != original.SystemPrompt || restored.UserToolConfigIDs[0] != "old-tool" || restored.ResumeData["interrupt"] != "回答" {
 		t.Fatal("恢复混入新素材", err)
 	}
-	for _, change := range []func(*Request){func(r *Request) { r.ModelName = "other" }, func(r *Request) { r.MaxContextLength = 8192 }, func(r *Request) { r.OutputLimit = 8000 }, func(r *Request) { r.UserID = "other" }} {
+	for _, change := range []func(*Request){func(r *Request) { r.ModelName = "other" }, func(r *Request) { r.MaxContextLength = 8192 }, func(r *Request) { r.OutputLimit = 8000 }, func(r *Request) { r.InputLimit = 16000 }, func(r *Request) { r.UserID = "other" }} {
 		copy := incoming
 		change(&copy)
 		if _, err := e.restoreContextRequest(ctx, copy); err == nil {

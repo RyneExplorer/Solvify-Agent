@@ -3,8 +3,6 @@ package llm
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -63,63 +61,45 @@ type OpenAIClientConfig struct {
 	MaxContextLength int    // 模型最大上下文 token 长度
 }
 
-// ModelExtraConfig 描述数据库 Config JSON 中可配置的参数
-type ModelExtraConfig struct {
-	Temperature         *float32 `json:"temperature,omitempty"`
-	MaxCompletionTokens *int     `json:"max_completion_tokens,omitempty"`
-	Timeout             *int     `json:"timeout,omitempty"` // 秒
-}
-
 // NewOpenAIClient 创建 OpenAI 兼容客户端
 func NewOpenAIClient(ctx context.Context, cfg OpenAIClientConfig) (*OpenAIClient, error) {
 	// 解析扩展配置
-	var extra ModelExtraConfig
-	if len(cfg.Config) > 0 {
-		if err := json.Unmarshal(cfg.Config, &extra); err != nil {
-			return nil, fmt.Errorf("解析模型扩展配置失败: %w", err)
-		}
+	extra, err := ParseModelOptions(cfg.Config, cfg.MaxContextLength)
+	if err != nil {
+		return nil, err
 	}
 
 	contextPolicy := config.ContextDefaults()
-	defaultMaxCompletionTokens := contextPolicy.OutputLimit
 	config := &einoOpenai.ChatModelConfig{
-		APIKey:              cfg.APIKey,
-		BaseURL:             cfg.BaseURL,
-		Model:               cfg.Model,
-		HTTPClient:          getSharedHTTPClient(),
-		MaxCompletionTokens: &defaultMaxCompletionTokens,
+		APIKey:     cfg.APIKey,
+		BaseURL:    cfg.BaseURL,
+		Model:      cfg.Model,
+		HTTPClient: getSharedHTTPClient(),
 	}
 
 	// 用户配置覆盖默认值
 	if extra.Temperature != nil {
 		config.Temperature = extra.Temperature
 	}
-	if extra.MaxCompletionTokens != nil {
+	if extra.OutputTokenField == "max_completion_tokens" {
 		config.MaxCompletionTokens = extra.MaxCompletionTokens
+	} else {
+		config.MaxTokens = extra.MaxCompletionTokens
 	}
 	if extra.Timeout != nil && *extra.Timeout > 0 {
 		config.Timeout = toDuration(*extra.Timeout)
 	}
 
-	if *config.MaxCompletionTokens <= 0 {
-		return nil, fmt.Errorf("%w: 最大输出必须为正", ErrContextConfig)
-	}
 	cm, err := einoOpenai.NewChatModel(ctx, config)
 	if err != nil {
 		return nil, err
 	}
 
 	maxCtx := cfg.MaxContextLength
-	if maxCtx <= 0 {
-		maxCtx = modelContextRegistry[cfg.Model]
-		if maxCtx <= 0 {
-			maxCtx = parseContextFromName(cfg.Model)
-		}
-	}
 
 	return &OpenAIClient{
-		chatModel:        &contextModel{inner: cm, modelName: cfg.Model, declared: maxCtx, output: *config.MaxCompletionTokens, policy: contextPolicy},
-		outputLimit:      *config.MaxCompletionTokens,
+		chatModel:        &contextModel{inner: cm, modelName: cfg.Model, declared: maxCtx, output: *extra.MaxCompletionTokens, policy: contextPolicy, options: &extra},
+		outputLimit:      *extra.MaxCompletionTokens,
 		model:            cfg.Model,
 		maxContextLength: maxCtx,
 	}, nil
@@ -133,7 +113,12 @@ func (c *OpenAIClient) ChatModel() model.ToolCallingChatModel {
 // ModelName 返回具体模型名（用于编码解析 / tiktoken / 指标分桶），
 // 对用户配置的自定义模型别名不做猜测。已知模型名（gpt-4o / qwen-* / deepseek-chat ...）可通过
 // tiktoken.EncodingForModel 拿到真 BPE；未知模型回退 cl100k_base。
+func (c *OpenAIClient) InputLimit() int  { return c.chatModel.(*contextModel).InputLimit() }
 func (c *OpenAIClient) OutputLimit() int { return c.outputLimit }
+
+func (c *OpenAIClient) CheckAgentTools() error {
+	return c.chatModel.(*contextModel).options.CheckTools()
+}
 
 func (c *OpenAIClient) ModelName() string {
 	if c == nil {
