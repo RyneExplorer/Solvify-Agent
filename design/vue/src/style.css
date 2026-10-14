@@ -167,3 +167,26 @@ body {
 }
 
 
+.model-api-key-input {
+  --el-input-bg-color: #f8fafc;
+  --el-input-text-color: #0f172a;
+  --el-input-border-color: #e2e8f0;
+  --el-input-hover-border-color: #e2e8f0;
+  --el-input-focus-border-color: var(--model-key-focus-color, #0f172a);
+  --el-input-border-radius: 12px;
+  --el-input-placeholder-color: #9ca3af;
+  --el-input-height: 42px;
+}
+
+.model-api-key-input .el-input__wrapper {
+  padding: 0 16px;
+  min-height: 42px;
+}
+
+.model-api-key-input .el-input__inner {
+  height: 40px;
+  line-height: 20px;
+  font-size: 14px;
+  font-family: inherit;
+}
+

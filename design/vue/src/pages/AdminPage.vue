@@ -125,7 +125,7 @@
               <td class="px-4 py-3 font-medium text-slate-900">{{ m.provider }}</td>
               <td class="px-4 py-3 text-slate-900">{{ m.model_id }}</td>
               <td class="px-4 py-3 text-slate-900">{{ m.base_url || '-' }}</td>
-              <td class="px-4 py-3 text-slate-900 font-mono tabular-nums">{{ m.max_context_length ?? '-' }}</td>
+              <td class="px-4 py-3 text-slate-900 font-mono tabular-nums">{{ m.max_context_length ?? '-' }} {{ m.capability_status === 'text_only' ? '（当前能力不能用于工具Agent）' : modelSettingsError(m.max_context_length, m.config) ? '（能力待确认）' : '' }}</td>
               <td class="px-4 py-3"><AppBadge :variant="m.is_enabled ? 'success' : 'neutral'">{{ m.is_enabled ? '启用' : '停用' }}</AppBadge></td>
               <td class="px-4 py-3">
                 <div class="flex items-center gap-1">
@@ -319,30 +319,28 @@
     <!-- 模型弹窗 -->
     <div v-if="modelModalVisible" class="fixed inset-0 z-50 flex items-center justify-center">
       <div class="absolute inset-0 bg-black/30" @click="modelModalVisible = false" />
-      <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-[480px]">
+      <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 p-5 w-[600px] max-w-[calc(100vw-2rem)] max-h-[90vh] flex flex-col">
         <h3 class="text-lg font-semibold text-slate-900 mb-4">{{ editingModel ? '编辑模型' : '添加模型' }}</h3>
-        <div class="space-y-4">
-          <div>
-            <label class="block text-[13px] font-medium text-slate-600 mb-1.5">提供商</label>
-            <input v-model="modelForm.provider" placeholder="例如：OpenAI / 阿里云 / 智谱" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
+        <div class="space-y-3 overflow-y-auto min-h-0 pr-1">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-[13px] font-medium text-slate-600 mb-1.5">提供商</label>
+              <input v-model="modelForm.provider" placeholder="例如：OpenAI / 阿里云 / 智谱" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
+            </div>
+            <div>
+              <label class="block text-[13px] font-medium text-slate-600 mb-1.5">模型 ID</label>
+              <input v-model="modelForm.model_id" placeholder="例如：gpt-4 / qwen-max" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
+            </div>
+            <div>
+              <label class="block text-[13px] font-medium text-slate-600 mb-1.5">Base URL</label>
+              <input v-model="modelForm.base_url" placeholder="https://api.openai.com/v1" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
+            </div>
+            <div>
+              <label class="block text-[13px] font-medium text-slate-600 mb-1.5">API Key</label>
+              <el-input v-model="modelForm.api_key" type="password" show-password autocomplete="off" placeholder="已保存密钥自动回填" size="large" class="model-api-key-input" />
+            </div>
           </div>
-          <div>
-            <label class="block text-[13px] font-medium text-slate-600 mb-1.5">模型 ID</label>
-            <input v-model="modelForm.model_id" placeholder="例如：gpt-4 / qwen-max" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
-          </div>
-          <div>
-            <label class="block text-[13px] font-medium text-slate-600 mb-1.5">Base URL</label>
-            <input v-model="modelForm.base_url" placeholder="https://api.openai.com/v1" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
-          </div>
-          <div>
-            <label class="block text-[13px] font-medium text-slate-600 mb-1.5">API Key</label>
-            <input v-model="modelForm.api_key" type="password" placeholder="sk-..." class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
-          </div>
-          <div>
-            <label class="block text-[13px] font-medium text-slate-600 mb-1.5">最大上下文长度 <span class="text-red-500">*</span></label>
-            <input v-model.number="modelForm.max_context_length" type="number" min="1024" max="200000" step="1024" placeholder="8192" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
-            <p class="text-xs text-slate-400 mt-1">范围 1024~200000，可后续通过"测试连接"自动探测</p>
-          </div>
+          <ModelCapabilityFields v-model:window="modelForm.max_context_length" v-model:config="modelForm.config" />
 
           <!-- 测试结果 -->
           <div v-if="modelTestResult" class="mt-2">
@@ -354,14 +352,18 @@
               <div v-if="modelTestResult.response_time_ms" class="text-xs opacity-70">响应时间: {{ modelTestResult.response_time_ms }}ms</div>
               <div v-if="modelTestResult.detected_max_context_length" class="text-xs mt-1 opacity-70">探测到的最大上下文: {{ modelTestResult.detected_max_context_length }}</div>
               <div v-if="modelTestResult.error" class="text-xs mt-1 opacity-70">错误: {{ modelTestResult.error }}</div>
+              <div class="text-xs mt-1">连接 {{ modelTestResult.connection_status || '未验证' }} · 流式 {{ modelTestResult.streaming_status || '未验证' }} · 工具 {{ modelTestResult.tool_calling_status || '未验证' }}</div>
+              <div v-if="modelTestResult.detected_max_input_tokens" class="text-xs">服务商最大输入：{{ modelTestResult.detected_max_input_tokens }}</div>
+              <div v-if="modelTestResult.detected_max_output_tokens" class="text-xs">服务商最大生成：{{ modelTestResult.detected_max_output_tokens }}</div>
               <div v-if="modelTestResult.details" class="text-xs mt-1 opacity-70">详情: {{ modelTestResult.details }}</div>
             </div>
           </div>
         </div>
-        <div class="flex justify-end gap-2 mt-6">
+        <div class="flex flex-wrap justify-end gap-2 mt-4 shrink-0 border-t border-slate-100 pt-4">
           <AppButton variant="secondary" @click="modelModalVisible = false">取消</AppButton>
-          <AppButton variant="outline" :disabled="!modelFormValid" :loading="modelTesting" @click="testModel">{{ modelTesting ? '测试中...' : '测试连接' }}</AppButton>
-          <AppButton :disabled="!modelFormValid" @click="saveModel">保存</AppButton>
+          <AppButton variant="outline" :disabled="!modelForm.model_id || !modelForm.base_url" :loading="modelTesting" @click="testModel('capabilities')">获取能力</AppButton>
+          <AppButton variant="outline" :disabled="!modelForm.provider || !modelForm.model_id || !modelForm.base_url" :loading="modelTesting" @click="testModel()">{{ modelTesting ? '测试中...' : '测试模型' }}</AppButton>
+          <AppButton :disabled="!modelFormValid || modelTesting" :loading="modelSaving" @click="saveModel">{{ modelSaving ? '验证中…' : '验证并保存' }}</AppButton>
         </div>
       </div>
     </div>
@@ -659,7 +661,7 @@
         </div>
         <div class="flex justify-end gap-2 mt-6">
           <AppButton variant="secondary" @click="toolProviderModalVisible = false">取消</AppButton>
-          <AppButton variant="outline" :disabled="!toolProviderFormValid" :loading="toolTesting" @click="testToolProvider">{{ toolTesting ? '测试中...' : '测试连接' }}</AppButton>
+          <AppButton variant="outline" :disabled="!toolProviderFormValid" :loading="toolTesting" @click="testToolProvider">{{ toolTesting ? '测试中...' : '测试连接 / 流式 / 工具' }}</AppButton>
           <AppButton :disabled="!toolProviderFormValid" @click="saveToolProvider">保存</AppButton>
         </div>
       </div>
@@ -670,7 +672,7 @@
       <div class="absolute inset-0 bg-black/30" @click="quickTestModalVisible = false" />
       <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-[520px] max-h-[80vh] overflow-y-auto">
         <div class="flex items-center justify-between mb-4">
-          <h3 class="text-lg font-semibold text-slate-900">测试连接 · {{ quickTestProviderName }}</h3>
+          <h3 class="text-lg font-semibold text-slate-900">测试能力 / 探测 · {{ quickTestProviderName }}</h3>
           <button type="button" class="text-xl leading-none text-slate-400 hover:text-slate-600" @click="quickTestModalVisible = false">×</button>
         </div>
         <div v-if="quickTestLoading" class="py-8 text-center text-sm text-slate-400">正在连接 MCP 服务器...</div>
@@ -765,6 +767,8 @@
 </template>
 
 <script setup lang="ts">
+import { modelSettingsError, applyModelCapabilities } from '@/lib/model-capabilities.mjs'
+import ModelCapabilityFields from '@/components/ModelCapabilityFields.vue'
 import { provide, ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AppCard from '../components/ui/AppCard.vue'
@@ -783,6 +787,7 @@ import {
   adminDeleteUser,
   adminResetUserPassword,
   adminListModels,
+  adminGetModelForEdit,
   adminCreateModel,
   adminUpdateModel,
   adminDeleteModel,
@@ -845,25 +850,42 @@ const filteredModels = computed(() => {
 })
 const modelModalVisible = ref(false)
 const editingModel = ref<ModelInfo | null>(null)
-const modelForm = ref({ provider: '', model_id: '', base_url: '', api_key: '', max_context_length: 8192 })
-const modelFormValid = computed(() => modelForm.value.provider.trim() && modelForm.value.model_id.trim() && modelForm.value.max_context_length >= 1024 && modelForm.value.max_context_length <= 200000)
+const modelForm = ref({ provider: '', model_id: '', base_url: '', api_key: '', max_context_length: 0, config: {} as Record<string, unknown> })
+const modelFormValid = computed(() => modelForm.value.provider.trim() && modelForm.value.model_id.trim() && !modelSettingsError(modelForm.value.max_context_length, modelForm.value.config))
 const modelTestResult = ref<ModelTestResult | null>(null)
 const modelTesting = ref(false)
+const modelSaving = ref(false)
+watch(() => [modelForm.value.provider, modelForm.value.model_id, modelForm.value.base_url], () => {
+  if (!modelModalVisible.value) return
+  modelForm.value.max_context_length = 0; modelForm.value.config = {}; modelTestResult.value = null
+}, { flush: 'sync' })
 
-function openModelModal(model?: ModelInfo) {
+async function openModelModal(model?: ModelInfo) {
+  if (model) {
+    try {
+      const res = await adminGetModelForEdit(model.id)
+      model = res.data
+    } catch {
+      ElMessage.error('读取模型配置失败，请重试')
+      return
+    }
+  }
   editingModel.value = model ?? null
   if (model) {
-    modelForm.value = { provider: model.provider, model_id: model.model_id, base_url: model.base_url || '', api_key: '', max_context_length: model.max_context_length || 8192 }
+    modelForm.value = { provider: model.provider, model_id: model.model_id, base_url: model.base_url || '', api_key: model.api_key || '', max_context_length: model.max_context_length || 0, config: { ...model.config } }
   } else {
-    modelForm.value = { provider: '', model_id: '', base_url: '', api_key: '', max_context_length: 8192 }
+    modelForm.value = { provider: '', model_id: '', base_url: '', api_key: '', max_context_length: 0, config: {} as Record<string, unknown> }
   }
   modelModalVisible.value = true
 }
 
 async function saveModel() {
+  if (modelSaving.value) return
   try {
+    const error = modelSettingsError(modelForm.value.max_context_length, modelForm.value.config); if (error) throw new Error(error)
+    modelSaving.value = true
     if (editingModel.value) {
-      const payload: Partial<typeof modelForm.value> = { ...modelForm.value }
+      const payload = { ...modelForm.value, reconfirm_capabilities: !modelSettingsError(modelForm.value.max_context_length, modelForm.value.config) }
       if (!payload.api_key) delete payload.api_key
       await adminUpdateModel(editingModel.value.id, payload)
     } else {
@@ -874,20 +896,29 @@ async function saveModel() {
     ElMessage.success(editingModel.value ? '保存成功' : '添加成功')
   } catch (e: any) {
     ElMessage.error(e.message || '保存失败')
-  }
+  } finally { modelSaving.value = false }
 }
 
-async function testModel() {
+async function testModel(operation: 'test' | 'capabilities' = 'test') {
   try {
     modelTesting.value = true
     modelTestResult.value = null
+    const identity = JSON.stringify([modelForm.value.provider, modelForm.value.model_id, modelForm.value.base_url])
     const res = await adminTestModel({
+      operation,
       provider: modelForm.value.provider,
       model_id: modelForm.value.model_id,
       base_url: modelForm.value.base_url,
       api_key: modelForm.value.api_key,
+      config: modelForm.value.config,
+      max_context_length: modelForm.value.max_context_length || undefined,
     })
+    if (identity !== JSON.stringify([modelForm.value.provider, modelForm.value.model_id, modelForm.value.base_url])) return
     modelTestResult.value = res.data
+    if (operation === 'capabilities') {
+      const next = applyModelCapabilities(modelForm.value.max_context_length, modelForm.value.config, res.data)
+      modelForm.value.max_context_length = next.window; modelForm.value.config = next.config
+    }
   } catch (e: any) {
     modelTestResult.value = {
       success: false,

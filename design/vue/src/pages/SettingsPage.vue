@@ -54,7 +54,7 @@
               >
                 <div class="min-w-0 flex-1 mr-3">
                   <div class="text-sm font-medium text-slate-900 truncate">{{ m.display_name || m.model_id }}</div>
-                  <div class="text-xs text-slate-400 mt-0.5 truncate">{{ m.api_format }} · {{ m.base_url }} · 最大上下文 {{ m.max_context_length }}</div>
+                  <div class="text-xs text-slate-400 mt-0.5 truncate">{{ m.api_format }} · {{ m.base_url }} · 最大上下文 {{ m.max_context_length }} {{ m.capability_status === 'text_only' ? '· 不支持工具 · 请更换模型' : modelSettingsError(m.max_context_length, m.config) ? '· 能力待确认' : '' }}</div>
                 </div>
                 <div class="flex items-center gap-1.5 shrink-0">
                   <button @click="openModelEdit(m)" class="text-xs px-2.5 py-1 rounded-md text-slate-600 hover:bg-slate-100 border border-slate-200">编辑</button>
@@ -273,20 +273,17 @@
     <!-- 弹窗 -->
     <Teleport to="body">
       <div v-if="showModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/30" @click.self="showModal = false">
-        <div class="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md mx-4" style="max-height:90vh;overflow-y:auto;">
+        <div class="bg-white rounded-2xl shadow-xl p-5 w-full mx-4" :class="modalMode === 'model' ? 'max-w-[600px]' : 'max-w-md'" style="max-height:90vh;overflow-y:auto;">
           <h3 class="text-lg font-semibold text-slate-900 mb-4" style="font-family: 'Space Grotesk', sans-serif;">{{ modalTitle }}</h3>
 
           <template v-if="modalMode === 'model'">
-            <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">API 格式</label><AppSelect v-model="mForm.api_format" class="w-full"><el-option value="openai" label="OpenAI 兼容" /><el-option value="anthropic" label="Anthropic" /><el-option value="custom" label="自定义" /></AppSelect></div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
+            <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">API 格式</label><AppSelect v-model="mForm.api_format" class="w-full"><el-option value="openai" label="OpenAI 兼容" /></AppSelect></div>
             <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">Base URL</label><input v-model="mForm.base_url" placeholder="https://api.openai.com/v1" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" /></div>
             <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">Model ID</label><input v-model="mForm.model_id" placeholder="gpt-4" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" /></div>
-            <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">API Key</label><input v-model="mForm.api_key" type="password" placeholder="sk-..." class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" /></div>
-            <div class="mb-3">
-              <label class="block text-[13px] font-medium text-slate-600 mb-1.5">最大上下文长度 <span class="text-red-500">*</span></label>
-              <input v-model.number="mForm.max_context_length" type="number" min="1024" max="200000" step="1024" placeholder="8192" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" />
-              <p class="text-xs text-slate-400 mt-1">范围 1024~200000，可后续通过"测试连接"自动探测</p>
+            <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">API Key</label><el-input v-model="mForm.api_key" type="password" show-password autocomplete="off" placeholder="已保存密钥自动回填" size="large" class="model-api-key-input" style="--model-key-focus-color: #6366f1" /></div>
             </div>
-            <div class="mb-5"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">配置 (JSON 可选)</label><textarea v-model="cfgText" rows="3" placeholder='{"temperature": 0.7}' class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500 resize-none" /></div>
+            <ModelCapabilityFields v-model:window="mForm.max_context_length" v-model:config="modelOptions" />
 
             <!-- 测试结果 -->
             <div v-if="modelTestResult" class="mb-5">
@@ -298,6 +295,9 @@
                 <div v-if="modelTestResult.response_time_ms" class="text-xs opacity-70">响应时间: {{ modelTestResult.response_time_ms }}ms</div>
                 <div v-if="modelTestResult.detected_max_context_length" class="text-xs mt-1 opacity-70">探测到的最大上下文: {{ modelTestResult.detected_max_context_length }}</div>
                 <div v-if="modelTestResult.error" class="text-xs mt-1 opacity-70">错误: {{ modelTestResult.error }}</div>
+                <div class="text-xs mt-1">连接 {{ modelTestResult.connection_status || '未验证' }} · 流式 {{ modelTestResult.streaming_status || '未验证' }} · 工具 {{ modelTestResult.tool_calling_status || '未验证' }}</div>
+                <div v-if="modelTestResult.detected_max_input_tokens" class="text-xs">服务商最大输入：{{ modelTestResult.detected_max_input_tokens }}</div>
+                <div v-if="modelTestResult.detected_max_output_tokens" class="text-xs">服务商最大生成：{{ modelTestResult.detected_max_output_tokens }}</div>
                 <div v-if="modelTestResult.details" class="text-xs mt-1 opacity-70">详情: {{ modelTestResult.details }}</div>
               </div>
             </div>
@@ -375,11 +375,12 @@
             </div>
           </template>
 
-          <div class="flex gap-2 justify-end">
+          <div class="flex flex-wrap gap-2 justify-end mt-4 border-t border-slate-100 pt-4">
             <AppButton variant="secondary" @click="showModal = false">取消</AppButton>
-            <AppButton v-if="modalMode === 'model'" variant="outline" :disabled="!mForm.model_id" :loading="modelTesting" @click="doTestModel">{{ modelTesting ? '测试中...' : '测试连接' }}</AppButton>
-            <AppButton v-if="modalMode === 'tool'" variant="outline" :disabled="!tForm.provider_id" :loading="toolTesting" @click="doTestTool">{{ toolTesting ? '测试中...' : '测试连接' }}</AppButton>
-            <AppButton @click="doSave" :disabled="modalMode === 'model' ? !mForm.model_id : !tForm.provider_id">保存</AppButton>
+            <AppButton v-if="modalMode === 'model'" variant="outline" :disabled="!mForm.model_id || !mForm.base_url" :loading="modelTesting" @click="doTestModel('capabilities')">获取能力</AppButton>
+            <AppButton v-if="modalMode === 'model'" variant="outline" :disabled="!mForm.model_id || !mForm.base_url" :loading="modelTesting" @click="doTestModel()">{{ modelTesting ? '测试中...' : '测试模型' }}</AppButton>
+            <AppButton v-if="modalMode === 'tool'" variant="outline" :disabled="!tForm.provider_id" :loading="toolTesting" @click="doTestTool">{{ toolTesting ? '测试中...' : '测试连接 / 流式 / 工具' }}</AppButton>
+            <AppButton :loading="modelSaving" @click="doSave" :disabled="modalMode === 'model' ? !mForm.model_id || !!modelSettingsError(mForm.max_context_length, modelOptions) || modelTesting : !tForm.provider_id">{{ modalMode === 'model' ? (modelSaving ? '验证中…' : '验证并保存') : '保存' }}</AppButton>
           </div>
         </div>
       </div>
@@ -410,6 +411,8 @@
 </template>
 
 <script setup lang="ts">
+import { modelSettingsError, applyModelCapabilities } from '@/lib/model-capabilities.mjs'
+import ModelCapabilityFields from '@/components/ModelCapabilityFields.vue'
 import { ref, reactive, computed, nextTick, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useModelConfig } from '@/composables/useModelConfig'
@@ -425,7 +428,7 @@ import AppBadge from '@/components/ui/AppBadge.vue'
 import AppSelect from '@/components/ui/AppSelect.vue'
 import type { UserModelConfigInfo, CreateUserModelConfigRequest, ModelTestResult } from '@/types/model'
 import type { UserToolConfigInfo, CreateUserToolConfigRequest, ConfigSchema, ProviderBrief } from '@/types/tool'
-import { testUserModelConfig } from '@/api/model'
+import { testUserModelConfig, getUserModelConfig } from '@/api/model'
 import { testUserToolConfig, probeUserMCP } from '@/api/tool'
 import type { DingTalkBinding } from '@/types/dingtalk'
 
@@ -465,7 +468,8 @@ const editId = ref<string | null>(null)
 const cfgText = ref('')
 const selToolType = ref('')
 
-const mForm = reactive<CreateUserModelConfigRequest>({ api_format: 'openai', base_url: '', model_id: '', api_key: '', max_context_length: 8192 })
+const modelOptions = ref<Record<string, unknown>>({})
+const mForm = reactive<CreateUserModelConfigRequest>({ api_format: 'openai', base_url: '', model_id: '', api_key: '', max_context_length: 0 })
 const tForm = reactive<CreateUserToolConfigRequest>({ tool_type_id: '', provider_id: '', display_name: '', config: {} })
 const modelTestResult = ref<ModelTestResult | null>(null)
 const toolTestResult = ref<{
@@ -476,6 +480,11 @@ const toolTestResult = ref<{
   details?: string
 } | null>(null)
 const modelTesting = ref(false)
+const modelSaving = ref(false)
+watch(() => [mForm.api_format, mForm.model_id, mForm.base_url], () => {
+  if (!showModal.value || modalMode.value !== 'model') return
+  mForm.max_context_length = 0; modelOptions.value = {}; modelTestResult.value = null
+}, { flush: 'sync' })
 const toolTesting = ref(false)
 
 const modalTitle = computed(() => `${editId.value ? '编辑' : '添加'}${modalMode.value === 'model' ? '模型' : '工具'}`)
@@ -521,28 +530,43 @@ const selectedExistingProviderConfig = computed(() => {
 
 // ── 操作 ──
 // 打开添加模型弹窗
-function openModelCreate() { modalMode.value = 'model'; editId.value = null; mForm.api_format = 'openai'; mForm.base_url = ''; mForm.model_id = ''; mForm.api_key = ''; mForm.max_context_length = 8192; cfgText.value = ''; modelTestResult.value = null; showModal.value = true }
+function openModelCreate() { modalMode.value = 'model'; editId.value = null; mForm.api_format = 'openai'; mForm.base_url = ''; mForm.model_id = ''; mForm.api_key = ''; mForm.max_context_length = 0; modelOptions.value = {}; cfgText.value = ''; modelTestResult.value = null; showModal.value = true }
 // 打开编辑模型弹窗
-function openModelEdit(m: UserModelConfigInfo) {
+async function openModelEdit(m: UserModelConfigInfo) {
+  try {
+    const res = await getUserModelConfig(m.id)
+    m = res.data
+  } catch {
+    ElMessage.error('读取模型配置失败，请重试')
+    return
+  }
   modalMode.value = 'model'; editId.value = m.id; mForm.api_format = m.api_format; mForm.base_url = m.base_url; mForm.model_id = m.model_id; mForm.api_key = m.api_key || ''
-  mForm.max_context_length = m.max_context_length || 8192
-  cfgText.value = m.config ? JSON.stringify(m.config, null, 2) : ''; modelTestResult.value = null; showModal.value = true
+  mForm.max_context_length = m.max_context_length || 0
+  modelOptions.value = { ...m.config }; cfgText.value = ''; modelTestResult.value = null; showModal.value = true
 }
 
 // 测试模型连通性
-async function doTestModel() {
+async function doTestModel(operation: 'test' | 'capabilities' = 'test') {
   try {
     modelTesting.value = true
     modelTestResult.value = null
-    const config = cfgText.value ? JSON.parse(cfgText.value) : {}
+    const config = modelOptions.value
+    const identity = JSON.stringify([mForm.api_format, mForm.model_id, mForm.base_url])
     const res = await testUserModelConfig({
+      operation,
       provider: mForm.api_format,
       model_id: mForm.model_id,
       base_url: mForm.base_url,
       api_key: mForm.api_key,
       config,
+      max_context_length: mForm.max_context_length || undefined,
     })
+    if (identity !== JSON.stringify([mForm.api_format, mForm.model_id, mForm.base_url])) return
     modelTestResult.value = res.data
+    if (operation === 'capabilities') {
+      const next = applyModelCapabilities(mForm.max_context_length, modelOptions.value, res.data)
+      mForm.max_context_length = next.window; modelOptions.value = next.config
+    }
   } catch (e: any) {
     modelTestResult.value = {
       success: false,
@@ -812,10 +836,13 @@ async function probeMCP(onlyMissing: boolean) {
 
 // 保存配置
 async function doSave() {
+  if (modelSaving.value) return
   try {
+    if (modalMode.value === 'model') { const error = modelSettingsError(mForm.max_context_length, modelOptions.value); if (error) throw new Error(error) }
     if (modalMode.value === 'model') {
-      const config = cfgText.value ? JSON.parse(cfgText.value) : {}
-      if (editId.value) await updateModel(editId.value, { ...mForm, config })
+      modelSaving.value = true
+      const config = modelOptions.value
+      if (editId.value) await updateModel(editId.value, { ...mForm, config, reconfirm_capabilities: !modelSettingsError(mForm.max_context_length, config) })
       else await createModel({ ...mForm, config })
       loadModels()
     } else {
@@ -840,7 +867,7 @@ async function doSave() {
     ElMessage.success('保存成功')
   } catch (e: unknown) {
     ElMessage.error(e instanceof Error ? e.message : '保存失败')
-  }
+  } finally { modelSaving.value = false }
 }
 
 // 加载当前用户的钉钉绑定状态

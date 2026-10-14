@@ -69,6 +69,7 @@ export function adminCreateModel(data: {
   model_id: string
   base_url: string
   api_key: string
+  config?: Record<string, unknown>
   max_context_length: number
 }) {
   return request<ModelInfo>('/models', { method: 'POST', body: data })
@@ -83,6 +84,7 @@ export function adminUpdateModel(
     base_url: string
     api_key: string
     is_enabled: boolean
+    config: Record<string, unknown>
     max_context_length: number
   }>,
 ) {
@@ -101,6 +103,8 @@ export function adminTestModel(data: {
   base_url: string
   api_key: string
   config?: Record<string, unknown>
+  max_context_length?: number
+  operation?: 'test' | 'capabilities'
 }) {
   return request<ModelTestResult>('/models/test', { method: 'POST', body: data })
 }
@@ -262,4 +266,9 @@ export function adminDeleteSession(id: string) {
 // 清理过期会话
 export function adminCleanupSessions() {
   return request<{ deleted: number }>('/admin/sessions/cleanup', { method: 'POST' })
+}
+
+// 仅管理员编辑时读取完整凭据。
+export function adminGetModelForEdit(id: string) {
+  return request<ModelInfo>(`/models/${id}/edit`)
 }

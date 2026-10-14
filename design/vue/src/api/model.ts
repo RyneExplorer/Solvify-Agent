@@ -81,6 +81,8 @@ export function testUserModelConfig(data: {
   base_url: string
   api_key: string
   config?: Record<string, unknown>
+  max_context_length?: number
+  operation?: 'test' | 'capabilities'
 }) {
   return request<ModelTestResult>('/user/model-configs/test', { method: 'POST', body: data })
 }
