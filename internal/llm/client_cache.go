@@ -17,7 +17,7 @@ const defaultClientCacheCapacity = 64
 // ⚠️ 不变式：字段必须与 OpenAIClientConfig 一一对应（同名同序）。
 // 给 OpenAIClientConfig 加了字段却忘了加进 key，会让两份不同配置共用同一个客户端 ——
 // 这个坑已经真实发生过：原先的 key 漏了 Config 与 MaxContextLength，
-// 前者导致预热条目永远命中不到，后者让上下文窗口被别的配置覆盖。
+// 这些字段缺失会导致不同配置共用客户端，让模型参数或上下文窗口被其他配置覆盖。
 // TestClientCacheKeyCoversAllClientConfigFields 会把这个不变式钉死。
 type clientCacheKey struct {
 	APIKey           string
@@ -29,8 +29,7 @@ type clientCacheKey struct {
 
 // cacheKey 返回该客户端配置的缓存指纹。
 //
-// 它是 key 的唯一来源：请求路径与预热路径都必须经过它，
-// 不允许再有第二处手拼 clientCacheKey 的代码（P1-8 的根因就是手拼了两份）。
+// 它是 key 的唯一来源，避免不同调用路径手拼字段造成口径不一致。
 func (cfg OpenAIClientConfig) cacheKey() clientCacheKey {
 	return clientCacheKey{
 		APIKey:           cfg.APIKey,

@@ -432,8 +432,6 @@ func (a *App) initDependencies() error {
 	cachedToolTypeRepo := repository.NewCachedToolTypeRepository(toolTypeRepo, toolTypeCache)
 	cachedUserToolConfigRepo := repository.NewCachedUserToolConfigRepository(rawUserToolConfigRepo, toolConfigCache)
 
-	// 预热所有已启用系统模型的 LLM 客户端（消除首次请求冷启动）
-	a.prewarmModelClients(modelRepo)
 	// 初始化工具 Provider 注册表——注册通用 Provider 类型
 	toolRegistry := tool.NewProviderRegistry()
 	toolRegistry.Register("http", providers.NewHTTPProvider()) // 通用 HTTP Provider
@@ -541,7 +539,7 @@ func (a *App) initDependencies() error {
 	dingtalkSvc := service.NewDingTalkService(a.cfg.DingTalk, dingtalkBindingRepo, dingtalkStateCache, dingtalkClient)
 	syncSvc := service.NewSyncService(knowledgeBaseRepo, syncSourceRepo, syncJobRepo, syncItemRepo, syncedDocumentRepo, dingtalkBindingRepo, documentChunkSvc, textExtractor, dingtalkClient, "data/uploads")
 	storageSvc := service.NewStorageService(storageQuotaRepo)
-	// 三方链路：只有「eino → Langfuse」这一条，没有自研 span 树 / 落库 / 指标出口。
+	// 三方链路：「eino → Langfuse」
 	// NewTracer 在凭据不全时返回 (nil, nil)，调用点靠 nil 接收者空转，不必各自判分支。
 	obsCfg := a.cfg.Observability
 	tracer, tErr := observability.NewTracer(context.Background(), obsCfg)
@@ -580,31 +578,6 @@ func (a *App) initDependencies() error {
 	)
 
 	return nil
-}
-
-// prewarmModelClients 启动时预创建所有已启用系统模型的 LLM 客户端
-func (a *App) prewarmModelClients(modelRepo repository.ModelRepo) {
-	models, err := modelRepo.List(context.Background())
-	if err != nil {
-		logger.Warnf("预热模型客户端: 查询系统模型列表失败: %v", err)
-		return
-	}
-
-	// 预热入参用与请求路径同一个结构（llm.ModelConfig），
-	// 而不是它的子集 —— 子集漏字段正是预热失效的原因（见 llm.PrewarmClients 注释）。
-	infos := make([]llm.ModelConfig, 0, len(models))
-	for _, m := range models {
-		infos = append(infos, llm.ModelConfig{
-			Provider:         m.Provider,
-			ModelID:          m.ModelID,
-			BaseURL:          m.BaseURL,
-			APIKey:           m.APIKey,
-			Config:           m.Config,
-			MaxContextLength: m.MaxContextLength,
-		})
-	}
-	logger.Infof("预热模型客户端: 从数据库加载到 %d 个已启用系统模型", len(infos))
-	llm.PrewarmClients(context.Background(), infos)
 }
 
 // initRouter 初始化路由

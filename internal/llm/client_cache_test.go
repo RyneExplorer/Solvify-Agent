@@ -50,53 +50,54 @@ func newTestClient(t *testing.T, model string) *OpenAIClient {
 	return client
 }
 
-// TestPrewarmThenRequestHitsSameClient 是 P1-8 的真回归。
-//
-// 原先预热用 SystemModelInfo（ModelConfig 的子集，漏了 Config）并自己手拼了一份
-// 缓存 key，而查询路径的 key 含 Config → Config 非空的模型，预热写入的条目
-// 永远命中不到（Config 为空的模型碰巧能命中，所以长期表现成「有时候有效」）。
-func TestPrewarmThenRequestHitsSameClient(t *testing.T) {
+// TestClientCreatedOnDemandAndReused 验证首次获取创建客户端，后续获取复用同一实例。
+func TestClientCreatedOnDemandAndReused(t *testing.T) {
 	resetClientCache(t)
 	cfg := testModelConfig(func(c *ModelConfig) {
 		c.Config = []byte(`{"max_input_tokens":8192,"max_output_tokens":8192,"max_completion_tokens":4096,"output_token_field":"max_completion_tokens","tool_calling":true,"reasoning_capability":"none","reasoning_mode":"default","temperature":0.3}`)
 	})
 
-	PrewarmClients(context.Background(), []ModelConfig{cfg})
-
-	// ① 预热必须写进「请求路径会去查的那个 key」
-	warmed, ok := llmClientCache.Get(cfg.openAIConfig().cacheKey())
-	if !ok {
-		t.Fatal("预热未写入请求路径查询的 key：预热 key 与查询 key 口径不一致（P1-8 回归）")
+	first, err := NewClientFromModelConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("首次获取客户端失败: %v", err)
 	}
-
-	// ② 请求路径必须复用预热好的那个实例，而不是新建一个
-	before := llmClientCache.Len()
+	if got := llmClientCache.Len(); got != 1 {
+		t.Fatalf("首次获取应缓存一个客户端，实际条目数=%d", got)
+	}
 	got, err := NewClientFromModelConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("NewClientFromModelConfig 失败: %v", err)
 	}
-	if got != warmed {
-		t.Error("请求路径返回的不是预热好的客户端实例，预热形同虚设")
+	if got != first {
+		t.Error("相同配置应复用首次创建的客户端")
 	}
-	if after := llmClientCache.Len(); after != before {
-		t.Errorf("请求路径新建了客户端（缓存条目 %d → %d），预热未生效", before, after)
+	if count := llmClientCache.Len(); count != 1 {
+		t.Errorf("重复获取不应增加缓存条目，实际条目数=%d", count)
 	}
 }
 
-// TestPrewarmCoversEveryConfiguredModel 保证预热不会静默漏掉某个模型。
-func TestPrewarmCoversEveryConfiguredModel(t *testing.T) {
+// TestClientConfigChangeCreatesSeparateClient 验证同一模型的不同扩展配置不会共用实例。
+func TestClientConfigChangeCreatesSeparateClient(t *testing.T) {
 	resetClientCache(t)
 	models := []ModelConfig{
-		testModelConfig(func(c *ModelConfig) { c.ModelID = "m-empty-config" }),
+		testModelConfig(nil),
 		testModelConfig(func(c *ModelConfig) {
-			c.ModelID = "m-with-config"
 			c.Config = []byte(`{"max_input_tokens":8192,"max_output_tokens":8192,"max_completion_tokens":4096,"output_token_field":"max_completion_tokens","tool_calling":true,"reasoning_capability":"none","reasoning_mode":"default","timeout":30}`)
 		}),
 	}
-	PrewarmClients(context.Background(), models)
-
+	var previous *OpenAIClient
+	for _, cfg := range models {
+		client, err := NewClientFromModelConfig(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("获取客户端失败: %v", err)
+		}
+		if client == previous {
+			t.Fatal("不同配置不应共用客户端")
+		}
+		previous = client
+	}
 	if got := llmClientCache.Len(); got != len(models) {
-		t.Errorf("预热后缓存条目数=%d，期望 %d（Config 非空的模型此前会另占一个 key）", got, len(models))
+		t.Errorf("不同配置应分别缓存，实际条目数=%d，期望 %d", got, len(models))
 	}
 }
 
@@ -263,19 +264,5 @@ func TestUnsupportedProviderIsRejectedWithoutCaching(t *testing.T) {
 	}
 	if got := llmClientCache.Len(); got != 0 {
 		t.Errorf("不支持的服务商不应写入缓存，实际条目数=%d", got)
-	}
-}
-
-// TestPrewarmReportsUnsupportedProviderAsFailure 固化行为变化：
-// 预热不再对「请求路径根本不支持的服务商」报成功。
-func TestPrewarmReportsUnsupportedProviderAsFailure(t *testing.T) {
-	resetClientCache(t)
-
-	PrewarmClients(context.Background(), []ModelConfig{
-		{Provider: "not-a-provider", ModelID: "bad"},
-	})
-
-	if got := llmClientCache.Len(); got != 0 {
-		t.Errorf("预热不应为不支持的服务商缓存客户端，实际条目数=%d", got)
 	}
 }
