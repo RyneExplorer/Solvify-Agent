@@ -102,7 +102,7 @@ func runContextProbeChild(t *testing.T, phase, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := contextCheckpointStore{CheckPointStore:probeFileStore{dir:dir},req:Request{UserID:"probe-user",SessionID:"probe-session",RunID:"probe-run",Query:"冻结问题",ModelName:"gpt-4o"},policy:config.DefaultContextPolicy(),runtimePolicy:config.DefaultRuntimeContextPolicy()}
+	store := contextCheckpointStore{CheckPointStore: probeFileStore{dir: dir}, req: Request{UserID: "probe-user", SessionID: "probe-session", RunID: "probe-run", Query: "冻结问题", ModelName: "gpt-4o"}, policy: config.DefaultContextPolicy(), runtimePolicy: config.DefaultRuntimeContextPolicy()}
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, CheckPointStore: store})
 	var iter *adk.AsyncIterator[*adk.AgentEvent]
 	if phase == "save" {

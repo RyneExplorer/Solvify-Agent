@@ -63,7 +63,7 @@ type Request struct {
 	Summary          *entity.ChatSummary // 会话摘要（长对话压缩内容）— 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段
 	Memories         []entity.UserMemory // 用户长期记忆 — 保留给调试/日志
 	UserCtx          PromptUserContext   // 用户基本信息 + 当前时间 — 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段
-	SystemPrompt     string              // 统一入口注入的完整 System Prompt。不为空时 runAgent 完全信任它，不再内部二次拼接摘要/记忆
+	SystemPrompt     string              // 统一入口注入的完整 System Prompt。不为空时 runDeepAgent 完全信任它，不再内部二次拼接摘要/记忆
 	ResumeData       map[string]any      // 恢复执行时的审批数据（key=interruptID, value=用户审批结果）；为 nil 时首次执行
 	// TaskID/AgentName 用于受控深度编排中的任务归属和事件追踪。
 	TaskID      string
@@ -153,4 +153,11 @@ const (
 	EventTaskCreated = "task_created"
 	EventTaskUpdated = "task_updated"
 	EventTaskResult  = "task_result"
+)
+
+const (
+	// deepAgentName / quickAgentName 是 Agent 在 eino 里的身份名，会出现在
+	// Langfuse 的 trace 上 —— 两个模式同名的话，平台上分不出是哪条链路。
+	deepAgentName  = "SolvifyDeepAgent"
+	quickAgentName = "SolvifyQuickAgent"
 )

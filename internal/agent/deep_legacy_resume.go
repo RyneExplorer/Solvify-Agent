@@ -222,7 +222,7 @@ func (e *Engine) executeDeepTask(ctx context.Context, req Request, chatModel mod
 	}
 
 	childEvents := make(chan Event, 100)
-	go func() { defer close(childEvents); e.runAgent(ctx, childReq, chatModel, childEvents) }()
+	go func() { defer close(childEvents); e.runDeepAgent(ctx, childReq, chatModel, childEvents) }()
 	var answer strings.Builder
 	var sources []SourceInfo
 	status := TaskSuccess

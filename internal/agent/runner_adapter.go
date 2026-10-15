@@ -89,7 +89,7 @@ func (e *Engine) runWithRunner(
 			// 精确种类上；判不出来时归为「Agent 执行失败」——
 			// 它是本函数握着的事实，比笼统的 unknown 更有信息量。
 			// ⚠️ 这里原本写死了「深度思考模式执行异常」，而本函数被快速模式共用
-			// （runQuickAgent 第 69 行也走这里），于是快速模式的失败显示了深度模式的文案。
+			// （runQuickAgent 也走这里），于是快速模式的失败显示了深度模式的文案。
 			kind := apperrors.Classify(agentEvent.Err)
 			if kind == apperrors.KindUnknown {
 				kind = apperrors.KindAgentRunFailed

@@ -16,15 +16,20 @@ type peStage struct {
 	phase   string
 }
 
-func (a *peStage) Name(ctx context.Context) string        { return a.inner.Name(ctx) }
+func (a *peStage) Name(ctx context.Context) string { return a.inner.Name(ctx) }
+
 func (a *peStage) Description(ctx context.Context) string { return a.inner.Description(ctx) }
-func (a *peStage) GetType() string                        { return "PlanExecuteStage" }
+
+func (a *peStage) GetType() string { return "PlanExecuteStage" }
+
 func (a *peStage) Run(ctx context.Context, in *adk.AgentInput, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	return a.execute(ctx, in, nil, opts...)
 }
+
 func (a *peStage) Resume(ctx context.Context, info *adk.ResumeInfo, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	return a.execute(ctx, nil, info, opts...)
 }
+
 func (a *peStage) execute(ctx context.Context, in *adk.AgentInput, resume *adk.ResumeInfo, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	iter, g := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 	go func() {

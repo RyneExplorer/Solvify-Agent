@@ -104,6 +104,7 @@ func (m *peExecutorModel) WithTools(tools []*schema.ToolInfo) (model.ToolCalling
 	}
 	return &peExecutorModel{inner: inner, runtime: m.runtime}, nil
 }
+
 func (m *peExecutorModel) Generate(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
 	msg, err := m.inner.Generate(ctx, msgs, opts...)
 	if err != nil {
@@ -111,6 +112,7 @@ func (m *peExecutorModel) Generate(ctx context.Context, msgs []*schema.Message, 
 	}
 	return msg, m.validate(ctx, msg)
 }
+
 func (m *peExecutorModel) Stream(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	stream, err := m.inner.Stream(ctx, msgs, opts...)
 	if err != nil {
@@ -126,6 +128,7 @@ func (m *peExecutorModel) Stream(ctx context.Context, msgs []*schema.Message, op
 	}
 	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
 }
+
 func (m *peExecutorModel) validate(ctx context.Context, msg *schema.Message) error {
 	r := m.runtime
 	r.mu.Lock()

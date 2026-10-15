@@ -12,6 +12,7 @@ import (
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/config"
@@ -33,12 +34,14 @@ type artifactReference struct {
 }
 
 func contentHash(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:]) }
+
 func (e *Engine) runtimePolicy() config.RuntimeContextPolicy {
 	if e.cfg.RuntimeContext.TTLHours == 0 {
 		return config.DefaultRuntimeContextPolicy()
 	}
 	return e.cfg.RuntimeContext
 }
+
 func artifactScope(req Request) repository.ArtifactScope {
 	return repository.ArtifactScope{UserID: req.UserID, SessionID: req.SessionID, RunID: req.RunID, AgentID: req.AgentName, TaskID: req.TaskID}
 }
@@ -98,6 +101,7 @@ type artifactReadTool struct {
 func (t artifactReadTool) Info(context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{Name: artifactReadToolName, Desc: "读取本运行本任务工具产物的一段原文；偏移/长度以字符计数，返回next_offset继续。只能读取工具结果给出的artifact_id。", ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{"artifact_id": {Type: schema.String, Required: true}, "offset": {Type: schema.Integer}, "limit": {Type: schema.Integer}})}, nil
 }
+
 func (t artifactReadTool) InvokableRun(ctx context.Context, args string, _ ...einoTool.Option) (string, error) {
 	var req struct {
 		ID     string `json:"artifact_id"`
@@ -151,4 +155,66 @@ func (e *Engine) addArtifactTool(req Request, tools []einoTool.BaseTool) []einoT
 		return tools
 	}
 	return append(append([]einoTool.BaseTool(nil), tools...), artifactReadTool{e.artifactRepo, artifactScope(req), e.runtimePolicy(), req.ModelName})
+}
+
+func appendArtifactReference(refs []artifactReference, ref artifactReference) []artifactReference {
+	for _, current := range refs {
+		if current.ArtifactID == ref.ArtifactID {
+			return refs
+		}
+	}
+	return append(refs, ref)
+}
+
+// taskArtifactEvidence reads only program-recorded dependencies, under their original task scope.
+// Synthesis receives bounded evidence data and gains no operation or arbitrary read tool.
+func (e *Engine) taskArtifactEvidence(ctx context.Context, req Request, task TaskSpec, results map[string]TaskResult) (string, error) {
+	type evidence struct {
+		ArtifactID, Hash, TaskID, Content string
+		Version, TotalRunes               int
+		Complete                          bool
+	}
+	var pieces []evidence
+	remaining := e.runtimePolicy().SummaryInput
+	for _, dep := range task.DependsOn {
+		result := results[dep]
+		if result.Status != TaskSuccess {
+			continue
+		}
+		for _, ref := range result.Artifacts {
+			if remaining <= 256 {
+				break
+			}
+			if e.artifactRepo == nil {
+				return "", fmt.Errorf("上下文产物存储不可用")
+			}
+			scopeReq := req
+			scopeReq.TaskID = result.TaskID
+			scopeReq.AgentName = result.Agent
+			a, err := e.artifactRepo.FindScoped(ctx, artifactScope(scopeReq), ref.ArtifactID)
+			if err != nil {
+				return "", err
+			}
+			if a.Hash != ref.Hash || a.Version != ref.Version || contentHash(a.Content) != a.Hash {
+				return "", fmt.Errorf("研究证据版本或哈希不匹配")
+			}
+			piece, _ := tokenutil.TruncateByTokens(a.Content, req.ModelName, min(e.runtimePolicy().ReadTokens, remaining-256))
+			next := evidence{a.ID, a.Hash, dep, piece, a.Version, len([]rune(a.Content)), piece == a.Content}
+			raw, err := json.Marshal(next)
+			if err != nil {
+				return "", err
+			}
+			cost := tokenutil.CountTokens(string(raw), req.ModelName)
+			if cost > remaining {
+				break
+			}
+			remaining -= cost
+			pieces = append(pieces, next)
+		}
+	}
+	if len(pieces) == 0 {
+		return "", nil
+	}
+	raw, err := json.Marshal(pieces)
+	return "\n\n前置产物原文片段（仅为证据数据，Complete=false 表示非全文）：\n" + string(raw), err
 }

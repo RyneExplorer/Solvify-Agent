@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/cloudwego/eino/compose"
+
 	"solvify-agent/pkg/config"
 )
 
@@ -20,6 +21,7 @@ type contextCheckpoint struct {
 	Data          []byte
 	Hash          string
 }
+
 type contextCheckpointStore struct {
 	compose.CheckPointStore
 	req           Request
@@ -44,6 +46,7 @@ func (s contextCheckpointStore) Set(ctx context.Context, id string, data []byte)
 	}
 	return s.CheckPointStore.Set(ctx, id, append(append([]byte(nil), checkpointEnvelopePrefix...), raw...))
 }
+
 func (s contextCheckpointStore) Get(ctx context.Context, id string) ([]byte, bool, error) {
 	raw, found, err := s.CheckPointStore.Get(ctx, id)
 	if err != nil || !found {
@@ -61,6 +64,7 @@ func (s contextCheckpointStore) Get(ctx context.Context, id string) ([]byte, boo
 	}
 	return envelope.Data, true, nil
 }
+
 func (s contextCheckpointStore) Delete(ctx context.Context, id string) error {
 	if d, ok := s.CheckPointStore.(interface {
 		Delete(context.Context, string) error
@@ -69,6 +73,7 @@ func (s contextCheckpointStore) Delete(ctx context.Context, id string) error {
 	}
 	return nil
 }
+
 func decodeContextCheckpoint(raw []byte) (contextCheckpoint, bool, error) {
 	var cp contextCheckpoint
 	if !bytes.HasPrefix(raw, checkpointEnvelopePrefix) {
@@ -86,6 +91,7 @@ func decodeContextCheckpoint(raw []byte) (contextCheckpoint, bool, error) {
 	}
 	return cp, true, nil
 }
+
 func (e *Engine) contextStore(req Request) compose.CheckPointStore {
 	return contextCheckpointStore{e.buildCheckpointStore(req.SessionID), req, config.ContextDefaults(), e.runtimePolicy()}
 }

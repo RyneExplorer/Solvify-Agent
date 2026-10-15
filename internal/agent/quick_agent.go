@@ -15,7 +15,7 @@ import (
 
 // runQuickAgent 快速模式：单个 ChatModelAgent + 知识检索域工具。
 //
-// 与 runAgent（深度模式）刻意保持两套独立函数，而不是塞进一个带if 的巨型函数：
+// 与 runDeepAgent（深度模式）刻意保持两套独立函数，而不是塞进一个带if 的巨型函数：
 // 两者的工具集、迭代上限、Agent 身份都不同，合并后每加一个分支都要重读全函数。
 // 共享的部分只有 runWithRunner（事件消费与中断冒泡）。
 func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model.ToolCallingChatModel, eventCh chan<- Event) {

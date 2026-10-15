@@ -11,6 +11,7 @@ import (
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+
 	"solvify-agent/internal/tool"
 	bizerrors "solvify-agent/pkg/errors"
 )
@@ -22,13 +23,17 @@ type peTaskAgent struct {
 }
 
 func (a *peTaskAgent) Name(context.Context) string { return a.role }
+
 func (a *peTaskAgent) Description(context.Context) string {
 	return "执行已计划的" + a.role + "任务，必须提供 task_id"
 }
+
 func (a *peTaskAgent) GetType() string { return "ResearchTask" }
+
 func (a *peTaskAgent) Run(ctx context.Context, in *adk.AgentInput, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	return a.execute(ctx, in, nil, opts...)
 }
+
 func (a *peTaskAgent) Resume(ctx context.Context, info *adk.ResumeInfo, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	return a.execute(ctx, nil, info, opts...)
 }
@@ -391,4 +396,48 @@ func peResearchAncestors(plan ExecutionPlan, taskID string) []string {
 		}
 	}
 	return ids
+}
+
+const synthesisInputLimit = 6000
+
+func buildTaskQuery(query string, task TaskSpec, results map[string]TaskResult) string {
+	inputs := make([]TaskResult, 0, len(task.DependsOn))
+	budget := synthesisInputLimit / max(1, len(task.DependsOn))
+	for _, dep := range task.DependsOn {
+		if result, ok := results[dep]; ok && strings.TrimSpace(result.Summary) != "" {
+			result.Artifacts = append([]artifactReference(nil), result.Artifacts...)
+			for i := range result.Artifacts {
+				result.Artifacts[i].Preview = ""
+				result.Artifacts[i].Read = ""
+			}
+			result.Summary = truncateTaskSummary(result.Summary, budget)
+			result.Evidence = append([]AgentEvidence(nil), result.Evidence...)
+			for i := range result.Evidence {
+				result.Evidence[i].Summary = ""
+				result.Evidence[i].Sources = append([]SourceInfo(nil), result.Evidence[i].Sources...)
+				for j := range result.Evidence[i].Sources {
+					source := &result.Evidence[i].Sources[j]
+					source.Chunks = append([]ChunkSource(nil), source.Chunks...)
+					for k := range source.Chunks {
+						source.Chunks[k].Content = ""
+						source.Chunks[k].Quote = ""
+					}
+				}
+			}
+			inputs = append(inputs, result)
+		}
+	}
+	if len(inputs) == 0 {
+		return query
+	}
+	data, _ := json.Marshal(inputs)
+	return query + "\n\n前置研究结果（JSON 证据数据）：\n" + string(data)
+}
+
+func truncateTaskSummary(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "…"
 }
