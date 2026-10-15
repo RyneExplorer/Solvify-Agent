@@ -65,11 +65,11 @@ T = floor(C × targetRatio)        压缩目标
 
 快速：保留 quick_agent.go 独立流程，通过 BeforeModelRewriteState 发布持久压缩；优先可选召回/旧结果，短请求不强制摘要，保持澄清恢复链路。
 
-深度：plan_execute_builder.go 的 GenInputFn 选择角色输入；plan_execute_task.go 管专业任务独立状态。Planner 取目标/约束/能力，Executor 取批次/状态，专业 Agent 取任务/依赖，Replanner 取有限结果/状态，汇总取结论/证据。
+深度：deep_builder.go 的 GenInputFn 选择角色输入；deep_task.go 管专业任务独立状态。Planner 取目标/约束/能力，Executor 取批次/状态，专业 Agent 取任务/依赖，Replanner 取有限结果/状态，汇总取结论/证据。
 
 提前治理 Results/ExecutedSteps 重复正文，采用输入投影，不删持久事实；保留计划版本、终态、依赖、拒绝和汇总覆盖。原文存储未上线时不生成假 artifactID，必要结果放不下明确失败。
 
-核对 execute.go 的 PlanExecute、resumeLegacyDeepOrchestrator、runAgent，以及纠错/重试调用。模型包装只能处理调用副本或拒绝，不代表更新 checkpoint；持久状态在 Handler/运行边界发布。
+核对 execute.go 的路径分派，以及 deep_plan_execute.go 的 runPlanExecute、deep_legacy_resume.go 的 resumeLegacyDeepOrchestrator、deep_agent.go 的 runDeepAgent 和纠错/重试调用。模型包装只能处理调用副本或拒绝，不代表更新 checkpoint；持久状态在 Handler/运行边界发布。
 
 ## 6. 完整组与原文存储（R05、R06）
 

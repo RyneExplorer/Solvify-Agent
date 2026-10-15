@@ -85,6 +85,8 @@ ExpandRetriever (装饰器，可选)
 
 ## Chat 双模式架构（策略模式）
 
+Agent 的执行入口、深度计划、工具和上下文代码位置见 [Agent 代码导航](../internal/agent/README.md)；开发约束以 [AGENTS.md](../AGENTS.md) 为准。
+
 ```
 POST /api/v1/chat/sessions/:id/messages (SSE)
   ├── 快速模式 (search_mode=quick)
