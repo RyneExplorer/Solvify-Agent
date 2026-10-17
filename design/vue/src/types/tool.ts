@@ -33,6 +33,7 @@ export interface ToolProviderInfo {
 
 // 供应商配置
 export interface ProviderConfig {
+  timeout?: number
   method: string
   url: string
   headers: Record<string, string>

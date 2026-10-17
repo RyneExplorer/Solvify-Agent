@@ -20,11 +20,12 @@ import (
 // HTTPProvider 通用 HTTP 供应商
 // 通过数据库配置实现不同供应商的功能
 type HTTPProvider struct {
-	client *http.Client
+	client         *http.Client
+	defaultTimeout time.Duration
 }
 
 // NewHTTPProvider 创建 HTTP Provider
-func NewHTTPProvider() *HTTPProvider {
+func NewHTTPProvider(defaultTimeout time.Duration) *HTTPProvider {
 	proxyFunc := func(req *http.Request) (*url.URL, error) {
 		return nil, nil
 	}
@@ -34,8 +35,8 @@ func NewHTTPProvider() *HTTPProvider {
 		DisableKeepAlives:   false,
 	}
 	return &HTTPProvider{
+		defaultTimeout: defaultTimeout,
 		client: &http.Client{
-			Timeout:   15 * time.Second,
 			Transport: transport,
 		},
 	}
@@ -48,6 +49,9 @@ func (p *HTTPProvider) Validate(config *tool.ExecuteConfig) error {
 	if config.ProviderConfig == nil {
 		return fmt.Errorf("provider_config 不能为空")
 	}
+	if _, err := tool.ConfiguredExecutionTimeout(config.ProviderConfig.Timeout, p.defaultTimeout); err != nil {
+		return err
+	}
 	if config.ProviderConfig.URL == "" {
 		return fmt.Errorf("url 不能为空")
 	}
@@ -59,6 +63,23 @@ func (p *HTTPProvider) Validate(config *tool.ExecuteConfig) error {
 
 // Execute 执行 HTTP 请求
 func (p *HTTPProvider) Execute(ctx context.Context, config *tool.ExecuteConfig) (string, error) {
+	if err := p.Validate(config); err != nil {
+		return "", err
+	}
+	timeout, err := tool.ConfiguredExecutionTimeout(config.ProviderConfig.Timeout, p.defaultTimeout)
+	if err != nil {
+		return "", err
+	}
+	runCtx, cancel, err := tool.ExecutionContext(ctx, timeout)
+	if err != nil {
+		return "", err
+	}
+	defer cancel()
+	result, err := p.execute(runCtx, config)
+	return result, tool.ExecutionError(runCtx, err)
+}
+
+func (p *HTTPProvider) execute(ctx context.Context, config *tool.ExecuteConfig) (string, error) {
 	pc := config.ProviderConfig
 
 	// 1. 合并所有配置数据（用于模板渲染）

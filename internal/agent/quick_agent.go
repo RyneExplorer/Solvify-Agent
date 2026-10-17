@@ -52,7 +52,7 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 		Description:   "快速模式 Agent，基于知识库回答问题，必要时向用户澄清",
 		Instruction:   systemPromptFinal,
 		Model:         chatModel,
-		ToolsConfig:   adk.ToolsConfig{ToolsNodeConfig: toolsNodeConfig},
+		ToolsConfig:   adk.ToolsConfig{ToolsNodeConfig: e.withToolExecutionTimeout(toolsNodeConfig)},
 		MaxIterations: iterations,
 		// 每次模型调用前的总预算检查（首次执行 / 每轮迭代 / 中断恢复三条路径共用）。
 		Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, systemPromptFinal, chatModel), newBudgetGuard(req, systemPromptFinal)},

@@ -434,7 +434,7 @@ func (a *App) initDependencies() error {
 
 	// 初始化工具 Provider 注册表——注册通用 Provider 类型
 	toolRegistry := tool.NewProviderRegistry()
-	toolRegistry.Register("http", providers.NewHTTPProvider()) // 通用 HTTP Provider
+	toolRegistry.Register("http", providers.NewHTTPProvider(config.ToolExecutionTimeout()))
 
 	// MCP Provider：一个 MCP Server 可提供多个工具（一对多映射）
 	a.mcpClientPool = providers.NewMCPClientPool()
@@ -442,7 +442,8 @@ func (a *App) initDependencies() error {
 	toolRegistry.Register("mcp", a.mcpProvider)
 
 	// ToolFactory——Agent 引擎从 DB/Redis 加载用户配置的工具
-	toolFactory := tool.NewFactory(toolRegistry, cachedUserToolConfigRepo, cachedToolTypeRepo)
+	// 执行时直接读取供应商关联，避免用户配置缓存中的旧timeout延迟生效。
+	toolFactory := tool.NewFactory(toolRegistry, rawUserToolConfigRepo, cachedToolTypeRepo)
 
 	// 加载系统预置 MCP 服务器（从 config.yaml 同步到数据库）
 	a.loadSystemMCPServersWithTimeout()
@@ -462,6 +463,7 @@ func (a *App) initDependencies() error {
 
 	// 初始化 Agent 组件（传入 ToolFactory + DocumentRepo + ChunkRepo + KnowledgeBaseRepo）
 	ai := a.initAgentComponents(toolFactory, documentRepo, chunkRepo, knowledgeBaseRepo)
+	ai.AgentEngine.WithToolTimeout(config.ToolExecutionTimeout())
 
 	// 注入 DB 版 CheckPointStore 所需的 AgentCheckpointRepo
 	ai.AgentEngine.WithCheckpointRepo(agentCheckpointRepo)

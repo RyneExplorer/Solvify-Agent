@@ -40,6 +40,7 @@ docs/superpowers/
 docs/*
 !docs/architecture.md
 !docs/DEVELOPMENT.md
+!docs/tool-timeouts.md
 !docs/model-configuration.md
 !docs/PRD.md
 design/solvify-prototype

@@ -150,9 +150,10 @@ type ExpanderConfig struct {
 
 // ToolsConfig 描述工具调用配置
 type ToolsConfig struct {
-	Enabled    bool                    `mapstructure:"enabled"`
-	WebSearch  WebSearchConfig         `mapstructure:"web_search"`
-	MCPServers []SystemMCPServerConfig `mapstructure:"mcp_servers"`
+	DefaultTimeout int                     `mapstructure:"default_timeout"` // 内置和未指定HTTP工具单次时限，秒
+	Enabled        bool                    `mapstructure:"enabled"`
+	WebSearch      WebSearchConfig         `mapstructure:"web_search"`
+	MCPServers     []SystemMCPServerConfig `mapstructure:"mcp_servers"`
 }
 
 // WebSearchConfig 描述网络搜索工具配置
@@ -350,6 +351,13 @@ func Get() *Config {
 	return globalConfig
 }
 
+func ToolExecutionTimeout() time.Duration {
+	if globalConfig != nil {
+		return time.Duration(globalConfig.Tools.DefaultTimeout) * time.Second
+	}
+	return time.Duration(Default().Tools.DefaultTimeout) * time.Second
+}
+
 // Default 返回可直接启动的默认配置
 func Default() *Config {
 	return &Config{
@@ -415,7 +423,8 @@ func Default() *Config {
 			},
 		},
 		Tools: ToolsConfig{
-			Enabled: true,
+			Enabled:        true,
+			DefaultTimeout: 30,
 		},
 		DingTalk: DingTalkConfig{
 			OAuthRedirectURI: "http://localhost:5173/dingtalk/bind",
@@ -484,6 +493,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.ShutdownTimeoutSeconds <= 0 {
 		return errors.New("服务关闭超时时间必须大于 0")
+	}
+	if c.Tools.DefaultTimeout < 1 || c.Tools.DefaultTimeout > 86400 {
+		return errors.New("tools.default_timeout 必须为1～86400秒")
 	}
 	if c.Database.Postgres.Host == "" {
 		return errors.New("database.postgres.host 不能为空")
@@ -632,6 +644,9 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("TOOLS_ENABLED"); value != "" {
 		cfg.Tools.Enabled = parseBool(value, cfg.Tools.Enabled)
+	}
+	if value := os.Getenv("TOOLS_DEFAULT_TIMEOUT"); value != "" {
+		cfg.Tools.DefaultTimeout = parseInt(value, cfg.Tools.DefaultTimeout)
 	}
 	cfg.DingTalk.AppKey = getEnv("DINGTALK_APP_KEY", cfg.DingTalk.AppKey)
 	cfg.DingTalk.AppSecret = getEnv("DINGTALK_APP_SECRET", cfg.DingTalk.AppSecret)

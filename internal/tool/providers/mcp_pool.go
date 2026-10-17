@@ -386,6 +386,9 @@ func (p *MCPClientPool) Close() error {
 // 仅支持 sse/http：stdio 会拉起本机子进程，只在「本地客户端」形态下有意义，
 // 本服务是网页版（进程在服务端），配了只会连到服务端自己的文件系统，故直接拒绝。
 func validateMCPConfig(cfg *tool.MCPProviderConfig) error {
+	if cfg.Timeout < 0 || cfg.Timeout > 86400 {
+		return fmt.Errorf("MCP超时时间须为1～86400秒；留空沿用原默认")
+	}
 	if cfg.Transport == "" {
 		return fmt.Errorf("transport 不能为空")
 	}

@@ -69,7 +69,7 @@ func (e *Engine) runDeepAgent(ctx context.Context, req Request, chatModel model.
 		Instruction: systemPromptFinal,
 		Model:       chatModel,
 		ToolsConfig: adk.ToolsConfig{
-			ToolsNodeConfig: toolsNodeConfig,
+			ToolsNodeConfig: e.withToolExecutionTimeout(toolsNodeConfig),
 		},
 		MaxIterations: iterations,
 		Handlers:      []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, systemPromptFinal, chatModel), newBudgetGuard(req, systemPromptFinal)},

@@ -45,6 +45,7 @@ type ExecuteConfig struct {
 
 // ProviderConfig 供应商配置（HTTP 配置等）
 type ProviderConfig struct {
+	Timeout         int                    `json:"timeout,omitempty"` // HTTP完整执行时限；0沿用tools.default_timeout
 	Method          string                 `json:"method"`
 	URL             string                 `json:"url"`
 	Headers         map[string]string      `json:"headers"`
@@ -58,13 +59,13 @@ type ProviderConfig struct {
 
 // MCPProviderConfig MCP 供应商配置
 type MCPProviderConfig struct {
-	Transport string            `json:"transport"`            // stdio | sse | http
-	Command   string            `json:"command,omitempty"`    // stdio: 可执行文件
-	Args      []string          `json:"args,omitempty"`       // stdio: 命令参数
-	Env       map[string]string `json:"env,omitempty"`        // stdio: 环境变量
-	URL       string            `json:"url,omitempty"`        // sse/http: 端点 URL
-	Headers   map[string]string `json:"headers,omitempty"`    // sse/http: 请求头
-	Timeout   int               `json:"timeout,omitempty"`    // 超时秒数：用于连接初始化与工具调用，未配置时连接默认 30、调用兜底 300
+	Transport string            `json:"transport"`         // stdio | sse | http
+	Command   string            `json:"command,omitempty"` // stdio: 可执行文件
+	Args      []string          `json:"args,omitempty"`    // stdio: 命令参数
+	Env       map[string]string `json:"env,omitempty"`     // stdio: 环境变量
+	URL       string            `json:"url,omitempty"`     // sse/http: 端点 URL
+	Headers   map[string]string `json:"headers,omitempty"` // sse/http: 请求头
+	Timeout   int               `json:"timeout,omitempty"` // 超时秒数：用于连接初始化与工具调用，未配置时连接默认 30、调用兜底 300
 }
 
 // AuthConfig 认证配置

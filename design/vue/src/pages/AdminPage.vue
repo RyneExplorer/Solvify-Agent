@@ -427,6 +427,11 @@
               <label class="block text-[13px] font-medium text-slate-600">HTTP 配置 <span class="text-red-500">*</span></label>
             </div>
             <div class="space-y-3 border border-slate-200 rounded-xl p-3 bg-slate-50">
+              <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">单次执行超时（秒，可选）</label>
+                <input v-model="toolProviderForm.timeout" type="number" min="1" max="86400" step="1" placeholder="留空使用系统默认时限" class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                <p class="text-xs text-slate-400 mt-1">包含建连、等待响应和完整响应体读取；保存后新一轮执行生效。</p>
+              </div>
               <div class="grid grid-cols-3 gap-2">
                 <AppSelect v-model="toolProviderForm.method" class="w-full">
                   <el-option value="GET" label="GET" />
@@ -537,15 +542,17 @@
               </template>
 
               <div>
-                <label class="block text-xs font-medium text-slate-500 mb-1">超时时间（秒，可选）</label>
+                <label class="block text-xs font-medium text-slate-500 mb-1">连接及调用超时（秒，可选）</label>
                 <input
                   v-model.number="mcpForm.timeout"
                   type="number"
                   min="1"
-                  max="300"
-                  placeholder="默认 30"
+                  max="86400"
+                  step="1"
+                  placeholder="留空：连接30秒，工具调用300秒"
                   class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900"
                 />
+                <p class="text-xs text-slate-400 mt-1">填写后用于连接初始化与单次工具调用；连接池另有60秒初始化等待上限。</p>
               </div>
             </div>
           </div>
@@ -769,6 +776,7 @@
 <script setup lang="ts">
 import { modelSettingsError, applyModelCapabilities } from '@/lib/model-capabilities.mjs'
 import ModelCapabilityFields from '@/components/ModelCapabilityFields.vue'
+import { toolTimeoutValue, toolTimeoutFromConfig } from '@/lib/tool-timeout.mjs'
 import { provide, ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AppCard from '../components/ui/AppCard.vue'
@@ -1187,6 +1195,7 @@ interface KVRow {
 }
 
 const toolProviderForm = ref<{
+  timeout: number | string
   name: string
   provider_key: string
   provider_type: 'http' | 'mcp' | 'custom'
@@ -1199,7 +1208,7 @@ const toolProviderForm = ref<{
   headers_rows: KVRow[]
   body_template_text: string
   response_mapping_rows: KVRow[]
-}>({ name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] })
+}>({ timeout: '', name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] })
 const toolProviderFormValid = computed(() => toolProviderForm.value.name.trim() && toolProviderForm.value.provider_key.trim() && toolProviderForm.value.provider_type.trim())
 const toolTestResult = ref<ToolTestResult | null>(null)
 const toolTesting = ref(false)
@@ -1222,7 +1231,7 @@ interface MCPFormState {
   env_rows: KVRow[]
   url: string
   headers_rows: KVRow[]
-  timeout: number
+  timeout: number | string
 }
 function createEmptyMCPForm(): MCPFormState {
   return {
@@ -1232,7 +1241,7 @@ function createEmptyMCPForm(): MCPFormState {
     env_rows: [],
     url: '',
     headers_rows: [],
-    timeout: 30,
+    timeout: '',
   }
 }
 const mcpForm = reactive<MCPFormState>(createEmptyMCPForm())
@@ -1262,7 +1271,7 @@ function mcpFromJSON(json: string | object | null): MCPFormState {
         form.headers_rows.push({ key: k, value: String(v) })
       }
     }
-    form.timeout = typeof cfg.timeout === 'number' ? cfg.timeout : 30
+    form.timeout = toolTimeoutFromConfig(cfg.timeout)
   } catch { /* ignore */ }
   return form
 }
@@ -1272,7 +1281,8 @@ function buildMCPProviderConfig(form: MCPFormState): Record<string, unknown> | u
   const base: Record<string, unknown> = {
     transport: form.transport,
   }
-  if (form.timeout && form.timeout !== 30) base.timeout = form.timeout
+  const timeout = toolTimeoutValue(form.timeout)
+  if (timeout !== undefined) base.timeout = timeout
   if (form.transport === 'stdio') {
     if (!form.command.trim()) return undefined
     base.command = form.command.trim()
@@ -1309,6 +1319,7 @@ async function quickTestToolProvider(p: ToolProviderInfo) {
       : undefined
     const res = await adminTestTool({
       provider_type: p.provider_type,
+      provider_id: p.id,
       provider_config: pcfg,
       admin_config: p.admin_config ? (p.admin_config as Record<string, unknown>) : undefined,
       tool_input: {},
@@ -1385,6 +1396,7 @@ function providerConfigFromJSON(json: string | object | null) {
     }
     return {
       method: (obj.method === 'GET' ? 'GET' : 'POST') as 'GET' | 'POST',
+      timeout: toolTimeoutFromConfig(obj.timeout),
       url: obj.url || '',
       headers_rows: headers,
       body_template_text: obj.body_template ? JSON.stringify(obj.body_template, null, 2) : '{}',
@@ -1401,6 +1413,8 @@ function buildProviderConfig(form: typeof toolProviderForm.value): Record<string
     method: form.method,
     url: form.url,
   }
+  const timeout = toolTimeoutValue(form.timeout)
+  if (timeout !== undefined) obj.timeout = timeout
   const headers = parseKVRows(form.headers_rows)
   if (headers) obj.headers = headers
   if (form.body_template_text.trim() && form.body_template_text.trim() !== '{}') {
@@ -1499,6 +1513,7 @@ function openToolProviderModal(provider?: ToolProviderInfo) {
   Object.assign(mcpForm, provider?.provider_type === 'mcp' ? mcpFromJSON(provider.provider_config) : createEmptyMCPForm())
   if (provider) {
     toolProviderForm.value = {
+      timeout: providerConfig?.timeout ?? '',
       name: provider.name,
       provider_key: provider.provider_key,
       provider_type: (provider.provider_type as 'http' | 'mcp' | 'custom') || 'http',
@@ -1513,7 +1528,7 @@ function openToolProviderModal(provider?: ToolProviderInfo) {
       response_mapping_rows: providerConfig?.response_mapping_rows || [],
     }
   } else {
-    toolProviderForm.value = { name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] }
+    toolProviderForm.value = { timeout: '', name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] }
   }
   toolTestResult.value = null
   mcpManifest.value = (provider?.provider_type === 'mcp' && provider?.mcp_tool_manifest) ? [...provider.mcp_tool_manifest] : []

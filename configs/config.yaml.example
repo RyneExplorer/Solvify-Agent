@@ -127,6 +127,7 @@ rag:
 
 # 工具配置
 tools:
+  default_timeout: 30 # 内置和未指定HTTP工具的单次时限（秒）；HTTP编辑框可覆盖
   enabled: true
   web_search:
     api_key: ""

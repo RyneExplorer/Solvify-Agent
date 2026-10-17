@@ -75,6 +75,9 @@ func (s *toolProviderService) Create(ctx context.Context, req request.CreateTool
 		}
 		providerConfig = wrapped
 	}
+	if err := validateProviderTimeout(req.ProviderType, providerConfig); err != nil {
+		return nil, apperrors.New(apperrors.CodeBadRequest, err.Error())
+	}
 
 	provider := &entity.ToolProvider{
 		ToolTypeID:     req.ToolTypeID,
@@ -154,6 +157,9 @@ func (s *toolProviderService) Update(ctx context.Context, id string, req request
 	}
 	if req.IsEnabled != nil {
 		provider.IsEnabled = *req.IsEnabled
+	}
+	if err := validateProviderTimeout(provider.ProviderType, provider.ProviderConfig); err != nil {
+		return nil, apperrors.New(apperrors.CodeBadRequest, err.Error())
 	}
 
 	if err := s.repo.Update(ctx, provider); err != nil {
@@ -695,8 +701,10 @@ func getDefaultPlaceholderValue(ph string) interface{} {
 
 // normalizeMCPProviderConfig 规范化 MCP 供应商的 provider_config。
 // 管理员前端可能传入两种格式：
-//  A. 裸 MCP 配置：{"transport":"http","url":"https://..."}  → 自动包装为标准结构
-//  B. 已包装格式：{"mcp":{"transport":"http",...}}  → 直接校验
+//
+//	A. 裸 MCP 配置：{"transport":"http","url":"https://..."}  → 自动包装为标准结构
+//	B. 已包装格式：{"mcp":{"transport":"http",...}}  → 直接校验
+//
 // 返回已包装的标准 ProviderConfig JSON。
 func normalizeMCPProviderConfig(raw json.RawMessage, registry tool.ProviderRegistry) (json.RawMessage, error) {
 	// 先尝试解析为标准 ProviderConfig（包含 mcp 字段）
@@ -706,6 +714,9 @@ func normalizeMCPProviderConfig(raw json.RawMessage, registry tool.ProviderRegis
 	}
 
 	if stdCfg.MCP != nil {
+		if err := validateProviderTimeout("mcp", raw); err != nil {
+			return nil, err
+		}
 		// 情况 B：已经是标准结构，直接 Validate
 		exeCfg := &tool.ExecuteConfig{
 			ProviderConfig: &stdCfg,
@@ -729,6 +740,9 @@ func normalizeMCPProviderConfig(raw json.RawMessage, registry tool.ProviderRegis
 		return nil, fmt.Errorf("MCP 配置缺少 transport 字段（sse/http）")
 	}
 	wrapped := tool.ProviderConfig{MCP: &mcpCfg}
+	if mcpCfg.Timeout < 0 || mcpCfg.Timeout > 86400 {
+		return nil, fmt.Errorf("MCP超时时间须为1～86400秒；留空沿用原默认")
+	}
 	exeCfg := &tool.ExecuteConfig{ProviderConfig: &wrapped}
 	provider := registry.Get("mcp")
 	if provider != nil {
@@ -741,4 +755,26 @@ func normalizeMCPProviderConfig(raw json.RawMessage, registry tool.ProviderRegis
 		return nil, fmt.Errorf("序列化 provider_config 失败: %w", err)
 	}
 	return out, nil
+}
+
+// 复用现有供应商JSON保存时限，不新增策略资源或接口。
+func validateProviderTimeout(kind string, raw []byte) error {
+	if kind != "http" && kind != "mcp" {
+		return nil
+	}
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var pc tool.ProviderConfig
+	if err := json.Unmarshal(raw, &pc); err != nil {
+		return fmt.Errorf("供应商配置格式错误: %w", err)
+	}
+	if kind == "http" {
+		_, err := tool.ConfiguredExecutionTimeout(pc.Timeout, time.Second)
+		return err
+	}
+	if kind == "mcp" && pc.MCP != nil && (pc.MCP.Timeout < 0 || pc.MCP.Timeout > 86400) {
+		return fmt.Errorf("MCP超时时间须为1～86400秒；留空沿用原默认")
+	}
+	return nil
 }
