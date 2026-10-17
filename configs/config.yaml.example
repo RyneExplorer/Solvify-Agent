@@ -66,6 +66,7 @@ agent:
     summary_timeout_seconds: 15
     summary_max_calls: 2
   max_iterations: 10
+  model_max_retries: 3
   quick_agent_max_iterations: 8 # 模型调用轮数，澄清恢复沿用剩余轮数
   score_threshold: 0.7
   deep_plan_execute_enabled: true
@@ -84,7 +85,9 @@ llm:
   base_url: ""
   temperature: 0.7
   max_tokens: 2000
-  timeout: 30
+  timeout: 120 # 单次完整模型调用秒数（含全部输出）；不是 Agent 总时限
+  stream_first_output_timeout: 60 # 从调用开始等待首个有效输出，包含响应头等待
+  stream_idle_timeout: 30 # 正文、思考或工具参数片段的最大连续空闲秒数
 
 # Embedding 向量化模型配置
 embedding:
@@ -127,6 +130,7 @@ rag:
 
 # 工具配置
 tools:
+  default_timeout: 30 # 内置和未指定HTTP工具的单次时限（秒）；HTTP编辑框可覆盖
   enabled: true
   web_search:
     api_key: ""
@@ -139,14 +143,16 @@ tools:
       description: "Council of AI 公开 MCP（GSPC 测量板，只读，无需鉴权）"
       transport: "http"
       url: "https://councilof.ai/mcp/free"
-      timeout: 30
+      connect_timeout: 30
+      call_timeout: 300
     # - name: "my-remote-mcp"
     #   description: "远程 MCP 服务器示例"
     #   transport: "sse"
     #   url: "https://example.com/mcp/sse"
     #   headers:
     #     Authorization: "Bearer xxx"
-    #   timeout: 30
+    #   connect_timeout: 30
+    #   call_timeout: 300
 
 # 钉钉集成配置
 dingtalk:

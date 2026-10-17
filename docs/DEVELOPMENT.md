@@ -28,6 +28,8 @@ go run ./cmd/server
 
 当前没有 `cmd/seed` 入口。已有数据库升级需单独确认升级 SQL，不能将新库初始化等同于迁移；依赖变更后再运行 `go mod tidy` 并检查 diff。
 
+HTTP和MCP超时在已有供应商编辑框配置，复用原创建/更新接口和provider_config JSON，无新增路由或数据库迁移。内置和未指定HTTP工具使用 `tools.default_timeout`（默认30秒，`TOOLS_DEFAULT_TIMEOUT`可覆盖）；MCP分别配置connect_timeout/call_timeout，默认30/300秒，旧timeout兼容读取；系统预置允许管理员仅修改时限并在启动同步时保留。范围、发布与验证见[工具执行时限](tool-timeouts.md)。Agent整次任务总时限仍为独立待办，MCP连接/调用时限已拆分并移除固定60秒初始化截断。
+
 ### 常用检查
 
 ```bash
@@ -37,6 +39,14 @@ go vet ./...
 ```
 
 ## 分层职责
+
+### 模型调用重试
+
+直接创建的 Eino ChatModelAgent（快速、普通深度及 PlanExecute 专业子 Agent）通过 `ModelRetryConfig` 重试临时模型故障，`agent.model_max_retries` 默认 3，可用 `AGENT_MODEL_MAX_RETRIES` 覆盖；允许 0–5，0 关闭。3 次重试表示单个模型节点最多 4 次调用，不是整个 Agent 重跑。
+
+仅重试网络超时、连接重置/拒绝、意外 EOF 及 HTTP 408/429/500/502/503/504；认证、非法参数、上下文预算不足及请求取消不重试。已产生任何模型消息的失败流不重试，避免重复输出；沿用 Eino 默认指数退避与抖动，以及原请求 context 和输入预算校验，不重新执行已完成工具。
+
+当前 Eino v0.9.14 的 prebuilt PlanExecute Planner/Executor/Replanner 配置未暴露 `ModelRetryConfig`，这些控制节点保持原行为。本项不调整 HTTP 客户端超时。
 
 ### Controller（`internal/api/v1/<module>`）
 
@@ -408,9 +418,15 @@ go test ./...
 
 聊天发送入口限制单条 `content` 最多4000个Unicode码点（中文、英文字母和单码点表情各计1），完整JSON请求体最多64KiB。超限返回HTTP200、业务码400和中文提示，在建立SSE、保存消息、摘要、向量化或模型调用之前拒绝；Service直接调用也执行字符上限校验。正常消息不截断、不改写。该上限不等同于模型token额度，合法输入仍须在历史压缩/裁剪后重新核算完整模型输入及输出预留。
 
-`TestContextConversationLiveHTTP` 的第12轮原58525字符样本现在应在入口拒绝，不进入上下文并且不新增持久消息；此前JSON/HTML记录仍是未限制版本的历史证据。本轮入口限制的离线回归不会自动重新运行收费的13轮真实模型评估。
+`TestContextConversationLiveHTTP` 的第12轮58525字符样本应在入口拒绝，不进入上下文并且不新增持久消息，第13轮继续同一会话。普通离线测试不会自动运行收费的13轮真实模型评估；不同日期的JSON/HTML可能记录不同代码版本，不能混为一次测试。
 
-普通测试包含 24 并发、192 请求的用户隔离与超限终态检查，以及最终模型输入的精确边界、Service 提示和 HTTP SSE 错误帧检查。模型使用模拟实现或本地 HTTP 服务，不访问真实模型。
+普通测试包含 24 并发、192 请求的用户隔离与超限终态检查，以及按项目计数器构造的最终输入边界、Service 提示和 HTTP SSE 错误帧检查。模型使用模拟实现或本地 HTTP 服务，不访问真实模型。项目BPE与兼容回退计数不等同于所有供应商的官方tokenizer或计费认证。
+
+摘要和记忆正文以独立的 `ContextData` 数据消息进入Agent，而非拼进system；召回和已裁剪的历史片段也标记材料类型，并通过来源ID避免与历史重复。最终预算保护减少可丢普通问答后，仍超硬上限时依次减少可选召回、历史片段和记忆，每步重新计数。当前问题、必要指令、摘要与已识别的失败/拒绝事实保留，仍放不下时明确拒绝，不擅自改写当前问题。工具定义和输出预留另由实际模型请求保护核对。
+
+当前Eino的 `BeforeModelRewriteState` 收到的消息已包含 `GenModelInput` 生成的system，运行摘要水位和预算保护均按实际消息计算，不另外叠加Instruction。`TestContextRunnerCountsSystemInstructionOnce` 用真实Runner验证恰好满足输入上限时不误拒绝。可设置 `SOLVIFY_CONTEXT_REPLAY_REPORT` 为本地失败JSON绝对路径，执行 `go test -p 1 ./internal/agent -run '^TestContextConversationFailureReplay$' -v` 离线重放第11轮；该用例需要含运行摘要的报告，不访问真实模型。
+
+`context_degradation_test.go` 覆盖旧工具轨迹不阻断后续裁剪、失败/审批事实保护、可选材料降级与合法长问题；`context_data_test.go` 验证摘要/记忆的消息角色边界；`context_persistence_test.go` 验证记忆写入错误透传、空白摘要不推进覆盖。数据消息和提示词约束并不等于完全防提示词注入，语义事实正确性需真实模型重复评估。
 
 120 轮连续会话与 1000 轮历史测试耗时较长，需显式启用（PowerShell）：
 
@@ -420,6 +436,18 @@ go test -p 1 -count=1 ./internal/agent -run '^TestContextStability' -v -timeout 
 Remove-Item Env:SOLVIFY_CONTEXT_STRESS_TEST
 ```
 
-上述大历史测试覆盖 quick 与默认旧式 deep 执行路径，不代表 PlanExecute、真实数据库负载或真实模型回答质量验收。并发样本使用分行文本；连续无分隔长中文的 token 计数仍存在性能风险。真实模型摘要延迟需要单独验证，不能以离线通过代替。
+上述大历史测试覆盖 quick 与默认旧式 deep 执行路径，不代表 PlanExecute、真实数据库负载或真实模型回答质量验收。并发样本使用分行文本；另以同一开关运行 `go test -p 1 -count=1 ./pkg/tokenutil -run '^TestContextTokenCountingAtInputLimit$' -v`，验证4000连续中文字符的24并发计数和本机耗时。更大的旧历史/工具材料仍有计数性能风险，本机耗时不是生产SLO。
 
-单会话真实 HTTP 联调入口为 `TestContextConversationLiveHTTP`，显式设置 `SOLVIFY_CONTEXT_CONVERSATION_LIVE_TEST=1` 后运行 `go test -race -p 1 -count=1 ./internal/api/v1/chat -run '^TestContextConversationLiveHTTP$' -v -timeout 1000s`。它使用真实 DeepSeek、数据库和 Redis，创建并清理临时 schema/key，在同一会话连续提问 13 次，逐轮通过 HTTP 读回原文，保存过程到 `tmp/context-conversation-live.json`。窗口局部限制为8192、输出1024以触发压力，不更改生产配置；真实调用有费用，普通CI默认跳过。第11轮压力样本可能因预算不足拒绝，事实和回答质量断言可能失败，必须记录实际结果，不能以工程门禁通过替代真实验收。
+显式设置 `SOLVIFY_CONTEXT_DB_TEST=1` 后运行 `go test -race -p 1 -count=1 ./internal/repository -run '^TestContextArtifactPostgresMigrationQuotaAndCleanup$' -v -timeout 180s`，验证隔离PostgreSQL schema中的事务回滚、独立连接配额竞争、摘要版本竞争与产物清理。普通测试默认跳过；这不等于生产进程崩溃恢复或真实副作用的恰好执行一次认证。
+
+单会话真实 HTTP 联调入口为 `TestContextConversationLiveHTTP`，显式设置 `SOLVIFY_CONTEXT_CONVERSATION_LIVE_TEST=1` 后运行 `go test -race -p 1 -count=1 ./internal/api/v1/chat -run '^TestContextConversationLiveHTTP$' -v -timeout 1000s`。它使用真实 DeepSeek、数据库和 Redis，创建并清理临时 schema/key，在同一会话连续提问13次，逐轮通过HTTP读回原文，保存过程到 `tmp/context-conversation-live.json`。设置 `SOLVIFY_CONTEXT_REPORT_NAME` 为独立的 `.json` 文件名可避免覆盖先前失败证据。窗口局部限制为8192、输出1024以触发压力，不更改生产配置；真实调用有费用，普通CI默认跳过。第11轮3677字符样本应在可选上下文降级后正常回答；预算或事实断言失败必须保留实际结果。测试每轮等待后台摘要/记忆完成，不代表立即连发、浏览器UI、真实业务工具/MCP、向量服务或生产负载已验收。真实联调一次通过不等于重复稳定性或真实模型race已通过。
+
+### 模型执行策略升级（2026-10-14）
+
+模型配置普通入口仅填写连接信息与部署额度；执行参数统一managed_v1。已有库依次执行`scripts/migrations/20261013_model_limits.sql`、`scripts/migrations/20261014_model_managed_policy.sql`，先备份JSONB并核对记录及非config字段；两个升级可重复执行。后一个仅清理用户执行参数，不改模型额度或凭据，也不为旧记录认证工具能力。契约见`docs/model-configuration.md`。
+隔离数据库验证：`SOLVIFY_MODEL_CONFIG_DB_TEST=1 go test -vet=off -p 1 ./scripts/migrations`；普通测试无需该开关。
+
+### 普通模型配置两项收口
+
+用户连接信息之外仅调整上下文窗口与思考模式。none/always/unknown分别禁用、锁定、沿用默认；optional须已识别协议才允许切换。额度/协议资料来自同身份旧配置、管理员完全匹配部署或服务商元数据/已核实目录。用户API不能伪造能力。管理员折叠资料可补第三方输出上限及协议；无明确额度不猜测。编辑测试携带config_id并按当前用户归属读取；当前模式保存前仍实测工具。
+本轮沿用JSONB，无新增schema迁移；已核对当前系统1条/用户1条配置与新解析兼容，保留原思考关闭协议。当前契约见docs/model-configuration.md。
