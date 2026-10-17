@@ -3,6 +3,7 @@ package llm
 import (
 	"container/list"
 	"sync"
+	"time"
 )
 
 // defaultClientCacheCapacity 是 LLM 客户端缓存的默认容量上限。
@@ -20,11 +21,14 @@ const defaultClientCacheCapacity = 64
 // 这些字段缺失会导致不同配置共用客户端，让模型参数或上下文窗口被其他配置覆盖。
 // TestClientCacheKeyCoversAllClientConfigFields 会把这个不变式钉死。
 type clientCacheKey struct {
-	APIKey           string
-	BaseURL          string
-	Model            string
-	Config           string
-	MaxContextLength int
+	APIKey                   string
+	BaseURL                  string
+	Model                    string
+	Config                   string
+	MaxContextLength         int
+	Timeout                  time.Duration
+	StreamFirstOutputTimeout time.Duration
+	StreamIdleTimeout        time.Duration
 }
 
 // cacheKey 返回该客户端配置的缓存指纹。
@@ -32,11 +36,14 @@ type clientCacheKey struct {
 // 它是 key 的唯一来源，避免不同调用路径手拼字段造成口径不一致。
 func (cfg OpenAIClientConfig) cacheKey() clientCacheKey {
 	return clientCacheKey{
-		APIKey:           cfg.APIKey,
-		BaseURL:          cfg.BaseURL,
-		Model:            cfg.Model,
-		Config:           string(cfg.Config),
-		MaxContextLength: cfg.MaxContextLength,
+		APIKey:                   cfg.APIKey,
+		BaseURL:                  cfg.BaseURL,
+		Model:                    cfg.Model,
+		Config:                   string(cfg.Config),
+		MaxContextLength:         cfg.MaxContextLength,
+		Timeout:                  cfg.Timeout,
+		StreamFirstOutputTimeout: cfg.StreamFirstOutputTimeout,
+		StreamIdleTimeout:        cfg.StreamIdleTimeout,
 	}
 }
 

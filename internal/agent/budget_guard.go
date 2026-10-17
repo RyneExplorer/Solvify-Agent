@@ -34,11 +34,6 @@ type budgetGuard struct {
 	modelName   string
 	profile     Profile
 
-	// instruction 是本轮 System Prompt。state 里没有它
-	// （adk/chatmodel.go:216-230 的 state 只有 Messages/ToolInfos），
-	// 不传进来预算就会漏掉最大的一块固定开销。
-	// 模型包装器接收最终消息，instruction 为空；不靠 role 猜测去重。
-	instruction         string
 	inputLimit          int
 	outputLimit         int
 	policy              config.ContextPolicy
@@ -55,7 +50,7 @@ const (
 
 // newBudgetGuard 构造当前模式的总预算检查。
 // 窗口及输出在调用前解析，不能确定时明确拒绝。
-func newBudgetGuard(req Request, instruction string) *budgetGuard {
+func newBudgetGuard(req Request) *budgetGuard {
 	return &budgetGuard{
 		modelID:     req.ModelID,
 		inputLimit:  req.InputLimit,
@@ -64,7 +59,6 @@ func newBudgetGuard(req Request, instruction string) *budgetGuard {
 		declaredCtx: req.MaxContextLength,
 		modelName:   req.ModelName,
 		profile:     req.effectiveProfile(),
-		instruction: instruction,
 	}
 }
 
@@ -93,11 +87,7 @@ func (g *budgetGuard) BeforeModelRewriteState(
 		return ctx, state, err
 	}
 	budget = budget.WithInputLimit(g.inputLimit)
-	// Handler 明确收到不含 Instruction 的状态；模型包装器的 instruction 为空，接收最终消息。
 	fixed := llm.ToolsTokens(state.ToolInfos, g.modelName)
-	if g.instruction != "" {
-		fixed += llm.MessageTokens(schema.SystemMessage(g.instruction), g.modelName)
-	}
 	before := llm.MessagesTokens(state.Messages, g.modelName) + fixed
 	msgs, truncated := truncateToolResults(state.Messages, g.modelName)
 	after := llm.MessagesTokens(msgs, g.modelName) + fixed
@@ -117,6 +107,18 @@ func (g *budgetGuard) BeforeModelRewriteState(
 	if removed > 0 {
 		logger.Infof("上下文降级：减少旧对话组=%d", removed)
 	}
+	for _, kind := range []string{"recall", "history_fragment", "memory"} {
+		for index := len(msgs) - 1; after > budget.Hard && index >= 0; index-- {
+			message := msgs[index]
+			if message == nil || message.Extra["solvify_context_material"] != kind || protectedToolResult(message.Content) {
+				continue
+			}
+			next := append([]*schema.Message(nil), msgs[:index]...)
+			msgs = append(next, msgs[index+1:]...)
+			after = llm.MessagesTokens(msgs, g.modelName) + fixed
+			logger.Infof("上下文降级：减少可选数据 类型=%s 重新计数=%d", kind, after)
+		}
+	}
 	logger.Infof("上下文预算：模式=%s 窗口=%d 输出=%d 裕量=%d 硬上限=%d 软水位=%d 压缩前=%d 压缩后=%d 工具截断=%d", g.profile, budget.Limit, budget.Output, budget.Margin, budget.Hard, budget.Soft, before, after, truncated)
 	if err = budget.Check(after); err != nil && !g.finalCheckElsewhere {
 		return ctx, state, err
@@ -134,28 +136,18 @@ func dropOldConversation(msgs []*schema.Message) ([]*schema.Message, bool) {
 			lastUser = i
 		}
 	}
-	start := -1
-	for i := 0; i < lastUser; i++ {
-		m := msgs[i]
-		if m == nil {
+	for start := 0; start+1 < lastUser; start++ {
+		user, answer := msgs[start], msgs[start+1]
+		if user == nil || answer == nil || user.Role != schema.User || answer.Role != schema.Assistant ||
+			user.Extra["solvify_context_material"] != nil ||
+			strings.HasPrefix(user.Content, runtimeSummaryPrefix) || protectedToolResult(user.Content) ||
+			len(answer.ToolCalls) > 0 || protectedToolResult(answer.Content) {
 			continue
 		}
-		if start < 0 {
-			if m.Role == schema.User && !strings.HasPrefix(m.Content, runtimeSummaryPrefix) {
-				start = i
-			}
-			continue
-		}
-		if m.Role == schema.System || m.Role == schema.Tool || len(m.ToolCalls) > 0 {
-			return msgs, false
-		}
-		if m.Role == schema.User {
-			start = i
-			continue
-		}
-		if m.Role == schema.Assistant && (i+1 == lastUser || (i+1 < len(msgs) && msgs[i+1] != nil && msgs[i+1].Role == schema.User)) {
+		end := start + 2
+		if end <= lastUser && msgs[end] != nil && msgs[end].Role == schema.User {
 			next := append([]*schema.Message(nil), msgs[:start]...)
-			next = append(next, msgs[i+1:]...)
+			next = append(next, msgs[end:]...)
 			return next, true
 		}
 	}
@@ -181,7 +173,7 @@ func truncateToolResults(msgs []*schema.Message, modelName string) ([]*schema.Me
 		if m == nil {
 			continue
 		}
-		if m.Role == schema.Tool {
+		if m.Role == schema.Tool && !protectedToolResult(m.Content) {
 			if t := tokenutil.CountTokens(m.Content, modelName); t > toolResultCap {
 				if cut, actual := tokenutil.TruncateByTokens(m.Content, modelName, body); actual > 0 {
 					cp := *m

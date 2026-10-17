@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -30,14 +31,13 @@ func getSharedHTTPClient() *http.Client {
 					Timeout:   10 * time.Second,
 					KeepAlive: 60 * time.Second, // TCP keep-alive 探活
 				}).DialContext,
-				TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
-				MaxIdleConns:          100,
-				MaxIdleConnsPerHost:   20,               // 同 Host 最多保持 20 个空闲连接
-				MaxConnsPerHost:       50,               // 同 Host 最多 50 个并发连接
-				IdleConnTimeout:       10 * time.Minute, // 空闲连接保活 10 分钟
-				TLSHandshakeTimeout:   5 * time.Second,
-				ResponseHeaderTimeout: 60 * time.Second,
-				ForceAttemptHTTP2:     true, // 启用 HTTP/2 多路复用
+				TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 20,               // 同 Host 最多保持 20 个空闲连接
+				MaxConnsPerHost:     50,               // 同 Host 最多 50 个并发连接
+				IdleConnTimeout:     10 * time.Minute, // 空闲连接保活 10 分钟
+				TLSHandshakeTimeout: 5 * time.Second,
+				ForceAttemptHTTP2:   true, // 启用 HTTP/2 多路复用
 			},
 		}
 	})
@@ -54,15 +54,31 @@ type OpenAIClient struct {
 
 // OpenAIClientConfig 描述 OpenAI 客户端配置
 type OpenAIClientConfig struct {
-	APIKey           string
-	BaseURL          string
-	Model            string
-	Config           []byte // 可选，数据库中的 JSON 扩展配置
-	MaxContextLength int    // 模型最大上下文 token 长度
+	APIKey                   string
+	BaseURL                  string
+	Model                    string
+	Config                   []byte        // 可选，数据库中的 JSON 扩展配置
+	MaxContextLength         int           // 模型最大上下文 token 长度
+	Timeout                  time.Duration // 系统调用策略，不接受用户模型 JSON 覆盖；零值读取系统配置
+	StreamFirstOutputTimeout time.Duration
+	StreamIdleTimeout        time.Duration
 }
 
 // NewOpenAIClient 创建 OpenAI 兼容客户端
 func NewOpenAIClient(ctx context.Context, cfg OpenAIClientConfig) (*OpenAIClient, error) {
+	first, idle := config.ChatModelStreamTimeouts()
+	if cfg.StreamFirstOutputTimeout == 0 {
+		cfg.StreamFirstOutputTimeout = first
+	}
+	if cfg.StreamIdleTimeout == 0 {
+		cfg.StreamIdleTimeout = idle
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = config.ChatModelTimeout()
+	}
+	if cfg.Timeout < 0 || cfg.StreamFirstOutputTimeout < 0 || cfg.StreamIdleTimeout < 0 {
+		return nil, fmt.Errorf("模型调用超时时间必须大于 0")
+	}
 	// 解析扩展配置
 	extra, err := ParseModelOptions(cfg.Config, cfg.MaxContextLength)
 	if err != nil {
@@ -71,23 +87,18 @@ func NewOpenAIClient(ctx context.Context, cfg OpenAIClientConfig) (*OpenAIClient
 
 	contextPolicy := config.ContextDefaults()
 	config := &einoOpenai.ChatModelConfig{
-		APIKey:     cfg.APIKey,
-		BaseURL:    cfg.BaseURL,
-		Model:      cfg.Model,
-		HTTPClient: getSharedHTTPClient(),
+		APIKey:  cfg.APIKey,
+		BaseURL: cfg.BaseURL,
+		Model:   cfg.Model,
+		// Eino 在提供 HTTPClient 时忽略 Timeout；独立 Client 设置完整调用时限，
+		// 共享 Transport 保留连接池，避免修改全局 Client 影响其他请求。
+		HTTPClient: &http.Client{Transport: timedModelTransport{base: getSharedHTTPClient().Transport}, Timeout: cfg.Timeout},
 	}
 
-	// 用户配置覆盖默认值
-	if extra.Temperature != nil {
-		config.Temperature = extra.Temperature
-	}
 	if extra.OutputTokenField == "max_completion_tokens" {
 		config.MaxCompletionTokens = extra.MaxCompletionTokens
 	} else {
 		config.MaxTokens = extra.MaxCompletionTokens
-	}
-	if extra.Timeout != nil && *extra.Timeout > 0 {
-		config.Timeout = toDuration(*extra.Timeout)
 	}
 
 	cm, err := einoOpenai.NewChatModel(ctx, config)
@@ -98,7 +109,7 @@ func NewOpenAIClient(ctx context.Context, cfg OpenAIClientConfig) (*OpenAIClient
 	maxCtx := cfg.MaxContextLength
 
 	return &OpenAIClient{
-		chatModel:        &contextModel{inner: cm, modelName: cfg.Model, declared: maxCtx, output: *extra.MaxCompletionTokens, policy: contextPolicy, options: &extra},
+		chatModel:        &contextModel{inner: cm, modelName: cfg.Model, declared: maxCtx, output: *extra.MaxCompletionTokens, policy: contextPolicy, options: &extra, timeout: cfg.Timeout, firstTimeout: cfg.StreamFirstOutputTimeout, idleTimeout: cfg.StreamIdleTimeout},
 		outputLimit:      *extra.MaxCompletionTokens,
 		model:            cfg.Model,
 		maxContextLength: maxCtx,

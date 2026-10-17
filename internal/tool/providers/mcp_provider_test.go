@@ -162,9 +162,10 @@ func TestConfigHash(t *testing.T) {
 		Timeout:   30,
 	}
 	cfg2 := &tool.MCPProviderConfig{
-		Transport: "http",
-		URL:       "https://a.example.com/mcp",
-		Timeout:   60, // timeout 不同，但 hash 应相同
+		Transport:   "http",
+		URL:         "https://a.example.com/mcp",
+		CallTimeout: ptrMCPSeconds(60),
+		Timeout:     30, // 仅调用时限不同，仍复用连接
 	}
 	cfg3 := &tool.MCPProviderConfig{
 		Transport: "http",
@@ -177,9 +178,15 @@ func TestConfigHash(t *testing.T) {
 	h3 := configHash(cfg3)
 
 	if h1 != h2 {
-		t.Error("相同连接配置（timeout 不同）的 hash 应相同")
+		t.Error("仅调用时限不同的配置应复用连接")
 	}
 	if h1 == h3 {
 		t.Error("不同连接配置的 hash 应不同")
 	}
+	cfg2.ConnectTimeout = ptrMCPSeconds(60)
+	if h1 == configHash(cfg2) {
+		t.Error("连接时限改变不能命中旧初始化缓存")
+	}
 }
+
+func ptrMCPSeconds(seconds int) *int { return &seconds }

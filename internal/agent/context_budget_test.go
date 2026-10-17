@@ -19,7 +19,7 @@ func TestBudgetModelRejectsBeforeCallingInner(t *testing.T) {
 		calls++
 		return schema.AssistantMessage("正常", nil), nil
 	}}
-	wrapped := &budgetModel{inner: inner, guard: newBudgetGuard(Request{ModelName: "gpt-4o", MaxContextLength: 8192}, "")}
+	wrapped := &budgetModel{inner: inner, guard: newBudgetGuard(Request{ModelName: "gpt-4o", MaxContextLength: 8192})}
 	for _, streaming := range []bool{false, true} {
 		huge := []*schema.Message{schema.UserMessage(strings.Repeat("当前问题", 5000))}
 		var err error
@@ -43,7 +43,7 @@ func TestBudgetModelRejectsBeforeCallingInner(t *testing.T) {
 }
 
 func TestBudgetGuardDefersInvalidDefaultToActualPayload(t *testing.T) {
-	guard := newBudgetGuard(Request{ModelName: "gpt-4o", MaxContextLength: 2048, OutputLimit: 4096}, "")
+	guard := newBudgetGuard(Request{ModelName: "gpt-4o", MaxContextLength: 2048, OutputLimit: 4096})
 	state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("问题")}}
 	if _, _, err := guard.BeforeModelRewriteState(context.Background(), state, nil); !errors.Is(err, llm.ErrContextBudget) {
 		t.Fatal("无最终保护时必须拒绝", err)
@@ -62,7 +62,7 @@ func TestBudgetModelDropsOnlyCompletedOldConversation(t *testing.T) {
 		}
 		return schema.AssistantMessage("正常", nil), nil
 	}}
-	wrapped := &budgetModel{inner: inner, guard: newBudgetGuard(Request{ModelName: "gpt-4o", MaxContextLength: 8192}, "")}
+	wrapped := &budgetModel{inner: inner, guard: newBudgetGuard(Request{ModelName: "gpt-4o", MaxContextLength: 8192})}
 	if _, err := wrapped.Generate(context.Background(), messages); err != nil {
 		t.Fatal(err)
 	}

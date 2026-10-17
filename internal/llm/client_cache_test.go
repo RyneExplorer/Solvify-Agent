@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 )
 
 // resetClientCache 把全局缓存换成全新实例，避免用例之间互相污染。
@@ -54,7 +55,7 @@ func newTestClient(t *testing.T, model string) *OpenAIClient {
 func TestClientCreatedOnDemandAndReused(t *testing.T) {
 	resetClientCache(t)
 	cfg := testModelConfig(func(c *ModelConfig) {
-		c.Config = []byte(`{"max_input_tokens":8192,"max_output_tokens":8192,"max_completion_tokens":4096,"output_token_field":"max_completion_tokens","tool_calling":true,"reasoning_capability":"none","reasoning_mode":"default","temperature":0.3}`)
+		c.Config = []byte(`{"max_input_tokens":8192,"max_output_tokens":8192,"max_completion_tokens":4096,"output_token_field":"max_completion_tokens","tool_calling":true,"reasoning_capability":"none","reasoning_mode":"default"}`)
 	})
 
 	first, err := NewClientFromModelConfig(context.Background(), cfg)
@@ -82,7 +83,7 @@ func TestClientConfigChangeCreatesSeparateClient(t *testing.T) {
 	models := []ModelConfig{
 		testModelConfig(nil),
 		testModelConfig(func(c *ModelConfig) {
-			c.Config = []byte(`{"max_input_tokens":8192,"max_output_tokens":8192,"max_completion_tokens":4096,"output_token_field":"max_completion_tokens","tool_calling":true,"reasoning_capability":"none","reasoning_mode":"default","timeout":30}`)
+			c.Config = []byte(`{"max_input_tokens":4096,"max_output_tokens":8192,"max_completion_tokens":4096,"output_token_field":"max_completion_tokens","tool_calling":true,"reasoning_capability":"none","reasoning_mode":"default"}`)
 		}),
 	}
 	var previous *OpenAIClient
@@ -127,7 +128,7 @@ func TestClientCacheKeySeparatesConstructionInputs(t *testing.T) {
 		APIKey:           "sk-a",
 		BaseURL:          "https://example.invalid/v1",
 		Model:            "m",
-		Config:           []byte(`{"temperature":0.1}`),
+		Config:           []byte(`{"max_input_tokens":4096}`),
 		MaxContextLength: 8192,
 	}
 	baseKey := base.cacheKey()
@@ -139,8 +140,11 @@ func TestClientCacheKeySeparatesConstructionInputs(t *testing.T) {
 		{"APIKey", func() OpenAIClientConfig { c := base; c.APIKey = "sk-b"; return c }()},
 		{"BaseURL", func() OpenAIClientConfig { c := base; c.BaseURL = "https://other.invalid/v1"; return c }()},
 		{"Model", func() OpenAIClientConfig { c := base; c.Model = "m2"; return c }()},
-		{"Config", func() OpenAIClientConfig { c := base; c.Config = []byte(`{"temperature":0.9}`); return c }()},
+		{"Config", func() OpenAIClientConfig { c := base; c.Config = []byte(`{"max_input_tokens":8192}`); return c }()},
 		{"MaxContextLength", func() OpenAIClientConfig { c := base; c.MaxContextLength = 32768; return c }()},
+		{"Timeout", func() OpenAIClientConfig { c := base; c.Timeout = time.Second; return c }()},
+		{"StreamFirstOutputTimeout", func() OpenAIClientConfig { c := base; c.StreamFirstOutputTimeout = time.Second; return c }()},
+		{"StreamIdleTimeout", func() OpenAIClientConfig { c := base; c.StreamIdleTimeout = time.Second; return c }()},
 	}
 	for _, tc := range cases {
 		if tc.cfg.cacheKey() == baseKey {

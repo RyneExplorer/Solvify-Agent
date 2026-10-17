@@ -20,7 +20,7 @@ func admissionServer(t *testing.T, scenario string, expectedKey ...string) *http
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasSuffix(r.URL.Path, "/models") {
-			_, _ = w.Write([]byte(`{"data":[]}`))
+			_, _ = w.Write([]byte(`{"data":[{"id":"test","context_window":8192,"max_output_tokens":1024}]}`))
 			return
 		}
 		if scenario == "unauthorized" {
@@ -29,6 +29,9 @@ func admissionServer(t *testing.T, scenario string, expectedKey ...string) *http
 			return
 		}
 		var p struct {
+			Thinking struct {
+				Type string `json:"type"`
+			} `json:"thinking"`
 			Stream   bool  `json:"stream"`
 			Tools    []any `json:"tools"`
 			Messages []struct {
@@ -42,7 +45,7 @@ func admissionServer(t *testing.T, scenario string, expectedKey ...string) *http
 		if p.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			delta := map[string]any{"role": "assistant", "content": "ok"}
-			if len(p.Tools) > 0 && scenario != "ignores_tools" {
+			if len(p.Tools) > 0 && scenario != "ignores_tools" && !(scenario == "thinking_conflict" && p.Thinking.Type == "enabled") {
 				value := "capability-ok"
 				if scenario == "bad_arguments" {
 					value = "wrong"
@@ -97,10 +100,10 @@ func TestSaveVerifiesActualToolsBeforeWriting(t *testing.T) {
 				var e1, e2 error
 				if operation == "create" {
 					_, e1 = NewModelService(sys).Create(ctx, requestdto.CreateModelRequest{Provider: "openai", ModelID: "test", BaseURL: srv.URL, APIKey: "synthetic", MaxContextLength: 8192, Config: settingsFixture()})
-					_, e2 = NewUserModelConfigService(usr).Create(ctx, "owner", requestdto.CreateUserModelConfigRequest{APIFormat: "openai", ModelID: "test", BaseURL: srv.URL, APIKey: "synthetic", MaxContextLength: 8192, Config: settingsFixture()})
+					_, e2 = NewUserModelConfigService(usr, nil).Create(ctx, "owner", requestdto.CreateUserModelConfigRequest{APIFormat: "openai", ModelID: "test", BaseURL: srv.URL, APIKey: "synthetic", MaxContextLength: 8192, Config: settingsFixture()})
 				} else {
 					e1 = NewModelService(sys).Update(ctx, "m", requestdto.UpdateModelRequest{Config: settingsFixture()})
-					_, e2 = NewUserModelConfigService(usr).Update(ctx, "owner", "m", requestdto.UpdateUserModelConfigRequest{Config: settingsFixture()})
+					_, e2 = NewUserModelConfigService(usr, nil).Update(ctx, "owner", "m", requestdto.UpdateUserModelConfigRequest{Config: settingsFixture()})
 				}
 				if scenario == "passed" {
 					if e1 != nil || e2 != nil || sys.updates != 1 || usr.updates != 1 {
@@ -128,7 +131,7 @@ func TestSaveUsesCandidateKeyAndAllowsDisablingUnavailableModel(t *testing.T) {
 	if err := NewModelService(sys).Update(context.Background(), "m", requestdto.UpdateModelRequest{APIKey: &key}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewUserModelConfigService(usr).Update(context.Background(), "u", "m", requestdto.UpdateUserModelConfigRequest{APIKey: &key}); err != nil {
+	if _, err := NewUserModelConfigService(usr, nil).Update(context.Background(), "u", "m", requestdto.UpdateUserModelConfigRequest{APIKey: &key}); err != nil {
 		t.Fatal(err)
 	}
 	if sys.stored.APIKey != key || usr.stored.APIKey != key {
@@ -141,5 +144,40 @@ func TestSaveUsesCandidateKeyAndAllowsDisablingUnavailableModel(t *testing.T) {
 	}
 	if _, err := NewModelService(nil).Create(context.Background(), requestdto.CreateModelRequest{Provider: "openai"}); err == nil {
 		t.Fatal("未知能力保存未拒绝")
+	}
+}
+
+func TestSimplifiedModelSaveBothEntrypoints(t *testing.T) {
+	for _, scenario := range []string{"passed", "ignores_tools"} {
+		srv := admissionServer(t, scenario)
+		settings := map[string]interface{}{"max_output_tokens": 1024, "temperature": 2, "timeout": 1, "max_completion_tokens": 8000}
+		sys := &capabilityModelRepo{}
+		usr := &capabilityUserModelRepo{}
+		_, e1 := NewModelService(sys).Create(context.Background(), requestdto.CreateModelRequest{Provider: "openai", ModelID: "test", BaseURL: srv.URL, MaxContextLength: 8192, Config: settings})
+		_, e2 := NewUserModelConfigService(usr, nil).Create(context.Background(), "owner", requestdto.CreateUserModelConfigRequest{APIFormat: "openai", ModelID: "test", BaseURL: srv.URL, MaxContextLength: 8192, Config: settings})
+		srv.Close()
+		if scenario != "passed" {
+			if e1 == nil || e2 == nil || sys.updates != 0 || usr.updates != 0 {
+				t.Fatal("声明未填且真实工具失败却保存")
+			}
+			continue
+		}
+		if e1 != nil || e2 != nil {
+			t.Fatal(e1, e2)
+		}
+		for _, raw := range [][]byte{sys.stored.Config, usr.stored.Config} {
+			persisted := decodeSettings(raw)
+			if persisted["execution_policy"] != "managed_v1" || persisted["tool_calling"] != true {
+				t.Fatal("未保存统一策略")
+			}
+			for _, key := range []string{"temperature", "timeout", "max_completion_tokens"} {
+				if _, exists := persisted[key]; exists {
+					t.Fatal("仍保存用户执行参数", key)
+				}
+			}
+		}
+		if settings["timeout"] != 1 {
+			t.Fatal("原始请求被修改")
+		}
 	}
 }

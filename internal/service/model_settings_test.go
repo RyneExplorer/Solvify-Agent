@@ -150,7 +150,7 @@ func TestModelUpdatesRejectInvalidCandidateWithoutChangingRecord(t *testing.T) {
 	if err := NewModelService(systemRepo).Update(context.Background(), "system", requestdto.UpdateModelRequest{MaxContextLength: &zero}); err == nil {
 		t.Fatal("非法系统配置保存")
 	}
-	if _, err := NewUserModelConfigService(userRepo).Update(context.Background(), "u", "user-model", requestdto.UpdateUserModelConfigRequest{MaxContextLength: &zero}); err == nil {
+	if _, err := NewUserModelConfigService(userRepo, nil).Update(context.Background(), "u", "user-model", requestdto.UpdateUserModelConfigRequest{MaxContextLength: &zero}); err == nil {
 		t.Fatal("非法用户配置保存")
 	}
 	if systemRepo.stored.MaxContextLength != 8192 || userRepo.stored.MaxContextLength != 8192 || systemRepo.updates != 0 || userRepo.updates != 0 {
@@ -159,7 +159,7 @@ func TestModelUpdatesRejectInvalidCandidateWithoutChangingRecord(t *testing.T) {
 	if err := NewModelService(systemRepo).Update(context.Background(), "system", requestdto.UpdateModelRequest{MaxContextLength: &window, APIKey: &empty}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := NewUserModelConfigService(userRepo).Update(context.Background(), "u", "user-model", requestdto.UpdateUserModelConfigRequest{MaxContextLength: &window, APIKey: &empty})
+	result, err := NewUserModelConfigService(userRepo, nil).Update(context.Background(), "u", "user-model", requestdto.UpdateUserModelConfigRequest{MaxContextLength: &window, APIKey: &empty})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -125,11 +125,13 @@ func TestSummaryKeepsTailOutOfCoverage(t *testing.T) {
 // 旧实现在 endIdx <= startIdx 时把 endIdx 抬到 len，等于把保留区吃掉。
 //
 // ⚠️ 用例数据的构造必须让「强行抬到 len」这条路**真的走得通**，两个条件同时成立：
-//  ① endIdx = len - 5 <= startIdx  ⇔ startIdx >= 15
-//  ② 抬到 len 后区间仍 ≥ summaryMinSegment(5) ⇔ len - startIdx >= 5 ⇔ startIdx <= 15
+//
+//	① endIdx = len - 5 <= startIdx  ⇔ startIdx >= 15
+//	② 抬到 len 后区间仍 ≥ summaryMinSegment(5) ⇔ len - startIdx >= 5 ⇔ startIdx <= 15
+//
 // 两者交集只有 startIdx = 15。取别的值会得出「缺陷形态被掩盖 ⇒ 测试全绿」的假结论：
-//  - startIdx < 15（如初版的 13）：endIdx 判定为假，根本不进那个分支；
-//  - startIdx > 15（如初版的 18）：抬到 len 后区间不足 5 条，被下一道关卡拦住。
+//   - startIdx < 15（如初版的 13）：endIdx 判定为假，根本不进那个分支；
+//   - startIdx > 15（如初版的 18）：抬到 len 后区间不足 5 条，被下一道关卡拦住。
 func TestSummaryDoesNotAdvanceWithoutRoom(t *testing.T) {
 	const total = 20
 	const startIdx = total - summaryMinSegment // = 15，同时满足 ①②
@@ -176,9 +178,9 @@ func (r *summaryMessageRepo) FindBySessionIDForContext(context.Context, string) 
 // summarySummaryRepo 记住已有摘要与实际写回的内容。
 type summarySummaryRepo struct {
 	repository.SummaryRepo
-	existing  *entity.ChatSummary
+	existing    *entity.ChatSummary
 	gotDialogue string
-	saved    *entity.ChatSummary
+	saved       *entity.ChatSummary
 }
 
 func (r *summarySummaryRepo) GetBySessionID(context.Context, string) (*entity.ChatSummary, error) {
@@ -190,7 +192,6 @@ func (r *summarySummaryRepo) Upsert(_ context.Context, s *entity.ChatSummary) er
 	return nil
 }
 
-// stubChatModel 记录收到的 system prompt（其中含对话文本），并返回固定摘要。
 type stubChatModel struct {
 	reply    string
 	onPrompt func(prompt string)
@@ -200,7 +201,7 @@ func newStubChatModel(reply string) *stubChatModel { return &stubChatModel{reply
 
 func (m *stubChatModel) Generate(_ context.Context, in []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	for _, msg := range in {
-		if msg.Role == schema.System {
+		if msg.Role == schema.User {
 			if m.onPrompt != nil {
 				m.onPrompt(msg.Content)
 			}

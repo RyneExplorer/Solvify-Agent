@@ -23,6 +23,11 @@ func NewModelService(modelRepo repository.ModelRepo) ModelServiceInterface {
 
 // Create 创建系统模型
 func (s *modelService) Create(ctx context.Context, req requestdto.CreateModelRequest) (responsedto.ModelInfo, error) {
+	settings, prepareErr := prepareAdminModelSettings(ctx, requestdto.TestModelRequest{Provider: req.Provider, ModelID: req.ModelID, BaseURL: req.BaseURL, APIKey: req.APIKey, Config: req.Config})
+	if prepareErr != nil {
+		return responsedto.ModelInfo{}, prepareErr
+	}
+	req.Config = settings
 	if err := validateModelSettings(req.MaxContextLength, req.Config); err != nil {
 		return responsedto.ModelInfo{}, err
 	}
@@ -108,6 +113,11 @@ func (s *modelService) Update(ctx context.Context, id string, req requestdto.Upd
 		model.MaxContextLength = *req.MaxContextLength
 	}
 	if req.Config != nil {
+		settings, prepareErr := prepareAdminModelSettings(ctx, requestdto.TestModelRequest{Provider: model.Provider, ModelID: model.ModelID, BaseURL: model.BaseURL, APIKey: model.APIKey, Config: req.Config})
+		if prepareErr != nil {
+			return prepareErr
+		}
+		req.Config = settings
 		if err := validateModelDraftSettings(model.MaxContextLength, req.Config); err != nil {
 			return err
 		}
@@ -126,6 +136,7 @@ func (s *modelService) Update(ctx context.Context, id string, req requestdto.Upd
 			model.Config = toJSONB(map[string]interface{}{})
 		}
 	}
+	model.Config = toJSONB(managedModelSettings(decodeSettings(model.Config)))
 	if err := validateModelDraft(model.MaxContextLength, model.Config); err != nil {
 		return apperrors.New(apperrors.CodeInvalidParam, err.Error())
 	}

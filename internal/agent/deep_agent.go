@@ -41,7 +41,7 @@ func (e *Engine) runDeepAgent(ctx context.Context, req Request, chatModel model.
 	systemPromptFinal := composeSystemPrompt(baseSystemPrompt, req.SystemPrompt)
 	logger.Infof("[Agent] SystemPrompt (前400字符): %s", strutil.Truncate(systemPromptFinal, 400))
 
-	inputMessages := buildInputMessages(req.Query, req.History)
+	inputMessages := buildInputMessages(req.Query, req.History, req.ContextData...)
 
 	// ── 创建 adk.ChatModelAgent ──
 	toolsNodeConfig := buildToolsNodeConfig()
@@ -69,10 +69,11 @@ func (e *Engine) runDeepAgent(ctx context.Context, req Request, chatModel model.
 		Instruction: systemPromptFinal,
 		Model:       chatModel,
 		ToolsConfig: adk.ToolsConfig{
-			ToolsNodeConfig: toolsNodeConfig,
+			ToolsNodeConfig: e.withToolExecutionTimeout(toolsNodeConfig),
 		},
-		MaxIterations: iterations,
-		Handlers:      []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, systemPromptFinal, chatModel), newBudgetGuard(req, systemPromptFinal)},
+		MaxIterations:    iterations,
+		ModelRetryConfig: e.modelRetryConfig(),
+		Handlers:         []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, systemPromptFinal, chatModel), newBudgetGuard(req)},
 	})
 	if err != nil {
 		logger.Errorf("[Agent] ChatModelAgent 初始化失败: %v", err)

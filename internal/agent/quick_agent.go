@@ -37,7 +37,7 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 	systemPromptFinal := composeSystemPrompt(baseSystemPrompt, req.SystemPrompt)
 	logger.Infof("[Agent] SystemPrompt (前400字符): %s", strutil.Truncate(systemPromptFinal, 400))
 
-	inputMessages := buildInputMessages(req.Query, req.History)
+	inputMessages := buildInputMessages(req.Query, req.History, req.ContextData...)
 	toolsNodeConfig := buildToolsNodeConfig()
 	toolsNodeConfig.Tools = allTools
 	toolsNodeConfig.ToolCallMiddlewares = append(toolsNodeConfig.ToolCallMiddlewares, compose.ToolMiddleware{Invokable: e.artifactMiddleware(req)})
@@ -48,14 +48,15 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 	}
 
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name:          quickAgentName,
-		Description:   "快速模式 Agent，基于知识库回答问题，必要时向用户澄清",
-		Instruction:   systemPromptFinal,
-		Model:         chatModel,
-		ToolsConfig:   adk.ToolsConfig{ToolsNodeConfig: toolsNodeConfig},
-		MaxIterations: iterations,
+		Name:             quickAgentName,
+		Description:      "快速模式 Agent，基于知识库回答问题，必要时向用户澄清",
+		Instruction:      systemPromptFinal,
+		Model:            chatModel,
+		ToolsConfig:      adk.ToolsConfig{ToolsNodeConfig: e.withToolExecutionTimeout(toolsNodeConfig)},
+		MaxIterations:    iterations,
+		ModelRetryConfig: e.modelRetryConfig(),
 		// 每次模型调用前的总预算检查（首次执行 / 每轮迭代 / 中断恢复三条路径共用）。
-		Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, systemPromptFinal, chatModel), newBudgetGuard(req, systemPromptFinal)},
+		Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, systemPromptFinal, chatModel), newBudgetGuard(req)},
 	})
 	if err != nil {
 		logger.Errorf("[Agent] ChatModelAgent 初始化失败: %v", err)

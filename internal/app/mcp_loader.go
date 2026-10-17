@@ -83,24 +83,14 @@ func (a *App) ensureMCPToolType(ctx context.Context) (*entity.ToolType, error) {
 func (a *App) upsertSystemMCPProvider(ctx context.Context, toolTypeID string, srv *config.SystemMCPServerConfig) error {
 	db := a.postgresqlDB.WithContext(ctx)
 
-	// 构造 provider_config（MCP 配置）
-	mcpCfg := map[string]interface{}{
-		"mcp": map[string]interface{}{
-			"transport": srv.Transport,
-			"command":   srv.Command,
-			"args":      srv.Args,
-			"env":       srv.Env,
-			"url":       srv.URL,
-			"headers":   srv.Headers,
-			"timeout":   srv.Timeout,
-		},
-	}
-	providerConfigJSON, _ := json.Marshal(mcpCfg)
-
 	// 查找是否已存在同 provider_key 的记录
 	var provider entity.ToolProvider
 	err := db.Where("tool_type_id = ? AND provider_key = ?", toolTypeID, srv.Name).First(&provider).Error
 	if err == nil {
+		providerConfigJSON, configErr := systemMCPProviderConfig(srv, provider.ProviderConfig)
+		if configErr != nil {
+			return configErr
+		}
 		// 已存在：仅更新配置（保留 is_system 标记）
 		provider.Name = srv.Name
 		provider.Description = srv.Description
@@ -114,6 +104,10 @@ func (a *App) upsertSystemMCPProvider(ctx context.Context, toolTypeID string, sr
 		return nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	providerConfigJSON, err := systemMCPProviderConfig(srv, nil)
+	if err != nil {
 		return err
 	}
 
@@ -133,6 +127,34 @@ func (a *App) upsertSystemMCPProvider(ctx context.Context, toolTypeID string, sr
 	}
 	logger.Infof("[MCPLoader] 创建系统预置 MCP 服务器: name=%s, id=%s", srv.Name, provider.ID)
 	return nil
+}
+
+// YAML管理连接信息；已由管理员保存的超时在重启同步时保留。
+func systemMCPProviderConfig(srv *config.SystemMCPServerConfig, existing []byte) ([]byte, error) {
+	cfg := tool.MCPProviderConfig{
+		Transport: srv.Transport, Command: srv.Command, Args: srv.Args, Env: srv.Env,
+		URL: srv.URL, Headers: srv.Headers, Timeout: srv.Timeout,
+		ConnectTimeout: srv.ConnectTimeout, CallTimeout: srv.CallTimeout,
+	}
+	if err := cfg.ValidateTimeouts(); err != nil {
+		return nil, err
+	}
+	if len(existing) > 0 {
+		var stored tool.ProviderConfig
+		if err := json.Unmarshal(existing, &stored); err != nil {
+			return nil, err
+		}
+		if stored.MCP != nil && stored.MCP.AdminTimeouts {
+			cfg.Timeout = 0
+			cfg.ConnectTimeout = stored.MCP.ConnectTimeout
+			cfg.CallTimeout = stored.MCP.CallTimeout
+			cfg.AdminTimeouts = true
+		}
+	}
+	if err := cfg.ValidateTimeouts(); err != nil {
+		return nil, err
+	}
+	return json.Marshal(tool.ProviderConfig{MCP: &cfg})
 }
 
 // loadSystemMCPServersWithTimeout 带超时的加载包装

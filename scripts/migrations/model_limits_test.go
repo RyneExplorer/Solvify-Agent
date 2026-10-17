@@ -80,4 +80,27 @@ func TestModelLimitsMigrationPostgres(t *testing.T) {
 			t.Fatal("缺失窗口仍被默认填入")
 		}
 	}
+	managed, err := os.ReadFile("20261014_model_managed_policy.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"models", "user_model_configs"} {
+		_, err = conn.ExecContext(ctx, "UPDATE "+table+" SET config = '{\"max_output_tokens\":4096,\"max_completion_tokens\":128,\"temperature\":0.3,\"timeout\":1,\"reasoning_effort\":\"high\",\"tool_calling\":false,\"reasoning_mode\":\"off\",\"reasoning_protocol\":\"thinking\"}'::jsonb")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := conn.ExecContext(ctx, string(managed)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, table := range []string{"models", "user_model_configs"} {
+		var preserved bool
+		err := conn.QueryRowContext(ctx, "SELECT max_context_length=8192 AND config->>'execution_policy'='managed_v1' AND config->>'max_output_tokens'='4096' AND config->>'tool_calling'='false' AND config->>'reasoning_mode'='off' AND config->>'reasoning_protocol'='thinking' AND NOT (config ?| ARRAY['max_completion_tokens','temperature','timeout','reasoning_effort']) FROM "+table+" WHERE id=1").Scan(&preserved)
+		if err != nil || !preserved {
+			t.Fatal("执行策略升级未保留能力/协议或旧执行参数未移除", err)
+		}
+	}
+
 }

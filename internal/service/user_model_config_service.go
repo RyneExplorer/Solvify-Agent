@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"solvify-agent/internal/llm"
+	"strings"
 
 	"gorm.io/datatypes"
 
@@ -38,16 +40,22 @@ func isNotFound(err error) bool {
 
 // userModelConfigService 封装用户模型配置业务用例实现
 type userModelConfigService struct {
-	repo repository.UserModelConfigRepo
+	repo     repository.UserModelConfigRepo
+	profiles modelDeploymentReader
 }
 
 // NewUserModelConfigService 创建用户模型配置服务
-func NewUserModelConfigService(repo repository.UserModelConfigRepo) UserModelConfigServiceInterface {
-	return &userModelConfigService{repo: repo}
+func NewUserModelConfigService(repo repository.UserModelConfigRepo, profiles modelDeploymentReader) UserModelConfigServiceInterface {
+	return &userModelConfigService{repo: repo, profiles: profiles}
 }
 
 // Create 创建用户模型配置
 func (s *userModelConfigService) Create(ctx context.Context, userID string, req requestdto.CreateUserModelConfigRequest) (responsedto.UserModelConfigInfo, error) {
+	settings, err := userDeploymentSettings(ctx, requestdto.TestModelRequest{Provider: req.APIFormat, ModelID: req.ModelID, BaseURL: req.BaseURL, APIKey: req.APIKey, MaxContextLength: req.MaxContextLength, Config: req.Config}, nil, s.profiles)
+	if err != nil {
+		return responsedto.UserModelConfigInfo{}, err
+	}
+	req.Config = settings
 	if err := validateModelSettings(req.MaxContextLength, req.Config); err != nil {
 		return responsedto.UserModelConfigInfo{}, err
 	}
@@ -122,19 +130,26 @@ func (s *userModelConfigService) Update(ctx context.Context, userID string, conf
 	if req.BaseURL != nil {
 		config.BaseURL = *req.BaseURL
 	}
-	if req.Config != nil {
-		if err := validateModelDraftSettings(0, req.Config); err != nil {
-			return responsedto.UserModelConfigInfo{}, err
-		}
-		config.Config = toJSONB(req.Config)
+	existingSettings := decodeSettings(config.Config)
+	if config.ModelID != candidateIdentityModel || config.BaseURL != candidateIdentityURL || config.APIFormat != candidateIdentityProtocol {
+		existingSettings = nil
 	}
+	settings, err := userDeploymentSettings(ctx, requestdto.TestModelRequest{Provider: config.APIFormat, ModelID: config.ModelID, BaseURL: config.BaseURL, APIKey: config.APIKey, Config: req.Config}, existingSettings, s.profiles)
+	if err != nil {
+		return responsedto.UserModelConfigInfo{}, err
+	}
+	req.Config = settings
+	if err := validateModelDraftSettings(0, req.Config); err != nil {
+		return responsedto.UserModelConfigInfo{}, err
+	}
+	config.Config = toJSONB(req.Config)
 	if req.MaxContextLength != nil {
 		config.MaxContextLength = *req.MaxContextLength
 	}
 	if config.ModelID != candidateIdentityModel || config.BaseURL != candidateIdentityURL || config.APIFormat != candidateIdentityProtocol {
 		if req.ReconfirmCapabilities {
-			if req.Config == nil || req.MaxContextLength == nil {
-				return responsedto.UserModelConfigInfo{}, apperrors.New(apperrors.CodeInvalidParam, "重新确认需要完整能力配置")
+			if req.MaxContextLength == nil {
+				return responsedto.UserModelConfigInfo{}, apperrors.New(apperrors.CodeInvalidParam, "重新确认需要填写窗口并取得当前部署资料")
 			}
 			if err := validateModelSettings(config.MaxContextLength, req.Config); err != nil {
 				return responsedto.UserModelConfigInfo{}, err
@@ -221,7 +236,45 @@ func (s *userModelConfigService) ResolveModelConfig(ctx context.Context, userID 
 }
 
 // Test 测试用户模型连接
-func (s *userModelConfigService) Test(ctx context.Context, req requestdto.TestModelRequest) (responsedto.TestResult, error) {
+func (s *userModelConfigService) Test(ctx context.Context, userID string, req requestdto.TestModelRequest) (responsedto.TestResult, error) {
+	var existing map[string]interface{}
+	var existingWindow int
+	if req.ConfigID != "" {
+		stored, err := s.repo.GetByID(ctx, req.ConfigID, userID)
+		if err != nil {
+			return responsedto.TestResult{}, err
+		}
+		if stored.ModelID == req.ModelID && stored.BaseURL == req.BaseURL && stored.APIFormat == req.Provider {
+			existing, existingWindow = decodeSettings(stored.Config), stored.MaxContextLength
+		}
+	}
+	if req.Operation == "capabilities" {
+		if existing == nil && s.profiles != nil {
+			models, err := s.profiles.List(ctx)
+			if err != nil {
+				return responsedto.TestResult{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
+			}
+			for _, m := range models {
+				if m.IsEnabled && m.ModelID == req.ModelID && strings.TrimRight(m.BaseURL, "/") == strings.TrimRight(req.BaseURL, "/") {
+					existing, existingWindow = decodeSettings(m.Config), m.MaxContextLength
+					break
+				}
+			}
+		}
+		if existing != nil {
+			raw, _ := json.Marshal(existing)
+			p, err := llm.ParseModelDraft(raw, existingWindow)
+			if err == nil && p.MaxOutputTokens > 0 {
+				return responsedto.TestResult{Success: true, Message: "已读取服务端当前部署资料，保存前仍需验证工具调用", DetectedMaxContextLength: existingWindow, DetectedMaxOutputTokens: p.MaxOutputTokens, DetectedMaxInputTokens: p.MaxInputTokens, CapabilitySource: "manual", SuggestedConfig: existing}, nil
+			}
+		}
+		return acquireModelCapabilities(ctx, req)
+	}
+	settings, err := userDeploymentSettings(ctx, req, existing, s.profiles)
+	if err != nil {
+		return responsedto.TestResult{}, err
+	}
+	req.Config = settings
 	return testModelSettings(ctx, req)
 }
 

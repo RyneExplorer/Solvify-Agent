@@ -303,6 +303,53 @@ func TestRuntimeContextsIsolateParallelTasks(t *testing.T) {
 	})
 }
 
+func TestRuntimeContextRejectsLateSummaryForSameTask(t *testing.T) {
+	engine := deepTestEngine()
+	request := Request{Profile: ProfileQuick, UserID: "owner", SessionID: "session", RunID: "same-run", TaskID: "same-task", ModelName: "gpt-4o", MaxContextLength: 8192}
+	entered := make(chan struct{}, 2)
+	releases := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	var callMutex sync.Mutex
+	calls := 0
+	chatModel := &deepTestModel{respond: func(ctx context.Context, _ []*schema.Message) (*schema.Message, error) {
+		callMutex.Lock()
+		index := calls
+		calls++
+		callMutex.Unlock()
+		entered <- struct{}{}
+		select {
+		case <-releases[index]:
+			return schema.AssistantMessage("保留最新摘要", nil), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}}
+	runContextTest(t, nil, func(ctx context.Context) error {
+		results := make(chan error, 2)
+		middleware := engine.runtimeHandler(request, "必要指令", chatModel)
+		for worker := 0; worker < 2; worker++ {
+			go func() {
+				_, _, err := middleware.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: quickSummaryHistory()}, nil)
+				results <- err
+			}()
+		}
+		for worker := 0; worker < 2; worker++ {
+			select {
+			case <-entered:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		close(releases[0])
+		first := <-results
+		close(releases[1])
+		second := <-results
+		if first != nil || second == nil || !strings.Contains(second.Error(), "版本在摘要期间变化") {
+			return fmt.Errorf("旧摘要覆盖新摘要或新摘要失败：first=%v second=%v", first, second)
+		}
+		return nil
+	})
+}
+
 func TestTaskArtifactEvidenceBoundedAndSourceMissing(t *testing.T) {
 	e := deepTestEngine()
 	repo := &memoryArtifactRepo{}

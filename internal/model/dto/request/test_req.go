@@ -2,6 +2,7 @@ package request
 
 // TestModelRequest 测试模型连接请求
 type TestModelRequest struct {
+	ConfigID         string                 `json:"config_id,omitempty" binding:"omitempty,uuid"`
 	Operation        string                 `json:"operation,omitempty" binding:"omitempty,oneof=test capabilities"`
 	Provider         string                 `json:"provider" binding:"required"`
 	ModelID          string                 `json:"model_id" binding:"required"`

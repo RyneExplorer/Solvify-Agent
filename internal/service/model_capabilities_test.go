@@ -65,12 +65,12 @@ func TestDraftAndIdentityChangeBothEntrypoints(t *testing.T) {
 		}
 	}
 	base := "https://new.example/v1"
-	systemRepo := &capabilityModelRepo{stored: &entity.Model{Provider: "openai", ModelID: "m", BaseURL: "https://old.example/v1", MaxContextLength: 8192, Config: toJSONB(settingsFixture())}}
-	userRepo := &capabilityUserModelRepo{stored: &entity.UserModelConfig{APIFormat: "openai", ModelID: "m", BaseURL: "https://old.example/v1", MaxContextLength: 8192, Config: toJSONB(settingsFixture())}}
+	systemRepo := &capabilityModelRepo{stored: &entity.Model{Provider: "openai", ModelID: "test", BaseURL: "https://old.example/v1", MaxContextLength: 8192, Config: toJSONB(settingsFixture())}}
+	userRepo := &capabilityUserModelRepo{stored: &entity.UserModelConfig{APIFormat: "openai", ModelID: "test", BaseURL: "https://old.example/v1", MaxContextLength: 8192, Config: toJSONB(settingsFixture())}}
 	if err := NewModelService(systemRepo).Update(context.Background(), "m", requestdto.UpdateModelRequest{BaseURL: &base}); err == nil {
 		t.Fatal("未确认身份变化被保存")
 	}
-	if _, err := NewUserModelConfigService(userRepo).Update(context.Background(), "u", "m", requestdto.UpdateUserModelConfigRequest{BaseURL: &base}); err == nil {
+	if _, err := NewUserModelConfigService(userRepo, nil).Update(context.Background(), "u", "m", requestdto.UpdateUserModelConfigRequest{BaseURL: &base}); err == nil {
 		t.Fatal("未确认身份变化被保存")
 	}
 	if systemRepo.updates != 0 || userRepo.updates != 0 {
@@ -83,7 +83,7 @@ func TestDraftAndIdentityChangeBothEntrypoints(t *testing.T) {
 	if err := NewModelService(systemRepo).Update(context.Background(), "m", requestdto.UpdateModelRequest{BaseURL: &base, MaxContextLength: &window, Config: settingsFixture(), ReconfirmCapabilities: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewUserModelConfigService(userRepo).Update(context.Background(), "u", "m", requestdto.UpdateUserModelConfigRequest{BaseURL: &base, MaxContextLength: &window, Config: settingsFixture(), ReconfirmCapabilities: true}); err != nil {
+	if _, err := NewUserModelConfigService(userRepo, nil).Update(context.Background(), "u", "m", requestdto.UpdateUserModelConfigRequest{BaseURL: &base, MaxContextLength: &window, Config: settingsFixture(), ReconfirmCapabilities: true}); err != nil {
 		t.Fatal(err)
 	}
 	if systemRepo.stored.MaxContextLength != window || userRepo.stored.MaxContextLength != window {
@@ -104,7 +104,7 @@ func TestModelConfigurationRequiresToolsBeforePersistence(t *testing.T) {
 			if _, err := NewModelService(nil).Create(context.Background(), requestdto.CreateModelRequest{Provider: "openai", MaxContextLength: 8192, Config: p}); err == nil {
 				t.Fatal("创建了不支持工具的系统模型")
 			}
-			if _, err := NewUserModelConfigService(nil).Create(context.Background(), "u", requestdto.CreateUserModelConfigRequest{APIFormat: "openai", MaxContextLength: 8192, Config: p}); err == nil {
+			if _, err := NewUserModelConfigService(nil, nil).Create(context.Background(), "u", requestdto.CreateUserModelConfigRequest{APIFormat: "openai", MaxContextLength: 8192, Config: p}); err == nil {
 				t.Fatal("创建了不支持工具的用户模型")
 			}
 			sys := &capabilityModelRepo{stored: &entity.Model{Provider: "openai", MaxContextLength: 8192, Config: toJSONB(settingsFixture())}}
@@ -112,7 +112,7 @@ func TestModelConfigurationRequiresToolsBeforePersistence(t *testing.T) {
 			if err := NewModelService(sys).Update(context.Background(), "m", requestdto.UpdateModelRequest{Config: p}); err == nil {
 				t.Fatal("更新了不支持工具的系统模型")
 			}
-			if _, err := NewUserModelConfigService(usr).Update(context.Background(), "u", "m", requestdto.UpdateUserModelConfigRequest{Config: p}); err == nil {
+			if _, err := NewUserModelConfigService(usr, nil).Update(context.Background(), "u", "m", requestdto.UpdateUserModelConfigRequest{Config: p}); err == nil {
 				t.Fatal("更新了不支持工具的用户模型")
 			}
 			if sys.updates != 0 || usr.updates != 0 || modelCapabilityStatus(sys.stored.Config, 8192) != "ready" || modelCapabilityStatus(usr.stored.Config, 8192) != "ready" {
@@ -147,7 +147,7 @@ func TestEditDetailsReturnCredentialsButGeneralResponsesMask(t *testing.T) {
 		t.Fatal("系统读取边界错误")
 	}
 	usr := &capabilityUserModelRepo{stored: &entity.UserModelConfig{APIKey: "synthetic-user-key"}}
-	info, err := NewUserModelConfigService(usr).Get(context.Background(), "owner", "m")
+	info, err := NewUserModelConfigService(usr, nil).Get(context.Background(), "owner", "m")
 	if err != nil {
 		t.Fatal(err)
 	}

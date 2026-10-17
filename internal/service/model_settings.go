@@ -43,7 +43,15 @@ func verifyModelForSave(ctx context.Context, req requestdto.TestModelRequest) er
 		return err
 	}
 	if !result.Success || result.ToolCallingStatus != "passed" {
-		return apperrors.New(apperrors.CodeInvalidParam, "模型工具调用验证未通过，配置未保存；请检查模型、服务地址、密钥及思考设置")
+		message := "模型工具调用验证未通过，配置未保存；请更换工具模型或检查当前部署"
+		if result.ConnectionStatus != "passed" {
+			message = "模型连接验证未完成，配置未保存；请检查地址、密钥、网络与配额后重试"
+		} else if result.StreamingStatus != "passed" {
+			message = "模型流式验证未通过，配置未保存；请检查当前部署后重试"
+		} else if req.Config["reasoning_mode"] == "on" {
+			message = "当前思考模式的工具调用验证未通过，配置未保存；可关闭思考后重新验证"
+		}
+		return apperrors.New(apperrors.CodeInvalidParam, message)
 	}
 	return nil
 }
@@ -86,6 +94,11 @@ func testModelSettings(ctx context.Context, req requestdto.TestModelRequest) (re
 	if req.Operation != "" && req.Operation != "test" {
 		return responsedto.TestResult{}, apperrors.New(apperrors.CodeInvalidParam, "不支持的模型操作")
 	}
+	settings, prepareErr := prepareAdminModelSettings(ctx, req)
+	if prepareErr != nil {
+		return responsedto.TestResult{}, prepareErr
+	}
+	req.Config = settings
 	started := time.Now()
 	result := responsedto.TestResult{ConnectionStatus: "unknown", ToolCallingStatus: "unknown", StreamingStatus: "unknown"}
 	if !llm.SupportsProvider(req.Provider) {

@@ -101,7 +101,7 @@ func TestContextLiveDeepSeek(t *testing.T) {
 					return errors.New("摘要触发或压缩效果不符合预期")
 				}
 				input := append([]*schema.Message{schema.SystemMessage("只根据提供的数据回答代号、预算和证据；引用doc-ctx/chunk-1。")}, next.Messages...)
-				guarded := &budgetModel{inner: client.ChatModel(), guard: newBudgetGuard(req, "")}
+				guarded := &budgetModel{inner: client.ChatModel(), guard: newBudgetGuard(req)}
 				response, err := guarded.Generate(ctx, input, model.WithTools([]*schema.ToolInfo{}), model.WithMaxTokens(512))
 				if err != nil {
 					return errors.New("真实回答模型调用失败：" + liveContextErrorCategory(err))

@@ -23,12 +23,16 @@ type ModelConfig struct {
 //
 // 缓存 key 与客户端创建共用这份配置，避免字段口径不一致。
 func (cfg ModelConfig) openAIConfig() OpenAIClientConfig {
+	first, idle := config.ChatModelStreamTimeouts()
 	return OpenAIClientConfig{
-		APIKey:           cfg.APIKey,
-		BaseURL:          cfg.BaseURL,
-		Model:            cfg.ModelID,
-		Config:           cfg.Config,
-		MaxContextLength: cfg.MaxContextLength,
+		APIKey:                   cfg.APIKey,
+		BaseURL:                  cfg.BaseURL,
+		Model:                    cfg.ModelID,
+		Config:                   cfg.Config,
+		MaxContextLength:         cfg.MaxContextLength,
+		Timeout:                  config.ChatModelTimeout(),
+		StreamFirstOutputTimeout: first,
+		StreamIdleTimeout:        idle,
 	}
 }
 

@@ -132,7 +132,7 @@ func (e *Engine) runPlanExecute(ctx context.Context, req Request, chatModel mode
 			e.emitPlanError(ctx, out, marshalErr)
 			return
 		}
-		iter = runner.Run(ctx, buildInputMessages(req.Query, req.History), adk.WithCheckPointID(id), adk.WithSessionValues(map[string]any{peSessionKey: string(data)}))
+		iter = runner.Run(ctx, buildInputMessages(req.Query, req.History, req.ContextData...), adk.WithCheckPointID(id), adk.WithSessionValues(map[string]any{peSessionKey: string(data)}))
 	}
 	if err != nil {
 		e.emitPlanError(ctx, out, fmt.Errorf("恢复深度任务失败: %w", err))

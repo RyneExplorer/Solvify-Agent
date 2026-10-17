@@ -35,7 +35,7 @@ func (e *Engine) Execute(ctx context.Context, req Request, chatModel model.ToolC
 			req.RunID = uuid.NewString()
 		}
 		ctx = llm.WithBudgetIdentity(ctx, req.ModelID, req.MaxContextLength)
-		chatModel = &budgetModel{inner: chatModel, guard: newBudgetGuard(req, "")}
+		chatModel = &budgetModel{inner: chatModel, guard: newBudgetGuard(req)}
 		if req.effectiveProfile() == ProfileQuick {
 			e.runQuickAgent(ctx, req, chatModel, eventCh)
 			return

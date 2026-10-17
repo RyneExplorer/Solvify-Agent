@@ -149,7 +149,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 		if resume != nil {
 			childResume = &adk.ResumeInfo{EnableStreaming: resume.EnableStreaming, WasInterrupted: true, InterruptState: saved.Data}
 		} else {
-			childInput = &adk.AgentInput{Messages: buildInputMessages(req.Query, req.History), EnableStreaming: in.EnableStreaming}
+			childInput = &adk.AgentInput{Messages: buildInputMessages(req.Query, req.History, req.ContextData...), EnableStreaming: in.EnableStreaming}
 		}
 		ctx, finishTrace := startPEProfessionalTrace(ctx, a.role, childInput, childResume)
 		defer func() { finishTrace(result, taskError) }()
@@ -167,6 +167,9 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 				break
 			}
 			if ev.Err != nil {
+				if isModelRetryNotification(ev.Err) {
+					continue
+				}
 				taskError = ev.Err
 				continue
 			}
@@ -178,6 +181,9 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 				mv := ev.Output.MessageOutput
 				msg, mErr := mv.GetMessage()
 				if mErr != nil {
+					if isModelRetryNotification(mErr) {
+						continue
+					}
 					taskError = mErr
 					continue
 				}
@@ -312,7 +318,7 @@ func (a *peTaskAgent) buildAgent(ctx context.Context, req Request) (*adk.ChatMod
 		config.ToolCallMiddlewares = append(config.ToolCallMiddlewares, compose.ToolMiddleware{Invokable: buildClarifyMiddleware(clarify)})
 	}
 	instruction := composeSystemPrompt(buildDeepTaskPrompt(ctx, a.role, ts, iterations), req.SystemPrompt)
-	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: a.role, Description: a.Description(ctx), Instruction: instruction, Model: r.model, ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: config}, MaxIterations: iterations, Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, instruction, r.model), newBudgetGuard(req, instruction)}, GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: a.role, Description: a.Description(ctx), Instruction: instruction, Model: r.model, ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: e.withToolExecutionTimeout(config)}, MaxIterations: iterations, ModelRetryConfig: e.modelRetryConfig(), Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, instruction, r.model), newBudgetGuard(req)}, GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
 		return append([]*schema.Message{schema.SystemMessage(instruction)}, input.Messages...), nil
 	}})
 	return agent, knowledgeSearchToolOf(ts.Tools), err

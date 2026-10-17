@@ -34,7 +34,8 @@ const (
 
 // Request 描述 Agent 执行请求
 type Request struct {
-	RunID string // 由程序生成并随checkpoint冻结
+	ContextData []ContextMaterial `json:",omitempty"`
+	RunID       string            // 由程序生成并随checkpoint冻结
 	// Profile 问答模式；空值等同 ProfileDeep（保持既有行为不变），判定一律走 effectiveProfile
 	Profile           Profile
 	CheckpointID      string               // 恢复执行时使用的 checkpointID（恢复场景必填）
@@ -60,15 +61,21 @@ type Request struct {
 	InputLimit       int // 模型声明的独立输入上限，纳入快照及压缩水位
 	OutputLimit      int // 本次实际默认输出上限，调用级覆盖由最终模型保护处理
 	MaxContextLength int
-	Summary          *entity.ChatSummary // 会话摘要（长对话压缩内容）— 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段
+	Summary          *entity.ChatSummary
 	Memories         []entity.UserMemory // 用户长期记忆 — 保留给调试/日志
 	UserCtx          PromptUserContext   // 用户基本信息 + 当前时间 — 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段
-	SystemPrompt     string              // 统一入口注入的完整 System Prompt。不为空时 runDeepAgent 完全信任它，不再内部二次拼接摘要/记忆
-	ResumeData       map[string]any      // 恢复执行时的审批数据（key=interruptID, value=用户审批结果）；为 nil 时首次执行
+	SystemPrompt     string
+	ResumeData       map[string]any // 恢复执行时的审批数据（key=interruptID, value=用户审批结果）；为 nil 时首次执行
 	// TaskID/AgentName 用于受控深度编排中的任务归属和事件追踪。
 	TaskID      string
 	AgentName   string
 	ToolDomains []ToolDomain
+}
+
+type ContextMaterial struct {
+	Kind     string
+	Content  string
+	SourceID string `json:",omitempty"`
 }
 
 // effectiveProfile 归一化 Profile：空值按 ProfileDeep 处理。

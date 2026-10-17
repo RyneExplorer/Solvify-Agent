@@ -11,14 +11,19 @@ import (
 
 // ModelListItem 描述服务商明确返回的元数据；不推断能力。
 type ModelListItem struct {
-	ID              string `json:"id"`
-	Object          string `json:"object"`
-	Created         int64  `json:"created"`
-	OwnedBy         string `json:"owned_by"`
-	ContextWindow   int    `json:"context_window,omitempty"`
-	MaxTokens       int    `json:"max_tokens,omitempty"`
-	MaxInputTokens  int    `json:"max_input_tokens,omitempty"`
-	MaxOutputTokens int    `json:"max_output_tokens,omitempty"`
+	ID                  string `json:"id"`
+	Object              string `json:"object"`
+	Created             int64  `json:"created"`
+	OwnedBy             string `json:"owned_by"`
+	ContextWindow       int    `json:"context_window,omitempty"`
+	MaxTokens           int    `json:"max_tokens,omitempty"`
+	MaxInputTokens      int    `json:"max_input_tokens,omitempty"`
+	MaxOutputTokens     int    `json:"max_output_tokens,omitempty"`
+	ReasoningCapability string `json:"reasoning_capability,omitempty"`
+	ReasoningProtocol   string `json:"reasoning_protocol,omitempty"`
+	ToolCalling         *bool  `json:"tool_calling,omitempty"`
+	ToolsWithReasoning  *bool  `json:"tools_with_reasoning,omitempty"`
+	OutputTokenField    string `json:"output_token_field,omitempty"`
 }
 
 // ModelsListResponse 描述 /v1/models 返回结构

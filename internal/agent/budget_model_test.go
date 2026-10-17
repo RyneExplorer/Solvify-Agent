@@ -24,7 +24,7 @@ func TestBudgetModelCopiesToolMessages(t *testing.T) {
 			}
 			return schema.AssistantMessage("结果", nil), nil
 		}}
-		wrapped, err := (&budgetModel{inner: inner, guard: newBudgetGuard(Request{Profile: ProfileDeep, MaxContextLength: 64000, ModelName: "gpt-4o"}, "")}).WithTools([]*schema.ToolInfo{{Name: "probe"}})
+		wrapped, err := (&budgetModel{inner: inner, guard: newBudgetGuard(Request{Profile: ProfileDeep, MaxContextLength: 64000, ModelName: "gpt-4o"})}).WithTools([]*schema.ToolInfo{{Name: "probe"}})
 		if err != nil {
 			t.Fatal(err)
 		}

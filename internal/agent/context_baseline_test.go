@@ -17,7 +17,7 @@ func TestContextBudgetBaseline(t *testing.T) {
 			messages := []*schema.Message{schema.SystemMessage(instruction), schema.UserMessage("查找之前约定的方案"), schema.ToolMessage(strings.Repeat("工具证据内容。", 800), "sample")}
 			tools := []*schema.ToolInfo{{Name: "search", Desc: "查找相关证据"}}
 			before := llm.MessagesTokens(messages, "gpt-4o")
-			guard := newBudgetGuard(Request{Profile: profile, ModelID: "baseline", ModelName: "gpt-4o", MaxContextLength: limit}, "")
+			guard := newBudgetGuard(Request{Profile: profile, ModelID: "baseline", ModelName: "gpt-4o", MaxContextLength: limit})
 			_, state, err := guard.BeforeModelRewriteState(context.Background(), &adk.ChatModelAgentState{Messages: messages, ToolInfos: tools}, nil)
 			if err != nil {
 				t.Fatal(err)

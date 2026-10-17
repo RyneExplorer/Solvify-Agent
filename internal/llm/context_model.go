@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	einoOpenai "github.com/cloudwego/eino-ext/components/model/openai"
 	aclOpenai "github.com/cloudwego/eino-ext/libs/acl/openai"
@@ -18,12 +19,15 @@ import (
 // contextModel 在序列化请求后核对实际消息、工具与输出选项，覆盖扩展选项。
 // 原始模型仅在客户端内部保存，调用方得到的总是受保护对象。
 type contextModel struct {
-	inner     model.ToolCallingChatModel
-	modelName string
-	declared  int
-	output    int
-	policy    config.ContextPolicy
-	options   *ModelExtraConfig
+	inner        model.ToolCallingChatModel
+	modelName    string
+	declared     int
+	output       int
+	policy       config.ContextPolicy
+	options      *ModelExtraConfig
+	timeout      time.Duration
+	firstTimeout time.Duration
+	idleTimeout  time.Duration
 }
 
 func (m *contextModel) ContextWindow() int { return m.declared }
@@ -59,10 +63,15 @@ func (m *contextModel) callOptions(opts []model.Option) []model.Option {
 	return append(next, aclOpenai.WithRequestPayloadModifier(m.checkPayload))
 }
 func (m *contextModel) Generate(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	if m.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, m.timeout)
+		defer cancel()
+	}
 	return m.inner.Generate(ctx, msgs, m.callOptions(opts)...)
 }
 func (m *contextModel) Stream(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	return m.inner.Stream(ctx, msgs, m.callOptions(opts)...)
+	return m.streamWithTimeout(ctx, msgs, opts...)
 }
 func (m *contextModel) checkPayload(ctx context.Context, _ []*schema.Message, raw []byte) ([]byte, error) {
 	if m.options != nil {
@@ -170,9 +179,6 @@ func (m *contextModel) applyModelOptions(raw []byte) ([]byte, error) {
 		} else if p.ReasoningProtocol == "enable_thinking" {
 			payload["enable_thinking"], _ = json.Marshal(enabled)
 		}
-	}
-	if p.ReasoningEffort != "" {
-		payload["reasoning_effort"], _ = json.Marshal(p.ReasoningEffort)
 	}
 	return json.Marshal(payload)
 }

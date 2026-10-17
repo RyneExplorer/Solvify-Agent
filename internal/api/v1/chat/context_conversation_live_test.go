@@ -362,6 +362,7 @@ func TestContextConversationLiveHTTP(t *testing.T) {
 	extra["max_completion_tokens"] = 1024
 	extra["output_token_field"] = "max_tokens"
 	extra["reasoning_mode"] = "off"
+	delete(extra, "execution_policy")
 	raw, err := json.Marshal(extra)
 	if err != nil {
 		t.Fatal(err)
@@ -380,6 +381,12 @@ func TestContextConversationLiveHTTP(t *testing.T) {
 	}
 	report := conversationReport{Model: source.ModelID, Window: 8192, OutputLimit: 1024, Hard: budget.Hard, Soft: budget.Soft, Started: time.Now().In(time.FixedZone("Asia/Shanghai", 8*3600)).Format(time.RFC3339)}
 	outputPath := filepath.Join("..", "..", "..", "..", "tmp", "context-conversation-live.json")
+	if reportName := os.Getenv("SOLVIFY_CONTEXT_REPORT_NAME"); reportName != "" {
+		if filepath.Base(reportName) != reportName || filepath.Ext(reportName) != ".json" {
+			t.Fatal("报告文件名必须是tmp目录中的JSON文件名")
+		}
+		outputPath = filepath.Join("..", "..", "..", "..", "tmp", reportName)
+	}
 	defer func() {
 		encoded, marshalErr := json.MarshalIndent(report, "", "  ")
 		if marshalErr != nil {
@@ -604,6 +611,7 @@ func TestContextConversationLiveHTTP(t *testing.T) {
 		if index == 9 {
 			round.Checks["跨长历史保留与更新"] = strings.Contains(round.Answer, "海星") && strings.Contains(round.Answer, "林舟") && strings.Contains(round.Answer, "5120") && strings.Contains(round.Answer, "2026-12-05") && strings.Contains(round.Answer, "蓝桥-47") && strings.Contains(round.Answer, "审批")
 			round.Checks["修改后未沿用旧预算日期"] = !strings.Contains(round.Answer, "4096") && !strings.Contains(round.Answer, "2026-11-20")
+			round.Checks["明确更新未误报未知"] = !strings.Contains(round.Answer, "未知") && !strings.Contains(round.Answer, "未确认")
 		}
 		if index == 10 || index == 12 {
 			round.Checks["最新事实及口令保留"] = strings.Contains(round.Answer, "5120") && strings.Contains(round.Answer, "2026-12-05") && strings.Contains(round.Answer, "蓝桥-47")

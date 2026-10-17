@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 	"strings"
 	"time"
@@ -53,15 +54,48 @@ func acquireModelCapabilities(ctx context.Context, req requestdto.TestModelReque
 		suggestions := r.SuggestedConfig
 		r = responsedto.TestResult{CapabilitySource: "provider_metadata", CapabilityCheckedAt: time.Now().UTC().Format(time.RFC3339), SuggestedConfig: suggestions,
 			DetectedMaxContextLength: m.ContextWindow, DetectedMaxInputTokens: m.MaxInputTokens, DetectedMaxOutputTokens: m.MaxOutputTokens}
+		if r.SuggestedConfig == nil {
+			r.SuggestedConfig = map[string]interface{}{}
+		}
+		if m.ReasoningCapability != "" {
+			r.SuggestedConfig["reasoning_capability"] = m.ReasoningCapability
+		}
+		if m.ReasoningProtocol != "" {
+			r.SuggestedConfig["reasoning_protocol"] = m.ReasoningProtocol
+		}
+		if m.OutputTokenField != "" {
+			r.SuggestedConfig["output_token_field"] = m.OutputTokenField
+		}
+		if m.ToolCalling != nil {
+			r.SuggestedConfig["tool_calling"] = *m.ToolCalling
+		}
+		if m.ToolsWithReasoning != nil {
+			r.SuggestedConfig["tools_with_reasoning"] = *m.ToolsWithReasoning
+		}
 	}
 	if ctx.Err() != nil {
 		return responsedto.TestResult{}, ctx.Err()
 	}
 	r.Success = r.DetectedMaxContextLength > 0 || r.DetectedMaxInputTokens > 0 || r.DetectedMaxOutputTokens > 0
-	r.Message = "已获取能力资料；请确认回填值并填写实际生成额度和思考设置"
+	r.Message = "已获取能力资料，请确认部署额度；实际输出由系统管理，保存前自动验证工具调用"
 	if !r.Success {
 		r.Message = "未获取到明确能力，请查阅当前部署资料后手动填写；补齐能力后保存时将自动验证工具调用"
 	}
 	r.ResponseTime = time.Since(started).Milliseconds()
+	if r.Success {
+		if r.SuggestedConfig == nil {
+			r.SuggestedConfig = map[string]interface{}{}
+		}
+		if _, ok := r.SuggestedConfig["reasoning_capability"]; !ok {
+			r.SuggestedConfig["reasoning_capability"] = "unknown"
+		}
+		raw, err := json.Marshal(r.SuggestedConfig)
+		if err != nil {
+			return responsedto.TestResult{}, apperrors.New(apperrors.CodeInvalidParam, "服务商能力资料格式无效")
+		}
+		if _, err := llm.ParseModelDraft(raw, 0); err != nil {
+			return responsedto.TestResult{Message: "服务商思考或工具能力资料无效，请由管理员核实部署配置"}, nil
+		}
+	}
 	return r, nil
 }

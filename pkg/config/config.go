@@ -14,6 +14,8 @@ import (
 
 const defaultConfigPath = "configs/config.yaml"
 
+const defaultLLMTimeoutSeconds = 120
+
 // Config 描述应用全局配置
 type Config struct {
 	App            AppConfig            `mapstructure:"app"`
@@ -64,11 +66,12 @@ type CORSConfig struct {
 
 // AgentConfig 描述 Agent 行为开关
 type AgentConfig struct {
-	RuntimeContext RuntimeContextPolicy `mapstructure:"runtime_context"`
-	Context        ContextPolicy        `mapstructure:"context"`
-	EnableDemo     bool                 `mapstructure:"enable_demo"`
-	MaxIterations  int                  `mapstructure:"max_iterations"`
-	ScoreThreshold float64              `mapstructure:"score_threshold"`
+	RuntimeContext  RuntimeContextPolicy `mapstructure:"runtime_context"`
+	Context         ContextPolicy        `mapstructure:"context"`
+	EnableDemo      bool                 `mapstructure:"enable_demo"`
+	MaxIterations   int                  `mapstructure:"max_iterations"`
+	ModelMaxRetries int                  `mapstructure:"model_max_retries"`
+	ScoreThreshold  float64              `mapstructure:"score_threshold"`
 	// QuickAgentMaxIterations 指定快速模式（eino ChatModelAgent）最多执行几个
 	// 模型调用，默认 8，澄清和最终回答均计入轮数，恢复不重置计数。
 	QuickAgentMaxIterations   int  `mapstructure:"quick_agent_max_iterations"`
@@ -82,14 +85,16 @@ type AgentConfig struct {
 
 // LLMConfig 描述模型调用配置
 type LLMConfig struct {
-	Provider    string  `mapstructure:"provider"`
-	APIFormat   string  `mapstructure:"api_format"`
-	Model       string  `mapstructure:"model"`
-	APIKey      string  `mapstructure:"api_key"`
-	BaseURL     string  `mapstructure:"base_url"`
-	Temperature float64 `mapstructure:"temperature"`
-	MaxTokens   int     `mapstructure:"max_tokens"`
-	Timeout     int     `mapstructure:"timeout"`
+	Provider                 string  `mapstructure:"provider"`
+	APIFormat                string  `mapstructure:"api_format"`
+	Model                    string  `mapstructure:"model"`
+	APIKey                   string  `mapstructure:"api_key"`
+	BaseURL                  string  `mapstructure:"base_url"`
+	Temperature              float64 `mapstructure:"temperature"`
+	MaxTokens                int     `mapstructure:"max_tokens"`
+	Timeout                  int     `mapstructure:"timeout"`                     // 系统模型单次完整 HTTP 调用时限，单位秒
+	StreamFirstOutputTimeout int     `mapstructure:"stream_first_output_timeout"` // 从调用开始等待首个有效输出，秒
+	StreamIdleTimeout        int     `mapstructure:"stream_idle_timeout"`         // 有效输出之间的最大空闲时间，秒
 }
 
 // EmbeddingConfig 描述 Embedding 模型配置
@@ -150,9 +155,10 @@ type ExpanderConfig struct {
 
 // ToolsConfig 描述工具调用配置
 type ToolsConfig struct {
-	Enabled    bool                    `mapstructure:"enabled"`
-	WebSearch  WebSearchConfig         `mapstructure:"web_search"`
-	MCPServers []SystemMCPServerConfig `mapstructure:"mcp_servers"`
+	DefaultTimeout int                     `mapstructure:"default_timeout"` // 内置和未指定HTTP工具单次时限，秒
+	Enabled        bool                    `mapstructure:"enabled"`
+	WebSearch      WebSearchConfig         `mapstructure:"web_search"`
+	MCPServers     []SystemMCPServerConfig `mapstructure:"mcp_servers"`
 }
 
 // WebSearchConfig 描述网络搜索工具配置
@@ -163,15 +169,17 @@ type WebSearchConfig struct {
 
 // SystemMCPServerConfig 系统预置 MCP 服务器配置
 type SystemMCPServerConfig struct {
-	Name        string            `mapstructure:"name" json:"name"`
-	Description string            `mapstructure:"description" json:"description"`
-	Transport   string            `mapstructure:"transport" json:"transport"`       // stdio | sse | http
-	Command     string            `mapstructure:"command" json:"command,omitempty"` // stdio
-	Args        []string          `mapstructure:"args" json:"args,omitempty"`       // stdio
-	Env         map[string]string `mapstructure:"env" json:"env,omitempty"`         // stdio
-	URL         string            `mapstructure:"url" json:"url,omitempty"`         // sse/http
-	Headers     map[string]string `mapstructure:"headers" json:"headers,omitempty"` // sse/http
-	Timeout     int               `mapstructure:"timeout" json:"timeout,omitempty"` // 默认 30
+	Name           string            `mapstructure:"name" json:"name"`
+	Description    string            `mapstructure:"description" json:"description"`
+	Transport      string            `mapstructure:"transport" json:"transport"`       // stdio | sse | http
+	Command        string            `mapstructure:"command" json:"command,omitempty"` // stdio
+	Args           []string          `mapstructure:"args" json:"args,omitempty"`       // stdio
+	Env            map[string]string `mapstructure:"env" json:"env,omitempty"`         // stdio
+	URL            string            `mapstructure:"url" json:"url,omitempty"`         // sse/http
+	Headers        map[string]string `mapstructure:"headers" json:"headers,omitempty"` // sse/http
+	Timeout        int               `mapstructure:"timeout" json:"timeout,omitempty"` // 兼容旧配置
+	ConnectTimeout *int              `mapstructure:"connect_timeout" json:"connect_timeout,omitempty"`
+	CallTimeout    *int              `mapstructure:"call_timeout" json:"call_timeout,omitempty"`
 }
 
 // DingTalkConfig 描述钉钉开放平台配置
@@ -350,6 +358,29 @@ func Get() *Config {
 	return globalConfig
 }
 
+// ChatModelTimeout 与 ContextDefaults 一样，在配置加载前使用同一份代码默认值。
+// 配置只在启动时加载，模型调用期间不修改全局配置。
+func ChatModelTimeout() time.Duration {
+	if globalConfig != nil {
+		return time.Duration(globalConfig.LLM.Timeout) * time.Second
+	}
+	return defaultLLMTimeoutSeconds * time.Second
+}
+
+func ToolExecutionTimeout() time.Duration {
+	if globalConfig != nil {
+		return time.Duration(globalConfig.Tools.DefaultTimeout) * time.Second
+	}
+	return time.Duration(Default().Tools.DefaultTimeout) * time.Second
+}
+
+func ChatModelStreamTimeouts() (first, idle time.Duration) {
+	if globalConfig != nil {
+		return time.Duration(globalConfig.LLM.StreamFirstOutputTimeout) * time.Second, time.Duration(globalConfig.LLM.StreamIdleTimeout) * time.Second
+	}
+	return 60 * time.Second, 30 * time.Second
+}
+
 // Default 返回可直接启动的默认配置
 func Default() *Config {
 	return &Config{
@@ -372,6 +403,7 @@ func Default() *Config {
 			RuntimeContext:            DefaultRuntimeContextPolicy(),
 			EnableDemo:                true,
 			MaxIterations:             4,
+			ModelMaxRetries:           3,
 			ScoreThreshold:            0.7,
 			QuickAgentMaxIterations:   8,
 			DeepPlanExecuteEnabled:    true,
@@ -382,11 +414,13 @@ func Default() *Config {
 			DeepMaxExecutorIterations: 6,
 		},
 		LLM: LLMConfig{
-			Provider:    "mock",
-			Model:       "mock-knowledge-assistant",
-			Temperature: 0.7,
-			MaxTokens:   2000,
-			Timeout:     30,
+			Provider:                 "mock",
+			Model:                    "mock-knowledge-assistant",
+			Temperature:              0.7,
+			MaxTokens:                2000,
+			Timeout:                  defaultLLMTimeoutSeconds,
+			StreamFirstOutputTimeout: 60,
+			StreamIdleTimeout:        30,
 		},
 		Embedding: EmbeddingConfig{
 			Provider:  "openai",
@@ -415,7 +449,8 @@ func Default() *Config {
 			},
 		},
 		Tools: ToolsConfig{
-			Enabled: true,
+			Enabled:        true,
+			DefaultTimeout: 30,
 		},
 		DingTalk: DingTalkConfig{
 			OAuthRedirectURI: "http://localhost:5173/dingtalk/bind",
@@ -482,8 +517,33 @@ func (c *Config) Validate() error {
 	if c.LLM.Model == "" {
 		return errors.New("LLM model 不能为空")
 	}
+	for _, item := range []struct {
+		name    string
+		seconds int
+	}{
+		{"timeout", c.LLM.Timeout},
+		{"stream_first_output_timeout", c.LLM.StreamFirstOutputTimeout},
+		{"stream_idle_timeout", c.LLM.StreamIdleTimeout},
+	} {
+		if item.seconds <= 0 || int64(item.seconds) > int64(time.Duration(1<<63-1)/time.Second) {
+			return fmt.Errorf("llm.%s 必须为大于 0 且不超过 9223372036 的秒数", item.name)
+		}
+	}
 	if c.Server.ShutdownTimeoutSeconds <= 0 {
 		return errors.New("服务关闭超时时间必须大于 0")
+	}
+	if c.Tools.DefaultTimeout < 1 || c.Tools.DefaultTimeout > 86400 {
+		return errors.New("tools.default_timeout 必须为1～86400秒")
+	}
+	for _, srv := range c.Tools.MCPServers {
+		if srv.Timeout < 0 || srv.Timeout > 86400 {
+			return errors.New("MCP旧timeout须为0～86400秒")
+		}
+		for _, seconds := range []*int{srv.ConnectTimeout, srv.CallTimeout} {
+			if seconds != nil && (*seconds < 1 || *seconds > 86400) {
+				return errors.New("MCP连接与调用超时须为1～86400秒，或留空")
+			}
+		}
 	}
 	if c.Database.Postgres.Host == "" {
 		return errors.New("database.postgres.host 不能为空")
@@ -520,6 +580,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Agent.QuickAgentMaxIterations <= 0 {
 		return errors.New("agent.quick_agent_max_iterations 必须大于 0")
+	}
+	if c.Agent.ModelMaxRetries < 0 || c.Agent.ModelMaxRetries > 5 {
+		return errors.New("agent.model_max_retries 必须在 0 到 5 之间")
 	}
 	if c.Agent.MaxIterations <= 0 {
 		return errors.New("agent.max_iterations 必须大于 0")
@@ -565,6 +628,12 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("LLM_TIMEOUT"); value != "" {
 		cfg.LLM.Timeout = parseInt(value, cfg.LLM.Timeout)
+	}
+	if value := os.Getenv("LLM_STREAM_FIRST_OUTPUT_TIMEOUT"); value != "" {
+		cfg.LLM.StreamFirstOutputTimeout = parseInt(value, cfg.LLM.StreamFirstOutputTimeout)
+	}
+	if value := os.Getenv("LLM_STREAM_IDLE_TIMEOUT"); value != "" {
+		cfg.LLM.StreamIdleTimeout = parseInt(value, cfg.LLM.StreamIdleTimeout)
 	}
 
 	// Embedding 配置
@@ -632,6 +701,9 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("TOOLS_ENABLED"); value != "" {
 		cfg.Tools.Enabled = parseBool(value, cfg.Tools.Enabled)
+	}
+	if value := os.Getenv("TOOLS_DEFAULT_TIMEOUT"); value != "" {
+		cfg.Tools.DefaultTimeout = parseInt(value, cfg.Tools.DefaultTimeout)
 	}
 	cfg.DingTalk.AppKey = getEnv("DINGTALK_APP_KEY", cfg.DingTalk.AppKey)
 	cfg.DingTalk.AppSecret = getEnv("DINGTALK_APP_SECRET", cfg.DingTalk.AppSecret)
@@ -708,6 +780,9 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("AGENT_QUICK_MAX_ITERATIONS"); value != "" {
 		cfg.Agent.QuickAgentMaxIterations = parseInt(value, cfg.Agent.QuickAgentMaxIterations)
+	}
+	if value := os.Getenv("AGENT_MODEL_MAX_RETRIES"); value != "" {
+		cfg.Agent.ModelMaxRetries = parseInt(value, cfg.Agent.ModelMaxRetries)
 	}
 	if value := os.Getenv("AGENT_MAX_ITERATIONS"); value != "" {
 		cfg.Agent.MaxIterations = parseInt(value, cfg.Agent.MaxIterations)

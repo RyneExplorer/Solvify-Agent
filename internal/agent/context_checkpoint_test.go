@@ -46,12 +46,13 @@ func TestContextCheckpointIntegrityOwnershipAndLegacy(t *testing.T) {
 func TestContextRestoreFreezesMaterialsAndRejectsModelChanges(t *testing.T) {
 	e := deepTestEngine()
 	ctx := context.Background()
-	original := Request{UserID: "u", SessionID: "s", RunID: "r", Query: "冻结的问题", SystemPrompt: "冻结的指令", ModelID: "m", ModelName: "gpt-4o", MaxContextLength: 64000, OutputLimit: 4096, InputLimit: 32000, UserToolConfigIDs: []string{"old-tool"}}
+	original := Request{UserID: "u", SessionID: "s", RunID: "r", Query: "冻结的问题", SystemPrompt: "冻结的指令", ModelID: "m", ModelName: "gpt-4o", MaxContextLength: 64000, OutputLimit: 4096, InputLimit: 32000, UserToolConfigIDs: []string{"old-tool"}, ContextData: []ContextMaterial{{Kind: "summary", Content: "冻结摘要，预算5120"}}}
 	if err := e.contextStore(original).Set(ctx, "cp", []byte("eino-state")); err != nil {
 		t.Fatal(err)
 	}
 	incoming := original
 	incoming.Query = "新素材"
+	incoming.ContextData = []ContextMaterial{{Kind: "summary", Content: "无权替换的摘要"}}
 	incoming.SystemPrompt = "新指令"
 	incoming.UserToolConfigIDs = []string{"new-tool"}
 	incoming.CheckpointID = "cp"
@@ -59,6 +60,9 @@ func TestContextRestoreFreezesMaterialsAndRejectsModelChanges(t *testing.T) {
 	restored, err := e.restoreContextRequest(ctx, incoming)
 	if err != nil || restored.Query != original.Query || restored.SystemPrompt != original.SystemPrompt || restored.UserToolConfigIDs[0] != "old-tool" || restored.ResumeData["interrupt"] != "回答" {
 		t.Fatal("恢复混入新素材", err)
+	}
+	if len(restored.ContextData) != 1 || restored.ContextData[0].Content != original.ContextData[0].Content {
+		t.Fatal("恢复时摘要数据被新请求替换")
 	}
 	for _, change := range []func(*Request){func(r *Request) { r.ModelName = "other" }, func(r *Request) { r.MaxContextLength = 8192 }, func(r *Request) { r.OutputLimit = 8000 }, func(r *Request) { r.InputLimit = 16000 }, func(r *Request) { r.UserID = "other" }} {
 		copy := incoming

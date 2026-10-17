@@ -153,7 +153,7 @@ func TestQuickSummaryHistoryAndFallback(t *testing.T) {
 							return errors.New("最新问答或当前问题被修改")
 						}
 					}
-					guard := newBudgetGuard(req, "必要指令")
+					guard := newBudgetGuard(req)
 					_, guarded, err := guard.BeforeModelRewriteState(ctx, next, nil)
 					if err != nil || guarded.Messages[0] != next.Messages[0] {
 						return errors.New("预算降级丢失摘要或仍超限")

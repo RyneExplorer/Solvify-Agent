@@ -105,7 +105,6 @@ func TestConfiguredProtocolAndInputLimitAtHTTPBoundary(t *testing.T) {
 				c["tools_with_reasoning"] = true
 				if protocol == "reasoning_effort" {
 					c["reasoning_mode"] = "default"
-					c["reasoning_effort"] = "low"
 				}
 			})
 			client, err := NewOpenAIClient(context.Background(), OpenAIClientConfig{Model: "test", BaseURL: server.URL, APIKey: "synthetic", MaxContextLength: 8192, Config: raw})
@@ -129,7 +128,7 @@ func TestConfiguredProtocolAndInputLimitAtHTTPBoundary(t *testing.T) {
 					t.Fatal(payload)
 				}
 			case "reasoning_effort":
-				if payload[protocol] != "low" {
+				if payload[protocol] != nil {
 					t.Fatal(payload)
 				}
 			}

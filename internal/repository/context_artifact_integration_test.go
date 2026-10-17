@@ -67,6 +67,9 @@ func TestContextArtifactPostgresMigrationQuotaAndCleanup(t *testing.T) {
 	if err = testDB.Exec("CREATE TABLE chat_sessions(id uuid PRIMARY KEY,user_id uuid NOT NULL); CREATE TABLE agent_checkpoints(id text PRIMARY KEY,session_id uuid NOT NULL,expired_at timestamptz NOT NULL)").Error; err != nil {
 		t.Fatal(err)
 	}
+	if err = testDB.AutoMigrate(&entity.ChatSummary{}); err != nil {
+		t.Fatal("隔离摘要表初始化失败", err)
+	}
 	for i := 0; i < 2; i++ {
 		if err = database.EnsureContextArtifactSchema(ctx, testDB); err != nil {
 			t.Fatal(err)
@@ -76,6 +79,44 @@ func TestContextArtifactPostgresMigrationQuotaAndCleanup(t *testing.T) {
 	if err = testDB.Exec("INSERT INTO chat_sessions VALUES(?,?)", session, owner).Error; err != nil {
 		t.Fatal(err)
 	}
+	var summaryWrites sync.WaitGroup
+	summaryErrors := make(chan error, 12)
+	latestMessage := uuid.NewString()
+	for count := 1; count <= 12; count++ {
+		summaryWrites.Add(1)
+		go func(covered int) {
+			defer summaryWrites.Done()
+			connection, connectErr := sqlDB.Conn(ctx)
+			if connectErr != nil {
+				summaryErrors <- connectErr
+				return
+			}
+			defer connection.Close()
+			if _, connectErr = connection.ExecContext(ctx, "SET search_path TO "+schemaName); connectErr != nil {
+				summaryErrors <- connectErr
+				return
+			}
+			defer connection.ExecContext(context.Background(), "RESET search_path")
+			isolated, openErr := gorm.Open(postgres.New(postgres.Config{Conn: connection}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+			if openErr != nil {
+				summaryErrors <- openErr
+				return
+			}
+			summaryErrors <- NewSummaryRepository(isolated).Upsert(ctx, &entity.ChatSummary{SessionID: session, Summary: fmt.Sprintf("最新覆盖%d", covered), CoveredCount: covered, LastMessageID: &latestMessage})
+		}(count)
+	}
+	summaryWrites.Wait()
+	close(summaryErrors)
+	for writeErr := range summaryErrors {
+		if writeErr != nil {
+			t.Fatal("并发摘要写入失败", writeErr)
+		}
+	}
+	summary, readErr := NewSummaryRepository(testDB).GetBySessionID(ctx, session)
+	if readErr != nil || summary == nil || summary.CoveredCount != 12 || summary.Summary != "最新覆盖12" {
+		t.Fatalf("并发摘要覆盖倒退：%+v err=%v", summary, readErr)
+	}
+	t.Log("12个独立数据库连接写同一会话摘要，最终正文和覆盖均保留最大版本")
 	newArtifact := func(id string) *entity.ContextArtifact {
 		content := "0123456789"
 		hash := sha256.Sum256([]byte(content))
