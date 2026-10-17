@@ -1,6 +1,49 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { modelSettingsError, modelDraftError, applyModelCapabilities } from '../src/lib/model-capabilities.mjs'
+import { modelSettingsError, modelDraftError, applyModelCapabilities, managedModelConfig, simplifiedModelSettingsError, thinkingState, userModelConfig, userModelSettingsError } from '../src/lib/model-capabilities.mjs'
+
+test('普通用户只提交思考选择，能力字段不成为声明', () => {
+  assert.deepEqual(userModelConfig({ max_output_tokens: 99999, tool_calling: true, reasoning_protocol: 'thinking', reasoning_mode: 'off' }), { reasoning_mode: 'off' })
+  assert.equal(userModelSettingsError(8192, {}), '')
+  assert.ok(userModelSettingsError(0, {}))
+  assert.ok(userModelSettingsError(8192, { reasoning_mode: 'on' }))
+  assert.ok(userModelSettingsError(8192, { tool_calling: false }))
+})
+test('思考开关区分无能力、固定开启、可切换和未知', () => {
+  assert.deepEqual(thinkingState({ reasoning_capability: 'none' }), { enabled: false, disabled: true, label: '该模型不支持思考' })
+  assert.equal(thinkingState({ reasoning_capability: 'always' }).enabled, true)
+  assert.equal(thinkingState({ reasoning_capability: 'always' }).disabled, true)
+  assert.equal(thinkingState({}).disabled, true)
+  assert.equal(thinkingState({ reasoning_capability: 'optional' }).disabled, true)
+  const config = { reasoning_capability: 'optional', reasoning_protocol: 'thinking', reasoning_mode: 'on' }
+  assert.equal(thinkingState(config).disabled, false)
+  assert.equal(thinkingState(config).enabled, true)
+  assert.equal(userModelSettingsError(8192, config), '')
+  assert.ok(userModelSettingsError(8192, { ...config, tools_with_reasoning: false }))
+  assert.equal(userModelSettingsError(8192, { ...config, tools_with_reasoning: false, reasoning_mode: 'off' }), '')
+})
+
+test('新获取的能力不可切换时不残留旧思考开关', () => {
+  for (const capability of ['none', 'always', 'unknown']) {
+    const next = applyModelCapabilities(8192, { reasoning_mode: 'on', reasoning_capability: 'optional', reasoning_protocol: 'thinking' }, { success: true, suggested_config: { reasoning_capability: capability } })
+    assert.equal(next.config.reasoning_mode, 'default')
+    assert.equal(thinkingState(next.config).disabled, true)
+  }
+})
+
+test('简化表单仅需额度；系统执行参数不接受手填覆盖', () => {
+  const config = { max_output_tokens: 4096, timeout: 1, temperature: 2, max_completion_tokens: 8000 }
+  assert.equal(simplifiedModelSettingsError(8192, config), '')
+  const managed = managedModelConfig(config)
+  assert.equal(managed.execution_policy, 'managed_v1')
+  assert.equal(managed.timeout, undefined)
+  assert.equal(managed.temperature, undefined)
+  assert.equal(managed.max_completion_tokens, undefined)
+  assert.equal(config.timeout, 1)
+  assert.ok(simplifiedModelSettingsError(0, config))
+  assert.ok(simplifiedModelSettingsError(8192, {}))
+  assert.ok(simplifiedModelSettingsError(8192, { ...config, tool_calling: false }))
+})
 
 const settings = () => ({ max_input_tokens: 4096, max_output_tokens: 1024, max_completion_tokens: 256, output_token_field: 'max_tokens', tool_calling: true, reasoning_capability: 'none', reasoning_mode: 'default' })
 

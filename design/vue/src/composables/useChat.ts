@@ -405,6 +405,34 @@ export function useChat() {
     let traceId: string | undefined
     let reader: Awaited<ReturnType<typeof chatApi.sendMessage>> | undefined
 
+    const preserveInterruptedAnswer = () => {
+      const partial = streamContent.value || finalContent
+      if (!partial && !streamPlan.value && !streamTimeline.value.length) return
+      streamTimeline.value.forEach(s => { if (s.status === 'running') s.status = 'error' })
+      const message: DisplayMessage = {
+        id: assistantId || 'a-' + Date.now(),
+        role: 'assistant',
+        content: partial ? partial + '\n\n（回答已中断，内容不完整）' : '',
+        sources: finalSources.length ? finalSources : [...(streamSources.value ?? [])],
+        timeline: streamTimeline.value.length ? [...streamTimeline.value] : undefined,
+        execution_plan: streamPlan.value ?? undefined,
+        trace_id: traceId,
+      }
+      const index = messages.value.findIndex(m => m.id === message.id)
+      if (index >= 0) messages.value[index] = message
+      else messages.value.push(message)
+    }
+
+    let lastActivityAt = Date.now()
+    const waitingTimer = setInterval(() => {
+      const silentSeconds = (Date.now() - lastActivityAt) / 1000
+      if (isLoading.value && silentSeconds >= 15) {
+        progressText.value = silentSeconds >= 45
+          ? '等待时间较长，你可以继续等待或停止生成'
+          : '仍在处理，请稍候…'
+      }
+    }, 5000)
+
     const onStreamTimeout = () => {
       if (isLoading.value) {
         abortController?.abort()
@@ -416,7 +444,8 @@ export function useChat() {
         })
       }
     }
-    let safetyTimer = setTimeout(onStreamTimeout, 120000)
+    // 网络兜底留出后端 120 秒调用与错误传递时间；模型超时由后端判定。
+    let safetyTimer = setTimeout(onStreamTimeout, 180000)
 
     try {
       reader = await chatApi.sendMessage(activeSessionId.value, {
@@ -439,7 +468,8 @@ export function useChat() {
         const { done, value } = await reader.read()
         if (done) throw new Error('响应流意外结束，请重试')
         clearTimeout(safetyTimer)
-        safetyTimer = setTimeout(onStreamTimeout, 120000)
+        safetyTimer = setTimeout(onStreamTimeout, 180000)
+        lastActivityAt = Date.now()
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
@@ -535,6 +565,7 @@ export function useChat() {
               case 'error':
                 isLoading.value = false
                 streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
+                preserveInterruptedAnswer()
                 messages.value.push({
                   id: 'e-' + Date.now(),
                   role: 'error',
@@ -636,22 +667,12 @@ export function useChat() {
     } catch (e: unknown) {
       const isAbort = e instanceof DOMException && e.name === 'AbortError'
       if (isAbort) {
-        // 用户中断——保存已有的部分内容 / 推理步骤 / 来源
-        if (finalContent || streamContent.value || streamTimeline.value.length || streamSources.value?.length || streamPlan.value) {
-          streamPlan.value = finishExecutionPlan(streamPlan.value, 'canceled')
-          messages.value.push({
-            id: assistantId || 'a-' + Date.now(),
-            role: 'assistant',
-            content: streamContent.value || finalContent,
-            sources: finalSources.length ? finalSources : (streamSources.value?.length ? [...streamSources.value] : undefined),
-            timeline: streamTimeline.value.length ? [...streamTimeline.value] : undefined,
-            execution_plan: streamPlan.value ?? undefined,
-            trace_id: traceId,
-          })
-        }
+        streamPlan.value = finishExecutionPlan(streamPlan.value, 'canceled')
+        preserveInterruptedAnswer()
       } else {
         const msg = e instanceof Error ? e.message : '请求失败'
         streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
+        preserveInterruptedAnswer()
         messages.value.push({
           id: 'e-' + Date.now(),
           role: 'error',
@@ -661,6 +682,7 @@ export function useChat() {
         })
       }
     } finally {
+      clearInterval(waitingTimer)
       clearTimeout(safetyTimer)
       await reader?.cancel().catch(() => {})
       reader?.releaseLock()

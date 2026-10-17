@@ -33,6 +33,7 @@ export interface ToolProviderInfo {
 
 // 供应商配置
 export interface ProviderConfig {
+  timeout?: number
   method: string
   url: string
   headers: Record<string, string>
@@ -53,8 +54,10 @@ export interface MCPConfig {
   // sse/http
   url?: string
   headers?: Record<string, string>
-  // 通用
+  // 旧字段只用于读取兼容；新保存使用独立时限
   timeout?: number
+  connect_timeout?: number
+  call_timeout?: number
 }
 
 // MCP 工具信息（测试连接返回）

@@ -54,7 +54,7 @@
               >
                 <div class="min-w-0 flex-1 mr-3">
                   <div class="text-sm font-medium text-slate-900 truncate">{{ m.display_name || m.model_id }}</div>
-                  <div class="text-xs text-slate-400 mt-0.5 truncate">{{ m.api_format }} · {{ m.base_url }} · 最大上下文 {{ m.max_context_length }} {{ m.capability_status === 'text_only' ? '· 不支持工具 · 请更换模型' : modelSettingsError(m.max_context_length, m.config) ? '· 能力待确认' : '' }}</div>
+                  <div class="text-xs text-slate-400 mt-0.5 truncate">{{ m.api_format }} · {{ m.base_url }} · 最大上下文 {{ m.max_context_length }} {{ m.capability_status === 'text_only' ? '· 不支持工具 · 请更换模型' : (m.capability_status === 'pending' || modelSettingsError(m.max_context_length, m.config)) ? '· 能力待确认' : '' }}</div>
                 </div>
                 <div class="flex items-center gap-1.5 shrink-0">
                   <button @click="openModelEdit(m)" class="text-xs px-2.5 py-1 rounded-md text-slate-600 hover:bg-slate-100 border border-slate-200">编辑</button>
@@ -278,7 +278,7 @@
 
           <template v-if="modalMode === 'model'">
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
-            <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">API 格式</label><AppSelect v-model="mForm.api_format" class="w-full"><el-option value="openai" label="OpenAI 兼容" /></AppSelect></div>
+            <div class="mb-3 flex items-center text-xs text-slate-400">使用 OpenAI 兼容接口</div>
             <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">Base URL</label><input v-model="mForm.base_url" placeholder="https://api.openai.com/v1" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" /></div>
             <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">Model ID</label><input v-model="mForm.model_id" placeholder="gpt-4" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-accent-500" /></div>
             <div class="mb-3"><label class="block text-[13px] font-medium text-slate-600 mb-1.5">API Key</label><el-input v-model="mForm.api_key" type="password" show-password autocomplete="off" placeholder="已保存密钥自动回填" size="large" class="model-api-key-input" style="--model-key-focus-color: #6366f1" /></div>
@@ -411,7 +411,7 @@
 </template>
 
 <script setup lang="ts">
-import { modelSettingsError, applyModelCapabilities } from '@/lib/model-capabilities.mjs'
+import { userModelSettingsError as modelSettingsError, userModelConfig, applyModelCapabilities } from '@/lib/model-capabilities.mjs'
 import ModelCapabilityFields from '@/components/ModelCapabilityFields.vue'
 import { ref, reactive, computed, nextTick, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -545,15 +545,18 @@ async function openModelEdit(m: UserModelConfigInfo) {
   modelOptions.value = { ...m.config }; cfgText.value = ''; modelTestResult.value = null; showModal.value = true
 }
 
+watch(() => [mForm.max_context_length, mForm.api_key, modelOptions.value.reasoning_mode], () => { modelTestResult.value = null })
+
 // 测试模型连通性
 async function doTestModel(operation: 'test' | 'capabilities' = 'test') {
   try {
     modelTesting.value = true
     modelTestResult.value = null
-    const config = modelOptions.value
-    const identity = JSON.stringify([mForm.api_format, mForm.model_id, mForm.base_url])
+    const config = userModelConfig(modelOptions.value)
+    const identity = JSON.stringify([mForm.api_format, mForm.model_id, mForm.base_url, mForm.api_key, ...(operation === 'test' ? [mForm.max_context_length, modelOptions.value.reasoning_mode] : [])])
     const res = await testUserModelConfig({
       operation,
+      config_id: editId.value || undefined,
       provider: mForm.api_format,
       model_id: mForm.model_id,
       base_url: mForm.base_url,
@@ -561,7 +564,7 @@ async function doTestModel(operation: 'test' | 'capabilities' = 'test') {
       config,
       max_context_length: mForm.max_context_length || undefined,
     })
-    if (identity !== JSON.stringify([mForm.api_format, mForm.model_id, mForm.base_url])) return
+    if (identity !== JSON.stringify([mForm.api_format, mForm.model_id, mForm.base_url, mForm.api_key, ...(operation === 'test' ? [mForm.max_context_length, modelOptions.value.reasoning_mode] : [])])) return
     modelTestResult.value = res.data
     if (operation === 'capabilities') {
       const next = applyModelCapabilities(mForm.max_context_length, modelOptions.value, res.data)
@@ -841,8 +844,8 @@ async function doSave() {
     if (modalMode.value === 'model') { const error = modelSettingsError(mForm.max_context_length, modelOptions.value); if (error) throw new Error(error) }
     if (modalMode.value === 'model') {
       modelSaving.value = true
-      const config = modelOptions.value
-      if (editId.value) await updateModel(editId.value, { ...mForm, config, reconfirm_capabilities: !modelSettingsError(mForm.max_context_length, config) })
+      const config = userModelConfig(modelOptions.value)
+      if (editId.value) await updateModel(editId.value, { ...mForm, config, reconfirm_capabilities: !modelSettingsError(mForm.max_context_length, modelOptions.value) })
       else await createModel({ ...mForm, config })
       loadModels()
     } else {

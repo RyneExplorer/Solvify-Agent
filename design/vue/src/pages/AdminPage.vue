@@ -125,7 +125,7 @@
               <td class="px-4 py-3 font-medium text-slate-900">{{ m.provider }}</td>
               <td class="px-4 py-3 text-slate-900">{{ m.model_id }}</td>
               <td class="px-4 py-3 text-slate-900">{{ m.base_url || '-' }}</td>
-              <td class="px-4 py-3 text-slate-900 font-mono tabular-nums">{{ m.max_context_length ?? '-' }} {{ m.capability_status === 'text_only' ? '（当前能力不能用于工具Agent）' : modelSettingsError(m.max_context_length, m.config) ? '（能力待确认）' : '' }}</td>
+              <td class="px-4 py-3 text-slate-900 font-mono tabular-nums">{{ m.max_context_length ?? '-' }} {{ m.capability_status === 'text_only' ? '（当前能力不能用于工具Agent）' : (m.capability_status === 'pending' || modelSettingsError(m.max_context_length, m.config)) ? '（能力待确认）' : '' }}</td>
               <td class="px-4 py-3"><AppBadge :variant="m.is_enabled ? 'success' : 'neutral'">{{ m.is_enabled ? '启用' : '停用' }}</AppBadge></td>
               <td class="px-4 py-3">
                 <div class="flex items-center gap-1">
@@ -217,8 +217,7 @@
                 <div class="flex items-center gap-1">
                   <AppButton
                     variant="ghost" size="sm"
-                    :disabled="p.is_system"
-                    :title="p.is_system ? '系统预置供应商不支持编辑' : ''"
+                    :title="p.is_system ? '编辑超时时间' : ''"
                     @click="openToolProviderModal(p)"
                   >编辑</AppButton>
                   <AppButton
@@ -289,8 +288,7 @@
                 <div class="flex items-center gap-1">
                   <AppButton
                     variant="ghost" size="sm"
-                    :disabled="s.is_system"
-                    :title="s.is_system ? '系统预置供应商不支持编辑' : ''"
+                    :title="s.is_system ? '编辑超时时间' : ''"
                     @click="openMCPServerEdit(s)"
                   >编辑</AppButton>
                   <AppButton
@@ -323,10 +321,7 @@
         <h3 class="text-lg font-semibold text-slate-900 mb-4">{{ editingModel ? '编辑模型' : '添加模型' }}</h3>
         <div class="space-y-3 overflow-y-auto min-h-0 pr-1">
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label class="block text-[13px] font-medium text-slate-600 mb-1.5">提供商</label>
-              <input v-model="modelForm.provider" placeholder="例如：OpenAI / 阿里云 / 智谱" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
-            </div>
+            <div class="flex items-center text-xs text-slate-400">使用 OpenAI 兼容接口</div>
             <div>
               <label class="block text-[13px] font-medium text-slate-600 mb-1.5">模型 ID</label>
               <input v-model="modelForm.model_id" placeholder="例如：gpt-4 / qwen-max" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
@@ -340,7 +335,7 @@
               <el-input v-model="modelForm.api_key" type="password" show-password autocomplete="off" placeholder="已保存密钥自动回填" size="large" class="model-api-key-input" />
             </div>
           </div>
-          <ModelCapabilityFields v-model:window="modelForm.max_context_length" v-model:config="modelForm.config" />
+          <ModelCapabilityFields admin-mode v-model:window="modelForm.max_context_length" v-model:config="modelForm.config" />
 
           <!-- 测试结果 -->
           <div v-if="modelTestResult" class="mt-2">
@@ -400,15 +395,15 @@
       <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-[520px]" style="max-height:90vh;overflow-y:auto;">
         <h3 class="text-lg font-semibold text-slate-900 mb-4">{{ editingToolProvider ? '编辑供应商' : '添加供应商' }}</h3>
         <div class="space-y-4">
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <label class="block text-[13px] font-medium text-slate-600 mb-1.5">名称 <span class="text-red-500">*</span></label>
             <input v-model="toolProviderForm.name" placeholder="博查 AI" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
           </div>
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <label class="block text-[13px] font-medium text-slate-600 mb-1.5">Provider Key <span class="text-red-500">*</span></label>
             <input v-model="toolProviderForm.provider_key" placeholder="bocha" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
           </div>
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <label class="block text-[13px] font-medium text-slate-600 mb-1.5">供应商类型 <span class="text-red-500">*</span></label>
             <AppSelect v-model="toolProviderForm.provider_type" class="w-full">
               <el-option value="http" label="HTTP" />
@@ -416,7 +411,7 @@
               <el-option value="custom" label="自定义" />
             </AppSelect>
           </div>
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <label class="block text-[13px] font-medium text-slate-600 mb-1.5">描述</label>
             <textarea v-model="toolProviderForm.description" rows="2" placeholder="供应商描述" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900 resize-none" />
           </div>
@@ -427,6 +422,11 @@
               <label class="block text-[13px] font-medium text-slate-600">HTTP 配置 <span class="text-red-500">*</span></label>
             </div>
             <div class="space-y-3 border border-slate-200 rounded-xl p-3 bg-slate-50">
+              <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">单次执行超时（秒，可选）</label>
+                <input v-model="toolProviderForm.timeout" type="number" min="1" max="86400" step="1" placeholder="留空使用系统默认时限" class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900" />
+                <p class="text-xs text-slate-400 mt-1">包含建连、等待响应和完整响应体读取；保存后新一轮执行生效。</p>
+              </div>
               <div class="grid grid-cols-3 gap-2">
                 <AppSelect v-model="toolProviderForm.method" class="w-full">
                   <el-option value="GET" label="GET" />
@@ -474,7 +474,7 @@
             <div class="space-y-3 border border-slate-200 rounded-xl p-3 bg-slate-50">
               <div>
                 <label class="block text-xs font-medium text-slate-500 mb-1">传输方式 <span class="text-red-500">*</span></label>
-                <AppSelect v-model="mcpForm.transport" class="w-full">
+                <AppSelect :disabled="editingToolProvider?.is_system" v-model="mcpForm.transport" class="w-full">
                   <el-option value="stdio" label="Stdio (本地进程)" />
                   <el-option value="sse" label="SSE (远程 HTTP 流)" />
                   <el-option value="http" label="HTTP (同步接口)" />
@@ -482,6 +482,7 @@
               </div>
 
               <!-- Stdio -->
+              <fieldset :disabled="editingToolProvider?.is_system" class="space-y-3">
               <template v-if="mcpForm.transport === 'stdio'">
                 <div>
                   <label class="block text-xs font-medium text-slate-500 mb-1">启动命令 <span class="text-red-500">*</span></label>
@@ -536,17 +537,19 @@
                 </div>
               </template>
 
-              <div>
-                <label class="block text-xs font-medium text-slate-500 mb-1">超时时间（秒，可选）</label>
-                <input
-                  v-model.number="mcpForm.timeout"
-                  type="number"
-                  min="1"
-                  max="300"
-                  placeholder="默认 30"
-                  class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900"
-                />
+              </fieldset>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-xs font-medium text-slate-500 mb-1">连接初始化超时（秒）</label>
+                  <input v-model="mcpForm.connect_timeout" type="number" min="1" max="86400" step="1" placeholder="默认30" class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2" />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-500 mb-1">单次工具调用超时（秒）</label>
+                  <input v-model="mcpForm.call_timeout" type="number" min="1" max="86400" step="1" placeholder="默认300" class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2" />
+                </div>
               </div>
+              <p class="text-xs text-slate-400">两项分别计时；留空恢复各自默认值。保存后新一轮执行生效。</p>
+              <p v-if="editingToolProvider?.is_system" class="text-xs text-amber-600">系统预置仅允许修改超时；保存值在重启后继续生效。</p>
             </div>
           </div>
 
@@ -576,7 +579,7 @@
           </div>
 
           <!-- Config Schema Builder -->
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <div class="flex items-center justify-between mb-1.5">
               <label class="block text-[13px] font-medium text-slate-600">用户配置 Schema</label>
               <button type="button" @click="addSchemaField" class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-1 rounded-md hover:bg-slate-50">+ 添加字段</button>
@@ -607,7 +610,7 @@
           </div>
 
           <!-- 管理配置键值对 -->
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <div class="flex items-center justify-between mb-1.5">
               <label class="block text-[13px] font-medium text-slate-600">管理员业务参数</label>
               <button type="button" @click="addKV(toolProviderForm.admin_config_rows)" class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-1 rounded-md hover:bg-slate-50">+ 添加</button>
@@ -621,7 +624,7 @@
           </div>
 
           <!-- Rate Limit Key-Value -->
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <div class="flex items-center justify-between mb-1.5">
               <label class="block text-[13px] font-medium text-slate-600">限流配置</label>
               <button type="button" @click="addKV(toolProviderForm.rate_limit_rows)" class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-1 rounded-md hover:bg-slate-50">+ 添加</button>
@@ -767,8 +770,9 @@
 </template>
 
 <script setup lang="ts">
-import { modelSettingsError, applyModelCapabilities } from '@/lib/model-capabilities.mjs'
+import { simplifiedModelSettingsError as modelSettingsError, managedModelConfig, applyModelCapabilities } from '@/lib/model-capabilities.mjs'
 import ModelCapabilityFields from '@/components/ModelCapabilityFields.vue'
+import { toolTimeoutValue, toolTimeoutFromConfig } from '@/lib/tool-timeout.mjs'
 import { provide, ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AppCard from '../components/ui/AppCard.vue'
@@ -850,7 +854,7 @@ const filteredModels = computed(() => {
 })
 const modelModalVisible = ref(false)
 const editingModel = ref<ModelInfo | null>(null)
-const modelForm = ref({ provider: '', model_id: '', base_url: '', api_key: '', max_context_length: 0, config: {} as Record<string, unknown> })
+const modelForm = ref({ provider: 'openai', model_id: '', base_url: '', api_key: '', max_context_length: 0, config: {} as Record<string, unknown> })
 const modelFormValid = computed(() => modelForm.value.provider.trim() && modelForm.value.model_id.trim() && !modelSettingsError(modelForm.value.max_context_length, modelForm.value.config))
 const modelTestResult = ref<ModelTestResult | null>(null)
 const modelTesting = ref(false)
@@ -874,16 +878,19 @@ async function openModelModal(model?: ModelInfo) {
   if (model) {
     modelForm.value = { provider: model.provider, model_id: model.model_id, base_url: model.base_url || '', api_key: model.api_key || '', max_context_length: model.max_context_length || 0, config: { ...model.config } }
   } else {
-    modelForm.value = { provider: '', model_id: '', base_url: '', api_key: '', max_context_length: 0, config: {} as Record<string, unknown> }
+    modelForm.value = { provider: 'openai', model_id: '', base_url: '', api_key: '', max_context_length: 0, config: {} as Record<string, unknown> }
   }
   modelModalVisible.value = true
 }
+
+watch(() => [modelForm.value.max_context_length, modelForm.value.api_key, modelForm.value.config.reasoning_mode], () => { modelTestResult.value = null })
 
 async function saveModel() {
   if (modelSaving.value) return
   try {
     const error = modelSettingsError(modelForm.value.max_context_length, modelForm.value.config); if (error) throw new Error(error)
     modelSaving.value = true
+    modelForm.value.config = managedModelConfig(modelForm.value.config)
     if (editingModel.value) {
       const payload = { ...modelForm.value, reconfirm_capabilities: !modelSettingsError(modelForm.value.max_context_length, modelForm.value.config) }
       if (!payload.api_key) delete payload.api_key
@@ -903,17 +910,17 @@ async function testModel(operation: 'test' | 'capabilities' = 'test') {
   try {
     modelTesting.value = true
     modelTestResult.value = null
-    const identity = JSON.stringify([modelForm.value.provider, modelForm.value.model_id, modelForm.value.base_url])
+    const identity = JSON.stringify([modelForm.value.provider, modelForm.value.model_id, modelForm.value.base_url, modelForm.value.api_key, ...(operation === 'test' ? [modelForm.value.max_context_length, modelForm.value.config.reasoning_mode] : [])])
     const res = await adminTestModel({
       operation,
       provider: modelForm.value.provider,
       model_id: modelForm.value.model_id,
       base_url: modelForm.value.base_url,
       api_key: modelForm.value.api_key,
-      config: modelForm.value.config,
+      config: managedModelConfig(modelForm.value.config),
       max_context_length: modelForm.value.max_context_length || undefined,
     })
-    if (identity !== JSON.stringify([modelForm.value.provider, modelForm.value.model_id, modelForm.value.base_url])) return
+    if (identity !== JSON.stringify([modelForm.value.provider, modelForm.value.model_id, modelForm.value.base_url, modelForm.value.api_key, ...(operation === 'test' ? [modelForm.value.max_context_length, modelForm.value.config.reasoning_mode] : [])])) return
     modelTestResult.value = res.data
     if (operation === 'capabilities') {
       const next = applyModelCapabilities(modelForm.value.max_context_length, modelForm.value.config, res.data)
@@ -1187,6 +1194,7 @@ interface KVRow {
 }
 
 const toolProviderForm = ref<{
+  timeout: number | string
   name: string
   provider_key: string
   provider_type: 'http' | 'mcp' | 'custom'
@@ -1199,7 +1207,7 @@ const toolProviderForm = ref<{
   headers_rows: KVRow[]
   body_template_text: string
   response_mapping_rows: KVRow[]
-}>({ name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] })
+}>({ timeout: '', name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] })
 const toolProviderFormValid = computed(() => toolProviderForm.value.name.trim() && toolProviderForm.value.provider_key.trim() && toolProviderForm.value.provider_type.trim())
 const toolTestResult = ref<ToolTestResult | null>(null)
 const toolTesting = ref(false)
@@ -1222,7 +1230,8 @@ interface MCPFormState {
   env_rows: KVRow[]
   url: string
   headers_rows: KVRow[]
-  timeout: number
+  connect_timeout: number | string
+  call_timeout: number | string
 }
 function createEmptyMCPForm(): MCPFormState {
   return {
@@ -1232,7 +1241,8 @@ function createEmptyMCPForm(): MCPFormState {
     env_rows: [],
     url: '',
     headers_rows: [],
-    timeout: 30,
+    connect_timeout: '',
+    call_timeout: '',
   }
 }
 const mcpForm = reactive<MCPFormState>(createEmptyMCPForm())
@@ -1262,17 +1272,27 @@ function mcpFromJSON(json: string | object | null): MCPFormState {
         form.headers_rows.push({ key: k, value: String(v) })
       }
     }
-    form.timeout = typeof cfg.timeout === 'number' ? cfg.timeout : 30
+    form.connect_timeout = toolTimeoutFromConfig(cfg.connect_timeout ?? cfg.timeout)
+    form.call_timeout = toolTimeoutFromConfig(cfg.call_timeout ?? cfg.timeout)
   } catch { /* ignore */ }
   return form
 }
 
 // 构建 MCP provider_config（裸配置格式，后端自动包装）
+function buildMCPTimeoutConfig(form: MCPFormState): Record<string, unknown> {
+  const result: Record<string, unknown> = {}
+  const connect = toolTimeoutValue(form.connect_timeout)
+  const call = toolTimeoutValue(form.call_timeout)
+  if (connect !== undefined) result.connect_timeout = connect
+  if (call !== undefined) result.call_timeout = call
+  return result
+}
+
 function buildMCPProviderConfig(form: MCPFormState): Record<string, unknown> | undefined {
   const base: Record<string, unknown> = {
     transport: form.transport,
   }
-  if (form.timeout && form.timeout !== 30) base.timeout = form.timeout
+  Object.assign(base, buildMCPTimeoutConfig(form))
   if (form.transport === 'stdio') {
     if (!form.command.trim()) return undefined
     base.command = form.command.trim()
@@ -1309,6 +1329,7 @@ async function quickTestToolProvider(p: ToolProviderInfo) {
       : undefined
     const res = await adminTestTool({
       provider_type: p.provider_type,
+      provider_id: p.id,
       provider_config: pcfg,
       admin_config: p.admin_config ? (p.admin_config as Record<string, unknown>) : undefined,
       tool_input: {},
@@ -1385,6 +1406,7 @@ function providerConfigFromJSON(json: string | object | null) {
     }
     return {
       method: (obj.method === 'GET' ? 'GET' : 'POST') as 'GET' | 'POST',
+      timeout: toolTimeoutFromConfig(obj.timeout),
       url: obj.url || '',
       headers_rows: headers,
       body_template_text: obj.body_template ? JSON.stringify(obj.body_template, null, 2) : '{}',
@@ -1401,6 +1423,8 @@ function buildProviderConfig(form: typeof toolProviderForm.value): Record<string
     method: form.method,
     url: form.url,
   }
+  const timeout = toolTimeoutValue(form.timeout)
+  if (timeout !== undefined) obj.timeout = timeout
   const headers = parseKVRows(form.headers_rows)
   if (headers) obj.headers = headers
   if (form.body_template_text.trim() && form.body_template_text.trim() !== '{}') {
@@ -1499,6 +1523,7 @@ function openToolProviderModal(provider?: ToolProviderInfo) {
   Object.assign(mcpForm, provider?.provider_type === 'mcp' ? mcpFromJSON(provider.provider_config) : createEmptyMCPForm())
   if (provider) {
     toolProviderForm.value = {
+      timeout: providerConfig?.timeout ?? '',
       name: provider.name,
       provider_key: provider.provider_key,
       provider_type: (provider.provider_type as 'http' | 'mcp' | 'custom') || 'http',
@@ -1513,7 +1538,7 @@ function openToolProviderModal(provider?: ToolProviderInfo) {
       response_mapping_rows: providerConfig?.response_mapping_rows || [],
     }
   } else {
-    toolProviderForm.value = { name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] }
+    toolProviderForm.value = { timeout: '', name: '', provider_key: '', provider_type: 'http', description: '', schema_fields: [], admin_config_rows: [], rate_limit_rows: [], method: 'POST', url: '', headers_rows: [], body_template_text: '{}', response_mapping_rows: [] }
   }
   toolTestResult.value = null
   mcpManifest.value = (provider?.provider_type === 'mcp' && provider?.mcp_tool_manifest) ? [...provider.mcp_tool_manifest] : []
@@ -1532,9 +1557,7 @@ async function autoProbeCurrentMCP(force: boolean) {
   if (mcpProbing.value) return
   try {
     mcpProbing.value = true
-    const providerConfig = provider?.provider_config && typeof provider.provider_config === 'object'
-      ? provider.provider_config as unknown as Record<string, unknown>
-      : buildMCPProviderConfig(mcpForm)
+    const providerConfig = buildMCPProviderConfig(mcpForm)
     const res = await adminProbeTool({
       provider_type: 'mcp',
       provider_id: provider?.id,
@@ -1563,7 +1586,11 @@ async function saveToolProvider() {
     } else {
       providerConfig = buildProviderConfig(toolProviderForm.value)
     }
-    if (editingToolProvider.value) {
+    if (editingToolProvider.value?.is_system) {
+      await adminUpdateToolProvider(currentToolType.value.id, editingToolProvider.value.id, {
+        provider_config: { mcp: buildMCPTimeoutConfig(mcpForm) },
+      })
+    } else if (editingToolProvider.value) {
       const payload: Parameters<typeof adminUpdateToolProvider>[2] = {
         name: toolProviderForm.value.name,
         provider_key: toolProviderForm.value.provider_key,

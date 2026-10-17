@@ -76,6 +76,7 @@ export function deleteUserModelConfig(id: string) {
 
 // 测试用户模型配置连通性
 export function testUserModelConfig(data: {
+	config_id?: string
   provider: string
   model_id: string
   base_url: string

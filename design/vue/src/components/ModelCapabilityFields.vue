@@ -1,79 +1,45 @@
 <template>
   <section class="capability-panel">
-    <div class="flex items-center justify-between gap-3 mb-3">
-      <h4 class="text-sm font-semibold text-slate-800">模型能力</h4>
-      <span class="text-[11px] text-slate-400">单位：token</span>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <label class="field-label">上下文窗口（token）
+        <input :value="window || ''" type="number" min="1024" max="2000000" placeholder="获取能力或按部署资料填写" class="model-input" @input="setWindow(numberValue($event))" />
+      </label>
+      <div class="field-label">
+        <div class="flex items-center justify-between"><span>思考模式</span><el-switch :model-value="thinking.enabled" :disabled="thinking.disabled" aria-label="思考模式" @change="set('reasoning_mode', $event ? 'on' : 'off')" /></div>
+        <p class="text-[11px] text-slate-500 mt-2 font-normal">{{ thinking.label }}</p>
+        <button v-if="!thinking.disabled && config.reasoning_mode && config.reasoning_mode !== 'default'" type="button" class="text-[11px] text-indigo-600 mt-1" @click="set('reasoning_mode', 'default')">恢复服务商默认</button>
+      </div>
     </div>
-    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-      <label class="field-label">总上下文窗口
-        <input :value="window || ''" type="number" min="1024" max="2000000" placeholder="待确认" class="model-input" @input="setWindow(numberValue($event))" />
-      </label>
-      <label class="field-label">最大输出
-        <input :value="config.max_output_tokens || ''" type="number" min="1" placeholder="服务商上限" class="model-input" @input="set('max_output_tokens', numberValue($event))" />
-      </label>
-      <label class="field-label">本次输出额度
-        <input :value="config.max_completion_tokens || ''" type="number" min="1" placeholder="按任务需要" class="model-input" @input="set('max_completion_tokens', numberValue($event))" />
-      </label>
-    </div>
-    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
-      <label class="field-label">工具调用 <span class="text-emerald-600 text-[10px]">必需</span>
-        <AppSelect :model-value="booleanValue(config.tool_calling)" class="capability-select" popper-class="model-capability-menu" @change="changeToolCalling(String($event))">
-          <el-option value="" label="待确认" />
-          <el-option value="true" label="已确认支持" />
-          <el-option v-if="config.tool_calling === false" value="false" disabled label="不支持 · 请更换模型" />
-        </AppSelect>
-      </label>
-      <label class="field-label">输出参数
-        <AppSelect :model-value="String(config.output_token_field || '')" placeholder="选择输出参数" class="capability-select" popper-class="model-capability-menu" @change="set('output_token_field', String($event))">
-          <el-option value="max_tokens" label="max_tokens" /><el-option value="max_completion_tokens" label="max_completion_tokens" />
-        </AppSelect>
-      </label>
-      <label class="field-label">思考能力
-        <AppSelect :model-value="String(config.reasoning_capability || '')" placeholder="待确认" class="capability-select" popper-class="model-capability-menu" @change="changeReasoning(String($event))">
-          <el-option value="none" label="无思考模式" /><el-option value="optional" label="可切换" /><el-option value="always" label="始终思考" />
-        </AppSelect>
-      </label>
-      <label v-if="config.reasoning_capability === 'optional'" class="field-label">思考设置
-        <AppSelect :model-value="String(config.reasoning_mode || 'default')" class="capability-select" popper-class="model-capability-menu" @change="set('reasoning_mode', String($event))">
-          <el-option value="default" label="服务商默认" /><el-option value="off" label="关闭" /><el-option value="on" label="开启" />
-        </AppSelect>
-      </label>
-      <label v-if="config.reasoning_capability && config.reasoning_capability !== 'none'" class="field-label">思考时支持工具
-        <AppSelect :model-value="booleanValue(config.tools_with_reasoning)" placeholder="待确认" class="capability-select" popper-class="model-capability-menu" @change="set('tools_with_reasoning', String($event) === 'true')">
-          <el-option value="true" label="支持" /><el-option value="false" label="不支持 · 需关闭思考" />
-        </AppSelect>
-      </label>
-    </div>
-    <p v-if="admissionError" role="alert" class="text-xs text-red-600 mt-3">{{ admissionError }}</p>
-    <div class="flex items-center gap-2 text-[11px] text-slate-400 mt-3">
-      <span>{{ originLabel(origin?.source) }}</span>
-      <span v-if="origin?.checked_at">{{ origin.checked_at.slice(0, 10) }}</span>
-    </div>
-    <details class="mt-3 border-t border-slate-200 pt-3">
-      <summary class="text-xs text-slate-500 cursor-pointer select-none">高级设置与能力来源</summary>
+    <p class="text-[11px] text-slate-500 mt-3">保存前验证当前思考设置的工具调用，不支持工具的模型不能使用。</p>
+    <p v-if="config.tool_calling === false" role="alert" class="text-xs text-red-600 mt-2">该模型不支持工具调用，请更换模型。</p>
+    <span class="block text-[11px] text-slate-400 mt-2">{{ originLabel(origin?.source) }}</span>
+    <details v-if="adminMode" class="mt-3 border-t border-slate-200 pt-3">
+      <summary class="text-xs text-slate-500 cursor-pointer select-none">管理员部署资料（获取不到时补充）</summary>
+      <p class="text-[11px] text-slate-400 mt-2">仅适用于当前地址和模型，用户配置复用资料；保存仍需实测工具协议。</p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+        <label class="field-label">模型最大输出
+          <input :value="config.max_output_tokens || ''" type="number" min="1" placeholder="按服务商资料填写" class="model-input" @input="set('max_output_tokens', numberValue($event))" />
+        </label>
         <label class="field-label">独立输入上限（可选）
           <input :value="config.max_input_tokens || ''" type="number" min="1" placeholder="无额外限制时留空" class="model-input" @input="set('max_input_tokens', numberValue($event))" />
         </label>
-        <label v-if="config.reasoning_capability && config.reasoning_capability !== 'none'" class="field-label">思考协议
-          <AppSelect :model-value="String(config.reasoning_protocol || '')" class="capability-select" popper-class="model-capability-menu" @change="changeProtocol(String($event))">
-            <el-option value="" label="服务商默认" /><el-option value="thinking" label="thinking.type" /><el-option value="enable_thinking" label="enable_thinking" /><el-option value="reasoning_effort" label="reasoning_effort" />
+        <label class="field-label">思考能力
+          <AppSelect :model-value="String(config.reasoning_capability || 'unknown')" class="capability-select" popper-class="model-capability-menu" @change="changeCapability(String($event))">
+            <el-option value="unknown" label="未知" /><el-option value="none" label="不支持" /><el-option value="optional" label="可以切换" /><el-option value="always" label="始终开启" />
           </AppSelect>
         </label>
-        <label v-if="config.reasoning_protocol === 'reasoning_effort'" class="field-label">思考强度
-          <AppSelect :model-value="String(config.reasoning_effort || '')" class="capability-select" popper-class="model-capability-menu" @change="set('reasoning_effort', String($event))">
-            <el-option value="" label="服务商默认" /><el-option value="low" label="low" /><el-option value="medium" label="medium" /><el-option value="high" label="high" />
+        <label v-if="config.reasoning_capability === 'optional'" class="field-label">思考开关协议
+          <AppSelect :model-value="String(config.reasoning_protocol || '')" class="capability-select" popper-class="model-capability-menu" @change="set('reasoning_protocol', String($event))">
+            <el-option value="" label="尚未识别" /><el-option value="thinking" label="thinking.type" /><el-option value="enable_thinking" label="enable_thinking" />
           </AppSelect>
         </label>
-        <label class="field-label">温度（可选）
-          <input :value="config.temperature ?? ''" type="number" min="0" max="2" step="0.1" placeholder="服务商默认" class="model-input" @input="setOptionalNumber('temperature', $event)" />
-        </label>
-        <label class="field-label">超时 / 秒（可选）
-          <input :value="config.timeout ?? ''" type="number" min="1" max="300" placeholder="沿用请求时限" class="model-input" @input="setOptionalNumber('timeout', $event)" />
+        <label class="field-label">输出参数协议
+          <AppSelect :model-value="String(config.output_token_field || 'max_tokens')" class="capability-select" popper-class="model-capability-menu" @change="set('output_token_field', String($event))">
+            <el-option value="max_tokens" label="max_tokens" /><el-option value="max_completion_tokens" label="max_completion_tokens" />
+          </AppSelect>
         </label>
       </div>
       <p v-if="origin?.url" class="text-xs text-slate-400 break-all mt-3">资料：{{ origin.url }}</p>
-      <p class="text-[11px] text-slate-400 mt-3 leading-relaxed">独立输入上限留空时共享总窗口。补齐能力后，保存时自动验证工具调用；验证通过才会保存。</p>
     </details>
   </section>
 </template>
@@ -81,43 +47,23 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import AppSelect from '@/components/ui/AppSelect.vue'
-import { modelDraftError } from '@/lib/model-capabilities.mjs'
-const props = defineProps<{ window: number; config: Record<string, unknown> }>()
+import { thinkingState } from '@/lib/model-capabilities.mjs'
+const props = defineProps<{ window: number; config: Record<string, unknown>; adminMode?: boolean }>()
 const emit = defineEmits<{ 'update:window': [number]; 'update:config': [Record<string, unknown>] }>()
-function originLabel(source?: string) { return ({ manual: '手动确认', provider_metadata: '当前服务商元数据', official_catalog: '已核实官方资料' } as Record<string, string>)[source || ''] || '手动填写 / 待确认' }
-const admissionError = computed(() => modelDraftError(props.window, props.config))
-const origin = computed(() => props.config.capability_origin as { source?: string; url?: string; checked_at?: string } | undefined)
-const limits = [
-  { key: 'max_output_tokens', label: '模型最大生成额度（token）' },
-  { key: 'max_completion_tokens', label: '本配置实际生成额度（token）' },
-  { key: 'max_input_tokens', label: '独立输入上限（可选，仅服务商额外限制时填写）' },
-]
-function changeToolCalling(value: string) {
-  const next: Record<string, unknown> = { ...props.config, capability_origin: { source: 'manual' } }
-  if (value === '') delete next.tool_calling
-  else next.tool_calling = value === 'true'
+const origin = computed(() => props.config.capability_origin as { source?: string; url?: string } | undefined)
+const thinking = computed(() => thinkingState(props.config))
+function originLabel(source?: string) { return ({ manual: '手动确认的部署资料', provider_metadata: '来自当前服务商', official_catalog: '来自已核实官方资料' } as Record<string, string>)[source || ''] || '待获取或由管理员补充能力资料' }
+function numberValue(event: Event) { return Number((event.target as HTMLInputElement).value) }
+function setWindow(value: number) { emit('update:window', value) }
+function set(key: string, value: unknown) {
+  const next: Record<string, unknown> = { ...props.config, [key]: value }
+  if (key !== 'reasoning_mode') next.capability_origin = { source: 'manual' }
+  if (value === 0 || value === '') delete next[key]
   emit('update:config', next)
 }
-function textValue(event: Event) { return (event.target as HTMLInputElement).value }
-function numberValue(event: Event) { return Number(textValue(event)) }
-function booleanValue(value: unknown) { return typeof value === 'boolean' ? String(value) : '' }
-function setWindow(value: number) { emit('update:window', value); emit('update:config', { ...props.config, capability_origin: { source: 'manual' } }) }
-function set(key: string, value: unknown) { const next: Record<string, unknown> = { ...props.config, [key]: value, capability_origin: { source: 'manual' } }; if (limits.some(field => field.key === key) && value === 0) delete next[key]; emit('update:config', next) }
-function setOptionalNumber(key: string, event: Event) {
-  const next: Record<string, unknown> = { ...props.config, capability_origin: { source: 'manual' } }
-  if (textValue(event) === '') delete next[key]
-  else next[key] = numberValue(event)
-  emit('update:config', next)
-}
-function changeReasoning(value: string) {
-  const next: Record<string, unknown> = { ...props.config, capability_origin: { source: 'manual' }, reasoning_capability: value, reasoning_mode: 'default' }
-  delete next.reasoning_protocol; delete next.reasoning_effort; delete next.tools_with_reasoning
-  emit('update:config', next)
-}
-function changeProtocol(value: string) {
-  const next: Record<string, unknown> = { ...props.config, capability_origin: { source: 'manual' }, reasoning_protocol: value }
-  delete next.reasoning_effort
-  if (value === 'reasoning_effort') next.reasoning_mode = 'default'
+function changeCapability(value: string) {
+  const next: Record<string, unknown> = { ...props.config, reasoning_capability: value, reasoning_mode: 'default', capability_origin: { source: 'manual' } }
+  delete next.reasoning_protocol
   emit('update:config', next)
 }
 </script>
