@@ -28,7 +28,15 @@ go run ./cmd/server
 
 当前没有 `cmd/seed` 入口。已有数据库升级需单独确认升级 SQL，不能将新库初始化等同于迁移；依赖变更后再运行 `go mod tidy` 并检查 diff。
 
-HTTP和MCP超时在已有供应商编辑框配置，复用原创建/更新接口和provider_config JSON，无新增路由或数据库迁移。内置和未指定HTTP工具使用 `tools.default_timeout`（默认30秒，`TOOLS_DEFAULT_TIMEOUT`可覆盖）；MCP分别配置connect_timeout/call_timeout，默认30/300秒，旧timeout兼容读取；系统预置允许管理员仅修改时限并在启动同步时保留。范围、发布与验证见[工具执行时限](tool-timeouts.md)。Agent整次任务总时限仍为独立待办，MCP连接/调用时限已拆分并移除固定60秒初始化截断。
+用户只配置MCP连接，管理员维护第三方MCP预置；普通HTTP工具入口与执行器已移除。已有库在部署新版本前执行：
+
+```bash
+psql -h localhost -U <数据库用户> -d <数据库名> -f scripts/migrations/20261017_mcp_connections.sql
+```
+
+脚本可重复执行，只迁移旧MCP配置并保留原ID，不覆盖后续编辑、不重新导入已删除连接。没有迁移标记的旧库首次升级前，应检查同一用户是否重复绑定同一预置；新表对该组合建立唯一约束，冲突会使整个迁移回滚。启动只检查MCP表是否存在，不自动升级业务schema。
+
+配置方式、搜索API Key与接口见[MCP配置](mcp-configuration.md)。内置工具使用 `tools.default_timeout`（默认30秒，`TOOLS_DEFAULT_TIMEOUT`可覆盖）；MCP分别配置connect_timeout/call_timeout，默认30/300秒，旧timeout兼容读取。部署预置的管理员超时在启动同步时保留，详见[工具执行时限](tool-timeouts.md)。
 
 ### 常用检查
 

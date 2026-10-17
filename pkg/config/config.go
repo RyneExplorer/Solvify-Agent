@@ -155,31 +155,25 @@ type ExpanderConfig struct {
 
 // ToolsConfig 描述工具调用配置
 type ToolsConfig struct {
-	DefaultTimeout int                     `mapstructure:"default_timeout"` // 内置和未指定HTTP工具单次时限，秒
+	DefaultTimeout int                     `mapstructure:"default_timeout"` // 内置工具单次时限，秒
 	Enabled        bool                    `mapstructure:"enabled"`
-	WebSearch      WebSearchConfig         `mapstructure:"web_search"`
 	MCPServers     []SystemMCPServerConfig `mapstructure:"mcp_servers"`
-}
-
-// WebSearchConfig 描述网络搜索工具配置
-type WebSearchConfig struct {
-	APIKey  string `mapstructure:"api_key"`
-	BaseURL string `mapstructure:"base_url"`
 }
 
 // SystemMCPServerConfig 系统预置 MCP 服务器配置
 type SystemMCPServerConfig struct {
-	Name           string            `mapstructure:"name" json:"name"`
-	Description    string            `mapstructure:"description" json:"description"`
-	Transport      string            `mapstructure:"transport" json:"transport"`       // stdio | sse | http
-	Command        string            `mapstructure:"command" json:"command,omitempty"` // stdio
-	Args           []string          `mapstructure:"args" json:"args,omitempty"`       // stdio
-	Env            map[string]string `mapstructure:"env" json:"env,omitempty"`         // stdio
-	URL            string            `mapstructure:"url" json:"url,omitempty"`         // sse/http
-	Headers        map[string]string `mapstructure:"headers" json:"headers,omitempty"` // sse/http
-	Timeout        int               `mapstructure:"timeout" json:"timeout,omitempty"` // 兼容旧配置
-	ConnectTimeout *int              `mapstructure:"connect_timeout" json:"connect_timeout,omitempty"`
-	CallTimeout    *int              `mapstructure:"call_timeout" json:"call_timeout,omitempty"`
+	ConfigSchema   map[string]interface{} `mapstructure:"config_schema" json:"config_schema,omitempty"`
+	Name           string                 `mapstructure:"name" json:"name"`
+	Description    string                 `mapstructure:"description" json:"description"`
+	Transport      string                 `mapstructure:"transport" json:"transport"`       // stdio | sse | http
+	Command        string                 `mapstructure:"command" json:"command,omitempty"` // stdio
+	Args           []string               `mapstructure:"args" json:"args,omitempty"`       // stdio
+	Env            map[string]string      `mapstructure:"env" json:"env,omitempty"`         // stdio
+	URL            string                 `mapstructure:"url" json:"url,omitempty"`         // sse/http
+	Headers        map[string]string      `mapstructure:"headers" json:"headers,omitempty"` // sse/http
+	Timeout        int                    `mapstructure:"timeout" json:"timeout,omitempty"` // 兼容旧配置
+	ConnectTimeout *int                   `mapstructure:"connect_timeout" json:"connect_timeout,omitempty"`
+	CallTimeout    *int                   `mapstructure:"call_timeout" json:"call_timeout,omitempty"`
 }
 
 // DingTalkConfig 描述钉钉开放平台配置

@@ -26,32 +26,24 @@ func (deadlineProbeTool) InvokableRun(ctx context.Context, _ string, _ ...einoto
 	return strconv.Itoa(int(time.Until(deadline).Round(time.Second) / time.Second)), nil
 }
 
-type timeoutProbeProvider struct{}
-
-func (timeoutProbeProvider) Name() string                  { return "http" }
-func (timeoutProbeProvider) Validate(*ExecuteConfig) error { return nil }
-func (timeoutProbeProvider) Execute(_ context.Context, config *ExecuteConfig) (string, error) {
-	return strconv.Itoa(config.ProviderConfig.Timeout), nil
-}
-
 func TestProviderTimeoutFactoryReadsSavedValues(t *testing.T) {
-	for _, kind := range []string{"http", "mcp"} {
+	for _, kind := range []string{"mcp"} {
 		t.Run(kind, func(t *testing.T) {
 			config := newMCPConfig(`{"timeout":99999}`)
-			config.ToolProvider.ProviderType = kind
+			config.Template.ProviderType = kind
 			store := &fakeConfigStore{}
-			var provider Provider = &timeoutProbeProvider{}
+			var provider Provider
 			if kind == "mcp" {
 				provider = &fakeMultiProvider{tools: []einotool.BaseTool{deadlineProbeTool{}}}
 			}
-			f := NewFactory(&fakeRegistry{provider: provider}, store, nil)
+			f := NewFactory(&fakeRegistry{provider: provider}, store)
 			for _, seconds := range []int{30, 60, 0} {
 				raw := fmt.Sprintf(`{"method":"GET","url":"https://example.invalid","timeout":%d}`, seconds)
 				if kind == "mcp" {
 					raw = fmt.Sprintf(`{"mcp":{"transport":"http","url":"https://example.invalid","timeout":%d}}`, seconds)
 				}
-				config.ToolProvider.ProviderConfig = datatypes.JSON(raw)
-				store.configs = []entity.UserToolConfig{config}
+				config.Template.ProviderConfig = datatypes.JSON(raw)
+				store.configs = []entity.MCPConnection{config}
 				tools := f.CreateAgentTools(context.Background(), "u1")
 				if len(tools) != 1 {
 					t.Fatal("供应商工具未构建")
@@ -66,8 +58,8 @@ func TestProviderTimeoutFactoryReadsSavedValues(t *testing.T) {
 				}
 			}
 			if kind == "mcp" {
-				config.ToolProvider.ProviderConfig = datatypes.JSON(`{"mcp":{"transport":"http","url":"https://example.invalid","timeout":45,"connect_timeout":90,"call_timeout":120}}`)
-				store.configs = []entity.UserToolConfig{config}
+				config.Template.ProviderConfig = datatypes.JSON(`{"mcp":{"transport":"http","url":"https://example.invalid","timeout":45,"connect_timeout":90,"call_timeout":120}}`)
+				store.configs = []entity.MCPConnection{config}
 				tools := f.CreateAgentTools(context.Background(), "u1")
 				if len(tools) != 1 {
 					t.Fatal("新配置工具构建失败")

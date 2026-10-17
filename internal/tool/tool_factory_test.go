@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	einoTool "github.com/cloudwego/eino/components/tool"
@@ -26,7 +27,6 @@ func (t *fakeBaseTool) Info(context.Context) (*schema.ToolInfo, error) {
 // fakeMultiProvider 返回固定工具列表的 MCP 供应商
 type fakeMultiProvider struct{ tools []einoTool.BaseTool }
 
-func (p *fakeMultiProvider) Name() string { return "mcp" }
 func (p *fakeMultiProvider) Validate(*ExecuteConfig) error {
 	return nil
 }
@@ -42,36 +42,34 @@ type fakeRegistry struct {
 	provider Provider
 }
 
-func (r *fakeRegistry) Register(string, Provider)          {}
-func (r *fakeRegistry) Get(string) Provider                { return r.provider }
-func (r *fakeRegistry) List() map[string]Provider          { return nil }
-func (r *fakeRegistry) Keys() []string                     { return nil }
+func (r *fakeRegistry) Register(string, Provider) {}
+func (r *fakeRegistry) Get(string) Provider       { return r.provider }
+func (r *fakeRegistry) Keys() []string            { return nil }
 
 // fakeConfigStore 返回固定工具配置
 type fakeConfigStore struct {
-	configs []entity.UserToolConfig
+	configs []entity.MCPConnection
 }
 
-func (s *fakeConfigStore) ListEnabledByUserID(context.Context, string) ([]entity.UserToolConfig, error) {
+func (s *fakeConfigStore) ListEnabledByUserID(context.Context, string) ([]entity.MCPConnection, error) {
 	return s.configs, nil
 }
 
-func newMCPConfig(userConfigJSON string) entity.UserToolConfig {
-	return entity.UserToolConfig{
-		ID:         "cfg-1",
-		UserID:     "u1",
-		ToolTypeID: "tt-mcp",
-		ProviderID: "p-fs",
-		Config:     datatypes.JSON(userConfigJSON),
-		IsEnabled:  true,
-		ToolType:   entity.ToolType{ID: "tt-mcp", ToolKey: "mcp"},
-		ToolProvider: entity.ToolProvider{
-			ID:           "p-fs",
-			ToolTypeID:   "tt-mcp",
-			ProviderKey:  "filesystem",
-			ProviderType: "mcp",
-			ProviderConfig: datatypes.JSON(`{"mcp":{"transport":"http","url":"http://example.com/mcp"}}`),
-		},
+func (s *fakeConfigStore) Get(_ context.Context, userID, id string) (*entity.MCPConnection, error) {
+	for _, c := range s.configs {
+		if c.ID == id && c.UserID == userID {
+			return &c, nil
+		}
+	}
+	return nil, fmt.Errorf("missing")
+}
+
+func newMCPConfig(userConfigJSON string) entity.MCPConnection {
+	return entity.MCPConnection{
+		ID: "cfg-1", UserID: "u1", TemplateID: func() *string { v := "p-fs"; return &v }(),
+		Connection: datatypes.JSON(`{}`), Config: datatypes.JSON(userConfigJSON), IsEnabled: true,
+		Template: &entity.ToolProvider{ID: "p-fs", ProviderKey: "filesystem", ProviderType: "mcp", IsEnabled: true,
+			ToolType: entity.ToolType{ToolKey: "mcp", IsEnabled: true}, ProviderConfig: datatypes.JSON(`{"mcp":{"transport":"http","url":"http://example.com/mcp"}}`)},
 	}
 }
 
@@ -82,8 +80,8 @@ func toolsFor(t *testing.T, userConfigJSON string) []einoTool.BaseTool {
 		&fakeBaseTool{name: "write_file"},
 	}}
 	f := NewFactory(&fakeRegistry{provider: multi}, &fakeConfigStore{
-		configs: []entity.UserToolConfig{newMCPConfig(userConfigJSON)},
-	}, nil)
+		configs: []entity.MCPConnection{newMCPConfig(userConfigJSON)},
+	})
 	return f.CreateAgentTools(context.Background(), "u1")
 }
 

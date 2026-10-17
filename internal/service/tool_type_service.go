@@ -16,8 +16,7 @@ import (
 
 type toolTypeService struct {
 	repo repository.ToolTypeRepository
-	// 删一个工具类型要连带删掉它的供应商和用户配置（三张表），且用户配置表带缓存，
-	// 只能经由 configRepo 删除——所以这三处写由本层编排、同处一个事务。
+	// 删除类型时，在同一事务清理供应商及旧用户配置。
 	providerRepo repository.ToolProviderRepository
 	configRepo   repository.UserToolConfigRepository
 	txMgr        repository.TxManager
@@ -105,10 +104,10 @@ func (s *toolTypeService) Delete(ctx context.Context, id string) error {
 		return apperrors.NotFoundOrInternal(apperrors.CodeToolTypeNotFound, err)
 	}
 
-	// 三张表一起走：用户配置（带缓存，必须经由 configRepo 删）→ 供应商 → 工具类型本身。
+	// 同一事务依次清理旧用户配置、供应商和工具类型。
 	// 任一步失败整体回滚，不留孤儿。
 	return s.txMgr.InTx(ctx, func(ctx context.Context) error {
-		if _, err := s.configRepo.DeleteByToolTypeID(ctx, id); err != nil {
+		if err := s.configRepo.DeleteByToolTypeID(ctx, id); err != nil {
 			return apperrors.WrapDefault(apperrors.CodeInternalError, err)
 		}
 		if err := s.providerRepo.DeleteByToolTypeID(ctx, id); err != nil {

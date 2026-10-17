@@ -1135,4 +1135,21 @@ ALTER TABLE "public"."tool_providers" ADD CONSTRAINT "fk_tool_providers_tool_typ
 ALTER TABLE "public"."user_tool_configs" ADD CONSTRAINT "fk_user_tool_configs_tool_provider" FOREIGN KEY ("provider_id") REFERENCES "public"."tool_providers" ("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
 ALTER TABLE "public"."user_tool_configs" ADD CONSTRAINT "fk_user_tool_configs_tool_type" FOREIGN KEY ("tool_type_id") REFERENCES "public"."tool_types" ("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
 
+-- 用户MCP连接（新库初始化；已有库使用独立MCP迁移脚本）。
+CREATE TABLE IF NOT EXISTS public.mcp_connections (
+ id varchar(36) PRIMARY KEY,
+ user_id varchar(36) NOT NULL,
+ template_id varchar(36) REFERENCES public.tool_providers(id) ON DELETE CASCADE,
+ display_name varchar(100) NOT NULL,
+ connection jsonb NOT NULL DEFAULT '{}'::jsonb,
+ config jsonb NOT NULL DEFAULT '{}'::jsonb,
+ is_enabled boolean NOT NULL DEFAULT true,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK (jsonb_typeof(connection) = 'object' AND jsonb_typeof(config) = 'object'),
+ CHECK (template_id IS NULL OR connection = '{}'::jsonb)
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_connections_user_id ON public.mcp_connections(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_connections_user_template ON public.mcp_connections(user_id,template_id) WHERE template_id IS NOT NULL;
+
 COMMIT;

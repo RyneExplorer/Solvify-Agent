@@ -13,14 +13,14 @@ cmd/server                —— 入口，创建并启动 App
        ├── internal/api   —— Gin Router + 13 个 Controller 模块
        │   └── internal/middleware  —— Auth、CORS、Logger、Recovery
        ├── internal/service      —— 16 个业务 Service（接口+实现）
-       ├── internal/repository   —— 16 个数据 Repository（接口+实现）+ 4 个 Redis 缓存装饰器
+       ├── internal/repository   —— 16 个数据 Repository（接口+实现）+ 3 个 Redis 缓存装饰器
        ├── internal/model
        │   ├── entity            —— 15 个 GORM 实体
        │   └── dto/request       —— 13 个请求 DTO
        │   └── dto/response      —— 11 个响应 DTO
        ├── internal/agent        —— eino ReAct Agent 引擎（执行/回调/提示词/类型）
        ├── internal/rag          —— RAG 检索管线（装饰器链）
-       ├── internal/tool         —— 工具系统（Provider 注册表 + HTTP Provider + AgentTool）
+       ├── internal/tool         —— 工具系统（MCP连接解析、连接池、运行适配与内置能力）
        ├── internal/llm          —— LLM 客户端工厂（OpenAI 兼容，连接池复用）
        ├── internal/integration  —— 钉钉集成（OAuth / Wiki / 文档导出）
        ├── pkg/jwt               —— JWT 令牌签发与解析
@@ -97,25 +97,32 @@ POST /api/v1/chat/sessions/:id/messages (SSE)
   └── 深度模式 (search_mode=smart-reasoning)
         └── agent.Engine.Execute() (eino ReAct)
               ├── Think: 分析问题
-              ├── Act: 调用 knowledge_search / web_search
+              ├── Act: 委派知识研究、MCP研究或文档操作子Agent
               ├── Observe: 评估结果
               └── 循环直至生成最终答案
                    → SSE 事件流: thinking / plan / tool_call / tool_result / answer / citation / done
 ```
 
-## Tool 系统（Provider 模式）
+## MCP与内部工具
+
+用户在设置中只管理MCP连接，不再管理普通HTTP工具或逐工具开关。系统预置是第三方MCP连接模板，服务无需由本项目实现；后台维护固定地址、Headers模板和用户字段schema，用户填写凭据后保存个人绑定。用户也可添加公网Streamable HTTP MCP端点。
 
 ```text
-ToolType (数据库定义，如 web_search)
-  └── ToolProvider (HTTP Provider，Template 驱动)
-        ├── URL/Headers/Body 模板渲染 {{placeholder}}
-        ├── Auth: bearer / api_key / basic
-        └── Response Mapping: JSONPath 提取
-
-AgentTool (eino BaseTool 适配器)
-  └── 动态 Schema 生成（参数推断 → jsonschema）
-  └── 执行委托给 Provider
+用户MCP连接（mcp_connections）
+  ├── 个人HTTP连接：URL、Headers、独立时限
+  └── 绑定系统预置：tool_providers引用 + 用户配置字段
+        └── 固定地址 + Headers中{{api_key}}等变量
+                ↓ 可信用户身份、模板可用性与配置验证
+MCP Provider → 按用户/连接/有效配置隔离的客户端池
+  └── initialize → tools/list → 工具Schema → BaseTool适配器
+        └── 调用前重新校验连接状态与有效配置 → tools/call
 ```
+
+快速模式不连接MCP。深度PlanExecute的Planner只规划、Executor只委派，MCP由 `web_research` 专业子Agent使用；该角色只可调用实际挂载的能力，非搜索MCP不会自动变成联网搜索能力。知识检索、文档操作分别进入对应内部能力域，汇总角色不直接获得MCP。普通深度单Agent的新请求不挂MCP，历史checkpoint保留原恢复边界。
+
+内部知识检索、文档管理和澄清工具继续由程序注册；HTTP接口与Agent工具共享业务规则。普通HTTP Provider已删除，旧用户工具路由不保留兼容。`tool_providers`/`tool_types`仍作为MCP预置基础设施，旧 `user_tool_configs` 只保留迁移与清理用途，仓库仅提供级联删除，不保留旧用户工具CRUD与缓存层，运行时不再从中加载工具。
+
+个人连接在拨号时解析并固定公网IP，禁用代理、跨源请求和重定向；管理员预置可连接企业内网。认证头覆盖初始化、发现与调用；每个响应体限制8MiB，每个服务最多128个工具。详情只向本人回读凭据用于编辑，列表不含凭据。配置、迁移与已知限制见[MCP配置](mcp-configuration.md)。
 
 ## 请求链路
 
@@ -148,7 +155,7 @@ configs/config.yaml          —— 主配置文件（含所有节点和实际�
   ├── rag:                   检索配置 (top_k, score_threshold, vector_weight, keyword_weight, rrf_k)
   │   ├── reranker:          重排序 (enabled, endpoint, model, api_key, top_n, timeout, score_threshold)
   │   └── expander:          分块扩展 (enabled, window_size, max_chunk_tokens, dedup_threshold)
-  ├── tools:                 工具开关 + 搜索工具 (web_search.api_key, web_search.base_url)
+  ├── tools:                 内置时限 + MCP预置 (default_timeout, mcp_servers)
   ├── dingtalk:              钉钉集成 (app_key, app_secret, oauth_redirect_uri)
   ├── database:              PostgreSQL + Redis 连接配置
   └── email:                 SMTP 邮件配置

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
-	"time"
 
 	"solvify-agent/internal/model/dto/request"
 	"solvify-agent/internal/model/entity"
@@ -44,61 +43,64 @@ func (providerTimeoutTypeRepo) GetByID(context.Context, string) (*entity.ToolTyp
 }
 
 func TestProviderTimeoutSavedThroughExistingService(t *testing.T) {
-	for _, kind := range []string{"http", "mcp"} {
-		t.Run(kind, func(t *testing.T) {
-			repo := &providerTimeoutRepo{}
-			registry := tool.NewProviderRegistry()
-			registry.Register("http", providers.NewHTTPProvider(30*time.Second))
-			registry.Register("mcp", providers.NewMCPProvider(nil))
-			svc := NewToolProviderService(repo, providerTimeoutTypeRepo{}, registry, nil, nil)
-			makeConfig := func(seconds string) json.RawMessage {
-				if kind == "mcp" {
-					return json.RawMessage(`{"transport":"http","url":"https://example.invalid","timeout":` + seconds + `}`)
-				}
-				return json.RawMessage(`{"method":"GET","url":"https://example.invalid","timeout":` + seconds + `}`)
-			}
-			created, err := svc.Create(context.Background(), request.CreateToolProviderRequest{ToolTypeID: "type", ProviderKey: "key", Name: "test", ProviderType: kind, ProviderConfig: makeConfig("30")})
-			if err != nil {
-				t.Fatal(err)
-			}
-			readSeconds := func(raw []byte) int {
-				var pc tool.ProviderConfig
-				if err := json.Unmarshal(raw, &pc); err != nil {
-					t.Fatal(err)
-				}
-				if kind == "mcp" {
-					return pc.MCP.Timeout
-				}
-				return pc.Timeout
-			}
-			if readSeconds(created.ProviderConfig) != 30 {
-				t.Fatal("创建未保存显式30秒")
-			}
-			raw := makeConfig("60")
-			updated, err := svc.Update(context.Background(), "id", request.UpdateToolProviderRequest{ProviderConfig: &raw})
-			if err != nil || readSeconds(updated.ProviderConfig) != 60 {
-				t.Fatalf("更新未保存: %+v %v", updated, err)
-			}
-			for _, value := range []string{"-1", "86401", "1.5", `"bad"`} {
-				bad := makeConfig(value)
-				writes := repo.writes
-				if _, err := svc.Update(context.Background(), "id", request.UpdateToolProviderRequest{ProviderConfig: &bad}); err == nil || writes != repo.writes {
-					t.Fatalf("非法时限被写入: %s %v", value, err)
-				}
-				if _, err := svc.Create(context.Background(), request.CreateToolProviderRequest{ToolTypeID: "type", ProviderKey: "key", ProviderType: kind, ProviderConfig: bad}); err == nil || writes != repo.writes {
-					t.Fatalf("非法时限被创建: %s %v", value, err)
-				}
-			}
-			raw = json.RawMessage(`{"method":"GET","url":"https://example.invalid"}`)
-			if kind == "mcp" {
-				raw = json.RawMessage(`{"mcp":{"transport":"http","url":"https://example.invalid"}}`)
-			}
-			if _, err := svc.Update(context.Background(), "id", request.UpdateToolProviderRequest{ProviderConfig: &raw}); err != nil {
-				t.Fatal(err)
-			}
-			if readSeconds(repo.saved.ProviderConfig) != 0 {
-				t.Fatal("清空时限没有恢复默认")
-			}
-		})
+	repo := &providerTimeoutRepo{}
+	registry := tool.NewProviderRegistry()
+	registry.Register("mcp", providers.NewMCPProvider(nil))
+	svc := NewToolProviderService(repo, providerTimeoutTypeRepo{}, registry, nil, nil)
+	makeConfig := func(seconds string) json.RawMessage {
+		return json.RawMessage(`{"transport":"http","url":"https://example.invalid","timeout":` + seconds + `}`)
+	}
+	readSeconds := func(raw []byte) int {
+		var pc tool.ProviderConfig
+		if err := json.Unmarshal(raw, &pc); err != nil {
+			t.Fatal(err)
+		}
+		return pc.MCP.Timeout
+	}
+	created, err := svc.Create(context.Background(), request.CreateToolProviderRequest{ToolTypeID: "type", ProviderKey: "key", Name: "test", ProviderType: "mcp", ProviderConfig: makeConfig("30")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readSeconds(created.ProviderConfig) != 30 {
+		t.Fatal("创建未保存显式30秒")
+	}
+	raw := makeConfig("60")
+	updated, err := svc.Update(context.Background(), "id", request.UpdateToolProviderRequest{ProviderConfig: &raw})
+	if err != nil || readSeconds(updated.ProviderConfig) != 60 {
+		t.Fatalf("更新未保存: %+v %v", updated, err)
+	}
+	for _, value := range []string{"-1", "86401", "1.5", `"bad"`} {
+		bad := makeConfig(value)
+		writes := repo.writes
+		if _, err := svc.Update(context.Background(), "id", request.UpdateToolProviderRequest{ProviderConfig: &bad}); err == nil || writes != repo.writes {
+			t.Fatalf("非法时限被写入: %s %v", value, err)
+		}
+		if _, err := svc.Create(context.Background(), request.CreateToolProviderRequest{ToolTypeID: "type", ProviderKey: "key", ProviderType: "mcp", ProviderConfig: bad}); err == nil || writes != repo.writes {
+			t.Fatalf("非法时限被创建: %s %v", value, err)
+		}
+	}
+	raw = json.RawMessage(`{"mcp":{"transport":"http","url":"https://example.invalid"}}`)
+	if _, err := svc.Update(context.Background(), "id", request.UpdateToolProviderRequest{ProviderConfig: &raw}); err != nil {
+		t.Fatal(err)
+	}
+	if readSeconds(repo.saved.ProviderConfig) != 0 {
+		t.Fatal("清空时限没有恢复默认")
+	}
+}
+
+func TestOrdinaryHTTPProviderCannotBeCreatedUpdatedOrTested(t *testing.T) {
+	repo := &providerTimeoutRepo{saved: entity.ToolProvider{ProviderType: "http"}}
+	svc := NewToolProviderService(repo, nil, nil, nil, nil)
+	if _, err := svc.Create(context.Background(), request.CreateToolProviderRequest{ProviderType: "http"}); err == nil {
+		t.Fatal("仍可创建普通HTTP工具")
+	}
+	if _, err := svc.Update(context.Background(), "id", request.UpdateToolProviderRequest{}); err == nil {
+		t.Fatal("仍可更新普通HTTP工具")
+	}
+	if _, err := svc.Test(context.Background(), request.TestToolRequest{ProviderType: "http"}); err == nil {
+		t.Fatal("仍可执行普通HTTP工具测试")
+	}
+	if repo.writes != 0 {
+		t.Fatal("废弃HTTP配置被写入")
 	}
 }

@@ -130,13 +130,10 @@ rag:
 
 # 工具配置
 tools:
-  default_timeout: 30 # 内置和未指定HTTP工具的单次时限（秒）；HTTP编辑框可覆盖
+  default_timeout: 30 # 内置工具单次执行时限（秒）
   enabled: true
-  web_search:
-    api_key: ""
-    base_url: ""
   # 系统预置 MCP 服务器列表（网页版仅支持 http/sse，不支持 stdio）
-  # 启动时自动加载到数据库（is_system=true），用户可在前端勾选启用；
+  # 启动时自动加载到数据库（is_system=true），用户填写预置要求的配置后启用；
   # 也可跳过此处，直接在后台管理页新增（写入数据库，无需重启）
   mcp_servers:
     - name: "council"
@@ -150,7 +147,12 @@ tools:
     #   transport: "sse"
     #   url: "https://example.com/mcp/sse"
     #   headers:
-    #     Authorization: "Bearer xxx"
+    #     Authorization: "Bearer {{api_key}}"
+    #   config_schema:
+    #     type: object
+    #     properties:
+    #       api_key: {type: string, title: API Key, secret: true}
+    #     required: [api_key]
     #   connect_timeout: 30
     #   call_timeout: 300
 

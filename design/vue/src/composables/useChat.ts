@@ -5,11 +5,11 @@ import { marked } from 'marked'
 import * as chatApi from '@/api/chat'
 import * as modelApi from '@/api/model'
 import * as authApi from '@/api/auth'
-import * as toolApi from '@/api/tool'
+import * as toolApi from '@/api/mcp'
 import { request } from '@/api/client'
 import type { ChatSession, ExecutionPlan, FeedbackRequest, PendingApproval, StreamEvent } from '@/types/chat'
 import { applyExecutionPlanEvent, finishExecutionPlan } from './chatExecutionPlan'
-import type { ToolTemplate, UserToolConfigInfo } from '@/types/tool'
+import type { MCPTemplate, MCPConnection } from '@/types/mcp'
 
 // ── UI 展示用的本地类型 ──
 
@@ -107,8 +107,8 @@ export function useChat() {
   const searchMode = ref<'quick' | 'smart-reasoning'>('quick')
 
   // ── MCP 工具（用户启用后可在对话级选择） ──
-  const mcpToolTemplates = ref<ToolTemplate[]>([])
-  const mcpUserConfigs = ref<UserToolConfigInfo[]>([])
+  const mcpToolTemplates = ref<MCPTemplate[]>([])
+  const mcpUserConfigs = ref<MCPConnection[]>([])
   const mcpLoading = ref(true)
   const MCP_SELECTION_KEY = 'solvify:mcp-selection'
   /** 对话级选中的 MCP user config ids；空数组=不使用任何 MCP（不再是「全部」） */
@@ -116,18 +116,9 @@ export function useChat() {
 
   /** 用户已启用的 MCP 服务器列表（用于选择器展示） */
   const enabledMCPOptions = computed<{ id: string; name: string; description: string }[]>(() => {
-    const template = mcpToolTemplates.value.find(t => t.tool_key === 'mcp')
-    const providers = template?.providers ?? []
-    const rows: { id: string; name: string; description: string }[] = []
-    for (const c of mcpUserConfigs.value) {
-      if (c.tool_type_key !== 'mcp' || !c.is_enabled) continue
-      const provider = providers.find(p => p.id === c.provider_id)
-      rows.push({
-        id: c.id,
-        name: c.display_name || provider?.name || c.provider_name || c.provider_id,
-        description: provider?.description || '',
-      })
-    }
+    const rows = mcpUserConfigs.value.filter(c => c.is_enabled && (!c.template_id || mcpToolTemplates.value.some(t => t.id === c.template_id))).map(c => ({
+      id:c.id,name:c.display_name,description:mcpToolTemplates.value.find(t => t.id === c.template_id)?.description || '个人 MCP',
+    }))
     return rows
   })
 
@@ -159,8 +150,8 @@ export function useChat() {
         modelApi.listUserModelConfigs().catch(() => null),
         request<{ data: unknown }>('/knowledge-bases').catch(() => null),
         authApi.getProfile().catch(() => null),
-        toolApi.listToolTemplates().catch(() => null),
-        toolApi.listUserToolConfigs().catch(() => null),
+        toolApi.listMCPTemplates().catch(() => null),
+        toolApi.listMCPConnections().catch(() => null),
       ])
 
       const opts: ModelOption[] = []
@@ -203,7 +194,7 @@ export function useChat() {
         mcpToolTemplates.value = toolTmplRes.data
       }
       if (userToolConfigRes?.code === 0) {
-        mcpUserConfigs.value = userToolConfigRes.data?.configs ?? []
+        mcpUserConfigs.value = userToolConfigRes.data ?? []
       }
       // 从 localStorage 恢复上次的 MCP 选择（空数组也要恢复：它表示「上次选了不使用任何 MCP」，
       // 若当成「没存过」而跳过，用户的「一个都不用」会被静默重置成全选）

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	einoTool "github.com/cloudwego/eino/components/tool"
@@ -303,7 +304,7 @@ func (p *MCPClientPool) doInit(ctx context.Context, cfg *tool.MCPProviderConfig)
 	var err error
 	switch cfg.Transport {
 	case "sse":
-		if c, err = client.NewSSEMCPClient(cfg.URL); err != nil {
+		if c, err = client.NewSSEMCPClient(cfg.URL, transport.WithHeaders(cfg.Headers), transport.WithHTTPClient(mcpHTTPClient(cfg))); err != nil {
 			return nil, fmt.Errorf("创建 SSE MCP 客户端失败: %w", err)
 		}
 		if err = c.Start(ctx); err != nil {
@@ -311,7 +312,7 @@ func (p *MCPClientPool) doInit(ctx context.Context, cfg *tool.MCPProviderConfig)
 			return nil, fmt.Errorf("启动 SSE MCP 客户端失败: %w", err)
 		}
 	case "http":
-		if c, err = client.NewStreamableHttpClient(cfg.URL); err != nil {
+		if c, err = client.NewStreamableHttpClient(cfg.URL, transport.WithHTTPHeaders(cfg.Headers), transport.WithHTTPBasicClient(mcpHTTPClient(cfg))); err != nil {
 			return nil, fmt.Errorf("创建 HTTP MCP 客户端失败: %w", err)
 		}
 		if err = c.Start(ctx); err != nil {
@@ -367,6 +368,12 @@ func (p *MCPClientPool) Close() error {
 // 仅支持 sse/http：stdio 会拉起本机子进程，只在「本地客户端」形态下有意义，
 // 本服务是网页版（进程在服务端），配了只会连到服务端自己的文件系统，故直接拒绝。
 func validateMCPConfig(cfg *tool.MCPProviderConfig) error {
+	if err := tool.ValidateMCPURL(cfg.URL); err != nil {
+		return err
+	}
+	if err := tool.ValidateMCPHeaders(cfg.Headers); err != nil {
+		return err
+	}
 	if err := cfg.ValidateTimeouts(); err != nil {
 		return err
 	}
@@ -388,14 +395,17 @@ func validateMCPConfig(cfg *tool.MCPProviderConfig) error {
 // 包含有效连接时限，修改后不命中旧初始化/失败缓存；调用时限改变仍复用连接。
 func configHash(cfg *tool.MCPProviderConfig) string {
 	key := struct {
-		ConnectTimeout time.Duration     `json:"connect_timeout"`
-		Transport      string            `json:"transport"`
-		Command        string            `json:"command"`
-		Args           []string          `json:"args"`
-		Env            map[string]string `json:"env"`
-		URL            string            `json:"url"`
-		Headers        map[string]string `json:"headers"`
+		ScopeKey        string
+		RestrictNetwork bool
+		ConnectTimeout  time.Duration     `json:"connect_timeout"`
+		Transport       string            `json:"transport"`
+		Command         string            `json:"command"`
+		Args            []string          `json:"args"`
+		Env             map[string]string `json:"env"`
+		URL             string            `json:"url"`
+		Headers         map[string]string `json:"headers"`
 	}{
+		ScopeKey: cfg.ScopeKey, RestrictNetwork: cfg.RestrictNetwork,
 		ConnectTimeout: cfg.ConnectionTimeout(),
 		Transport:      cfg.Transport,
 		Command:        cfg.Command,

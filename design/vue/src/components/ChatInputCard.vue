@@ -171,11 +171,11 @@
         </div>
 
         <!-- MCP 服务器加载中骨架 -->
-        <div v-if="mcpLoading && !mcpOptions.length" class="flex items-center px-2.5" title="MCP 服务器加载中...">
+        <div v-if="searchMode === 'smart-reasoning' && mcpLoading && !mcpOptions.length" class="flex items-center px-2.5" title="MCP 服务器加载中...">
           <div class="h-6 w-20 bg-slate-100 rounded-md animate-pulse" />
         </div>
         <!-- MCP 服务器（仅当有可用 MCP 时显示） -->
-        <div v-else-if="mcpOptions.length" class="relative" ref="mcpDropdownRef">
+        <div v-else-if="searchMode === 'smart-reasoning' && mcpOptions.length" class="relative" ref="mcpDropdownRef">
           <button @click="toggleMCPDropdown" class="tool-trigger" :class="{ 'opacity-60': loading }" :disabled="loading">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"/></svg>
             <span :title="mcpTooltip">{{ mcpLabel }}</span>
@@ -192,7 +192,7 @@
               >
                 <div class="px-4 py-3 border-b border-slate-100">
                   <div class="text-sm font-semibold text-slate-900">MCP 服务器</div>
-                  <div class="text-xs text-slate-400 mt-0.5">勾选要在本次对话启用的服务器；全部不勾选=不使用任何 MCP</div>
+                  <div class="text-xs text-slate-400 mt-0.5">由深度模式的专业 Agent 使用；全部不勾选则禁用 MCP</div>
                 </div>
                 <!-- 搜索框：≥ 7 台时显示 -->
                 <div v-if="showMCPSearch" class="px-3 py-2 border-b border-slate-100">
@@ -287,7 +287,7 @@ const props = defineProps<{
   selectedKBs: string[]
   modelOptions: ModelItem[]
   mcpOptions?: MCPOption[]
-  selectedMCPIds?: string[]
+  selectedMcpIds?: string[]
   mcpLoading?: boolean
 }>()
 
@@ -324,7 +324,7 @@ const mcpPanelPos = ref({ top: 0, left: 0 })
 
 // 本地副本：父组件 selectedMCPIds 变化时同步（含初始化）；本地操作后再 emit
 const localMCPIds = ref<string[]>([])
-watch(() => props.selectedMCPIds, (v) => { localMCPIds.value = [...(v ?? [])] }, { immediate: true, deep: false })
+watch(() => props.selectedMcpIds, (v) => { localMCPIds.value = [...(v ?? [])] }, { immediate: true, deep: false })
 // 关闭下拉时清空搜索关键字
 watch(showMCPDropdown, (open) => { if (!open) mcpSearch.value = '' })
 // 当用户未启用任何 MCP 时，mcpOptions 为空，不显示

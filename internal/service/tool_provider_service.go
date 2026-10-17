@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"gorm.io/datatypes"
@@ -22,8 +21,7 @@ type toolProviderService struct {
 	repo     repository.ToolProviderRepository
 	typeRepo repository.ToolTypeRepository
 	registry tool.ProviderRegistry
-	// 删除供应商要连带删掉用户对它的配置，而那张表带缓存（tool:config:user:<uid>）——
-	// 所以级联必须经由 configRepo，且与删供应商同处一个事务。
+	// 删除供应商时，在同一事务清理旧表中的历史绑定。
 	configRepo repository.UserToolConfigRepository
 	txMgr      repository.TxManager
 }
@@ -46,6 +44,9 @@ func NewToolProviderService(
 }
 
 func (s *toolProviderService) Create(ctx context.Context, req request.CreateToolProviderRequest) (*response.ToolProviderInfo, error) {
+	if req.ProviderType != "mcp" {
+		return nil, apperrors.New(apperrors.CodeBadRequest, "仅支持MCP预置")
+	}
 	// 检查工具类型是否存在
 	_, err := s.typeRepo.GetByID(ctx, req.ToolTypeID)
 	if err != nil {
@@ -106,6 +107,9 @@ func (s *toolProviderService) Update(ctx context.Context, id string, req request
 		return nil, apperrors.NotFoundOrInternal(apperrors.CodeToolProviderNotFound, err)
 	}
 
+	if provider.ProviderType != "mcp" {
+		return nil, apperrors.New(apperrors.CodeBadRequest, "普通HTTP工具已停用")
+	}
 	// 系统预置只开放超时编辑，连接地址和凭据仍由YAML管理。
 	if provider.IsSystem && (req.ProviderType != nil || req.ProviderConfig != nil) {
 		if provider.ProviderType != "mcp" || req.ProviderType != nil {
@@ -185,10 +189,9 @@ func (s *toolProviderService) Delete(ctx context.Context, id string) error {
 		return apperrors.New(apperrors.CodeBadRequest, "系统预置供应商不支持删除")
 	}
 
-	// 两处写必须同生共死：漏删用户配置会留下指向已删供应商的幽灵配置；
-	// 而用户配置表带缓存，所以它必须由 UserToolConfigRepository 来删（顺带失效缓存）。
+	// 旧绑定与供应商在同一事务删除，避免遗留引用。
 	return s.txMgr.InTx(ctx, func(ctx context.Context) error {
-		if _, err := s.configRepo.DeleteByProviderID(ctx, id); err != nil {
+		if err := s.configRepo.DeleteByProviderID(ctx, id); err != nil {
 			return apperrors.WrapDefault(apperrors.CodeInternalError, err)
 		}
 		if err := s.repo.Delete(ctx, id); err != nil {
@@ -224,7 +227,7 @@ func (s *toolProviderService) ListMCPServers(ctx context.Context) (*response.Lis
 }
 
 // DeleteMCPServerWithCleanup 删除 MCP 供应商；若其所属工具类型随之变空且非 mcp 容器类型，
-// 级联删除该空壳工具类型。三处写同处一个事务：用户配置（带缓存，必须经 configRepo）→
+// 级联删除该空壳工具类型。三处写同处一个事务：旧用户配置 →
 // 供应商 → 可能的空壳工具类型。
 func (s *toolProviderService) DeleteMCPServerWithCleanup(ctx context.Context, providerID string) error {
 	provider, err := s.repo.GetByID(ctx, providerID)
@@ -235,7 +238,7 @@ func (s *toolProviderService) DeleteMCPServerWithCleanup(ctx context.Context, pr
 		return apperrors.New(apperrors.CodeBadRequest, "系统预置供应商不支持删除")
 	}
 	return s.txMgr.InTx(ctx, func(ctx context.Context) error {
-		if _, err := s.configRepo.DeleteByProviderID(ctx, providerID); err != nil {
+		if err := s.configRepo.DeleteByProviderID(ctx, providerID); err != nil {
 			return apperrors.WrapDefault(apperrors.CodeInternalError, err)
 		}
 		if err := s.repo.Delete(ctx, providerID); err != nil {
@@ -256,7 +259,7 @@ func (s *toolProviderService) DeleteMCPServerWithCleanup(ctx context.Context, pr
 		if toolType.ToolKey == "mcp" {
 			return nil
 		}
-		if _, err := s.configRepo.DeleteByToolTypeID(ctx, provider.ToolTypeID); err != nil {
+		if err := s.configRepo.DeleteByToolTypeID(ctx, provider.ToolTypeID); err != nil {
 			return apperrors.WrapDefault(apperrors.CodeInternalError, err)
 		}
 		if err := s.typeRepo.Delete(ctx, provider.ToolTypeID); err != nil {
@@ -291,7 +294,7 @@ func (s *toolProviderService) CleanupEmptyToolTypes(ctx context.Context) (int, e
 	deleted := 0
 	err = s.txMgr.InTx(ctx, func(ctx context.Context) error {
 		for _, id := range emptyIDs {
-			if _, err := s.configRepo.DeleteByToolTypeID(ctx, id); err != nil {
+			if err := s.configRepo.DeleteByToolTypeID(ctx, id); err != nil {
 				return apperrors.WrapDefault(apperrors.CodeInternalError, err)
 			}
 			if err := s.typeRepo.Delete(ctx, id); err != nil {
@@ -354,10 +357,13 @@ func (s *toolProviderService) ListProviderTypes() []string {
 // Test 测试工具连接
 // 若 ProviderConfig 为空且 ProviderID 不为空，则从数据库查询 provider_config（用户测试场景）
 // 否则使用前端直接传入的 ProviderConfig（管理员测试场景）
-// 若 ToolInput 为空，HTTP 场景会自动从 URL 和 BodyTemplate 提取占位符并生成默认测试值
+// MCP测试只发现工具，不执行tools/call。
 // MCP 场景：工具执行时自动调用 tools/list 并返回工具清单；裸 MCP 配置会自动包装为 {mcp: ...}
 // 传入 ProviderID 时，MCP 场景会把探测到的工具清单持久化到该供应商
 func (s *toolProviderService) Test(ctx context.Context, req request.TestToolRequest) (*response.TestResult, error) {
+	if req.ProviderType != "mcp" {
+		return nil, apperrors.New(apperrors.CodeBadRequest, "仅支持MCP连接测试")
+	}
 	start := time.Now()
 
 	provider := s.registry.Get(req.ProviderType)
@@ -370,14 +376,8 @@ func (s *toolProviderService) Test(ctx context.Context, req request.TestToolRequ
 		return nil, err
 	}
 
-	// 如果 tool_input 为空，自动生成默认测试参数
-	toolInput := req.ToolInput
-	if toolInput == nil || len(toolInput) == 0 {
-		toolInput = generateDefaultToolInput(providerConfig, req.UserConfig, req.AdminConfig)
-	}
-
 	executeConfig := &tool.ExecuteConfig{
-		ToolInput:      toolInput,
+		ToolInput:      req.ToolInput,
 		UserConfig:     req.UserConfig,
 		ProviderConfig: providerConfig,
 		AdminConfig:    req.AdminConfig,
@@ -592,118 +592,6 @@ func (s *toolProviderService) toProviderInfo(p *entity.ToolProvider) *response.T
 	}
 }
 
-// generateDefaultToolInput 从 ProviderConfig 的 URL 和 BodyTemplate 中提取占位符并生成默认测试值
-func generateDefaultToolInput(pc *tool.ProviderConfig, userConfig, adminConfig map[string]interface{}) map[string]interface{} {
-	if pc == nil {
-		return nil
-	}
-
-	// 收集所有已提供的配置键
-	provided := make(map[string]bool)
-	for k := range userConfig {
-		provided[k] = true
-	}
-	for k := range adminConfig {
-		provided[k] = true
-	}
-
-	// 从 URL 提取占位符
-	placeholders := extractTestPlaceholders(pc.URL)
-
-	// 从 BodyTemplate 提取占位符
-	if pc.BodyTemplate != nil {
-		for _, ph := range extractTestPlaceholdersFromMap(pc.BodyTemplate) {
-			if _, ok := provided[ph]; !ok {
-				placeholders[ph] = true
-			}
-		}
-	}
-
-	// 为剩余占位符生成默认值
-	result := make(map[string]interface{})
-	for ph := range placeholders {
-		if provided[ph] {
-			continue
-		}
-		result[ph] = getDefaultPlaceholderValue(ph)
-	}
-
-	return result
-}
-
-// extractTestPlaceholders 从字符串中提取 {{xxx}} 占位符
-func extractTestPlaceholders(s string) map[string]bool {
-	result := make(map[string]bool)
-	for {
-		start := strings.Index(s, "{{")
-		if start == -1 {
-			break
-		}
-		end := strings.Index(s[start+2:], "}}")
-		if end == -1 {
-			break
-		}
-		ph := s[start+2 : start+2+end]
-		if ph != "" {
-			result[ph] = true
-		}
-		s = s[start+2+end+2:]
-	}
-	return result
-}
-
-// extractTestPlaceholdersFromMap 从 map 中递归提取占位符
-func extractTestPlaceholdersFromMap(m map[string]interface{}) []string {
-	var result []string
-	seen := make(map[string]bool)
-	var walk func(interface{})
-	walk = func(x interface{}) {
-		switch val := x.(type) {
-		case string:
-			for ph := range extractTestPlaceholders(val) {
-				if !seen[ph] {
-					result = append(result, ph)
-					seen[ph] = true
-				}
-			}
-		case map[string]interface{}:
-			for _, child := range val {
-				walk(child)
-			}
-		case []interface{}:
-			for _, child := range val {
-				walk(child)
-			}
-		}
-	}
-	walk(m)
-	return result
-}
-
-// getDefaultPlaceholderValue 根据占位符名称返回默认测试值
-func getDefaultPlaceholderValue(ph string) interface{} {
-	switch ph {
-	case "query", "q", "keyword", "search", "term":
-		return "test"
-	case "city", "location", "address":
-		return "Beijing"
-	case "lat", "latitude":
-		return 39.9042
-	case "lng", "longitude":
-		return 116.4074
-	case "days", "count":
-		return 3
-	case "format":
-		return "json"
-	case "stock_code":
-		return "sh600001"
-	case "currency":
-		return "usd"
-	default:
-		return "test"
-	}
-}
-
 // normalizeMCPProviderConfig 规范化 MCP 供应商的 provider_config。
 // 管理员前端可能传入两种格式：
 //
@@ -764,7 +652,7 @@ func normalizeMCPProviderConfig(raw json.RawMessage, registry tool.ProviderRegis
 
 // 复用现有供应商JSON保存时限，不新增策略资源或接口。
 func validateProviderTimeout(kind string, raw []byte) error {
-	if kind != "http" && kind != "mcp" {
+	if kind != "mcp" {
 		return nil
 	}
 	if len(raw) == 0 || string(raw) == "null" {
@@ -774,10 +662,7 @@ func validateProviderTimeout(kind string, raw []byte) error {
 	if err := json.Unmarshal(raw, &pc); err != nil {
 		return fmt.Errorf("供应商配置格式错误: %w", err)
 	}
-	if kind == "http" {
-		_, err := tool.ConfiguredExecutionTimeout(pc.Timeout, time.Second)
-		return err
-	}
+
 	if kind == "mcp" && pc.MCP != nil {
 		return pc.MCP.ValidateTimeouts()
 	}

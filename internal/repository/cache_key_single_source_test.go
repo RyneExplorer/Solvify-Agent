@@ -144,38 +144,8 @@ func (r *countingUserModelConfigRepo) ExistsByModelID(context.Context, string, s
 	return false, nil
 }
 
-// countingUserToolConfigRepo 复用同包已有的表实现，只给两个读方法加计数。
-type countingUserToolConfigRepo struct {
-	*memUserToolConfigRepo
-	mu    sync.Mutex
-	reads int
-}
-
-func (r *countingUserToolConfigRepo) readCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.reads
-}
-
-func (r *countingUserToolConfigRepo) bump() {
-	r.mu.Lock()
-	r.reads++
-	r.mu.Unlock()
-}
-
-func (r *countingUserToolConfigRepo) GetByID(ctx context.Context, id string) (*entity.UserToolConfig, error) {
-	r.bump()
-	return r.memUserToolConfigRepo.GetByID(ctx, id)
-}
-
-func (r *countingUserToolConfigRepo) ListEnabledByUserID(ctx context.Context, userID string) ([]entity.UserToolConfig, error) {
-	r.bump()
-	return r.memUserToolConfigRepo.ListEnabledByUserID(ctx, userID)
-}
-
 var _ ModelRepo = (*countingModelRepo)(nil)
 var _ UserModelConfigRepo = (*countingUserModelConfigRepo)(nil)
-var _ UserToolConfigRepository = (*countingUserToolConfigRepo)(nil)
 
 // ── 系统模型 ──
 
@@ -281,92 +251,5 @@ func TestCachedUserModelConfigRepository_ReadKeyIsTheOneInvalidated(t *testing.T
 	}
 	if cache.has(key) {
 		t.Fatalf("Delete 之后 %q 仍在缓存里 —— 已删除的配置会继续被读到", key)
-	}
-}
-
-// ── 用户工具配置：单条 key 与「按用户列表」key 都要成对 ──
-
-func TestCachedUserToolConfigRepository_BothKeyFormsAreInvalidated(t *testing.T) {
-	ctx := context.Background()
-	cache := newMemCache()
-	inner := &countingUserToolConfigRepo{memUserToolConfigRepo: newMemUserToolConfigRepo(
-		entity.UserToolConfig{ID: "x1", UserID: "u1", IsEnabled: true},
-	)}
-	repo := NewCachedUserToolConfigRepository(inner, cache)
-
-	idKey := userToolConfigCacheKeyByID("x1")
-	listKeyU1 := userToolConfigCacheKeyByUser("u1")
-	listKeyU2 := userToolConfigCacheKeyByUser("u2")
-
-	refill := func(when string) {
-		t.Helper()
-		if _, err := repo.GetByID(ctx, "x1"); err != nil {
-			t.Fatalf("%s: 读单条失败: %v", when, err)
-		}
-		if _, err := repo.ListEnabledByUserID(ctx, "u1"); err != nil {
-			t.Fatalf("%s: 读用户列表失败: %v", when, err)
-		}
-		if _, err := repo.ListEnabledByUserID(ctx, "u2"); err != nil {
-			t.Fatalf("%s: 读 u2 列表失败: %v", when, err)
-		}
-	}
-
-	refill("首读")
-	for _, k := range []string{idKey, listKeyU1, listKeyU2} {
-		if !cache.has(k) {
-			t.Fatalf("读路径没有回填 %q（已删除过的 key=%v）", k, cache.deleted())
-		}
-	}
-
-	// 复读：两个读方法都必须命中缓存
-	before := inner.readCount()
-	if _, err := repo.GetByID(ctx, "x1"); err != nil {
-		t.Fatalf("复读单条失败: %v", err)
-	}
-	if _, err := repo.ListEnabledByUserID(ctx, "u1"); err != nil {
-		t.Fatalf("复读列表失败: %v", err)
-	}
-	if inner.readCount() != before {
-		t.Fatalf("复读仍在查库（%d→%d），缓存没有真正命中", before, inner.readCount())
-	}
-
-	// Update：单条 key 与「该用户」的列表 key 都要失效；别的用户的列表不受影响
-	if err := repo.Update(ctx, &entity.UserToolConfig{ID: "x1", UserID: "u1", IsEnabled: false}); err != nil {
-		t.Fatalf("Update 失败: %v", err)
-	}
-	if cache.has(idKey) {
-		t.Errorf("Update 之后 %q 未失效", idKey)
-	}
-	if cache.has(listKeyU1) {
-		t.Errorf("Update 之后 %q 未失效 —— 用户会继续看到旧的「已启用工具」列表", listKeyU1)
-	}
-	if !cache.has(listKeyU2) {
-		t.Errorf("Update 误伤了别的用户的列表缓存 %q（失效范围过大）", listKeyU2)
-	}
-
-	// Delete：同样两个 key 都要失效
-	refill("Delete 前回填")
-	if err := repo.Delete(ctx, "x1"); err != nil {
-		t.Fatalf("Delete 失败: %v", err)
-	}
-	if cache.has(idKey) {
-		t.Errorf("Delete 之后 %q 未失效 —— 已删除的配置会继续被读到", idKey)
-	}
-	if cache.has(listKeyU1) {
-		t.Errorf("Delete 之后 %q 未失效 —— 用户会继续看到已删除的工具", listKeyU1)
-	}
-
-	// Create：新增配置后，该用户的列表缓存必须失效（否则新启用的工具要等 TTL 才出现）
-	if _, err := repo.ListEnabledByUserID(ctx, "u1"); err != nil {
-		t.Fatalf("Create 前回填失败: %v", err)
-	}
-	if !cache.has(listKeyU1) {
-		t.Fatalf("回填 %q 失败，无法验证 Create 的失效", listKeyU1)
-	}
-	if err := repo.Create(ctx, &entity.UserToolConfig{ID: "x2", UserID: "u1", IsEnabled: true}); err != nil {
-		t.Fatalf("Create 失败: %v", err)
-	}
-	if cache.has(listKeyU1) {
-		t.Errorf("Create 之后 %q 未失效 —— 新启用的工具要等 TTL 过期才出现在设置页", listKeyU1)
 	}
 }

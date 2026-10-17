@@ -32,7 +32,7 @@ func (s *timeoutProviderService) Update(_ context.Context, _ string, req request
 }
 
 func TestProviderTimeoutUsesExistingAdminRoutes(t *testing.T) {
-	for _, kind := range []string{"http", "mcp"} {
+	for _, kind := range []string{"mcp"} {
 		for _, method := range []string{"POST", "PUT"} {
 			pc := `{"timeout":60}`
 			if kind == "mcp" {

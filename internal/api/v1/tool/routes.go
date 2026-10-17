@@ -42,17 +42,4 @@ func (c *Controller) RegisterRoutes(router *gin.RouterGroup) {
 	adminToolTestGroup.POST("", c.TestToolProvider)
 	adminToolTestGroup.POST("/probe", c.ProbeMCPTools)
 
-	// 用户：工具模板浏览
-	toolGroup := router.Group("/user/tools")
-	toolGroup.GET("/templates", c.ListToolTemplates)
-	// 用户：探测 MCP 服务器工具清单（不执行工具；传入 provider_id 时刷新服务器工具缓存）
-	toolGroup.POST("/mcp/probe", c.ProbeMCPTools)
-
-	// 用户：工具配置管理
-	configGroup := router.Group("/user/tool-configs")
-	configGroup.GET("", c.ListUserToolConfigs)
-	configGroup.POST("", c.CreateUserToolConfig)
-	configGroup.PUT("/:id", c.UpdateUserToolConfig)
-	configGroup.DELETE("/:id", c.DeleteUserToolConfig)
-	configGroup.POST("/test", c.TestUserToolConfig)
 }

@@ -24,6 +24,7 @@ import (
 	"solvify-agent/internal/integration/dingtalk"
 	"solvify-agent/internal/llm"
 	"solvify-agent/internal/middleware"
+	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/observability"
 	"solvify-agent/internal/rag"
 	"solvify-agent/internal/repository"
@@ -58,10 +59,6 @@ type App struct {
 	// embedFn 是带两级缓存 + singleflight 的向量化函数，由 initEmbedding 赋值一次。
 	// 存字段而不是当参数传：retriever 与 chatService 都用它，两处各建一份会白付缓存与握手。
 	embedFn rag.EmbeddingFunc
-	// MCP 预热所需依赖：供应商仓库（读已启用列表）、Provider（拉工具列表）、mcp ToolType 的 ID
-	mcpProviderRepo repository.ToolProviderRepository
-	mcpProvider     *providers.MCPProvider
-	mcpToolTypeID   string
 }
 
 // NewApp 创建应用实例
@@ -391,6 +388,9 @@ func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo rep
 
 // initDependencies 初始化业务依赖并创建路由
 func (a *App) initDependencies() error {
+	if !a.postgresqlDB.Migrator().HasTable(&entity.MCPConnection{}) {
+		return fmt.Errorf("MCP连接表不存在，请先执行 scripts/migrations/20261017_mcp_connections.sql")
+	}
 	// 初始化 Repository
 	knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
 	documentRepo := repository.NewDocumentRepository(a.postgresqlDB)
@@ -421,42 +421,30 @@ func (a *App) initDependencies() error {
 	// 工具配置——原始仓库
 	toolTypeRepo := repository.NewToolTypeRepository(a.postgresqlDB)
 	toolProviderRepo := repository.NewToolProviderRepository(a.postgresqlDB)
-	rawUserToolConfigRepo := repository.NewUserToolConfigRepository(a.postgresqlDB)
+	legacyToolConfigRepo := repository.NewUserToolConfigRepository(a.postgresqlDB)
 
 	// Redis 缓存（写时失效，10 分钟 TTL 兜底）
 	toolTypeCache := cache.New(a.redis, "tool:type:", 10*time.Minute)
-	toolConfigCache := cache.New(a.redis, "tool:config:", 10*time.Minute)
 	userModelCache := cache.New(a.redis, "user:model:", 24*time.Hour)
 
 	// 缓存装饰器
 	cachedToolTypeRepo := repository.NewCachedToolTypeRepository(toolTypeRepo, toolTypeCache)
-	cachedUserToolConfigRepo := repository.NewCachedUserToolConfigRepository(rawUserToolConfigRepo, toolConfigCache)
 
 	// 初始化工具 Provider 注册表——注册通用 Provider 类型
 	toolRegistry := tool.NewProviderRegistry()
-	toolRegistry.Register("http", providers.NewHTTPProvider(config.ToolExecutionTimeout()))
+	mcpRepo := repository.NewMCPRepository(a.postgresqlDB)
 
 	// MCP Provider：一个 MCP Server 可提供多个工具（一对多映射）
 	a.mcpClientPool = providers.NewMCPClientPool()
-	a.mcpProvider = providers.NewMCPProvider(a.mcpClientPool)
-	toolRegistry.Register("mcp", a.mcpProvider)
+	mcpProvider := providers.NewMCPProvider(a.mcpClientPool)
+	toolRegistry.Register("mcp", mcpProvider)
 
 	// ToolFactory——Agent 引擎从 DB/Redis 加载用户配置的工具
 	// 执行时直接读取供应商关联，避免用户配置缓存中的旧timeout延迟生效。
-	toolFactory := tool.NewFactory(toolRegistry, rawUserToolConfigRepo, cachedToolTypeRepo)
+	toolFactory := tool.NewFactory(toolRegistry, mcpRepo)
 
 	// 加载系统预置 MCP 服务器（从 config.yaml 同步到数据库）
 	a.loadSystemMCPServersWithTimeout()
-
-	// 异步预热已启用 MCP 的工具列表，避免首次问答时才建连接、卡在请求路径上。
-	// 这里保留预热所需的仓库/Provider 引用与 mcp ToolType 的 ID。
-	a.mcpProviderRepo = toolProviderRepo
-	if tt, err := cachedToolTypeRepo.GetByKey(context.Background(), mcpToolKey); err != nil {
-		logger.Warnf("[MCPPrewarm] 获取 mcp ToolType 失败，跳过预热: %v", err)
-	} else {
-		a.mcpToolTypeID = tt.ID
-		a.prewarmMCPServersAsync()
-	}
 
 	// Chunk Repository（文档分块查询）
 	chunkRepo := repository.NewDocumentChunkRepository(a.postgresqlDB)
@@ -553,9 +541,9 @@ func (a *App) initDependencies() error {
 
 	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo)
 	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.tracer, feedbackRepo, a.embedFn)
-	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo, toolProviderRepo, cachedUserToolConfigRepo, txMgr)
-	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry, cachedUserToolConfigRepo, txMgr)
-	userToolConfigService := service.NewUserToolConfigService(cachedUserToolConfigRepo, cachedToolTypeRepo, toolProviderRepo, toolRegistry)
+	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo, toolProviderRepo, legacyToolConfigRepo, txMgr)
+	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry, legacyToolConfigRepo, txMgr)
+	mcpService := service.NewMCPService(mcpRepo, toolProviderRepo, mcpProvider)
 	searchSvc := service.NewSearchService(chatMessageRepo, chunkRepo)
 
 	// 路由
@@ -575,7 +563,7 @@ func (a *App) initDependencies() error {
 		dingtalkSvc,
 		toolTypeService,
 		toolProviderService,
-		userToolConfigService,
+		mcpService,
 		prefSvc,
 	)
 

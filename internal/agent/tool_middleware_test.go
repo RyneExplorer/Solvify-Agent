@@ -29,7 +29,7 @@ func TestDangerousToolResumeRequiresValidApproval(t *testing.T) {
 			m := &deepTestModel{respond: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
 				return schema.AssistantMessage("", []schema.ToolCall{{ID: "write", Type: "function", Function: schema.FunctionCall{Name: "write_file", Arguments: "{}"}}}), nil
 			}}
-			req := Request{UserID: "u", SessionID: "s", Query: "写文件"}
+			req := Request{UserID: "u", SessionID: "s", Query: "写文件", AgentName: "web_research", ToolDomains: []ToolDomain{DomainExternal}}
 			events := collectPEEvents(t, ctx, e, req, m)
 			var interrupt Event
 			for _, ev := range events {

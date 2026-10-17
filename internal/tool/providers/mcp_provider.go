@@ -24,8 +24,6 @@ func NewMCPProvider(pool *MCPClientPool) *MCPProvider {
 	return &MCPProvider{pool: pool}
 }
 
-func (p *MCPProvider) Name() string { return "mcp" }
-
 // Validate 验证执行配置
 func (p *MCPProvider) Validate(config *tool.ExecuteConfig) error {
 	if config.ProviderConfig == nil {
@@ -118,6 +116,10 @@ func (p *MCPProvider) GetTools(ctx context.Context, providerConfig *tool.Provide
 	})
 	if err != nil {
 		return nil, fmt.Errorf("拉取 MCP 工具列表失败: %w", err)
+	}
+
+	if len(mcpTools) > 128 {
+		return nil, fmt.Errorf("MCP工具清单超过128个工具限制")
 	}
 
 	// 3. 刷新缓存

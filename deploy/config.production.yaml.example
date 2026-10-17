@@ -87,11 +87,8 @@ rag:
     dedup_threshold: 0.8
 
 tools:
-  default_timeout: 30 # 内置和未指定HTTP工具的单次时限（秒）
+  default_timeout: 30 # 内置工具单次执行时限（秒）
   enabled: true
-  web_search:
-    api_key: ""
-    base_url: ""
 
 dingtalk:
   app_key: ""

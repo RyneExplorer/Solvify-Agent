@@ -15,6 +15,11 @@ import (
 
 // runDeepAgent 执行普通深度单 Agent，也供旧深度编排恢复专业任务。
 func (e *Engine) runDeepAgent(ctx context.Context, req Request, chatModel model.ToolCallingChatModel, eventCh chan<- Event) {
+	// 新建深度单Agent不直接获得MCP；旧checkpoint与专业子任务保留原恢复边界。
+	if req.AgentName == "" && req.CheckpointID == "" {
+		req.MCPDisabled = true
+		req.ToolDomains = []ToolDomain{DomainKnowledge, DomainDocMgmt, DomainClarify}
+	}
 	profile := req.effectiveProfile()
 	sorted := e.sortedInternalTools()
 

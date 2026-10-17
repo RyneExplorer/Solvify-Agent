@@ -5,12 +5,12 @@
       <h2 class="text-sm font-semibold text-slate-800">{{ session?.title ?? '新对话' }}</h2>
       <div class="flex items-center gap-2">
         <!-- MCP 服务器选择：加载中骨架 -->
-        <div v-if="chat.mcpLoading && !chat.enabledMCPOptions.length" class="flex items-center gap-1.5 pr-2 border-r border-slate-200" title="MCP 服务器加载中...">
+        <div v-if="searchMode === 'smart-reasoning' && mcpLoading && !enabledMCPOptions.length" class="flex items-center gap-1.5 pr-2 border-r border-slate-200" title="MCP 服务器加载中...">
           <div class="h-6 w-[120px] bg-slate-100 rounded-md animate-pulse" />
           <div class="h-5 w-7 bg-slate-100 rounded-md animate-pulse" />
         </div>
         <!-- MCP 服务器选择：已加载且有选项 -->
-        <div v-else-if="chat.enabledMCPOptions.length" class="flex items-center gap-1.5 pr-2 border-r border-slate-200 relative" ref="headerMCPWrapperRef">
+        <div v-else-if="searchMode === 'smart-reasoning' && enabledMCPOptions.length" class="flex items-center gap-1.5 pr-2 border-r border-slate-200 relative" ref="headerMCPWrapperRef">
           <button
             @click="headerMCPOpen = !headerMCPOpen"
             class="flex items-center gap-1.5 text-xs text-slate-700 hover:bg-slate-50 rounded-lg px-3 py-1.5 transition-colors border border-transparent"
@@ -547,9 +547,9 @@ const headerMCPLabel = computed(() => {
   return `${names[0]} +${names.length - 1}`
 })
 function toggleMCPOne(id: string) {
-  const idx = selectedMCPConfigIds.value.indexOf(id)
-  if (idx >= 0) selectedMCPConfigIds.value.splice(idx, 1)
-  else selectedMCPConfigIds.value.push(id)
+  selectedMCPConfigIds.value = selectedMCPConfigIds.value.includes(id)
+    ? selectedMCPConfigIds.value.filter(selected => selected !== id)
+    : [...selectedMCPConfigIds.value, id]
 }
 function selectAllMCP() {
   selectedMCPConfigIds.value = [...enabledMCPOptions.value.map(o => o.id)]

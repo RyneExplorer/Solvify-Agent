@@ -116,35 +116,6 @@ export function adminListToolTypes() {
   return request<{ tool_types: ToolTypeInfo[] }>('/admin/tool-types')
 }
 
-// 创建工具类型
-export function adminCreateToolType(data: {
-  name: string
-  tool_key: string
-  description: string
-  execution_mode: string
-}) {
-  return request<ToolTypeInfo>('/admin/tool-types', { method: 'POST', body: data })
-}
-
-// 更新工具类型
-export function adminUpdateToolType(
-  id: string,
-  data: Partial<{
-    name: string
-    tool_key: string
-    description: string
-    execution_mode: string
-    is_enabled: boolean
-  }>,
-) {
-  return request<ToolTypeInfo>(`/admin/tool-types/${id}`, { method: 'PUT', body: data })
-}
-
-// 删除工具类型
-export function adminDeleteToolType(id: string) {
-  return request<null>(`/admin/tool-types/${id}`, { method: 'DELETE' })
-}
-
 // 获取指定工具类型下的供应商列表
 export function adminListToolProviders(toolTypeId: string) {
   return request<{ providers: ToolProviderInfo[] }>(`/admin/tool-types/${toolTypeId}/providers`)
@@ -192,30 +163,6 @@ export function adminUpdateToolProvider(
   })
 }
 
-// 删除工具供应商
-export function adminDeleteToolProvider(toolTypeId: string, providerId: string) {
-  return request<null>(`/admin/tool-types/${toolTypeId}/providers/${providerId}`, {
-    method: 'DELETE',
-  })
-}
-
-// 列出已注册的供应商类型（http, mcp, custom 等）
-export function adminListProviderTypes() {
-  return request<string[]>('/admin/provider-types')
-}
-
-// 测试工具连通性（MCP 场景返回工具清单；传 provider_id 时后端会持久化 MCP 工具清单）
-export function adminTestTool(data: {
-  provider_type: string
-  provider_id?: string
-  provider_config?: Record<string, unknown>
-  user_config?: Record<string, unknown>
-  admin_config?: Record<string, unknown>
-  tool_input?: Record<string, unknown>
-}) {
-  return request<ToolTestResult>('/admin/tools/test', { method: 'POST', body: data })
-}
-
 // 探测 MCP 供应商的工具清单（只拉取 tools/list，不做工具调用）；传 provider_id 时后端持久化
 export function adminProbeTool(data: {
   provider_type: string
@@ -234,11 +181,6 @@ export function adminListMCPServers() {
 // 删除 MCP 供应商；所属工具类型若变空且非 mcp 容器，级联删除空壳类型
 export function adminDeleteMCPServer(providerId: string) {
   return request<null>(`/admin/mcp-servers/${providerId}`, { method: 'DELETE' })
-}
-
-// 清理所有无供应商的非容器工具类型，返回删除数量
-export function adminCleanupEmptyToolTypes() {
-  return request<{ deleted: number }>('/admin/tool-types/cleanup-empty', { method: 'POST' })
 }
 
 // ── 会话管理 ──

@@ -12,31 +12,6 @@ import (
 
 // ─── P0-5 守卫：有缓存的表，只能由它的「拥有者仓库」写 ──────────────────────────
 //
-// 缺陷长什么样：
-//
-//	user_tool_configs 由 cachedUserToolConfigRepository 缓存（tool:config:user:<uid>），
-//	但 tool_provider_repository.Delete 里有一句
-//	    tx.Delete(&entity.UserToolConfig{}, "provider_id = ?", id)
-//	—— 它删了这张表，却不知道（也没能力知道）要失效谁的缓存。于是管理员删掉一个供应商后，
-//	用户已启用的那个工具还会以「幽灵工具」形式出现在账号里，直到 10 分钟 TTL 过期。
-//
-// 为什么这是「一类」缺陷而不是两处笔误：
-//
-//	失效缓存的责任挂在「谁写谁负责」这条纪律上，而写这张表的地方可以随时新增
-//	（P1-7 刚教会大家「跨仓库多写要走 InTx」，下一个仓库顺手加一句级联删除时，
-//	 没人会想起缓存）。纪律拦不住人，结构才拦得住。
-//
-// 所以本守卫把规则收到「结构」这一层：
-//
-//	缓存表的写权属于拥有者仓库（X_repository.go 及其缓存装饰器 X_repository_cached.go）。
-//	仓库包里其他任何文件写这张表 → 红灯。
-//
-// 与 P1-7 的 dbFor 收口是同一个思路：把「必须记得做的事」变成「没有第二条路可走」。
-//
-// ⚠️ 注册表**不是手写的**，而是从 *_repository_cached.go 派生（见 deriveCachedTableOwners）：
-// 以后谁新增一个缓存仓库，它的表自动受保护，不需要有人想起来改这里。
-// TestCachedTableOwnersDerivationIsNotVacuous 是配套自检：确保派生本身没退化。
-
 // writeVerbs 是「会改数据」的方法名。宁可多收不可漏收——漏一个就等于守卫失效，
 // 多收一个最多是让人来确认一句。
 var writeVerbs = map[string]bool{
@@ -53,9 +28,9 @@ var writeVerbs = map[string]bool{
 
 // cachedTableOwner 描述「一张有缓存的表由谁负责写」。
 type cachedTableOwner struct {
-	Entity     string // 实体类型名，如 "UserToolConfig"
-	OwnerFile  string // 拥有者仓库实现文件，如 "user_tool_config_repository.go"
-	CachedFile string // 它的缓存装饰器文件，如 "user_tool_config_repository_cached.go"
+	Entity     string // 实体类型名，如 "Model"
+	OwnerFile  string // 拥有者仓库实现文件，如 "model_repository.go"
+	CachedFile string // 它的缓存装饰器文件，如 "model_repository_cached.go"
 }
 
 func (o cachedTableOwner) String() string {
@@ -114,7 +89,7 @@ func entityTypeFromCreateParam(t *testing.T, filename string) string {
 		if fn.Type.Params == nil || len(fn.Type.Params.List) < 2 {
 			continue
 		}
-		// 第二个参数：config *entity.UserToolConfig
+		// 第二个参数：实体指针
 		typeExpr := fn.Type.Params.List[1].Type
 		star, ok := typeExpr.(*ast.StarExpr)
 		if !ok {
@@ -136,7 +111,7 @@ func entityTypeFromCreateParam(t *testing.T, filename string) string {
 //
 // 如果派生逻辑退化（比如哪天缓存仓库的 Create 签名变了、glob 写错了），
 // 下面的写权守卫就会「扫了 0 张表 = 一切正常」，看起来全绿却毫无保护。
-// 这条把当前事实钉住：这 4 张表必须被派出来。
+// 这条把当前事实钉住：这 3 张表必须被派出来。
 func TestCachedTableOwnersDerivationIsNotVacuous(t *testing.T) {
 	got := map[string]string{}
 	for _, o := range deriveCachedTableOwners(t) {
@@ -147,7 +122,6 @@ func TestCachedTableOwnersDerivationIsNotVacuous(t *testing.T) {
 		"Model":           "model_repository.go",
 		"ToolType":        "tool_type_repository.go",
 		"UserModelConfig": "user_model_config_repository.go",
-		"UserToolConfig":  "user_tool_config_repository.go",
 	}
 
 	for entity, ownerFile := range want {

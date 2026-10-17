@@ -6,13 +6,6 @@ import (
 	"solvify-agent/internal/tool"
 )
 
-func TestMCPProvider_Name(t *testing.T) {
-	p := NewMCPProvider(NewMCPClientPool())
-	if p.Name() != "mcp" {
-		t.Errorf("Name() = %q, want %q", p.Name(), "mcp")
-	}
-}
-
 func TestMCPProvider_Validate(t *testing.T) {
 	pool := NewMCPClientPool()
 	p := NewMCPProvider(pool)

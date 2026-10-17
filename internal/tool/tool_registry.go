@@ -22,11 +22,6 @@ func (r *providerRegistry) Get(providerType string) Provider {
 	return r.providers[providerType]
 }
 
-// List 列出所有供应商类型
-func (r *providerRegistry) List() map[string]Provider {
-	return r.providers
-}
-
 // Keys 返回所有已注册的 provider_type
 func (r *providerRegistry) Keys() []string {
 	keys := make([]string, 0, len(r.providers))

@@ -95,7 +95,7 @@ func (e *Engine) buildToolsByDomain(ctx context.Context, sorted []internalToolRe
 		}
 		buckets[entry.Domain] = append(buckets[entry.Domain], entry.Build(ctx, userID, kbIDs))
 	}
-	// 动态工具（MCP / HTTP）没有注册表项，统一落 DomainExternal，追加在桶尾。
+	// 动态工具（MCP）没有注册表项，统一落 DomainExternal，追加在桶尾。
 	if want[DomainExternal] && allowDynamic && e.toolFactory != nil {
 		buckets[DomainExternal] = append(buckets[DomainExternal],
 			e.toolFactory.CreateAgentTools(ctx, userID, userToolConfigIDs...)...)

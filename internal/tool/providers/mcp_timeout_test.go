@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -179,10 +180,19 @@ func TestMCPSharedInitializationAndPoolClose(t *testing.T) {
 	}
 }
 
-type mcpTimeoutConfigStore struct{ configs []entity.UserToolConfig }
+type mcpTimeoutConfigStore struct{ configs []entity.MCPConnection }
 
-func (s mcpTimeoutConfigStore) ListEnabledByUserID(context.Context, string) ([]entity.UserToolConfig, error) {
+func (s mcpTimeoutConfigStore) ListEnabledByUserID(context.Context, string) ([]entity.MCPConnection, error) {
 	return s.configs, nil
+}
+
+func (s mcpTimeoutConfigStore) Get(_ context.Context, userID, id string) (*entity.MCPConnection, error) {
+	for _, c := range s.configs {
+		if c.ID == id && c.UserID == userID {
+			return &c, nil
+		}
+	}
+	return nil, fmt.Errorf("missing")
 }
 
 func TestMCPCallAndListUseIndependentTimeout(t *testing.T) {
@@ -213,8 +223,8 @@ func TestMCPCallAndListUseIndependentTimeout(t *testing.T) {
 				registry := tool.NewProviderRegistry()
 				registry.Register("mcp", provider)
 				raw, _ := json.Marshal(cfg)
-				store := mcpTimeoutConfigStore{configs: []entity.UserToolConfig{{ToolType: entity.ToolType{ToolKey: "mcp"}, ToolProvider: entity.ToolProvider{ProviderKey: "test", ProviderType: "mcp", ProviderConfig: datatypes.JSON(raw)}}}}
-				tools := tool.NewFactory(registry, store, nil).CreateAgentTools(ctx, "user")
+				store := mcpTimeoutConfigStore{configs: []entity.MCPConnection{{ID: "c1", UserID: "user", IsEnabled: true, Config: datatypes.JSON(`{}`), TemplateID: func() *string { v := "p1"; return &v }(), Template: &entity.ToolProvider{ProviderKey: "test", ProviderType: "mcp", IsEnabled: true, ToolType: entity.ToolType{ToolKey: "mcp", IsEnabled: true}, ProviderConfig: datatypes.JSON(raw)}}}}
+				tools := tool.NewFactory(registry, store).CreateAgentTools(ctx, "user")
 				if len(tools) != 1 {
 					t.Fatal("真实MCP工具加载失败")
 				}

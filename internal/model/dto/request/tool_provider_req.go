@@ -8,7 +8,7 @@ type CreateToolProviderRequest struct {
 	ProviderKey    string          `json:"provider_key" binding:"required,max=50"`
 	Name           string          `json:"name" binding:"required,max=100"`
 	Description    string          `json:"description"`
-	ProviderType   string          `json:"provider_type" binding:"required,oneof=http mcp custom"`
+	ProviderType   string          `json:"provider_type" binding:"required,oneof=mcp"`
 	ConfigSchema   json.RawMessage `json:"config_schema"`
 	InputSchema    json.RawMessage `json:"input_schema"`
 	ProviderConfig json.RawMessage `json:"provider_config"`
@@ -20,7 +20,7 @@ type CreateToolProviderRequest struct {
 type UpdateToolProviderRequest struct {
 	Name           *string          `json:"name,omitempty" binding:"omitempty,max=100"`
 	Description    *string          `json:"description,omitempty"`
-	ProviderType   *string          `json:"provider_type,omitempty" binding:"omitempty,oneof=http mcp custom"`
+	ProviderType   *string          `json:"provider_type,omitempty" binding:"omitempty,oneof=mcp"`
 	ConfigSchema   *json.RawMessage `json:"config_schema,omitempty"`
 	InputSchema    *json.RawMessage `json:"input_schema,omitempty"`
 	ProviderConfig *json.RawMessage `json:"provider_config,omitempty"`

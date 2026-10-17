@@ -37,18 +37,13 @@ func (r *toolProviderRepository) UpdateMCPToolManifest(ctx context.Context, id s
 }
 
 // DeleteByToolTypeID 删除某工具类型下的全部供应商。
-//
-// 这里**不再**顺手删 user_tool_configs（此前是）。原因：那张表带缓存，写它的地方必须
-// 同时失效 tool:config:user:<uid>，而唯一做这件事的是 UserToolConfigRepository。
-// 现在级联由 service 在同一个事务里编排两处删除（见 tool_provider_service.Delete）。
-// 守卫见 cached_table_write_guard_test.go。
 func (r *toolProviderRepository) DeleteByToolTypeID(ctx context.Context, toolTypeID string) error {
 	return dbFor(ctx, r.db).Delete(&entity.ToolProvider{}, "tool_type_id = ?", toolTypeID).Error
 }
 
 func (r *toolProviderRepository) GetByID(ctx context.Context, id string) (*entity.ToolProvider, error) {
 	var provider entity.ToolProvider
-	err := dbFor(ctx, r.db).First(&provider, "id = ?", id).Error
+	err := dbFor(ctx, r.db).Preload("ToolType").First(&provider, "id = ?", id).Error
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +113,7 @@ func (r *toolProviderRepository) ListMCPProviders(ctx context.Context) ([]MCPSer
 	rows := make([]MCPServerRow, 0, len(providers))
 	for _, p := range providers {
 		tt := nameByID[p.ToolTypeID]
+		p.ToolType = tt
 		rows = append(rows, MCPServerRow{ToolProvider: p, ToolTypeName: tt.Name, ToolTypeKey: tt.ToolKey})
 	}
 	return rows, nil

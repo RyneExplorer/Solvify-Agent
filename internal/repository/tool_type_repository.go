@@ -26,11 +26,6 @@ func (r *toolTypeRepository) Update(ctx context.Context, toolType *entity.ToolTy
 }
 
 // Delete 只删 tool_types 自己这一行。
-//
-// 此前它在一个事务里连删 user_tool_configs + tool_providers + tool_types 三张表，其中
-// user_tool_configs 带缓存却没有跟着失效（审查报告 P0-5）。级联删除已上移到
-// tool_type_service.Delete：由 service 用同一个事务编排三处写，写用户配置表的那一步
-// 必须经由 UserToolConfigRepository（唯一会失效缓存的地方）。
 func (r *toolTypeRepository) Delete(ctx context.Context, id string) error {
 	return dbFor(ctx, r.db).Delete(&entity.ToolType{}, "id = ?", id).Error
 }

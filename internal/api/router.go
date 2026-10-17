@@ -8,6 +8,7 @@ import (
 	dingtalkapi "solvify-agent/internal/api/v1/dingtalk"
 	"solvify-agent/internal/api/v1/document"
 	"solvify-agent/internal/api/v1/knowledgebase"
+	mcpapi "solvify-agent/internal/api/v1/mcp"
 	"solvify-agent/internal/api/v1/model"
 	"solvify-agent/internal/api/v1/search"
 	"solvify-agent/internal/api/v1/storage"
@@ -34,6 +35,7 @@ type Router struct {
 	syncCtrl          *syncapi.Controller
 	dingtalkCtrl      *dingtalkapi.Controller
 	toolCtrl          *tool.Controller
+	mcpCtrl           *mcpapi.Controller
 	authService       service.AuthServiceInterface
 }
 
@@ -54,7 +56,7 @@ func NewRouter(
 	dingtalkSvc service.DingTalkServiceInterface,
 	toolTypeService service.ToolTypeService,
 	toolProviderService service.ToolProviderService,
-	userToolConfigService service.UserToolConfigService,
+	mcpService service.MCPService,
 	prefService service.UserPreferenceService,
 ) *Router {
 	r := &Router{
@@ -69,7 +71,8 @@ func NewRouter(
 		syncCtrl:          syncapi.NewController(syncSvc),
 		dingtalkCtrl:      dingtalkapi.NewController(dingtalkSvc),
 		chatCtrl:          chat.NewController(chatSvc, adminSessionService),
-		toolCtrl:          tool.NewController(toolTypeService, toolProviderService, userToolConfigService),
+		toolCtrl:          tool.NewController(toolTypeService, toolProviderService),
+		mcpCtrl:           mcpapi.NewController(mcpService),
 		authService:       authService,
 	}
 	return r
@@ -120,6 +123,7 @@ func (r *Router) Setup(engine *gin.Engine) {
 
 	// 工具
 	r.toolCtrl.RegisterRoutes(v1)
+	r.mcpCtrl.RegisterRoutes(v1)
 }
 
 // health 返回服务健康状态
