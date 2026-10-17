@@ -22,8 +22,6 @@ import (
 const (
 	// toolsCacheTTL 工具列表缓存有效期
 	toolsCacheTTL = 5 * time.Minute
-	// defaultTimeout 默认连接超时秒数
-	defaultTimeout = 30
 	// maxIdle 空闲多久后回收。管理员改 MCP 配置会产生新的 configHash，
 	// 旧条目不会再被命中，只能靠空闲回收释放其长连接。
 	maxIdle = 30 * time.Minute
@@ -32,27 +30,7 @@ const (
 	// failureTTL 初始化失败的负缓存时长。服务端持续故障时，若每次请求都重建条目，
 	// 会反复拉起子进程/重连并形成惊群；期限内直接返回上次错误。
 	failureTTL = 30 * time.Second
-	// initHardTimeout 初始化总时限兜底。
-	// 远端 MCP 服务无响应时，Start/Initialize 可能长时间不回，
-	// 没有总时限兜底会让 initDone 永不关闭，
-	// 进而把等它的 sweep() 和 Close() 一起挂死。
-	initHardTimeout = 60 * time.Second
-	// maxTimeoutSeconds 超时配置上限。超过后 int64 纳秒会溢出导致
-	// context.WithTimeout 立即触发，故做钳制。
-	maxTimeoutSeconds = 24 * 60 * 60
 )
-
-// clampTimeoutSeconds 将管理员配置的超时秒数收敛到合法范围
-func clampTimeoutSeconds(sec int) int {
-	switch {
-	case sec <= 0:
-		return defaultTimeout
-	case sec > maxTimeoutSeconds:
-		return maxTimeoutSeconds
-	default:
-		return sec
-	}
-}
 
 // initResult 由初始化 goroutine 回传，避免多个 goroutine 并发写 entry 字段
 type initResult struct {
@@ -63,6 +41,8 @@ type initResult struct {
 // MCPClientPool MCP 客户端连接池
 // 按 MCPProviderConfig 的 hash 复用 *client.Client，避免反复启动子进程或建立连接
 type MCPClientPool struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
 	mu      sync.Mutex
 	closed  atomic.Bool
 	clients map[string]*mcpPoolEntry // key = configHash
@@ -136,7 +116,9 @@ func (e *mcpPoolEntry) tryMarkEvicted() bool {
 
 // NewMCPClientPool 创建 MCP 客户端连接池
 func NewMCPClientPool() *MCPClientPool {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &MCPClientPool{
+		ctx: ctx, cancel: cancel,
 		clients: make(map[string]*mcpPoolEntry),
 	}
 }
@@ -154,6 +136,9 @@ func (p *MCPClientPool) GetOrCreate(ctx context.Context, cfg *tool.MCPProviderCo
 		return nil, nil, fmt.Errorf("MCP 连接池已关闭，不再接受新的连接")
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	hash := configHash(cfg)
 
 	p.mu.Lock()
@@ -279,10 +264,12 @@ func (p *MCPClientPool) closeEntry(e *mcpPoolEntry) {
 // 等待方统一通过 initDone 同步，避免数据竞争。
 func (p *MCPClientPool) initClient(entry *mcpPoolEntry, cfg *tool.MCPProviderConfig) {
 	defer close(entry.initDone)
+	ctx, cancel := context.WithTimeout(p.ctx, cfg.ConnectionTimeout())
+	defer cancel()
 
 	resCh := make(chan initResult, 1)
 	go func() {
-		c, err := p.doInit(cfg)
+		c, err := p.doInit(ctx, cfg)
 		resCh <- initResult{client: c, err: err}
 	}()
 
@@ -290,17 +277,13 @@ func (p *MCPClientPool) initClient(entry *mcpPoolEntry, cfg *tool.MCPProviderCon
 	case res := <-resCh:
 		entry.client = res.client
 		entry.initErr = res.err
-	case <-time.After(initHardTimeout):
-		// doInit 仍在跑（如远端服务无响应），不再等待它，
-		// 否则等待方会一直挂在 initDone 上。initDone 仍会按时关闭，Close/sweep 得以有界返回。
-		entry.initErr = fmt.Errorf("MCP 客户端初始化耗时超过 %v 未返回", initHardTimeout)
-		logger.Warnf("[MCPClientPool] MCP 初始化超时: transport=%s, url=%s",
-			cfg.Transport, cfg.URL)
+	case <-ctx.Done():
+		entry.initErr = fmt.Errorf("MCP连接初始化取消或超时: %w", ctx.Err())
 		// 兜底清理：doInit 稍后才成功返回时，这个 client 没有任何 entry 接管，
 		// 不显式关闭就会一直泄漏，因此在这里补收并关闭。
 		go func() {
 			if res := <-resCh; res.client != nil {
-				logger.Warnf("[MCPClientPool] 关闭初始化超时后迟到的 MCP 客户端: url=%s", cfg.URL)
+				logger.Warnf("关闭初始化取消或超时后迟到的MCP客户端")
 				_ = res.client.Close()
 			}
 		}()
@@ -310,14 +293,11 @@ func (p *MCPClientPool) initClient(entry *mcpPoolEntry, cfg *tool.MCPProviderCon
 		entry.failedAt = time.Now()
 		return
 	}
-	logger.Infof("[MCPClientPool] MCP 客户端初始化成功: transport=%s, url=%s", cfg.Transport, cfg.URL)
+	logger.Infof("MCP客户端初始化成功: transport=%s", cfg.Transport)
 }
 
 // doInit 真正创建并握手 MCP 客户端，任何失败路径都要保证已创建的资源被清理
-func (p *MCPClientPool) doInit(cfg *tool.MCPProviderConfig) (*client.Client, error) {
-	timeout := clampTimeoutSeconds(cfg.Timeout)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
-	defer cancel()
+func (p *MCPClientPool) doInit(ctx context.Context, cfg *tool.MCPProviderConfig) (*client.Client, error) {
 
 	var c *client.Client
 	var err error
@@ -359,6 +339,7 @@ func (p *MCPClientPool) doInit(cfg *tool.MCPProviderConfig) (*client.Client, err
 // Close 关闭所有 MCP 客户端连接，之后连接池不再接受新连接
 func (p *MCPClientPool) Close() error {
 	p.closed.Store(true)
+	p.cancel()
 
 	p.mu.Lock()
 	entries := make([]*mcpPoolEntry, 0, len(p.clients))
@@ -386,8 +367,8 @@ func (p *MCPClientPool) Close() error {
 // 仅支持 sse/http：stdio 会拉起本机子进程，只在「本地客户端」形态下有意义，
 // 本服务是网页版（进程在服务端），配了只会连到服务端自己的文件系统，故直接拒绝。
 func validateMCPConfig(cfg *tool.MCPProviderConfig) error {
-	if cfg.Timeout < 0 || cfg.Timeout > 86400 {
-		return fmt.Errorf("MCP超时时间须为1～86400秒；留空沿用原默认")
+	if err := cfg.ValidateTimeouts(); err != nil {
+		return err
 	}
 	if cfg.Transport == "" {
 		return fmt.Errorf("transport 不能为空")
@@ -404,22 +385,24 @@ func validateMCPConfig(cfg *tool.MCPProviderConfig) error {
 }
 
 // configHash 计算 MCP 配置的 hash 值
-// 只算连接相关字段（transport/command/args/env/url/headers），不算 timeout
+// 包含有效连接时限，修改后不命中旧初始化/失败缓存；调用时限改变仍复用连接。
 func configHash(cfg *tool.MCPProviderConfig) string {
 	key := struct {
-		Transport string            `json:"transport"`
-		Command   string            `json:"command"`
-		Args      []string          `json:"args"`
-		Env       map[string]string `json:"env"`
-		URL       string            `json:"url"`
-		Headers   map[string]string `json:"headers"`
+		ConnectTimeout time.Duration     `json:"connect_timeout"`
+		Transport      string            `json:"transport"`
+		Command        string            `json:"command"`
+		Args           []string          `json:"args"`
+		Env            map[string]string `json:"env"`
+		URL            string            `json:"url"`
+		Headers        map[string]string `json:"headers"`
 	}{
-		Transport: cfg.Transport,
-		Command:   cfg.Command,
-		Args:      cfg.Args,
-		Env:       cfg.Env,
-		URL:       cfg.URL,
-		Headers:   cfg.Headers,
+		ConnectTimeout: cfg.ConnectionTimeout(),
+		Transport:      cfg.Transport,
+		Command:        cfg.Command,
+		Args:           cfg.Args,
+		Env:            cfg.Env,
+		URL:            cfg.URL,
+		Headers:        cfg.Headers,
 	}
 	data, _ := json.Marshal(key)
 	h := sha256.Sum256(data)

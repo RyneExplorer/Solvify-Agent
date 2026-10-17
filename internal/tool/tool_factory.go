@@ -284,6 +284,10 @@ func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string, userC
 
 		// MCP 场景：多工具供应商，一个 MCP Server 提供多个工具
 		if multi, ok := provider.(MultiToolProvider); ok && providerConfig.MCP != nil {
+			if err := providerConfig.MCP.ValidateTimeouts(); err != nil {
+				logger.Warnf("MCP工具时限配置错误，跳过: providerKey=%s", config.ToolProvider.ProviderKey)
+				continue
+			}
 			mcpTools, err := multi.GetTools(ctx, &providerConfig)
 			if err != nil {
 				logger.Warnf("[ToolFactory] MCP 拉取工具列表失败，跳过: providerKey=%s, err=%v",
@@ -298,7 +302,7 @@ func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string, userC
 			// 时后者会覆盖前者，Agent 实际只能调到其中一个。
 			// 最终形态：{tool_key}_{provider_key}_{tool_name}，例如 mcp_filesystem_read_file
 			prefix := mcpToolPrefix(config.ToolType.ToolKey, config.ToolProvider.ProviderKey)
-			callTimeout := mcpCallTimeout(providerConfig.MCP)
+			callTimeout := providerConfig.MCP.ToolCallTimeout()
 			loaded := 0
 			for _, mt := range mcpTools {
 				if len(disabled) > 0 {
@@ -395,28 +399,6 @@ func sanitizeToolNamePart(s string) string {
 	return b.String()
 }
 
-// defaultMCPCallTimeout 未配置 timeout 时的单次 MCP 工具调用超时兜底
-// MCP Server 多为外部进程/远程服务，可能卡死或长时间无响应；
-// 没有兜底的话一次 tools/call 会把整个 Agent 请求无限期挂住。
-const defaultMCPCallTimeout = 300 * time.Second
-
-// maxTimeoutSeconds 超时秒数上限，超过后 int64 纳秒溢出会让 WithTimeout 立即触发
-const maxTimeoutSeconds = 24 * 60 * 60
-
-// mcpCallTimeout 计算单次 MCP 工具调用超时
-// 优先使用管理员配置的 Timeout（秒），未配置时回落到兜底值
-func mcpCallTimeout(cfg *MCPProviderConfig) time.Duration {
-	if cfg == nil || cfg.Timeout <= 0 {
-		return defaultMCPCallTimeout
-	}
-	sec := cfg.Timeout
-	if sec > maxTimeoutSeconds {
-		logger.Warnf("[ToolFactory] MCP timeout 配置值 %d 超过上限，已钳制为 %d 秒", sec, maxTimeoutSeconds)
-		sec = maxTimeoutSeconds
-	}
-	return time.Duration(sec) * time.Second
-}
-
 // prefixedTool 为 BaseTool 的工具名添加前缀，避免不同 MCP Server 工具名冲突
 // 例如 MCP Server "filesystem" 的 read_file 工具 → Agent 看到的工具名为 "mcp_filesystem_read_file"
 //
@@ -464,7 +446,8 @@ func (t *prefixedTool) InvokableRun(ctx context.Context, argumentsInJSON string,
 	if inv, ok := t.BaseTool.(einoTool.InvokableTool); ok {
 		runCtx, cancel := t.callContext(ctx)
 		defer cancel()
-		return inv.InvokableRun(runCtx, argumentsInJSON, opts...)
+		result, err := inv.InvokableRun(runCtx, argumentsInJSON, opts...)
+		return result, ExecutionError(runCtx, err)
 	}
 	return "", fmt.Errorf("工具 %s 不支持 InvokableRun", t.prefix)
 }

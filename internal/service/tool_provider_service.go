@@ -106,11 +106,16 @@ func (s *toolProviderService) Update(ctx context.Context, id string, req request
 		return nil, apperrors.NotFoundOrInternal(apperrors.CodeToolProviderNotFound, err)
 	}
 
-	// 系统预置保护：不允许修改 provider_type 和 provider_config
-	if provider.IsSystem {
-		if req.ProviderType != nil || req.ProviderConfig != nil {
+	// 系统预置只开放超时编辑，连接地址和凭据仍由YAML管理。
+	if provider.IsSystem && (req.ProviderType != nil || req.ProviderConfig != nil) {
+		if provider.ProviderType != "mcp" || req.ProviderType != nil {
 			return nil, apperrors.New(apperrors.CodeBadRequest, "系统预置供应商不支持修改类型和连接配置")
 		}
+		merged, err := mergeSystemMCPTimeouts(provider.ProviderConfig, *req.ProviderConfig)
+		if err != nil {
+			return nil, apperrors.New(apperrors.CodeBadRequest, err.Error())
+		}
+		req.ProviderConfig = &merged
 	}
 
 	if req.Name != nil {
@@ -740,8 +745,8 @@ func normalizeMCPProviderConfig(raw json.RawMessage, registry tool.ProviderRegis
 		return nil, fmt.Errorf("MCP 配置缺少 transport 字段（sse/http）")
 	}
 	wrapped := tool.ProviderConfig{MCP: &mcpCfg}
-	if mcpCfg.Timeout < 0 || mcpCfg.Timeout > 86400 {
-		return nil, fmt.Errorf("MCP超时时间须为1～86400秒；留空沿用原默认")
+	if err := mcpCfg.ValidateTimeouts(); err != nil {
+		return nil, err
 	}
 	exeCfg := &tool.ExecuteConfig{ProviderConfig: &wrapped}
 	provider := registry.Get("mcp")
@@ -773,8 +778,8 @@ func validateProviderTimeout(kind string, raw []byte) error {
 		_, err := tool.ConfiguredExecutionTimeout(pc.Timeout, time.Second)
 		return err
 	}
-	if kind == "mcp" && pc.MCP != nil && (pc.MCP.Timeout < 0 || pc.MCP.Timeout > 86400) {
-		return fmt.Errorf("MCP超时时间须为1～86400秒；留空沿用原默认")
+	if kind == "mcp" && pc.MCP != nil {
+		return pc.MCP.ValidateTimeouts()
 	}
 	return nil
 }

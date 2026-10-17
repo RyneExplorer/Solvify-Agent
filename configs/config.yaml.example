@@ -140,14 +140,16 @@ tools:
       description: "Council of AI 公开 MCP（GSPC 测量板，只读，无需鉴权）"
       transport: "http"
       url: "https://councilof.ai/mcp/free"
-      timeout: 30
+      connect_timeout: 30
+      call_timeout: 300
     # - name: "my-remote-mcp"
     #   description: "远程 MCP 服务器示例"
     #   transport: "sse"
     #   url: "https://example.com/mcp/sse"
     #   headers:
     #     Authorization: "Bearer xxx"
-    #   timeout: 30
+    #   connect_timeout: 30
+    #   call_timeout: 300
 
 # 钉钉集成配置
 dingtalk:

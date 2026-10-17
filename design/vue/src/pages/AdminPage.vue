@@ -217,8 +217,7 @@
                 <div class="flex items-center gap-1">
                   <AppButton
                     variant="ghost" size="sm"
-                    :disabled="p.is_system"
-                    :title="p.is_system ? '系统预置供应商不支持编辑' : ''"
+                    :title="p.is_system ? '编辑超时时间' : ''"
                     @click="openToolProviderModal(p)"
                   >编辑</AppButton>
                   <AppButton
@@ -289,8 +288,7 @@
                 <div class="flex items-center gap-1">
                   <AppButton
                     variant="ghost" size="sm"
-                    :disabled="s.is_system"
-                    :title="s.is_system ? '系统预置供应商不支持编辑' : ''"
+                    :title="s.is_system ? '编辑超时时间' : ''"
                     @click="openMCPServerEdit(s)"
                   >编辑</AppButton>
                   <AppButton
@@ -400,15 +398,15 @@
       <div class="relative bg-white rounded-2xl shadow-xl border border-slate-200 p-6 w-[520px]" style="max-height:90vh;overflow-y:auto;">
         <h3 class="text-lg font-semibold text-slate-900 mb-4">{{ editingToolProvider ? '编辑供应商' : '添加供应商' }}</h3>
         <div class="space-y-4">
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <label class="block text-[13px] font-medium text-slate-600 mb-1.5">名称 <span class="text-red-500">*</span></label>
             <input v-model="toolProviderForm.name" placeholder="博查 AI" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
           </div>
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <label class="block text-[13px] font-medium text-slate-600 mb-1.5">Provider Key <span class="text-red-500">*</span></label>
             <input v-model="toolProviderForm.provider_key" placeholder="bocha" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900" />
           </div>
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <label class="block text-[13px] font-medium text-slate-600 mb-1.5">供应商类型 <span class="text-red-500">*</span></label>
             <AppSelect v-model="toolProviderForm.provider_type" class="w-full">
               <el-option value="http" label="HTTP" />
@@ -416,7 +414,7 @@
               <el-option value="custom" label="自定义" />
             </AppSelect>
           </div>
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <label class="block text-[13px] font-medium text-slate-600 mb-1.5">描述</label>
             <textarea v-model="toolProviderForm.description" rows="2" placeholder="供应商描述" class="w-full rounded-xl border border-slate-200 bg-slate-50 text-sm px-4 py-2.5 text-slate-900 outline-none focus:border-slate-900 resize-none" />
           </div>
@@ -479,7 +477,7 @@
             <div class="space-y-3 border border-slate-200 rounded-xl p-3 bg-slate-50">
               <div>
                 <label class="block text-xs font-medium text-slate-500 mb-1">传输方式 <span class="text-red-500">*</span></label>
-                <AppSelect v-model="mcpForm.transport" class="w-full">
+                <AppSelect :disabled="editingToolProvider?.is_system" v-model="mcpForm.transport" class="w-full">
                   <el-option value="stdio" label="Stdio (本地进程)" />
                   <el-option value="sse" label="SSE (远程 HTTP 流)" />
                   <el-option value="http" label="HTTP (同步接口)" />
@@ -487,6 +485,7 @@
               </div>
 
               <!-- Stdio -->
+              <fieldset :disabled="editingToolProvider?.is_system" class="space-y-3">
               <template v-if="mcpForm.transport === 'stdio'">
                 <div>
                   <label class="block text-xs font-medium text-slate-500 mb-1">启动命令 <span class="text-red-500">*</span></label>
@@ -541,19 +540,19 @@
                 </div>
               </template>
 
-              <div>
-                <label class="block text-xs font-medium text-slate-500 mb-1">连接及调用超时（秒，可选）</label>
-                <input
-                  v-model.number="mcpForm.timeout"
-                  type="number"
-                  min="1"
-                  max="86400"
-                  step="1"
-                  placeholder="留空：连接30秒，工具调用300秒"
-                  class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2 outline-none focus:border-slate-900"
-                />
-                <p class="text-xs text-slate-400 mt-1">填写后用于连接初始化与单次工具调用；连接池另有60秒初始化等待上限。</p>
+              </fieldset>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-xs font-medium text-slate-500 mb-1">连接初始化超时（秒）</label>
+                  <input v-model="mcpForm.connect_timeout" type="number" min="1" max="86400" step="1" placeholder="默认30" class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2" />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-500 mb-1">单次工具调用超时（秒）</label>
+                  <input v-model="mcpForm.call_timeout" type="number" min="1" max="86400" step="1" placeholder="默认300" class="w-full rounded-lg border border-slate-200 bg-white text-xs px-3 py-2" />
+                </div>
               </div>
+              <p class="text-xs text-slate-400">两项分别计时；留空恢复各自默认值。保存后新一轮执行生效。</p>
+              <p v-if="editingToolProvider?.is_system" class="text-xs text-amber-600">系统预置仅允许修改超时；保存值在重启后继续生效。</p>
             </div>
           </div>
 
@@ -583,7 +582,7 @@
           </div>
 
           <!-- Config Schema Builder -->
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <div class="flex items-center justify-between mb-1.5">
               <label class="block text-[13px] font-medium text-slate-600">用户配置 Schema</label>
               <button type="button" @click="addSchemaField" class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-1 rounded-md hover:bg-slate-50">+ 添加字段</button>
@@ -614,7 +613,7 @@
           </div>
 
           <!-- 管理配置键值对 -->
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <div class="flex items-center justify-between mb-1.5">
               <label class="block text-[13px] font-medium text-slate-600">管理员业务参数</label>
               <button type="button" @click="addKV(toolProviderForm.admin_config_rows)" class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-1 rounded-md hover:bg-slate-50">+ 添加</button>
@@ -628,7 +627,7 @@
           </div>
 
           <!-- Rate Limit Key-Value -->
-          <div>
+          <div v-if="!editingToolProvider?.is_system">
             <div class="flex items-center justify-between mb-1.5">
               <label class="block text-[13px] font-medium text-slate-600">限流配置</label>
               <button type="button" @click="addKV(toolProviderForm.rate_limit_rows)" class="text-xs text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-1 rounded-md hover:bg-slate-50">+ 添加</button>
@@ -1231,7 +1230,8 @@ interface MCPFormState {
   env_rows: KVRow[]
   url: string
   headers_rows: KVRow[]
-  timeout: number | string
+  connect_timeout: number | string
+  call_timeout: number | string
 }
 function createEmptyMCPForm(): MCPFormState {
   return {
@@ -1241,7 +1241,8 @@ function createEmptyMCPForm(): MCPFormState {
     env_rows: [],
     url: '',
     headers_rows: [],
-    timeout: '',
+    connect_timeout: '',
+    call_timeout: '',
   }
 }
 const mcpForm = reactive<MCPFormState>(createEmptyMCPForm())
@@ -1271,18 +1272,27 @@ function mcpFromJSON(json: string | object | null): MCPFormState {
         form.headers_rows.push({ key: k, value: String(v) })
       }
     }
-    form.timeout = toolTimeoutFromConfig(cfg.timeout)
+    form.connect_timeout = toolTimeoutFromConfig(cfg.connect_timeout ?? cfg.timeout)
+    form.call_timeout = toolTimeoutFromConfig(cfg.call_timeout ?? cfg.timeout)
   } catch { /* ignore */ }
   return form
 }
 
 // 构建 MCP provider_config（裸配置格式，后端自动包装）
+function buildMCPTimeoutConfig(form: MCPFormState): Record<string, unknown> {
+  const result: Record<string, unknown> = {}
+  const connect = toolTimeoutValue(form.connect_timeout)
+  const call = toolTimeoutValue(form.call_timeout)
+  if (connect !== undefined) result.connect_timeout = connect
+  if (call !== undefined) result.call_timeout = call
+  return result
+}
+
 function buildMCPProviderConfig(form: MCPFormState): Record<string, unknown> | undefined {
   const base: Record<string, unknown> = {
     transport: form.transport,
   }
-  const timeout = toolTimeoutValue(form.timeout)
-  if (timeout !== undefined) base.timeout = timeout
+  Object.assign(base, buildMCPTimeoutConfig(form))
   if (form.transport === 'stdio') {
     if (!form.command.trim()) return undefined
     base.command = form.command.trim()
@@ -1547,9 +1557,7 @@ async function autoProbeCurrentMCP(force: boolean) {
   if (mcpProbing.value) return
   try {
     mcpProbing.value = true
-    const providerConfig = provider?.provider_config && typeof provider.provider_config === 'object'
-      ? provider.provider_config as unknown as Record<string, unknown>
-      : buildMCPProviderConfig(mcpForm)
+    const providerConfig = buildMCPProviderConfig(mcpForm)
     const res = await adminProbeTool({
       provider_type: 'mcp',
       provider_id: provider?.id,
@@ -1578,7 +1586,11 @@ async function saveToolProvider() {
     } else {
       providerConfig = buildProviderConfig(toolProviderForm.value)
     }
-    if (editingToolProvider.value) {
+    if (editingToolProvider.value?.is_system) {
+      await adminUpdateToolProvider(currentToolType.value.id, editingToolProvider.value.id, {
+        provider_config: { mcp: buildMCPTimeoutConfig(mcpForm) },
+      })
+    } else if (editingToolProvider.value) {
       const payload: Parameters<typeof adminUpdateToolProvider>[2] = {
         name: toolProviderForm.value.name,
         provider_key: toolProviderForm.value.provider_key,

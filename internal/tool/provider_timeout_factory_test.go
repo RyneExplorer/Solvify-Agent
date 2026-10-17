@@ -65,6 +65,18 @@ func TestProviderTimeoutFactoryReadsSavedValues(t *testing.T) {
 					t.Fatalf("%s存储%d，实际%s: %v", kind, seconds, got, err)
 				}
 			}
+			if kind == "mcp" {
+				config.ToolProvider.ProviderConfig = datatypes.JSON(`{"mcp":{"transport":"http","url":"https://example.invalid","timeout":45,"connect_timeout":90,"call_timeout":120}}`)
+				store.configs = []entity.UserToolConfig{config}
+				tools := f.CreateAgentTools(context.Background(), "u1")
+				if len(tools) != 1 {
+					t.Fatal("新配置工具构建失败")
+				}
+				got, err := tools[0].(einotool.InvokableTool).InvokableRun(context.Background(), `{}`)
+				if err != nil || got != "120" {
+					t.Fatal("真实调用未优先使用独立调用时限", got, err)
+				}
+			}
 		})
 	}
 }

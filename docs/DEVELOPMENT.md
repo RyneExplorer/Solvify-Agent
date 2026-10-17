@@ -28,7 +28,7 @@ go run ./cmd/server
 
 当前没有 `cmd/seed` 入口。已有数据库升级需单独确认升级 SQL，不能将新库初始化等同于迁移；依赖变更后再运行 `go mod tidy` 并检查 diff。
 
-HTTP和MCP超时在已有供应商编辑框配置，复用原创建/更新接口和provider_config JSON，无新增路由或数据库迁移。内置和未指定HTTP工具使用 `tools.default_timeout`（默认30秒，`TOOLS_DEFAULT_TIMEOUT`可覆盖）；MCP显式值用于连接/调用，留空保持原默认。范围、发布与验证见[工具执行时限](tool-timeouts.md)。Agent整次任务总时限和MCP连接/调用时限拆分仍为独立待办。
+HTTP和MCP超时在已有供应商编辑框配置，复用原创建/更新接口和provider_config JSON，无新增路由或数据库迁移。内置和未指定HTTP工具使用 `tools.default_timeout`（默认30秒，`TOOLS_DEFAULT_TIMEOUT`可覆盖）；MCP分别配置connect_timeout/call_timeout，默认30/300秒，旧timeout兼容读取；系统预置允许管理员仅修改时限并在启动同步时保留。范围、发布与验证见[工具执行时限](tool-timeouts.md)。Agent整次任务总时限仍为独立待办，MCP连接/调用时限已拆分并移除固定60秒初始化截断。
 
 ### 常用检查
 

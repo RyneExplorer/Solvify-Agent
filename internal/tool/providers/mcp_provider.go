@@ -56,7 +56,9 @@ func (p *MCPProvider) Execute(ctx context.Context, config *tool.ExecuteConfig) (
 
 	// 管理员测试场景：调用 MCP tools/list 返回工具清单，便于验证连接是否正常
 	listReq := mcp.ListToolsRequest{}
-	result, err := p.listTools(ctx, entry, listReq)
+	listCtx, cancel := context.WithTimeout(ctx, mcpCfg.ToolCallTimeout())
+	defer cancel()
+	result, err := p.listTools(listCtx, entry, listReq)
 	if err != nil {
 		return "", fmt.Errorf("调用 MCP tools/list 失败: %w", err)
 	}
@@ -104,7 +106,13 @@ func (p *MCPProvider) GetTools(ctx context.Context, providerConfig *tool.Provide
 	entry.toolsCacheMu.RUnlock()
 
 	// 2. 未命中或过期：调用 eino-ext/mcp 包拉取工具列表
-	mcpTools, err := mcpp.GetTools(ctx, &mcpp.Config{
+	listCtx, cancel := context.WithTimeout(ctx, mcpCfg.ToolCallTimeout())
+	defer cancel()
+	if !entry.Acquire() {
+		return nil, fmt.Errorf("MCP连接已被回收，请重试")
+	}
+	defer entry.Release()
+	mcpTools, err := mcpp.GetTools(listCtx, &mcpp.Config{
 		Cli:           c,
 		CustomHeaders: mcpCfg.Headers,
 	})

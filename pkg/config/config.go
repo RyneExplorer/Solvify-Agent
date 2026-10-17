@@ -164,15 +164,17 @@ type WebSearchConfig struct {
 
 // SystemMCPServerConfig 系统预置 MCP 服务器配置
 type SystemMCPServerConfig struct {
-	Name        string            `mapstructure:"name" json:"name"`
-	Description string            `mapstructure:"description" json:"description"`
-	Transport   string            `mapstructure:"transport" json:"transport"`       // stdio | sse | http
-	Command     string            `mapstructure:"command" json:"command,omitempty"` // stdio
-	Args        []string          `mapstructure:"args" json:"args,omitempty"`       // stdio
-	Env         map[string]string `mapstructure:"env" json:"env,omitempty"`         // stdio
-	URL         string            `mapstructure:"url" json:"url,omitempty"`         // sse/http
-	Headers     map[string]string `mapstructure:"headers" json:"headers,omitempty"` // sse/http
-	Timeout     int               `mapstructure:"timeout" json:"timeout,omitempty"` // 默认 30
+	Name           string            `mapstructure:"name" json:"name"`
+	Description    string            `mapstructure:"description" json:"description"`
+	Transport      string            `mapstructure:"transport" json:"transport"`       // stdio | sse | http
+	Command        string            `mapstructure:"command" json:"command,omitempty"` // stdio
+	Args           []string          `mapstructure:"args" json:"args,omitempty"`       // stdio
+	Env            map[string]string `mapstructure:"env" json:"env,omitempty"`         // stdio
+	URL            string            `mapstructure:"url" json:"url,omitempty"`         // sse/http
+	Headers        map[string]string `mapstructure:"headers" json:"headers,omitempty"` // sse/http
+	Timeout        int               `mapstructure:"timeout" json:"timeout,omitempty"` // 兼容旧配置
+	ConnectTimeout *int              `mapstructure:"connect_timeout" json:"connect_timeout,omitempty"`
+	CallTimeout    *int              `mapstructure:"call_timeout" json:"call_timeout,omitempty"`
 }
 
 // DingTalkConfig 描述钉钉开放平台配置
@@ -496,6 +498,16 @@ func (c *Config) Validate() error {
 	}
 	if c.Tools.DefaultTimeout < 1 || c.Tools.DefaultTimeout > 86400 {
 		return errors.New("tools.default_timeout 必须为1～86400秒")
+	}
+	for _, srv := range c.Tools.MCPServers {
+		if srv.Timeout < 0 || srv.Timeout > 86400 {
+			return errors.New("MCP旧timeout须为0～86400秒")
+		}
+		for _, seconds := range []*int{srv.ConnectTimeout, srv.CallTimeout} {
+			if seconds != nil && (*seconds < 1 || *seconds > 86400) {
+				return errors.New("MCP连接与调用超时须为1～86400秒，或留空")
+			}
+		}
 	}
 	if c.Database.Postgres.Host == "" {
 		return errors.New("database.postgres.host 不能为空")

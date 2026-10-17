@@ -36,7 +36,7 @@ func TestProviderTimeoutUsesExistingAdminRoutes(t *testing.T) {
 		for _, method := range []string{"POST", "PUT"} {
 			pc := `{"timeout":60}`
 			if kind == "mcp" {
-				pc = `{"mcp":{"timeout":30}}`
+				pc = `{"mcp":{"connect_timeout":90,"call_timeout":120}}`
 			}
 			body := `{"tool_type_id":"type","provider_key":"key","name":"test","provider_type":"` + kind + `","provider_config":` + pc + `}`
 			path := "/api/v1/admin/tool-types/type/providers"
