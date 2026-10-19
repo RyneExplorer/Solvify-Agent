@@ -272,6 +272,10 @@ func buildToolsNodeConfig() compose.ToolsNodeConfig {
 		// LLM 看到错误信息后可以自行修正参数重试。
 		// 不加这个的话 InferTool 内部 sonic.Unmarshal 失败会直接 return error → 整个 Agent 崩。
 		ToolArgumentsHandler: func(ctx context.Context, toolName, arguments string) (string, error) {
+			// 产物读取自行返回字段级纠错反馈，保留原JSON，避免转成{}后丢失错误原因。
+			if toolName == artifactReadToolName {
+				return arguments, nil
+			}
 			if arguments == "" {
 				return "{}", nil
 			}

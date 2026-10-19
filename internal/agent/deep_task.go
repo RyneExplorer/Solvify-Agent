@@ -199,7 +199,11 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 					if json.Unmarshal([]byte(msg.Content), &ref) == nil && ref.ArtifactID != "" {
 						artifacts = appendArtifactReference(artifacts, ref)
 					}
-					peEvent(g, Event{Type: EventToolResult, TaskID: task.ID, AgentName: task.Agent, Title: "工具执行结果", ToolResult: msg.Content, Status: TaskSuccess})
+					toolEvent := Event{Type: EventToolResult, TaskID: task.ID, AgentName: task.Agent, Title: "工具执行结果", ToolResult: msg.Content, Status: TaskSuccess}
+					if message, recoverable := artifactArgumentFailure(mv.ToolName, msg.Content); recoverable {
+						toolEvent.Status, toolEvent.Retryable, toolEvent.Detail = TaskError, true, message
+					}
+					peEvent(g, toolEvent)
 				} else if mv.Role == schema.Assistant {
 					answer = msg.Content
 				}
@@ -237,6 +241,8 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 			}
 			if reason := s.Failures[task.ID]; reason != "" && interrupt == nil {
 				result.Status, result.Error = TaskError, reason
+			} else if reason := s.ArtifactArgumentFailures[task.ID]; reason != "" && taskError == nil && interrupt == nil {
+				result.Status, result.Error = TaskError, "产物读取参数尚未纠正："+reason
 			}
 			mergeTaskResult(&s.Plan, s.Results, result)
 			detail := truncateTaskSummary(result.Summary, 500)
@@ -361,6 +367,22 @@ func (a *peTaskAgent) resultMiddleware(taskID string, dangerous map[string]bool)
 				}
 			}
 			if output != nil && err == nil {
+				if input.Name == artifactReadToolName {
+					message, recoverable := artifactArgumentFailure(input.Name, output.Result)
+					r.mu.Lock()
+					if recoverable {
+						if s.ArtifactArgumentFailures == nil {
+							s.ArtifactArgumentFailures = map[string]string{}
+						}
+						s.ArtifactArgumentFailures[taskID] = message
+					} else {
+						delete(s.ArtifactArgumentFailures, taskID)
+					}
+					r.mu.Unlock()
+					if recoverable {
+						return output, nil
+					}
+				}
 				var response struct {
 					Success *bool  `json:"success"`
 					Message string `json:"message"`

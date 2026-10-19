@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -103,10 +104,39 @@ type artifactReadTool struct {
 	model  string
 }
 
+type artifactArgumentFeedback struct {
+	Success      bool   `json:"success"`
+	ErrorType    string `json:"error_type"`
+	Field        string `json:"field"`
+	Message      string `json:"message"`
+	Retryable    bool   `json:"retryable"`
+	MaxReadRunes int    `json:"max_read_runes"`
+}
+
+func (t artifactReadTool) invalidArguments(field, message string) (string, error) {
+	raw, err := json.Marshal(artifactArgumentFeedback{
+		ErrorType: "invalid_arguments", Field: field, Message: message,
+		Retryable: true, MaxReadRunes: t.policy.ReadRunes,
+	})
+	return string(raw), err
+}
+
+// 仅识别程序内置读取工具的参数反馈，外部工具不能声明此标记以清除失败事实。
+func artifactArgumentFailure(toolName, result string) (string, bool) {
+	if toolName != artifactReadToolName {
+		return "", false
+	}
+	var feedback artifactArgumentFeedback
+	if json.Unmarshal([]byte(result), &feedback) != nil || feedback.Success || !feedback.Retryable || feedback.ErrorType != "invalid_arguments" || feedback.Message == "" {
+		return "", false
+	}
+	return feedback.Message, true
+}
+
 func (t artifactReadTool) Info(context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
 		Name: artifactReadToolName,
-		Desc: fmt.Sprintf("读取本运行本任务工具产物的一段原文；偏移/长度以字符计数，每次最多%d个字符，超大limit自动缩小。实际返回长度还受token预算限制；complete=false时必须使用返回的next_offset继续，不要按请求limit推算偏移。只能读取工具结果给出的artifact_id。", t.policy.ReadRunes),
+		Desc: fmt.Sprintf("读取本运行本任务工具产物的一段原文；偏移/长度以字符计数，每次最多%d个字符，超大limit自动缩小。实际返回长度还受token预算限制；complete=false时必须使用返回的next_offset继续，不要按请求limit推算偏移。只能读取工具结果给出的artifact_id。返回invalid_arguments时按field和message修正参数后重新调用，纠错消耗当前执行预算。", t.policy.ReadRunes),
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
 			"artifact_id": {Type: schema.String, Required: true, Desc: "工具结果提供的产物ID"},
 			"offset":      {Type: schema.Integer, Desc: "从0开始的字符偏移；省略为0，后续分页使用上次返回的next_offset"},
@@ -116,13 +146,34 @@ func (t artifactReadTool) Info(context.Context) (*schema.ToolInfo, error) {
 }
 
 func (t artifactReadTool) InvokableRun(ctx context.Context, args string, _ ...einoTool.Option) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	var req struct {
 		ID     string `json:"artifact_id"`
 		Offset int    `json:"offset"`
 		Limit  int    `json:"limit"`
 	}
-	if json.Unmarshal([]byte(args), &req) != nil || len(req.ID) != 64 || req.Offset < 0 || req.Limit < 0 {
-		return "", fmt.Errorf("产物读取参数无效")
+	if err := json.Unmarshal([]byte(args), &req); err != nil {
+		var fieldErr *json.UnmarshalTypeError
+		if errors.As(err, &fieldErr) {
+			switch fieldErr.Field {
+			case "artifact_id":
+				return t.invalidArguments("artifact_id", "artifact_id必须是工具结果提供的字符串ID，请修正后重新调用")
+			case "offset", "limit":
+				return t.invalidArguments(fieldErr.Field, fieldErr.Field+"必须是非负整数，请修正后重新调用")
+			}
+		}
+		return t.invalidArguments("arguments", "参数必须是合法JSON对象，字段为artifact_id（字符串）、offset和limit（非负整数），请修正后重新调用")
+	}
+	if _, err := hex.DecodeString(req.ID); err != nil || len(req.ID) != 64 {
+		return t.invalidArguments("artifact_id", "artifact_id必须是工具结果提供的64位十六进制ID，请勿自行生成，请修正后重新调用")
+	}
+	if req.Offset < 0 {
+		return t.invalidArguments("offset", "offset不能为负数；首次读取使用0，后续使用返回的next_offset，请修正后重新调用")
+	}
+	if req.Limit < 0 {
+		return t.invalidArguments("limit", "limit不能为负数；省略或设为0使用配置上限，请修正后重新调用")
 	}
 	// limit是请求的页长；缩小超大请求即可继续读取，无需终止任务或额外纠错调用。
 	if req.Limit == 0 || req.Limit > t.policy.ReadRunes {
@@ -137,7 +188,7 @@ func (t artifactReadTool) InvokableRun(ctx context.Context, args string, _ ...ei
 	}
 	runes := []rune(a.Content)
 	if req.Offset > len(runes) {
-		return "", fmt.Errorf("产物偏移超出范围")
+		return t.invalidArguments("offset", fmt.Sprintf("offset超出范围，允许0至%d；请使用上次返回的next_offset或从0开始重新读取", len(runes)))
 	}
 	end := req.Offset + min(len(runes)-req.Offset, req.Limit)
 	// 按完整字符缩短，并以最终JSON计费，避免转义膨胀、短末页空转和半个UTF-8字符。

@@ -114,8 +114,9 @@ func TestContextArtifactSaveReadAndFailure(t *testing.T) {
 		}
 	}
 	for _, args := range []string{`{`, `{"artifact_id":"../secret"}`, fmt.Sprintf(`{"artifact_id":%q,"offset":-1}`, ref.ArtifactID), fmt.Sprintf(`{"artifact_id":%q,"limit":-1}`, ref.ArtifactID), fmt.Sprintf(`{"artifact_id":%q,"offset":999999}`, ref.ArtifactID)} {
-		if _, err = reader.InvokableRun(context.Background(), args); err == nil {
-			t.Fatal("非法范围放行")
+		raw, readErr := reader.InvokableRun(context.Background(), args)
+		if _, recoverable := artifactArgumentFailure(artifactReadToolName, raw); readErr != nil || !recoverable {
+			t.Fatalf("参数错误未反馈给模型: %s, %v", raw, readErr)
 		}
 	}
 	repo.fail = true

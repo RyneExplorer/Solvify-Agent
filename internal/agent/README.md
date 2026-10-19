@@ -40,7 +40,9 @@
 - `checkpoint_store.go`：内存/数据库 checkpoint 存储和通用 checkpoint ID。
 - `context_checkpoint.go`：checkpoint 上下文封装、请求恢复与兼容识别。
 
-`read_context_artifact` 的 `offset`、`limit` 均按字符计数，工具定义及产物引用公开当前 `max_read_runes`。省略或零 `limit` 使用配置上限，超大正整数自动缩小到该上限；完整 JSON 输出仍受 `read_tokens` 限制，因此 `complete=false` 时必须使用返回的 `next_offset` 继续，不能按请求页长累加偏移。非法参数、越界偏移、归属、存储、取消与版本/哈希错误仍返回失败。
+`read_context_artifact` 的 `offset`、`limit` 均按字符计数，工具定义及产物引用公开当前 `max_read_runes`。省略或零 `limit` 使用配置上限，超大正整数自动缩小到该上限；完整 JSON 输出仍受 `read_tokens` 限制，因此 `complete=false` 时必须使用返回的 `next_offset` 继续，不能按请求页长累加偏移。
+
+非法JSON、字段类型、缺少ID、负数与越界偏移作为工具结果返回 `success=false`、`error_type=invalid_arguments`、`field`、中文 `message` 和 `retryable=true`，模型可在原执行预算内修正后重新调用。深度任务单独保存尚未纠正的参数错误，正确读取后清除，模型忽略错误则任务失败；该标记仅识别程序内置读取工具。归属、存储、取消、版本/哈希与无法返回有效片段的预算错误仍通过Go error终止，不转为可纠正参数错误。
 
 ### 输出和错误
 

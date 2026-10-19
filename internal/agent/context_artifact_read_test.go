@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cloudwego/eino/compose"
 
+	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/repository"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/tokenutil"
@@ -23,6 +25,74 @@ type artifactReadPage struct {
 	TotalRunes   int    `json:"total_runes"`
 	MaxReadRunes int    `json:"max_read_runes"`
 	Complete     bool   `json:"complete"`
+}
+
+type argumentReadProbeRepo struct {
+	repository.ContextArtifactRepo
+	reads atomic.Int32
+}
+
+func (r *argumentReadProbeRepo) FindScoped(context.Context, repository.ArtifactScope, string) (*entity.ContextArtifact, error) {
+	r.reads.Add(1)
+	return nil, errors.New("存储不可用")
+}
+
+func TestContextArtifactArgumentFeedbackBeforeIO(t *testing.T) {
+	repo := &argumentReadProbeRepo{}
+	reader := artifactReadTool{repo: repo, policy: config.DefaultRuntimeContextPolicy()}
+	id := strings.Repeat("a", 64)
+	tests := []struct {
+		name, args, field string
+	}{
+		{"json", `{`, "arguments"},
+		{"array", `[]`, "arguments"},
+		{"missing", `{}`, "artifact_id"},
+		{"null", `null`, "artifact_id"},
+		{"id_type", `{"artifact_id":123}`, "artifact_id"},
+		{"id_format", fmt.Sprintf(`{"artifact_id":%q}`, strings.Repeat("x", 64)), "artifact_id"},
+		{"offset_type", fmt.Sprintf(`{"artifact_id":%q,"offset":"sensitive-input"}`, id), "offset"},
+		{"offset_negative", fmt.Sprintf(`{"artifact_id":%q,"offset":-1}`, id), "offset"},
+		{"limit_type", fmt.Sprintf(`{"artifact_id":%q,"limit":1.5}`, id), "limit"},
+		{"limit_overflow", fmt.Sprintf(`{"artifact_id":%q,"limit":9223372036854775808}`, id), "limit"},
+		{"limit_negative", fmt.Sprintf(`{"artifact_id":%q,"limit":-1}`, id), "limit"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw, err := reader.InvokableRun(context.Background(), test.args)
+			var feedback artifactArgumentFeedback
+			if err != nil || json.Unmarshal([]byte(raw), &feedback) != nil || feedback.Success || !feedback.Retryable || feedback.ErrorType != "invalid_arguments" || feedback.Field != test.field || feedback.Message == "" || feedback.MaxReadRunes != reader.policy.ReadRunes {
+				t.Fatalf("参数错误未返回可纠正反馈: %s, %v", raw, err)
+			}
+			if strings.Contains(raw, "sensitive-input") {
+				t.Fatal("反馈泄露原始参数")
+			}
+		})
+	}
+	if repo.reads.Load() != 0 {
+		t.Fatal("参数无效时仍执行IO")
+	}
+	if raw, err := reader.InvokableRun(context.Background(), fmt.Sprintf(`{"artifact_id":%q}`, id)); err == nil || raw != "" || repo.reads.Load() != 1 {
+		t.Fatalf("存储错误被转为参数反馈: %s, %v", raw, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := reader.InvokableRun(ctx, `{}`); !errors.Is(err, context.Canceled) || repo.reads.Load() != 1 {
+		t.Fatalf("参数校验吞掉取消: %v", err)
+	}
+}
+
+func TestContextArtifactOffsetFeedbackAfterScopedLookup(t *testing.T) {
+	reader, ref, _ := artifactReadFixture(t, config.DefaultRuntimeContextPolicy(), strings.Repeat("可信证据", 1500))
+	args := fmt.Sprintf(`{"artifact_id":%q,"offset":999999}`, ref.ArtifactID)
+	raw, err := reader.InvokableRun(context.Background(), args)
+	var feedback artifactArgumentFeedback
+	if err != nil || json.Unmarshal([]byte(raw), &feedback) != nil || feedback.Field != "offset" || !strings.Contains(feedback.Message, "6000") {
+		t.Fatalf("越界偏移缺少有效范围: %s, %v", raw, err)
+	}
+	reader.scope.UserID = "other"
+	if raw, err = reader.InvokableRun(context.Background(), args); !errors.Is(err, repository.ErrArtifactUnavailable) || raw != "" {
+		t.Fatalf("越权请求获得了参数反馈或内容长度: %s, %v", raw, err)
+	}
 }
 
 func artifactReadFixture(t *testing.T, policy config.RuntimeContextPolicy, content string) (artifactReadTool, artifactReference, string) {
