@@ -15,6 +15,9 @@ var mcpPlaceholder = regexp.MustCompile(`\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}`
 
 // ResolveMCPConnection 从可信归属和模板生成运行配置，不改写共享模板。
 func ResolveMCPConnection(c *entity.MCPConnection) (*MCPConfig, string, error) {
+	if _, err := DisabledMCPTools(c.Config); err != nil {
+		return nil, "", err
+	}
 	var cfg MCPConfig
 	prefix := MCPToolPrefix("mcp", c.ID)
 	if c.TemplateID != nil {
@@ -129,7 +132,7 @@ func validateMCPFields(raw []byte, values map[string]interface{}) error {
 	for key, value := range values {
 		if key == "disabled_tools" {
 			continue
-		} // 仅保留旧配置的有效期内工具选择。
+		} // 工具使用偏好不属于预置凭据schema。
 		field, ok := s.Properties[key]
 		if !ok {
 			return fmt.Errorf("未知MCP配置字段：%s", key)

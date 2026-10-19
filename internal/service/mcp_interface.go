@@ -15,4 +15,6 @@ type MCPService interface {
 	Update(ctx context.Context, userID, id string, req request.UpdateMCPConnectionRequest) (*response.MCPConnectionInfo, error)
 	Delete(ctx context.Context, userID, id string) error
 	Probe(ctx context.Context, userID string, req request.ProbeMCPConnectionRequest) (*response.TestResult, error)
+	Tools(ctx context.Context, userID, id string) (*response.MCPConnectionTools, error)
+	UpdateTool(ctx context.Context, userID, id string, req request.UpdateMCPToolRequest) (*response.MCPToolState, error)
 }

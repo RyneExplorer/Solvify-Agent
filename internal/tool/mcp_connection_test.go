@@ -29,6 +29,16 @@ func TestMCPFactoryRevalidatesRevocationAndCredentialRotation(t *testing.T) {
 		t.Fatal("停用后继续调用")
 	}
 	store.configs[0].IsEnabled = true
+	// 使用底层名称，停用后已有实例也必须拒绝执行。
+	baseInfo, _ := deadlineProbeTool{}.Info(context.Background())
+	store.configs[0].Config, _ = json.Marshal(map[string]interface{}{"disabled_tools": []string{baseInfo.Name}})
+	if _, err := invoke.InvokableRun(context.Background(), `{}`); err == nil {
+		t.Fatal("逐工具停用后旧实例继续调用")
+	}
+	store.configs[0].Config = datatypes.JSON(`{}`)
+	if _, err := invoke.InvokableRun(context.Background(), `{}`); err != nil {
+		t.Fatal("重新启用工具后无法调用", err)
+	}
 	store.configs[0].Template.Connection = datatypes.JSON(`{"transport":"http","url":"https://example.com/mcp","headers":{"Authorization":"Bearer new"}}`)
 	if _, err := invoke.InvokableRun(context.Background(), `{}`); err == nil {
 		t.Fatal("旧工具继续使用已轮换凭据")

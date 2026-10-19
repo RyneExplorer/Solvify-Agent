@@ -21,3 +21,8 @@ type ProbeMCPConnectionRequest struct {
 	Connection  json.RawMessage `json:"connection"`
 	Config      json.RawMessage `json:"config"`
 }
+
+type UpdateMCPToolRequest struct {
+	Name      string `json:"name" binding:"required,max=256"`
+	IsEnabled *bool  `json:"is_enabled" binding:"required"`
+}

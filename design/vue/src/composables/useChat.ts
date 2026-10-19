@@ -116,7 +116,7 @@ export function useChat() {
 
   /** 用户已启用的 MCP 服务器列表（用于选择器展示） */
   const enabledMCPOptions = computed<{ id: string; name: string; description: string }[]>(() => {
-    const rows = mcpUserConfigs.value.filter(c => c.is_enabled && (!c.template_id || mcpToolTemplates.value.some(t => t.id === c.template_id))).map(c => ({
+    const rows = mcpUserConfigs.value.filter(c => c.effective_enabled && (!c.template_id || mcpToolTemplates.value.some(t => t.id === c.template_id))).map(c => ({
       id:c.id,name:c.display_name,description:mcpToolTemplates.value.find(t => t.id === c.template_id)?.description || '个人 MCP',
     }))
     return rows

@@ -47,9 +47,7 @@ func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string, ids .
 			logger.Warnf("MCP连接或工具发现失败: connection_id=%s", c.ID)
 			continue
 		}
-		var fields map[string]interface{}
-		_ = json.Unmarshal(c.Config, &fields)
-		disabled := parseDisabledTools(fields)
+		disabled, _ := DisabledMCPTools(c.Config) // ResolveMCPConnection已校验。
 		for _, t := range tools {
 			info, err := t.Info(ctx)
 			if err != nil || info == nil || disabled[info.Name] {
@@ -57,10 +55,15 @@ func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string, ids .
 			}
 			expected, _ := json.Marshal(cfg)
 			connectionID := c.ID
+			toolName := info.Name
 			out = append(out, &prefixedTool{BaseTool: t, prefix: prefix, timeout: cfg.ToolCallTimeout(), check: func(checkCtx context.Context) error {
 				current, e := f.configRepo.Get(checkCtx, userID, connectionID)
 				if e != nil || current.UserID != userID || !current.IsEnabled {
 					return fmt.Errorf("MCP连接已停用或不可用")
+				}
+				disabled, err := DisabledMCPTools(current.Config)
+				if err != nil || disabled[toolName] {
+					return fmt.Errorf("MCP工具已停用或配置不可用")
 				}
 				resolved, currentPrefix, e := ResolveMCPConnection(current)
 				if e != nil {
@@ -75,32 +78,6 @@ func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string, ids .
 		}
 	}
 	return out
-}
-
-// parseDisabledTools 解析用户配置中的 disabled_tools 数组（MCP 工具级停用名单）
-// 未配置或解析失败时返回 nil，表示全部启用
-func parseDisabledTools(userConfig map[string]interface{}) map[string]bool {
-	if userConfig == nil {
-		return nil
-	}
-	raw, ok := userConfig["disabled_tools"]
-	if !ok {
-		return nil
-	}
-	list, ok := raw.([]interface{})
-	if !ok || len(list) == 0 {
-		return nil
-	}
-	disabled := make(map[string]bool, len(list))
-	for _, v := range list {
-		if name, ok := v.(string); ok && name != "" {
-			disabled[name] = true
-		}
-	}
-	if len(disabled) == 0 {
-		return nil
-	}
-	return disabled
 }
 
 // MCPToolPrefix 构造稳定前缀：命名空间与模板标识。
