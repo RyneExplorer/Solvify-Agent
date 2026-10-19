@@ -196,14 +196,14 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 				}
 				if len(msg.ToolCalls) > 0 {
 					for _, call := range msg.ToolCalls {
-						peEvent(g, Event{Type: EventToolCall, TaskID: task.ID, AgentName: task.Agent, Title: "调用工具 " + call.Function.Name, Detail: truncateTaskSummary(call.Function.Arguments, 200), Status: TaskRunning})
+						peEvent(g, Event{Type: EventToolCall, TaskID: task.ID, AgentName: task.Agent, ToolCallID: call.ID, ToolName: call.Function.Name, Title: "调用工具 " + call.Function.Name, Detail: truncateTaskSummary(call.Function.Arguments, 200), Status: TaskRunning})
 					}
 				} else if mv.Role == schema.Tool {
 					var ref artifactReference
 					if json.Unmarshal([]byte(msg.Content), &ref) == nil && ref.ArtifactID != "" {
 						artifacts = appendArtifactReference(artifacts, ref)
 					}
-					toolEvent := Event{Type: EventToolResult, TaskID: task.ID, AgentName: task.Agent, Title: "工具执行结果", ToolResult: msg.Content, Status: TaskSuccess}
+					toolEvent := Event{Type: EventToolResult, TaskID: task.ID, AgentName: task.Agent, ToolCallID: msg.ToolCallID, ToolName: mv.ToolName, Title: "工具执行结果", ToolResult: msg.Content, Status: TaskSuccess}
 					r.mu.Lock()
 					terminal := s.Denied || s.Blocked || s.Unsafe[task.ID]
 					r.mu.Unlock()

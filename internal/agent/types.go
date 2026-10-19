@@ -119,8 +119,10 @@ type Event struct {
 	Kind      apperrors.Kind `json:"-"`
 	Done      bool           `json:"done"`
 	Retryable bool           `json:"retryable,omitempty"`
-	// ToolResult 工具调用结果（完整内容，供前端展示）
+	// ToolResult 保留原始结果，供内部结果判定与来源处理。
 	ToolResult string `json:"tool_result,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	ToolName   string `json:"tool_name,omitempty"`
 	// interrupt 事件字段
 	CheckpointID  string         `json:"checkpoint_id,omitempty"`
 	InterruptID   string         `json:"interrupt_id,omitempty"`

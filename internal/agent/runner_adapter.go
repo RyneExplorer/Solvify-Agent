@@ -299,10 +299,12 @@ func (e *Engine) consumeMessageStream(
 					if tc.Function.Name != "" {
 						toolCallName = tc.Function.Name
 						eventch.Send(ctx, eventCh, Event{
-							Type:   EventToolCall,
-							Title:  "调用工具",
-							Detail: strutil.Truncate(tc.Function.Arguments, 200),
-							Status: "running",
+							Type:       EventToolCall,
+							ToolCallID: tc.ID,
+							ToolName:   tc.Function.Name,
+							Title:      "调用工具",
+							Detail:     strutil.Truncate(tc.Function.Arguments, 200),
+							Status:     "running",
 						})
 						toolCallPending = true
 					}
@@ -331,6 +333,8 @@ func (e *Engine) consumeMessageStream(
 			title, detail, _ := formatToolEnd(toolCallName, &einoTool.CallbackOutput{Response: msg.Content}, toolDescMap)
 			eventch.Send(ctx, eventCh, Event{
 				Type:       EventToolResult,
+				ToolCallID: msg.ToolCallID,
+				ToolName:   mv.ToolName,
 				Title:      title,
 				Detail:     detail,
 				Status:     "success",
@@ -360,10 +364,12 @@ func (e *Engine) handleMessage(
 				}
 				title, detail := formatToolStart(tc.Function.Name, extractQueryFromArgs(tc.Function.Arguments), nil, toolDescMap)
 				eventch.Send(ctx, eventCh, Event{
-					Type:   EventToolCall,
-					Title:  title,
-					Detail: detail,
-					Status: "running",
+					Type:       EventToolCall,
+					ToolCallID: tc.ID,
+					ToolName:   tc.Function.Name,
+					Title:      title,
+					Detail:     detail,
+					Status:     "running",
 				})
 			}
 			if strings.TrimSpace(msg.Content) != "" {
@@ -386,6 +392,8 @@ func (e *Engine) handleMessage(
 			title, detail, _ := formatToolEnd(toolName, &einoTool.CallbackOutput{Response: msg.Content}, toolDescMap)
 			eventch.Send(ctx, eventCh, Event{
 				Type:       EventToolResult,
+				ToolCallID: msg.ToolCallID,
+				ToolName:   toolName,
 				Title:      title,
 				Detail:     detail,
 				Status:     "success",

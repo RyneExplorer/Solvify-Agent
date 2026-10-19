@@ -188,18 +188,17 @@ func (p *pePlan) FirstStep() string {
 
 // peState 只存业务数据；模型、工具和互斥锁由每次请求重新装配。
 type peState struct {
-	Request   Request
-	Plan      ExecutionPlan
-	Results   map[string]TaskResult
-	Batch     []TaskSpec
-	Round     int
-	Final     string
-	RetryUsed bool
-	Unsafe    map[string]bool
-	Denied    bool
-	Blocked   bool
-	Failures  map[string]string
-
+	Request      Request
+	Plan         ExecutionPlan
+	Results      map[string]TaskResult
+	Batch        []TaskSpec
+	Round        int
+	Final        string
+	RetryUsed    bool
+	Unsafe       map[string]bool
+	Denied       bool
+	Blocked      bool
+	Failures     map[string]string
 	ToolProgress map[string]peToolProgress `json:",omitempty"`
 	// 与终止失败分开保存；模型纠正后清除，忽略错误不能标记任务成功。
 	ArtifactArgumentFailures map[string]string `json:",omitempty"`

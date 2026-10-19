@@ -99,8 +99,19 @@ func TestPlanExecuteToolBusinessResults(t *testing.T) {
 			defer cancel()
 			events := collectPEBehaviorEvents(t, ctx, e, Request{Query: "核对资料", UserID: "u", SessionID: "tool-result"}, m)
 			var toolEvents []Event
+			calls := make(map[string]Event)
 			for _, ev := range events {
+				if ev.Type == EventToolCall && ev.TaskID == "a" {
+					if ev.ToolCallID == "" || ev.ToolName == "" {
+						t.Fatalf("工具调用没有关联标识: %+v", ev)
+					}
+					calls[ev.ToolCallID] = ev
+				}
 				if ev.Type == EventToolResult && ev.TaskID == "a" {
+					call, ok := calls[ev.ToolCallID]
+					if !ok || call.ToolName != ev.ToolName || call.PlanID != ev.PlanID || call.PlanVersion != ev.PlanVersion {
+						t.Fatalf("工具结果无法关联原调用: call=%+v result=%+v", call, ev)
+					}
 					toolEvents = append(toolEvents, ev)
 				}
 			}

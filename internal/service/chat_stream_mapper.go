@@ -12,6 +12,8 @@ import (
 // 因此快速模式的失败不可能再显示深度模式的措辞，同一句话也不会出现第二个来源。
 func toStreamEvent(e agent.Event, profile agent.Profile) dto.StreamEvent {
 	se := dto.StreamEvent{
+		ToolCallID:   e.ToolCallID,
+		ToolName:     e.ToolName,
 		Type:         e.Type,
 		Title:        e.Title,
 		Detail:       e.Detail,
