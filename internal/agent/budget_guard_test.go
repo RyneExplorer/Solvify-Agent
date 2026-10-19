@@ -7,15 +7,13 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
-
-	"solvify-agent/pkg/tokenutil"
 )
 
-// V1：超长工具结果在**写入 state 之前**被截断，且工具调用配对不被破坏。
+// 窗口充足时完整保留工具证据，且工具调用配对不被破坏。
 //
 // 配对是硬约束：工具结果要和发起它的 assistant.tool_calls 按 ToolCallID 一一对应，
 // 少一条就会留下无人应答的 tool_call，模型直接报错。所以这条同时断言「条数不变」。
-func TestBudgetGuardTruncatesToolResults(t *testing.T) {
+func TestBudgetGuardRetainsToolResultsWhenTheyFit(t *testing.T) {
 	long := strings.Repeat("这是一段很长的检索结果。", 2000)
 	msgs := []*schema.Message{
 		schema.UserMessage("帮我查一下"),
@@ -29,7 +27,7 @@ func TestBudgetGuardTruncatesToolResults(t *testing.T) {
 
 	g := &budgetGuard{
 		modelID:     "test-model-budget-truncate",
-		declaredCtx: 16000,
+		declaredCtx: 64000,
 		modelName:   "gpt-4o",
 		profile:     ProfileQuick,
 	}
@@ -47,8 +45,8 @@ func TestBudgetGuardTruncatesToolResults(t *testing.T) {
 	if toolMsg.ToolCallID != "call-1" {
 		t.Fatalf("工具结果与 tool_call 的配对字段丢失: ToolCallID=%q", toolMsg.ToolCallID)
 	}
-	if got := tokenutil.CountTokens(toolMsg.Content, "gpt-4o"); got > toolResultCap {
-		t.Fatalf("工具结果未被截断到 %d token 以内，实际 %d", toolResultCap, got)
+	if toolMsg.Content != long {
+		t.Fatal("窗口充足仍裁剪了原文")
 	}
 	// 用户提问必须原样保留。
 	if out.Messages[0].Content != "帮我查一下" {

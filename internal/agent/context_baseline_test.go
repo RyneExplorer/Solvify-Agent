@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -19,6 +20,12 @@ func TestContextBudgetBaseline(t *testing.T) {
 			before := llm.MessagesTokens(messages, "gpt-4o")
 			guard := newBudgetGuard(Request{Profile: profile, ModelID: "baseline", ModelName: "gpt-4o", MaxContextLength: limit})
 			_, state, err := guard.BeforeModelRewriteState(context.Background(), &adk.ChatModelAgentState{Messages: messages, ToolInfos: tools}, nil)
+			if limit == 8192 {
+				if !errors.Is(err, llm.ErrContextBudget) || state.Messages[2].Content != messages[2].Content {
+					t.Fatal("无原文存储的证据超限应明确拒绝并保留原文", err)
+				}
+				continue
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

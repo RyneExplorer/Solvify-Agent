@@ -121,8 +121,8 @@ func TestContextArtifactSaveReadAndFailure(t *testing.T) {
 	}
 	repo.fail = true
 	out, err = endpoint(context.Background(), &compose.ToolInput{Name: "search", CallID: "failed"})
-	if err != nil || out.Result != content {
-		t.Fatal("写失败改变原文")
+	if err == nil || out != nil || len(repo.values) != 1 {
+		t.Fatal("原文保存失败未明确中止，或产生了伪引用")
 	}
 	for _, fact := range []string{`{"success": false,"message":"` + content + `"}`, "用户拒绝审批，操作未执行" + content} {
 		protected := e.artifactMiddleware(req)(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
