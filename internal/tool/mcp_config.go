@@ -5,10 +5,7 @@ type MCPConfig struct {
 	// 仅由可信配置解析设置，不能由用户JSON覆盖。
 	ScopeKey        string            `json:"-"`
 	RestrictNetwork bool              `json:"-"`
-	Transport       string            `json:"transport"`                 // stdio | sse | http
-	Command         string            `json:"command,omitempty"`         // stdio: 可执行文件
-	Args            []string          `json:"args,omitempty"`            // stdio: 命令参数
-	Env             map[string]string `json:"env,omitempty"`             // stdio: 环境变量
+	Transport       string            `json:"transport"`                 // sse | http
 	URL             string            `json:"url,omitempty"`             // sse/http: 端点 URL
 	Headers         map[string]string `json:"headers,omitempty"`         // sse/http: 请求头
 	Timeout         int               `json:"timeout,omitempty"`         // 兼容旧配置，新字段分别优先

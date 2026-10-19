@@ -62,7 +62,7 @@ func (a *App) upsertSystemMCPTemplate(ctx context.Context, srv *config.SystemMCP
 
 // YAML管理连接信息；已由管理员保存的超时在重启同步时保留。
 func systemMCPConnection(srv *config.SystemMCPServerConfig, existing []byte) ([]byte, error) {
-	cfg := tool.MCPConfig{Transport: srv.Transport, Command: srv.Command, Args: srv.Args, Env: srv.Env, URL: srv.URL, Headers: srv.Headers, Timeout: srv.Timeout, ConnectTimeout: srv.ConnectTimeout, CallTimeout: srv.CallTimeout}
+	cfg := tool.MCPConfig{Transport: srv.Transport, URL: srv.URL, Headers: srv.Headers, Timeout: srv.Timeout, ConnectTimeout: srv.ConnectTimeout, CallTimeout: srv.CallTimeout}
 	if err := cfg.ValidateTimeouts(); err != nil {
 		return nil, err
 	}

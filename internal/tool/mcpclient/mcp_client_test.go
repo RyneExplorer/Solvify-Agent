@@ -19,8 +19,7 @@ func TestMCPClient_Validate(t *testing.T) {
 			name: "stdio 不再支持（网页版只能 http/sse）",
 			config: &tool.MCPConfig{
 				Transport: "stdio",
-				Command:   "npx",
-				Args:      []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
+				URL:       "https://example.com/mcp",
 			},
 			wantErr: true,
 		},
@@ -46,13 +45,6 @@ func TestMCPClient_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "stdio 缺少 command（已被整体拒绝）",
-			config: &tool.MCPConfig{
-				Transport: "stdio",
-			},
-			wantErr: true,
-		},
-		{
 			name: "sse 缺少 url",
 			config: &tool.MCPConfig{
 				Transport: "sse",
@@ -68,7 +60,7 @@ func TestMCPClient_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "ProviderConfig 为空",
+			name:    "未提供 MCP 配置",
 			config:  nil,
 			wantErr: true,
 		},

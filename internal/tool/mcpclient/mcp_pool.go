@@ -40,7 +40,7 @@ type initResult struct {
 }
 
 // MCPClientPool MCP 客户端连接池
-// 按 MCPConfig 的 hash 复用 *client.Client，避免反复启动子进程或建立连接
+// 按 MCPConfig 的 hash 复用 *client.Client，避免反复建立连接
 type MCPClientPool struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -402,18 +402,12 @@ func configHash(cfg *tool.MCPConfig) string {
 		RestrictNetwork bool
 		ConnectTimeout  time.Duration     `json:"connect_timeout"`
 		Transport       string            `json:"transport"`
-		Command         string            `json:"command"`
-		Args            []string          `json:"args"`
-		Env             map[string]string `json:"env"`
 		URL             string            `json:"url"`
 		Headers         map[string]string `json:"headers"`
 	}{
 		ScopeKey: cfg.ScopeKey, RestrictNetwork: cfg.RestrictNetwork,
 		ConnectTimeout: cfg.ConnectionTimeout(),
 		Transport:      cfg.Transport,
-		Command:        cfg.Command,
-		Args:           cfg.Args,
-		Env:            cfg.Env,
 		URL:            cfg.URL,
 		Headers:        cfg.Headers,
 	}

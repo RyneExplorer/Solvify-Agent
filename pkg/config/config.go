@@ -166,10 +166,7 @@ type SystemMCPServerConfig struct {
 	ConfigSchema   map[string]interface{} `mapstructure:"config_schema" json:"config_schema,omitempty"`
 	Name           string                 `mapstructure:"name" json:"name"`
 	Description    string                 `mapstructure:"description" json:"description"`
-	Transport      string                 `mapstructure:"transport" json:"transport"`       // stdio | sse | http
-	Command        string                 `mapstructure:"command" json:"command,omitempty"` // stdio
-	Args           []string               `mapstructure:"args" json:"args,omitempty"`       // stdio
-	Env            map[string]string      `mapstructure:"env" json:"env,omitempty"`         // stdio
+	Transport      string                 `mapstructure:"transport" json:"transport"`       // sse | http
 	URL            string                 `mapstructure:"url" json:"url,omitempty"`         // sse/http
 	Headers        map[string]string      `mapstructure:"headers" json:"headers,omitempty"` // sse/http
 	Timeout        int                    `mapstructure:"timeout" json:"timeout,omitempty"` // 兼容旧配置
