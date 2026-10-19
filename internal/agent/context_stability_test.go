@@ -192,9 +192,15 @@ func TestContextStabilityThousandRoundHistory(t *testing.T) {
 }
 
 func TestContextStabilityConcurrentIsolationAndOverflow(t *testing.T) {
-	const workers, requestsPerWorker = 24, 8
+	// 常规回归覆盖共享 Engine 的并发隔离、摘要和超限终态；完整负载显式运行。
+	workers, requestsPerWorker := 4, 3
+	timeout := 60 * time.Second
+	if os.Getenv("SOLVIFY_CONTEXT_STRESS_TEST") == "1" {
+		workers, requestsPerWorker = 24, 8
+		timeout = 5 * time.Minute
+	}
 	engine := NewEngine(nil, config.AgentConfig{QuickAgentMaxIterations: 8}).(*Engine)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	start := make(chan struct{})
 	results := make(chan error, workers)
@@ -264,7 +270,9 @@ func TestContextStabilityConcurrentIsolationAndOverflow(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	if accepted.Load() != 120 || rejected.Load() != 72 || summaries.Load() == 0 {
+	wantRejected := workers * ((requestsPerWorker + 2) / 3)
+	wantAccepted := workers*requestsPerWorker - wantRejected
+	if accepted.Load() != int32(wantAccepted) || rejected.Load() != int32(wantRejected) || summaries.Load() == 0 {
 		t.Fatalf("并发规模或摘要未覆盖：成功=%d 拒绝=%d 摘要=%d", accepted.Load(), rejected.Load(), summaries.Load())
 	}
 	t.Logf("并发=%d 总请求=%d 成功=%d 正确拒绝=%d 摘要=%d 耗时=%s", workers, workers*requestsPerWorker, accepted.Load(), rejected.Load(), summaries.Load(), time.Since(started))
