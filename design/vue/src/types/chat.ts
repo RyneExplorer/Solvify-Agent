@@ -86,6 +86,8 @@ export interface ChatMessage {
   sources?: SourceInfo[]
   reasoning_steps?: ReasoningStep[]
   execution_plan?: ExecutionPlan
+  execution_error?: string
+  execution_retryable?: boolean
   created_at: string
 }
 

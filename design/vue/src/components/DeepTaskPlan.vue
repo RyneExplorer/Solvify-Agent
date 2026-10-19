@@ -7,7 +7,7 @@
     <div v-if="plan.version || plan.phase || plan.round" class="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
       <span v-if="plan.phase">{{ phaseLabel }}</span>
       <span v-if="plan.version">计划版本 {{ plan.version }}</span>
-      <span v-if="plan.round">第 {{ plan.round }} 轮</span>
+      <span v-if="plan.round">执行批次 {{ plan.round }}</span>
     </div>
     <p v-if="plan.replan_reason" class="mb-2 whitespace-pre-wrap break-words text-[11px] text-slate-500">调整原因：{{ plan.replan_reason }}</p>
     <ol class="space-y-2">

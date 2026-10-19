@@ -74,13 +74,14 @@ type AgentConfig struct {
 	ScoreThreshold  float64              `mapstructure:"score_threshold"`
 	// QuickAgentMaxIterations 指定快速模式（eino ChatModelAgent）最多执行几个
 	// 模型调用，默认 8，澄清和最终回答均计入轮数，恢复不重置计数。
-	QuickAgentMaxIterations   int  `mapstructure:"quick_agent_max_iterations"`
-	DeepPlanExecuteEnabled    bool `mapstructure:"deep_plan_execute_enabled"`
-	DeepParallelEnabled       bool `mapstructure:"deep_parallel_enabled"`
-	DeepMaxPlanTasks          int  `mapstructure:"deep_max_plan_tasks"`
-	DeepMaxSubagentIterations int  `mapstructure:"deep_max_subagent_iterations"`
-	DeepMaxPlanExecuteRounds  int  `mapstructure:"deep_max_plan_execute_rounds"`
-	DeepMaxExecutorIterations int  `mapstructure:"deep_max_executor_iterations"`
+	QuickAgentMaxIterations int  `mapstructure:"quick_agent_max_iterations"`
+	DeepPlanExecuteEnabled  bool `mapstructure:"deep_plan_execute_enabled"`
+	DeepParallelEnabled     bool `mapstructure:"deep_parallel_enabled"`
+	DeepMaxPlanTasks        int  `mapstructure:"deep_max_plan_tasks"`
+	// DeepMaxSubagentIterations 是单个专业任务的模型调用总额度，含重试与最终回答；审批恢复不重置。
+	DeepMaxSubagentIterations int `mapstructure:"deep_max_subagent_iterations"`
+	DeepMaxPlanExecuteRounds  int `mapstructure:"deep_max_plan_execute_rounds"`
+	DeepMaxExecutorIterations int `mapstructure:"deep_max_executor_iterations"`
 }
 
 // LLMConfig 描述模型调用配置
@@ -401,7 +402,7 @@ func Default() *Config {
 			DeepPlanExecuteEnabled:    true,
 			DeepParallelEnabled:       true,
 			DeepMaxPlanTasks:          4,
-			DeepMaxSubagentIterations: 3,
+			DeepMaxSubagentIterations: 12,
 			DeepMaxPlanExecuteRounds:  8,
 			DeepMaxExecutorIterations: 6,
 		},

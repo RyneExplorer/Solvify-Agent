@@ -148,12 +148,12 @@ var errorMessages = map[apperrors.Kind]kindMessage{
 		},
 		Quick: &ErrorMessage{
 			Title:     "快速检索轮次用尽",
-			Detail:    "本次快速检索用尽了推理轮次，请重试，或切换到深度模式（可用轮次更多）",
+			Detail:    "本次快速检索已达到模型调用轮次上限，尚未完成回答。可缩小查询范围后重试",
 			Retryable: true,
 		},
 		Deep: &ErrorMessage{
-			Title:     "深度推理轮次用尽",
-			Detail:    "本次深度推理用尽了推理轮次，请重试，或把问题拆小一些",
+			Title:     "深度任务达到调用上限",
+			Detail:    "本次执行已达到模型调用轮次上限，任务尚未完成。已完成结果保留在任务卡中，可缩小查询范围后重试；反复出现时请检查任务调用额度配置",
 			Retryable: true,
 		},
 	},

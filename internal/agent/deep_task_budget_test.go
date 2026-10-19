@@ -16,6 +16,7 @@ import (
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 
+	"solvify-agent/pkg/config"
 	apperrors "solvify-agent/pkg/errors"
 )
 
@@ -35,7 +36,7 @@ func TestPETaskBudgetMultiStepAndExhaustion(t *testing.T) {
 		t.Run(map[bool]string{false: "多步查询并收尾", true: "最后一次不执行工具"}[exhaust], func(t *testing.T) {
 			var tools, research, modelCalls atomic.Int32
 			e := deepTestEngine()
-			e.cfg.DeepMaxSubagentIterations = 12
+			e.cfg.DeepMaxSubagentIterations = config.Default().Agent.DeepMaxSubagentIterations
 			e.RegisterInternal("lookup_record", 1, false, DomainKnowledge, func(context.Context, string, []string) einoTool.BaseTool {
 				return taskBudgetTool{calls: &tools}
 			})

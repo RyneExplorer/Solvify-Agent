@@ -8,6 +8,25 @@ import { renderToString } from '@vue/server-renderer'
 import { applyExecutionPlanEvent, finishExecutionPlan } from '../src/composables/chatExecutionPlan.ts'
 import { streamRequest } from '../src/api/client.ts'
 
+test('错误标题和解释置于同一个提示框，安全显示并去除重复解释', async () => {
+  const filename = new URL('../src/components/ChatFailure.vue', import.meta.url)
+  const { descriptor } = parse(await readFile(filename, 'utf8'), { filename: filename.pathname })
+  const compiled = compileScript(descriptor, { id: 'chat-failure-test', inlineTemplate: true })
+  const { code } = await transformWithEsbuild(compiled.content, 'ChatFailure.ts', { loader: 'ts' })
+  const generated = new URL(`./.chat-failure-${process.pid}.mjs`, import.meta.url)
+  await writeFile(generated, code)
+  try {
+    const { default: component } = await import(generated.href)
+    const html = await renderToString(createSSRApp(component, { title: '执行未完成', detail: '<script>说明</script>' }))
+    assert.equal((html.match(/role="alert"/g) ?? []).length, 1)
+    assert.ok(html.includes('执行未完成') && html.includes('&lt;script&gt;说明&lt;/script&gt;'))
+    const repeated = await renderToString(createSSRApp(component, { title: '执行未完成', detail: '执行未完成' }))
+    assert.equal((repeated.match(/执行未完成/g) ?? []).length, 1)
+  } finally {
+    await unlink(generated)
+  }
+})
+
 test('SSE 建立前的业务错误保持后端提示，避免误判为空流', async () => {
   const originalFetch = globalThis.fetch
   const originalStorage = globalThis.localStorage
@@ -81,7 +100,7 @@ test('实时和历史任务卡渲染状态、中文角色、依赖与安全文�
     plan.tasks[1].status = 'waiting'
     plan.tasks[1].summary = '<script>alert(1)</script>'
     const html = await renderToString(createSSRApp(component, { plan }))
-    for (const text of ['深度任务 · 1/3', '并行执行', '已完成', '等待审批', '依赖：研究 A、研究 B', '外部工具研究', '计划版本 2', '第 3 轮', '评估与重规划', '调整原因：补充来源验证', '版本 2 新增']) assert.ok(html.includes(text), text)
+    for (const text of ['深度任务 · 1/3', '并行执行', '已完成', '等待审批', '依赖：研究 A、研究 B', '外部工具研究', '计划版本 2', '执行批次 3', '评估与重规划', '调整原因：补充来源验证', '版本 2 新增']) assert.ok(html.includes(text), text)
     assert.ok(!html.includes('<script>alert(1)</script>'))
     assert.ok(html.includes('&lt;script&gt;'))
     plan.status = 'error'

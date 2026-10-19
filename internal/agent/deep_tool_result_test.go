@@ -165,7 +165,7 @@ func TestPlanExecuteToolFailureRecoveryAcrossProcesses(t *testing.T) {
 		ctx := withPrebuiltTools(context.Background(), prebuiltToolsBundle{Buckets: map[ToolDomain][]einoTool.BaseTool{DomainExternal: {read, deepApprovalTool{calls: &writes}}}})
 		req := Request{UserID: "u", SessionID: "tool-result-process", Query: "查询后执行操作", MaxContextLength: 64000, ModelName: "gpt-4o", OutputLimit: 4096}
 		e := deepTestEngine()
-		r := &peRuntime{engine: e, request: req}
+		r := &peRuntime{engine: e, request: req, answerOutput: make(chan Event, 8)}
 		m := peModel(`{"strategy":"sequential","tasks":[{"id":"a","agent":"web_research","title":"查询并操作"},{"id":"s","agent":"synthesis_review","title":"汇总","depends_on":["a"]}]}`, new(atomic.Int32))
 		base := m.respond
 		m.respond = func(ctx context.Context, msgs []*schema.Message) (*schema.Message, error) {

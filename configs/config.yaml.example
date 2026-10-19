@@ -74,8 +74,8 @@ agent:
   deep_plan_execute_enabled: true
   deep_parallel_enabled: true
   deep_max_plan_tasks: 4
-  deep_max_subagent_iterations: 3
-  deep_max_plan_execute_rounds: 8
+  deep_max_subagent_iterations: 12 # 单个专业任务的模型调用总额度，含重试和最终回答；恢复不重置
+  deep_max_plan_execute_rounds: 8 # 执行批次上限，与专业任务模型调用额度独立
   deep_max_executor_iterations: 6
 
 # 默认 LLM 配置（系统级）

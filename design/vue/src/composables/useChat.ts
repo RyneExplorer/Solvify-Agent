@@ -27,6 +27,7 @@ interface DisplayMessage {
   content: string
   detail?: string
   retryable?: boolean
+  partial_content?: string
   sources?: StreamEvent['sources']
   timeline?: TimelineStep[]
   trace_id?: string
@@ -260,8 +261,11 @@ export function useChat() {
       if (res.code === 0) {
         const serverMessages = (res.data.messages ?? []).map((m) => ({
           id: m.id,
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
+          role: (m.execution_error ? 'error' : m.role) as DisplayMessage['role'],
+          content: m.execution_error ? '任务未完成' : m.content,
+          detail: m.execution_error,
+          retryable: m.execution_error ? m.execution_retryable === true : undefined,
+          partial_content: m.execution_error && m.content !== '深度任务未完成：' + m.execution_error ? m.content : undefined,
           sources: m.sources,
           timeline: m.reasoning_steps?.map((s) => ({
             title: s.content ?? s.type,
@@ -395,6 +399,7 @@ export function useChat() {
     let finalSources: StreamEvent['sources'] = []
     let traceId: string | undefined
     let reader: Awaited<ReturnType<typeof chatApi.sendMessage>> | undefined
+    let timedOut = false
 
     const preserveInterruptedAnswer = () => {
       const partial = streamContent.value || finalContent
@@ -404,6 +409,25 @@ export function useChat() {
         id: assistantId || 'a-' + Date.now(),
         role: 'assistant',
         content: partial ? partial + '\n\n（回答已中断，内容不完整）' : '',
+        sources: finalSources.length ? finalSources : [...(streamSources.value ?? [])],
+        timeline: streamTimeline.value.length ? [...streamTimeline.value] : undefined,
+        execution_plan: streamPlan.value ?? undefined,
+        trace_id: traceId,
+      }
+      const index = messages.value.findIndex(m => m.id === message.id)
+      if (index >= 0) messages.value[index] = message
+      else messages.value.push(message)
+    }
+
+    // 一个执行只生成一条终态消息，部分正文、计划和失败原因归属同一消息。
+    const finishWithError = (title: string, detail?: string, retryable = true) => {
+      streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
+      streamTimeline.value.forEach(s => { if (s.status === 'running') s.status = 'error' })
+      const partial = streamContent.value || finalContent
+      const message: DisplayMessage = {
+        id: assistantId || 'e-' + Date.now(),
+        role: 'error', content: title, detail, retryable,
+        partial_content: partial ? partial + '\n\n（回答已中断，内容不完整）' : undefined,
         sources: finalSources.length ? finalSources : [...(streamSources.value ?? [])],
         timeline: streamTimeline.value.length ? [...streamTimeline.value] : undefined,
         execution_plan: streamPlan.value ?? undefined,
@@ -426,13 +450,9 @@ export function useChat() {
 
     const onStreamTimeout = () => {
       if (isLoading.value) {
+        timedOut = true
         abortController?.abort()
-        messages.value.push({
-          id: 'e-' + Date.now(),
-          role: 'error',
-          content: '响应超时',
-          retryable: true,
-        })
+        finishWithError('连接等待超时', '未收到执行进展，请检查网络或稍后重试')
       }
     }
     // 网络兜底留出后端 120 秒调用与错误传递时间；模型超时由后端判定。
@@ -555,16 +575,7 @@ export function useChat() {
 
               case 'error':
                 isLoading.value = false
-                streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
-                preserveInterruptedAnswer()
-                messages.value.push({
-                  id: 'e-' + Date.now(),
-                  role: 'error',
-                  content: evt.title || '未知错误',
-                  detail: evt.detail,
-                  retryable: evt.retryable !== false,
-                  execution_plan: streamPlan.value ?? undefined,
-                })
+                finishWithError(evt.title || '执行失败', evt.detail, evt.retryable !== false)
                 return
 
               case 'interrupt': {
@@ -658,19 +669,13 @@ export function useChat() {
     } catch (e: unknown) {
       const isAbort = e instanceof DOMException && e.name === 'AbortError'
       if (isAbort) {
-        streamPlan.value = finishExecutionPlan(streamPlan.value, 'canceled')
-        preserveInterruptedAnswer()
+        if (!timedOut) {
+          streamPlan.value = finishExecutionPlan(streamPlan.value, 'canceled')
+          preserveInterruptedAnswer()
+        }
       } else {
         const msg = e instanceof Error ? e.message : '请求失败'
-        streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
-        preserveInterruptedAnswer()
-        messages.value.push({
-          id: 'e-' + Date.now(),
-          role: 'error',
-          content: msg,
-          retryable: true,
-          execution_plan: streamPlan.value ?? undefined,
-        })
+        finishWithError(msg)
       }
     } finally {
       clearInterval(waitingTimer)

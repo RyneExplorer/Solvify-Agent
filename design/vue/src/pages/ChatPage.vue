@@ -146,7 +146,7 @@
           <div v-for="(msg, msgIdx) in messages" :key="msg.id" class="flex" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
             <div class="max-w-[80%]">
               <!-- Timeline -->
-              <div v-if="msg.role === 'assistant' && msg.timeline?.length" class="mb-3">
+              <div v-if="msg.role !== 'user' && msg.timeline?.length" class="mb-3">
                 <button
                   @click="collapsedTimelines.has(msgIdx) ? collapsedTimelines.delete(msgIdx) : collapsedTimelines.add(msgIdx)"
                   class="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-600 mb-1 cursor-pointer"
@@ -170,13 +170,15 @@
               </div>
               <DeepTaskPlan v-if="msg.execution_plan" :plan="msg.execution_plan" />
               <!-- Bubble -->
-              <div :class="['px-4 py-3 rounded-2xl text-sm leading-relaxed', msg.role === 'user' ? 'bg-slate-100 text-slate-800' : msg.role === 'error' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-white text-slate-800']">
+              <div v-if="msg.partial_content" v-html="formatContent(msg.partial_content, msg.sources)" class="md-content px-4 py-3 text-sm leading-relaxed text-slate-800" />
+              <ChatFailure v-if="msg.role === 'error'" :title="msg.content" :detail="msg.detail" />
+              <div v-else-if="msg.content" :class="['px-4 py-3 rounded-2xl text-sm leading-relaxed', msg.role === 'user' ? 'bg-slate-100 text-slate-800' : 'bg-white text-slate-800']">
                 <div v-if="msg.role === 'assistant'" v-html="formatContent(msg.content, msg.sources)" class="md-content" />
                 <template v-else>{{ msg.content }}</template>
               </div>
               <!-- Actions -->
               <div v-if="msg.role === 'assistant' || msg.role === 'error'" class="flex items-center gap-1 mt-2 flex-wrap">
-                <button class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="复制" @click="copyText(msg.content)">
+                <button class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="复制" @click="copyText([msg.partial_content, msg.content, msg.detail].filter(Boolean).join('\n\n'))">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
                 </button>
                 <button v-if="msg.role === 'assistant'" class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="重新生成" @click="regenerate">
@@ -188,7 +190,7 @@
                 <button v-if="msg.role === 'assistant'" class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="保存到知识库" @click="openSaveNoteDialog(msg.content)">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 21v-8H7v8M7 3v5h8"/></svg>
                 </button>
-                <span class="mx-1 w-px h-4 bg-slate-200" />
+                <span v-if="msg.role === 'assistant'" class="mx-1 w-px h-4 bg-slate-200" />
                 <button
                   v-if="msg.role === 'assistant'"
                   class="p-1.5 rounded-md hover:bg-slate-100 transition-colors"
@@ -209,7 +211,7 @@
                 </button>
               </div>
               <!-- Sources -->
-              <div v-if="msg.role === 'assistant' && msg.sources?.filter(s => s?.title).length" class="mt-2 flex flex-wrap items-center gap-1.5">
+              <div v-if="msg.role !== 'user' && msg.sources?.filter(s => s?.title).length" class="mt-2 flex flex-wrap items-center gap-1.5">
                 <span class="text-[11px] text-slate-400">来源:</span>
                 <span
                   v-for="(s, si) in msg.sources.filter(s => s?.title)"
@@ -220,7 +222,7 @@
                 >{{ cleanTitle(s.title) }}</span>
               </div>
               <!-- Meta: trace id / feedback reasons -->
-              <div v-if="msg.role === 'assistant' && (msg.trace_id || msg.feedback_reasons?.length)" class="mt-2 flex flex-wrap items-center gap-2">
+              <div v-if="msg.role !== 'user' && (msg.trace_id || msg.feedback_reasons?.length)" class="mt-2 flex flex-wrap items-center gap-2">
                 <div v-if="msg.trace_id" class="flex items-center gap-1 text-[11px] text-slate-400">
                   <span>Trace</span>
                   <code class="px-1.5 py-0.5 bg-slate-100 rounded-md font-mono" :title="msg.trace_id">{{ msg.trace_id.slice(0, 10) }}…</code>
@@ -242,7 +244,6 @@
                   >{{ r }}</span>
                 </div>
               </div>
-              <div v-if="msg.role === 'error' && msg.detail && msg.detail !== msg.content" class="mt-1 text-xs text-red-500">{{ msg.detail }}</div>
             </div>
           </div>
 
@@ -497,6 +498,7 @@ import { useMarkdownTooltip } from '@/composables/useMarkdownTooltip'
 import { createNote } from '@/api/document'
 import ChatInputCard from '@/components/ChatInputCard.vue'
 import DeepTaskPlan from '@/components/DeepTaskPlan.vue'
+import ChatFailure from '@/components/ChatFailure.vue'
 import AppDialog from '@/components/ui/AppDialog.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import AppDropdownSelect from '@/components/ui/AppDropdownSelect.vue'
