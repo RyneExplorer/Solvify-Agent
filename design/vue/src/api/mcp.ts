@@ -1,5 +1,5 @@
 import { request } from './client'
-import type { MCPConnection, MCPDraft, MCPTemplate, MCPProbeResult } from '@/types/mcp'
+import type { MCPConnection, MCPDraft, MCPTemplate, MCPProbeResult, MCPConnectionTools } from '@/types/mcp'
 const base = '/user/mcp-connections'
 export const listMCPTemplates = () => request<MCPTemplate[]>(`${base}/templates`)
 export const listMCPConnections = () => request<MCPConnection[]>(base)
@@ -8,3 +8,5 @@ export const createMCPConnection = (body: MCPDraft) => request<MCPConnection>(ba
 export const updateMCPConnection = (id: string, body: Partial<MCPDraft> & { is_enabled?: boolean }) => request<MCPConnection>(`${base}/${id}`, { method: 'PUT', body })
 export const deleteMCPConnection = (id: string) => request<null>(`${base}/${id}`, { method: 'DELETE' })
 export const probeMCPConnection = (body: MCPDraft | { id: string }) => request<MCPProbeResult>(`${base}/probe`, { method: 'POST', body })
+export const listMCPConnectionTools = (id: string) => request<MCPConnectionTools>(`${base}/${id}/tools`)
+export const updateMCPTool = (id: string, name: string, is_enabled: boolean) => request<{ name: string; is_enabled: boolean }>(`${base}/${id}/tools`, { method: 'PUT', body: { name, is_enabled } })

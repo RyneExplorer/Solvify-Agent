@@ -1,5 +1,7 @@
 export interface MCPTemplate { id: string; name: string; description: string; config_schema: ConfigSchema | null }
-export interface MCPConnection { id: string; template_id: string | null; display_name: string; is_enabled: boolean; connection?: MCPConfig; config?: Record<string, unknown> }
+export interface MCPConnection { id: string; template_id: string | null; display_name: string; is_enabled: boolean; source: 'system' | 'custom'; template_name?: string; template_enabled: boolean; effective_enabled: boolean; updated_at: string; connection?: MCPConfig; config?: Record<string, unknown> }
+export interface MCPConnectionTool extends MCPToolInfo { is_enabled: boolean; effective_enabled: boolean }
+export interface MCPConnectionTools { tools: MCPConnectionTool[]; connection_enabled: boolean }
 export interface MCPDraft { display_name: string; template_id?: string; connection?: MCPConfig; config?: Record<string, unknown> }
 export type MCPProbeResult = MCPTestResult
 

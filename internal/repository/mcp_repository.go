@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	gormlogger "gorm.io/gorm/logger"
 
 	"solvify-agent/internal/model/entity"
@@ -28,12 +29,38 @@ func (r *mcpRepository) Create(ctx context.Context, c *entity.MCPConnection) err
 	return err
 }
 func (r *mcpRepository) Update(ctx context.Context, c *entity.MCPConnection) error {
-	result := dbFor(ctx, r.db).Session(&gorm.Session{Logger: r.logger}).Model(&entity.MCPConnection{}).Where("id = ? AND user_id = ?", c.ID, c.UserID).Select("display_name", "connection", "config", "is_enabled", "updated_at").Updates(c)
+	result := dbFor(ctx, r.db).Session(&gorm.Session{Logger: r.logger}).Model(c).
+		Clauses(clause.Returning{Columns: []clause.Column{{Name: "updated_at"}}}).
+		Where("id = ? AND user_id = ? AND updated_at = ?", c.ID, c.UserID, c.UpdatedAt).
+		Select("display_name", "connection", "config", "is_enabled", "updated_at").Updates(c)
 	if result.Error != nil {
 		return result.Error
 	}
 	if result.RowsAffected != 1 {
-		return gorm.ErrRecordNotFound
+		return ErrMCPConnectionChanged
+	}
+	return nil
+}
+
+// 由数据库原子修改单个工具偏好，避免并行开关丢失或覆盖用户凭据。
+func (r *mcpRepository) SetToolEnabled(ctx context.Context, userID, id, name string, enabled bool) error {
+	array := "COALESCE(NULLIF(config->'disabled_tools', 'null'::jsonb), '[]'::jsonb)"
+	expression := "jsonb_set(config, '{disabled_tools}', " + array + " - ?::text, true)"
+	args := []interface{}{name}
+	if !enabled {
+		expression = "jsonb_set(config, '{disabled_tools}', (" + array + " - ?::text) || jsonb_build_array(?::text), true)"
+		args = append(args, name)
+	}
+	query := dbFor(ctx, r.db).Session(&gorm.Session{Logger: r.logger}).Model(&entity.MCPConnection{}).Where("id = ? AND user_id = ?", id, userID)
+	if !enabled {
+		query = query.Where("jsonb_array_length("+array+") < 128 OR jsonb_exists("+array+", ?)", name)
+	}
+	result := query.Updates(map[string]interface{}{"config": gorm.Expr(expression, args...), "updated_at": gorm.Expr("clock_timestamp()")})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrMCPToolStateChanged
 	}
 	return nil
 }

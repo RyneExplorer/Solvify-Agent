@@ -1,16 +1,23 @@
 <template>
   <div class="space-y-5">
     <div class="flex items-center justify-between gap-3">
-      <p class="text-sm text-slate-500">配置 MCP 后，在深度模式中由专业 Agent 按任务调用。联网搜索需连接提供搜索能力的 MCP。</p>
-      <AppButton @click="open()">添加 MCP</AppButton>
+      <p class="text-sm text-slate-500">分别管理系统预置与自定义 MCP。启用连接和工具后，可在深度模式中选择使用。</p>
+      <AppButton class="shrink-0 whitespace-nowrap" @click="open()">添加 MCP</AppButton>
     </div>
     <p v-if="error" class="text-sm text-red-600" role="alert">{{ error }} <button @click="load">重试</button></p>
     <p v-if="loading" class="text-sm text-slate-400">正在加载连接…</p>
-    <div v-for="c in connections" :key="c.id" class="flex items-center justify-between gap-4 border-b border-slate-100 py-4">
-      <div class="min-w-0"><p class="font-medium text-slate-900 truncate">{{ c.display_name }}</p><p class="text-xs text-slate-400 mt-1">{{ c.template_id ? '来自系统预置' : '个人 HTTP MCP' }} · {{ c.is_enabled ? '已启用' : '已停用' }}</p></div>
-      <div class="flex gap-2 shrink-0"><AppButton size="sm" variant="ghost" @click="open(c)">配置</AppButton><AppButton size="sm" variant="ghost" :disabled="busy" @click="toggle(c)">{{ c.is_enabled ? '停用' : '启用' }}</AppButton><AppButton size="sm" variant="ghost" :disabled="busy" @click="remove(c)">删除</AppButton></div>
-    </div>
-    <p v-if="!loading && !connections.length" class="py-8 text-center text-sm text-slate-400">尚未添加 MCP，可选择系统预置或填写自己的远程 MCP 地址。</p>
+    <section v-for="group in connectionGroups" :key="group.source" class="rounded-2xl border border-slate-200 p-4 sm:p-5" :aria-label="group.title">
+      <div class="flex items-center justify-between gap-3"><h3 class="font-semibold text-slate-900">{{ group.title }} <span class="ml-1 text-xs font-normal text-slate-400">{{ group.items.length }}</span></h3><AppButton size="sm" variant="ghost" :disabled="busy" @click="openForSource(group.source)">{{ group.source === 'system' ? '添加系统预置' : '添加自定义 MCP' }}</AppButton></div>
+      <p class="mt-1 text-xs text-slate-500">{{ group.source === 'system' ? '服务地址由管理员维护，凭据与启停设置仅对你生效。' : '你添加的远程 HTTP MCP，可管理连接配置与工具。' }}</p>
+      <div v-for="c in group.items" :key="c.id" class="mt-4 border-t border-slate-100 pt-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="min-w-0"><p class="font-medium text-slate-900 break-all">{{ c.display_name }}</p><p class="mt-1 text-xs text-slate-500">{{ c.template_id ? `预置：${c.template_name || '系统 MCP'}` : '自定义 HTTP MCP' }} · {{ !c.template_enabled ? '管理员已停用' : c.is_enabled ? '已启用' : '已停用' }}</p></div>
+          <div class="flex gap-2 shrink-0"><AppButton size="sm" variant="ghost" :disabled="busy" @click="open(c)">配置</AppButton><AppButton size="sm" variant="ghost" :disabled="busy || (!c.template_enabled && !c.is_enabled)" @click="toggle(c)">{{ c.is_enabled ? '停用连接' : '启用连接' }}</AppButton><AppButton size="sm" variant="ghost" :disabled="busy" @click="remove(c)">删除</AppButton></div>
+        </div>
+        <MCPConnectionTools :connection="c" />
+      </div>
+      <p v-if="!loading && !group.items.length" class="py-6 text-center text-sm text-slate-400">{{ group.source === 'system' ? '尚未添加系统预置，选择预置并填写所需凭据即可使用。' : '尚未添加自定义 MCP。' }}</p>
+    </section>
     <Teleport to="body">
       <div v-if="visible" class="fixed inset-0 z-50 flex items-center justify-center bg-black/30" @click.self="close">
         <div class="bg-white rounded-2xl p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto space-y-4">
@@ -50,6 +57,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AppButton from './ui/AppButton.vue'
 import AppSelect from './ui/AppSelect.vue'
+import MCPConnectionTools from './MCPConnectionTools.vue'
 import * as api from '@/api/mcp'
 import type { MCPConnection, MCPDraft, MCPTemplate, MCPProbeResult } from '@/types/mcp'
 import { toolTimeoutValue } from '@/lib/tool-timeout.mjs'
@@ -58,6 +66,18 @@ const loading = ref(false), busy = ref(false), error = ref(''), visible = ref(fa
 const templateId = ref(''), name = ref(''), url = ref(''), auth = ref('none'), token = ref(''), headerName = ref('X-API-Key'), extraHeaders = ref('{}'), connectTimeout = ref<number | string>(''), callTimeout = ref<number | string>('')
 const values = ref<Record<string, any>>({}), result = ref<MCPProbeResult | null>(null)
 const selectedTemplate = computed(() => templates.value.find(t => t.id === templateId.value))
+const connectionGroups = computed(() => [
+  { source: 'system', title: '系统 MCP', items: connections.value.filter(c => c.template_id) },
+  { source: 'custom', title: '自定义 MCP', items: connections.value.filter(c => !c.template_id) },
+])
+async function openForSource(source: string) {
+  await open()
+  if (source === 'system') {
+    const available = templates.value.find(t => !connections.value.some(c => c.template_id === t.id))
+    if (!available) { close(); ElMessage.info('暂无可添加的系统预置'); return }
+    templateId.value = available.id; changeTemplate()
+  }
+}
 async function load() { loading.value = true; error.value = ''; try { const [a,b] = await Promise.all([api.listMCPTemplates(),api.listMCPConnections()]); templates.value = a.data; connections.value = b.data } catch(e) { error.value = e instanceof Error ? e.message : '加载失败' } finally { loading.value = false } }
 function changeTemplate() { values.value = {}; for(const [key,field] of Object.entries(selectedTemplate.value?.config_schema?.properties || {})) if(field.default !== undefined) values.value[key] = field.default; if(selectedTemplate.value) name.value = selectedTemplate.value.name; result.value = null }
 async function open(c?: MCPConnection) {

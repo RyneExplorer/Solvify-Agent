@@ -17,6 +17,8 @@ func (c *Controller) RegisterRoutes(router *gin.RouterGroup) {
 	group.GET("", c.List)
 	group.POST("", c.Create)
 	group.GET("/:id", c.Get)
+	group.GET("/:id/tools", c.Tools)
+	group.PUT("/:id/tools", c.UpdateTool)
 	group.PUT("/:id", c.Update)
 	group.DELETE("/:id", c.Delete)
 }

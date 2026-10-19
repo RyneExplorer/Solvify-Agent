@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	einotool "github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
@@ -31,6 +32,31 @@ func (r *mcpMemoryRepo) Create(_ context.Context, c *entity.MCPConnection) error
 func (r *mcpMemoryRepo) Update(_ context.Context, c *entity.MCPConnection) error {
 	r.writes++
 	r.rows[c.ID] = *c
+	return nil
+}
+func (r *mcpMemoryRepo) SetToolEnabled(_ context.Context, userID, id, name string, enabled bool) error {
+	c, ok := r.rows[id]
+	if !ok || c.UserID != userID {
+		return gorm.ErrRecordNotFound
+	}
+	var config map[string]interface{}
+	_ = json.Unmarshal(c.Config, &config)
+	disabled, err := tool.DisabledMCPTools(c.Config)
+	if err != nil {
+		return err
+	}
+	delete(disabled, name)
+	if !enabled {
+		disabled[name] = true
+	}
+	names := []string{}
+	for n := range disabled {
+		names = append(names, n)
+	}
+	config["disabled_tools"] = names
+	c.Config, _ = json.Marshal(config)
+	r.rows[id] = c
+	r.writes++
 	return nil
 }
 func (r *mcpMemoryRepo) Get(_ context.Context, userID, id string) (*entity.MCPConnection, error) {
@@ -81,6 +107,8 @@ func TestMCPTemplateListFiltersDisabledAndHidesConnectionSecrets(t *testing.T) {
 type probeMCPProvider struct {
 	cfg   *tool.MCPConfig
 	calls int
+	tools []einotool.BaseTool
+	err   error
 }
 
 func (p *probeMCPProvider) Validate(*tool.MCPConfig) error { return nil }
@@ -88,7 +116,13 @@ func (p *probeMCPProvider) Validate(*tool.MCPConfig) error { return nil }
 func (p *probeMCPProvider) GetTools(_ context.Context, c *tool.MCPConfig) ([]einotool.BaseTool, error) {
 	p.cfg = c
 	p.calls++
-	return nil, nil
+	return p.tools, p.err
+}
+
+type mcpInfoTool struct{ name string }
+
+func (t mcpInfoTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: t.name, Desc: "工具用途说明"}, nil
 }
 func TestMCPServiceTemplateCredentialsAndOwnership(t *testing.T) {
 	ctx := context.Background()

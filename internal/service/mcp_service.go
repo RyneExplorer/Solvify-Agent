@@ -60,6 +60,16 @@ func (s *mcpService) List(ctx context.Context, userID string) ([]response.MCPCon
 }
 func mcpInfo(c *entity.MCPConnection, detail bool) *response.MCPConnectionInfo {
 	out := &response.MCPConnectionInfo{ID: c.ID, TemplateID: c.TemplateID, DisplayName: c.DisplayName, IsEnabled: c.IsEnabled, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt}
+	out.Source = "custom"
+	out.TemplateEnabled = true
+	if c.TemplateID != nil {
+		out.Source = "system"
+		out.TemplateEnabled = c.Template != nil && c.Template.IsEnabled
+		if c.Template != nil {
+			out.TemplateName = c.Template.Name
+		}
+	}
+	out.EffectiveEnabled = c.IsEnabled && out.TemplateEnabled
 	if detail {
 		out.Connection = json.RawMessage(c.Connection)
 		out.Config = json.RawMessage(c.Config)
@@ -161,9 +171,22 @@ func (s *mcpService) Update(ctx context.Context, userID, id string, req request.
 		}
 	}
 	if req.Config != nil {
-		c.Config, err = objectJSON(*req.Config)
+		var updated datatypes.JSON
+		updated, err = objectJSON(*req.Config)
 		if err != nil {
 			return nil, err
+		}
+		// 凭据编辑不管理工具权限，保留该连接已保存的逐工具偏好。
+		var oldFields, newFields map[string]interface{}
+		_ = json.Unmarshal(c.Config, &oldFields)
+		_ = json.Unmarshal(updated, &newFields)
+		delete(newFields, "disabled_tools")
+		if disabled, ok := oldFields["disabled_tools"]; ok {
+			newFields["disabled_tools"] = disabled
+		}
+		c.Config, err = json.Marshal(newFields)
+		if err != nil {
+			return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 		}
 	}
 	if req.IsEnabled != nil {
@@ -176,6 +199,9 @@ func (s *mcpService) Update(ctx context.Context, userID, id string, req request.
 		}
 	}
 	if err = s.repo.Update(ctx, c); err != nil {
+		if errors.Is(err, repository.ErrMCPConnectionChanged) {
+			return nil, apperrors.New(apperrors.CodeBadRequest, err.Error())
+		}
 		return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 	return mcpInfo(c, false), nil

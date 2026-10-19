@@ -122,7 +122,49 @@ test('MCP API使用连接路由，探测和停用独立于工具执行', async (
     assert.deepEqual(calls[4].body, {is_enabled:false})
     assert.deepEqual(calls[5].body, {id:'id'})
     assert.equal(calls[6].method, 'DELETE')
+    await api.listMCPConnectionTools('id'); await api.updateMCPTool('id','web_fetch_exa',false)
+    assert.equal(calls[7].path,'/user/mcp-connections/id/tools')
+    assert.equal(calls[8].path,'/user/mcp-connections/id/tools')
+    assert.equal(calls[8].method,'PUT')
+    assert.deepEqual(calls[8].body,{name:'web_fetch_exa',is_enabled:false})
   } finally { delete globalThis.__mcpRequest }
+})
+
+test('工具开关只提交所属连接和工具状态，失败时保留原状态并允许重试', async () => {
+  const tool = {name:'search',is_enabled:true,effective_enabled:true}
+  const calls=[]
+  const scope={pending:ref(''),error:ref(''),props:{connection:{id:'mine',effective_enabled:true}},api:{updateMCPTool:async(...args)=>{calls.push(args);return {data:{is_enabled:false}}}}}
+  const {toggleTool}=await componentFunctions('MCPConnectionTools',['toggleTool'],scope)
+  await toggleTool(tool)
+  assert.deepEqual(calls,[['mine','search',false]])
+  assert.equal(tool.is_enabled,false); assert.equal(tool.effective_enabled,false)
+  assert.equal(scope.pending.value,'')
+  scope.api.updateMCPTool=async()=>{throw Error('服务暂不可用')}
+  await toggleTool(tool)
+  assert.equal(tool.is_enabled,false); assert.equal(scope.error.value,'服务暂不可用'); assert.equal(scope.pending.value,'')
+})
+
+test('工具清单按需加载，停用连接下仍保留工具偏好，丢弃旧配置返回的清单', async () => {
+  const scope={props:{connection:{id:'mine',updated_at:'v1'}},loading:ref(false),loaded:ref(false),tools:ref([]),error:ref(''),expanded:ref(false),api:{listMCPConnectionTools:async()=>({data:{tools:[{name:'fetch',is_enabled:true,effective_enabled:false}]}})}}
+  const {load,onToggle}=await componentFunctions('MCPConnectionTools',['load','onToggle'],scope)
+  onToggle({target:{open:false}})
+  assert.equal(scope.loaded.value,false)
+  await load()
+  assert.equal(scope.tools.value[0].is_enabled,true)
+  assert.equal(scope.tools.value[0].effective_enabled,false)
+  scope.api.listMCPConnectionTools=async()=>{scope.props.connection.updated_at='v2';return {data:{tools:[{name:'stale'}]}}}
+  await load()
+  assert.equal(scope.tools.value[0].name,'fetch')
+})
+
+test('系统分区添加时只选择尚未绑定的预置，自定义入口不自动选系统', async () => {
+  let opens=0,changes=0
+  const scope={open:async()=>{opens++},templates:ref([{id:'used'},{id:'free'}]),connections:ref([{template_id:'used'}]),templateId:ref(''),changeTemplate(){changes++},close(){},ElMessage:{info(){}}}
+  const {openForSource}=await componentFunctions('MCPSettings',['openForSource'],scope)
+  await openForSource('system')
+  assert.equal(scope.templateId.value,'free');assert.equal(changes,1)
+  await openForSource('custom')
+  assert.equal(changes,1);assert.equal(opens,2)
 })
 
 test('迁移后的MCP模板保留稳定标识仍可编辑保存，不重新选择工具类型', async () => {
