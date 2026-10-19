@@ -170,7 +170,7 @@ func (m *runtimeContextMiddleware) BeforeModelRewriteState(ctx context.Context, 
 				result, callErr := m.summaryModel.Generate(summaryCtx, input, model.WithTools([]*schema.ToolInfo{}), model.WithMaxTokens(p.SummaryOutput))
 				summaryExpired := summaryCtx.Err()
 				cancel()
-				if callErr == nil && summaryExpired == nil && result != nil && strings.TrimSpace(result.Content) != "" && len(result.ToolCalls) == 0 && tokenutil.CountTokens(result.Content, request.ModelName) <= p.SummaryOutput {
+				if callErr == nil && summaryExpired == nil && validateModelCompletion(result) == nil && strings.TrimSpace(result.Content) != "" && len(result.ToolCalls) == 0 && tokenutil.CountTokens(result.Content, request.ModelName) <= p.SummaryOutput {
 					summary := result.Content
 					if len(snapshot.References) > 0 {
 						refs := append([]artifactReference(nil), snapshot.References...)

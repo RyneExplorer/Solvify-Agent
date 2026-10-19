@@ -29,6 +29,7 @@ type peRuntime struct {
 	document       bool
 	documentNames  []string
 	state          *peState
+	answerOutput   chan<- Event
 }
 
 func (r *peRuntime) session(ctx context.Context) (*peState, error) {
@@ -92,7 +93,7 @@ func (e *Engine) runPlanExecute(ctx context.Context, req Request, chatModel mode
 		ctx = withPrebuiltTools(ctx, prebuiltToolsBundle{Sorted: sorted, Buckets: e.buildToolsByDomain(ctx, sorted, req.UserID, req.KnowledgeBaseIDs, AllToolDomains, !req.MCPDisabled, req.UserToolConfigIDs...)})
 	}
 	buckets, _ := e.bucketsFor(ctx, e.sortedInternalTools(), req)
-	r := &peRuntime{engine: e, model: chatModel, request: req, external: len(buckets[DomainExternal]) > 0}
+	r := &peRuntime{engine: e, model: chatModel, request: req, external: len(buckets[DomainExternal]) > 0, answerOutput: out}
 	root, err := r.build(ctx)
 	if err != nil {
 		e.emitPlanError(ctx, out, err)
@@ -103,7 +104,15 @@ func (e *Engine) runPlanExecute(ctx context.Context, req Request, chatModel mode
 		id = "deeppe-v1-" + uuid.NewString()
 	}
 	ctx = observability.WithExecutionMetadata(ctx, observability.ExecutionMetadata{CheckpointID: id, Phase: "planning", Resumed: len(req.ResumeData) > 0})
-	defer func() { r.traceContext(ctx, "completed", "") }()
+	defer func() {
+		phase := "failed"
+		if ctx.Err() != nil {
+			phase = "cancelled"
+		} else if r.state != nil {
+			phase = r.state.Plan.Phase
+		}
+		r.traceContext(ctx, phase, "")
+	}()
 	store := e.contextStore(req)
 	interrupted := false
 	defer func() {
@@ -115,7 +124,7 @@ func (e *Engine) runPlanExecute(ctx context.Context, req Request, chatModel mode
 			}
 		}
 	}()
-	// 过程通过结构化事件实时发送，内部正文无须 token 流。
+	// 内部过程通过结构化事件发送；Replanner 单独消费上游流并发送最终回答片段。
 	// Eino v0.9.14 流式 ID 注入会修改与异步回调共享的消息；使用非流式执行避免该竞争。
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: root, EnableStreaming: false, CheckPointStore: store})
 	var iter *adk.AsyncIterator[*adk.AgentEvent]
@@ -263,7 +272,6 @@ func (e *Engine) runPlanExecute(ctx context.Context, req Request, chatModel mode
 	for _, task := range s.Plan.Tasks {
 		evidence = append(evidence, s.Results[task.ID].Evidence...)
 	}
-	eventch.Send(ctx, out, Event{Type: EventAnswer, Content: s.Final, PlanID: s.Plan.ID, PlanVersion: s.Plan.Version})
 	eventch.Send(ctx, out, Event{Type: EventDone, Content: s.Final, Sources: flattenSources(evidence), PlanID: s.Plan.ID, Done: true})
 }
 

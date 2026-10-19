@@ -36,12 +36,15 @@ const (
 	KindContextBudget   Kind = "context_budget"
 
 	// ── 模型服务端（上游 HTTP 状态码 / 响应正文）──
-	KindModelUnavailable Kind = "model_unavailable"
-	KindRateLimited      Kind = "rate_limited"
-	KindContextLength    Kind = "context_length"
-	KindTimeout          Kind = "timeout"
-	KindLLMCallFailed    Kind = "llm_call_failed"
-	KindLLMStreamFailed  Kind = "llm_stream_failed"
+	KindModelUnavailable   Kind = "model_unavailable"
+	KindRateLimited        Kind = "rate_limited"
+	KindContextLength      Kind = "context_length"
+	KindTimeout            Kind = "timeout"
+	KindLLMCallFailed      Kind = "llm_call_failed"
+	KindLLMStreamFailed    Kind = "llm_stream_failed"
+	KindOutputLimit        Kind = "output_limit"
+	KindOutputFiltered     Kind = "output_filtered"
+	KindModelOutputInvalid Kind = "model_output_invalid"
 
 	// ── Agent 执行 ──
 	KindAgentInitFailed   Kind = "agent_init_failed"

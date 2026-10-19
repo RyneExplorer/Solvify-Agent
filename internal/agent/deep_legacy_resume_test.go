@@ -18,23 +18,35 @@ import (
 
 type deepTestModel struct {
 	respond func(context.Context, []*schema.Message) (*schema.Message, error)
+	// 普通fixture补齐供应商的正常结束状态；异常结束测试可保留原始缺失状态。
+	rawCompletion bool
 }
 
 func (m *deepTestModel) ContextWindow() int { return 64000 }
 func (m *deepTestModel) OutputLimit() int   { return 4096 }
 
 func (m *deepTestModel) Generate(ctx context.Context, msgs []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-	return m.respond(ctx, msgs)
+	msg, err := m.respond(ctx, msgs)
+	if msg != nil && msg.ResponseMeta == nil && !m.rawCompletion {
+		copy := *msg
+		reason := "stop"
+		if len(copy.ToolCalls) > 0 {
+			reason = "tool_calls"
+		}
+		copy.ResponseMeta = &schema.ResponseMeta{FinishReason: reason}
+		msg = &copy
+	}
+	return msg, err
 }
 func (m *deepTestModel) Stream(ctx context.Context, msgs []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	msg, err := m.respond(ctx, msgs)
+	msg, err := m.Generate(ctx, msgs)
 	if err != nil {
 		return nil, err
 	}
 	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
 }
 func (m *deepTestModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	return &deepTestModel{respond: m.respond}, nil
+	return &deepTestModel{respond: m.respond, rawCompletion: m.rawCompletion}, nil
 }
 
 const parallelTestPlan = `{"strategy":"parallel","tasks":[{"id":"a","agent":"knowledge_research","title":"研究 A","description":"topic-A"},{"id":"b","agent":"knowledge_research","title":"研究 B","description":"topic-B"},{"id":"final","agent":"synthesis_review","title":"汇总","depends_on":["a","b"]}]}`

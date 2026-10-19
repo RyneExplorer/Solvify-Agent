@@ -136,7 +136,11 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 			}
 			req.Query += evidence
 		}
-		agent, ks, err := a.buildAgent(ctx, req)
+		budget := &taskModelBudget{}
+		if saved != nil && saved.ModelBudget != nil {
+			budget = saved.ModelBudget
+		}
+		agent, ks, err := a.buildAgent(ctx, req, budget)
 		if err != nil {
 			g.Send(&adk.AgentEvent{Err: err})
 			return
@@ -206,6 +210,10 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 					peEvent(g, toolEvent)
 				} else if mv.Role == schema.Assistant {
 					answer = msg.Content
+					// 非空正文仍可能因长度或过滤结束，保存部分材料但不标记成功。
+					if completionErr := validateModelCompletion(msg); completionErr != nil {
+						taskError = completionErr
+					}
 				}
 			}
 		}
@@ -267,7 +275,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 				g.Send(&adk.AgentEvent{Err: fmt.Errorf("缺少子任务恢复数据")})
 				return
 			}
-			ev := adk.CompositeInterrupt(ctx, map[string]any{"task_id": task.ID}, &peChildState{TaskID: task.ID, Data: data.Data, RuntimeContext: privateContext.Raw}, adk.FromInterruptContexts(interrupt.Action.Interrupted.InterruptContexts))
+			ev := adk.CompositeInterrupt(ctx, map[string]any{"task_id": task.ID}, &peChildState{TaskID: task.ID, Data: data.Data, RuntimeContext: privateContext.Raw, ModelBudget: budget}, adk.FromInterruptContexts(interrupt.Action.Interrupted.InterruptContexts))
 			ev.AgentName = a.role
 			g.Send(ev)
 			return
@@ -278,7 +286,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 	return iter
 }
 
-func (a *peTaskAgent) buildAgent(ctx context.Context, req Request) (*adk.ChatModelAgent, *tool.KnowledgeSearchTool, error) {
+func (a *peTaskAgent) buildAgent(ctx context.Context, req Request, budget *taskModelBudget) (*adk.ChatModelAgent, *tool.KnowledgeSearchTool, error) {
 	r := a.runtime
 	e := r.engine
 	sorted := e.sortedInternalTools()
@@ -316,6 +324,10 @@ func (a *peTaskAgent) buildAgent(ctx context.Context, req Request) (*adk.ChatMod
 	clarify := e.clarifyToolNames()
 	// 预算与中间件注入读同一个结果（见 agentIterations）。
 	iterations := agentIterations(e.deepSubagentIterations(req), len(dangerous) > 0 || len(clarify) > 0)
+	if budget.Limit == 0 {
+		budget.Limit = iterations
+	}
+	iterations = budget.Limit
 	config.ToolCallMiddlewares = append(config.ToolCallMiddlewares, compose.ToolMiddleware{Invokable: a.resultMiddleware(req.TaskID, dangerous)})
 	if len(dangerous) > 0 {
 		config.ToolCallMiddlewares = append(config.ToolCallMiddlewares, compose.ToolMiddleware{Invokable: buildDangerousToolMiddleware(dangerous)})
@@ -324,7 +336,10 @@ func (a *peTaskAgent) buildAgent(ctx context.Context, req Request) (*adk.ChatMod
 		config.ToolCallMiddlewares = append(config.ToolCallMiddlewares, compose.ToolMiddleware{Invokable: buildClarifyMiddleware(clarify)})
 	}
 	instruction := composeSystemPrompt(buildDeepTaskPrompt(ctx, a.role, ts, iterations), req.SystemPrompt)
-	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: a.role, Description: a.Description(ctx), Instruction: instruction, Model: r.model, ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: e.withToolExecutionTimeout(config)}, MaxIterations: iterations, ModelRetryConfig: e.modelRetryConfig(), Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, instruction, r.model), newBudgetGuard(req)}, GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
+	taskModel := &peTaskModel{inner: r.model, budget: budget}
+	guard := newBudgetGuard(req)
+	guard.finalCheckElsewhere = true
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: a.role, Description: a.Description(ctx), Instruction: instruction, Model: taskModel, ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: e.withToolExecutionTimeout(config)}, MaxIterations: iterations, ModelRetryConfig: e.modelRetryConfig(), Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, instruction, taskModel), guard}, GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
 		return append([]*schema.Message{schema.SystemMessage(instruction)}, input.Messages...), nil
 	}})
 	return agent, knowledgeSearchToolOf(ts.Tools), err

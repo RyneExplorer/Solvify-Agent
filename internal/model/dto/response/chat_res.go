@@ -27,17 +27,19 @@ type SessionResponse struct {
 
 // MessageResponse 描述聊天消息响应
 type MessageResponse struct {
-	ID               string          `json:"id"`
-	SessionID        string          `json:"session_id"`
-	Role             string          `json:"role"`
-	Content          string          `json:"content"`
-	ModelID          string          `json:"model_id,omitempty"`
-	SearchMode       string          `json:"search_mode,omitempty"`
-	KnowledgeBaseIDs []string        `json:"knowledge_base_ids,omitempty"`
-	Sources          []SourceInfo    `json:"sources,omitempty"`
-	ReasoningSteps   []ReasoningStep `json:"reasoning_steps,omitempty"`
-	ExecutionPlan    *ExecutionPlan  `json:"execution_plan,omitempty"`
-	CreatedAt        time.Time       `json:"created_at"`
+	ID                 string          `json:"id"`
+	SessionID          string          `json:"session_id"`
+	Role               string          `json:"role"`
+	Content            string          `json:"content"`
+	ModelID            string          `json:"model_id,omitempty"`
+	SearchMode         string          `json:"search_mode,omitempty"`
+	KnowledgeBaseIDs   []string        `json:"knowledge_base_ids,omitempty"`
+	Sources            []SourceInfo    `json:"sources,omitempty"`
+	ReasoningSteps     []ReasoningStep `json:"reasoning_steps,omitempty"`
+	ExecutionPlan      *ExecutionPlan  `json:"execution_plan,omitempty"`
+	ExecutionError     string          `json:"execution_error,omitempty"`
+	ExecutionRetryable bool            `json:"execution_retryable,omitempty"`
+	CreatedAt          time.Time       `json:"created_at"`
 }
 
 type TaskProgress struct {

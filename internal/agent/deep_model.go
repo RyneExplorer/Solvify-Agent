@@ -13,8 +13,9 @@ import (
 // peControlModel 兼容只接受 auto 工具选择的思考模型。
 // 首次请求即使用 auto；计划或 respond 工具输出仍由业务校验约束。
 type peControlModel struct {
-	inner   model.ToolCallingChatModel
-	runtime *peRuntime
+	inner        model.ToolCallingChatModel
+	runtime      *peRuntime
+	streamAnswer bool
 }
 
 func (m *peControlModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
@@ -22,19 +23,32 @@ func (m *peControlModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingC
 	if err != nil {
 		return nil, err
 	}
-	return &peControlModel{inner: inner, runtime: m.runtime}, nil
+	return &peControlModel{inner: inner, runtime: m.runtime, streamAnswer: m.streamAnswer}, nil
 }
 
 func (m *peControlModel) Generate(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
 	input := msgs
 	callOptions := append(append([]model.Option(nil), opts...), model.WithToolChoice(schema.ToolChoiceAllowed))
 	for attempt := range 2 {
-		msg, err := m.inner.Generate(ctx, input, callOptions...)
+		var msg *schema.Message
+		var err error
+		if m.streamAnswer {
+			msg, err = m.readAnswerStream(ctx, input, callOptions...)
+		} else {
+			msg, err = m.inner.Generate(ctx, input, callOptions...)
+		}
+		if err == nil {
+			err = validateModelCompletion(msg)
+		}
 		if err != nil || m.runtime == nil {
 			return msg, err
 		}
 		if err = m.validatePlan(ctx, msg); err == nil {
 			return msg, nil
+		}
+		if len(msg.ToolCalls) == 1 && msg.ToolCalls[0].Function.Name == "respond" {
+			// 最终回答失败不能进入计划纠正，避免重复生成或替换部分正文。
+			return nil, err
 		}
 		if attempt == 1 {
 			return nil, fmt.Errorf("计划纠正后仍无效: %w", err)
@@ -47,15 +61,28 @@ func (m *peControlModel) Generate(ctx context.Context, msgs []*schema.Message, o
 }
 
 func (m *peControlModel) validatePlan(ctx context.Context, msg *schema.Message) error {
-	if msg == nil {
-		return fmt.Errorf("计划模型返回空消息")
+	if err := validateModelCompletion(msg); err != nil {
+		return err
 	}
 	if len(msg.ToolCalls) != 1 {
 		return fmt.Errorf("计划模型必须调用一个 plan 或 respond 工具")
 	}
 	call := msg.ToolCalls[0]
 	if call.Function.Name == "respond" {
-		return nil
+		var response struct {
+			Response string `json:"response"`
+		}
+		if json.Unmarshal([]byte(call.Function.Arguments), &response) != nil || strings.TrimSpace(response.Response) == "" {
+			return fmt.Errorf("最终回答参数不完整: %w", errModelOutputInvalid)
+		}
+		r := m.runtime
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		s, err := r.session(ctx)
+		if err != nil {
+			return err
+		}
+		return validatePECompletion(s, response.Response)
 	}
 	if call.Function.Name != "plan" {
 		return fmt.Errorf("计划工具无效: %s", call.Function.Name)
@@ -130,15 +157,15 @@ func (m *peExecutorModel) Stream(ctx context.Context, msgs []*schema.Message, op
 }
 
 func (m *peExecutorModel) validate(ctx context.Context, msg *schema.Message) error {
+	if err := validateModelCompletion(msg); err != nil {
+		return err
+	}
 	r := m.runtime
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, err := r.session(ctx)
 	if err != nil {
 		return err
-	}
-	if msg == nil {
-		return fmt.Errorf("Executor 返回空消息")
 	}
 	remaining := map[string]TaskSpec{}
 	for _, task := range s.Batch {

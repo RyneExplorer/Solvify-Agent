@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	einoOpenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	einoTool "github.com/cloudwego/eino/components/tool"
@@ -50,6 +51,11 @@ func TestRetryableModelErrors(t *testing.T) {
 			err  error
 			want bool
 		}{fmt.Sprintf("http_%d", status), &openai.APIError{HTTPStatusCode: status}, want})
+		cases = append(cases, struct {
+			name string
+			err  error
+			want bool
+		}{fmt.Sprintf("eino_http_%d", status), fmt.Errorf("调用失败: %w", &einoOpenai.APIError{HTTPStatusCode: status}), want})
 		cases = append(cases, struct {
 			name string
 			err  error
@@ -248,7 +254,9 @@ func TestModelRetryStreamBoundaries(t *testing.T) {
 			engine := &Engine{cfg: config.AgentConfig{QuickAgentMaxIterations: 4, ModelMaxRetries: 3}}
 			cm := &retryStreamModel{stream: func() (*schema.StreamReader[*schema.Message], error) {
 				if calls.Add(1) > 1 {
-					return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("成功答案", nil)}), nil
+					msg := schema.AssistantMessage("成功答案", nil)
+					msg.ResponseMeta = &schema.ResponseMeta{FinishReason: "stop"}
+					return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
 				}
 				reader, writer := schema.Pipe[*schema.Message](2)
 				if partial {

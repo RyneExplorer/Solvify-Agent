@@ -101,7 +101,7 @@ func TestRuntimeSummaryClearsBoundToolsAtHTTPBoundary(t *testing.T) {
 }
 
 func TestQuickSummaryHistoryAndFallback(t *testing.T) {
-	for _, scenario := range []string{"success", "short", "failure", "no_progress", "invalid_tools", "cancel"} {
+	for _, scenario := range []string{"success", "short", "failure", "no_progress", "invalid_tools", "length", "content_filter", "unknown", "missing_finish", "cancel"} {
 		t.Run(scenario, func(t *testing.T) {
 			e := deepTestEngine()
 			e.cfg.RuntimeContext = config.DefaultRuntimeContextPolicy()
@@ -125,9 +125,14 @@ func TestQuickSummaryHistoryAndFallback(t *testing.T) {
 					return schema.AssistantMessage(strings.Repeat("冗长摘要", 1500), nil), nil
 				case "invalid_tools":
 					return peCall("unexpected_tool", nil), nil
+				case "length", "content_filter", "unknown":
+					msg := schema.AssistantMessage("未完整的摘要", nil)
+					msg.ResponseMeta = &schema.ResponseMeta{FinishReason: scenario}
+					return msg, nil
 				}
 				return schema.AssistantMessage("项目代号海星，预算4096，证据doc-ctx/chunk-1。", nil), nil
 			}}
+			cm.rawCompletion = scenario == "missing_finish"
 			runContextTest(t, nil, func(ctx context.Context) error {
 				m := e.runtimeHandler(req, "必要指令", cm).(*runtimeContextMiddleware)
 				state := &adk.ChatModelAgentState{Messages: messages}
