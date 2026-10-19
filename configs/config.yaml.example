@@ -91,6 +91,13 @@ llm:
 
 # Embedding 向量化模型配置
 embedding:
+  # 聊天消息持久向量任务；旧消息仅通过维护命令入队。
+  message_jobs:
+    concurrency: 2
+    poll_seconds: 2
+    timeout_seconds: 10
+    max_attempts: 3
+    retry_seconds: 15
   provider: openai
   model: text-embedding-v4
   api_key: ""

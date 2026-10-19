@@ -328,20 +328,7 @@ func EnsureChatMessageEmbeddingSchema(db *gorm.DB, wantDim int) error {
 		return nil
 	}
 
-	// 4) 已写入多少行 —— 维度对得上但一行都没有，说明向量侧从未真正落库，
-	// 这跟「维度错配」是两种完全不同的故障，必须分开报。
-	var filled, total int64
-	if err := db.Raw(
-		`SELECT COUNT(*) AS total, COUNT(embedding) AS filled FROM chat_messages`,
-	).Row().Scan(&total, &filled); err != nil {
-		return fmt.Errorf("统计 chat_messages 向量覆盖率失败: %w", err)
-	}
-	if total > 0 && filled == 0 {
-		logger.Warnf("[embedding] chat_messages.embedding 列已就绪（%s），但 %d 条历史消息全部没有向量：语义召回在历史数据上无效。"+
-			"新消息会自动写入，历史消息需运行一次回填任务", colType, total)
-		return nil
-	}
-	logger.Infof("[embedding] chat_messages.embedding 已就绪（%s），向量覆盖 %d/%d 条消息", colType, filled, total)
+	logger.Infof("聊天消息向量列已就绪: column_type=%s", colType)
 	return nil
 }
 

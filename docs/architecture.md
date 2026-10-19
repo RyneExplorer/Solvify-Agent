@@ -196,6 +196,7 @@ configs/config.yaml          —— 主配置文件（含所有节点和实际�
 - **日志使用 zap + lumberjack**，JSON 格式，双输出，自动轮转
 - **LLM 使用 eino-openai**，支持 OpenAI / DeepSeek / 智谱 / 通义等所有兼容厂商
 - **Embedding 使用 eino-ext embedding/openai**，支持 Redis 缓存（SHA-256，24h TTL）
+- **聊天消息向量化异步持久执行**：消息INSERT同时登记任务状态；App管理有界Worker，数据库租约与令牌保证并发领取和重启恢复，向量结果与终态原子写入。后台直接使用可取消的Embedding客户端，查询侧保留缓存。启动不扫描或登记历史消息，旧数据由维护命令显式入队；有限重试后失败保留正文，排障和命令见[开发指南](DEVELOPMENT.md)。
 - **RAG 使用 pgvector + 中文分词**，支持 IVFFlat 向量索引和 GIN 关键词索引
 - **Agent 使用 eino ReAct**，支持工具调用、回调事件、SSE 流式输出
 - **Repository 使用接口+实现分离**，Model/Tool/UserModelConfig 等高频读仓库使用 Redis 缓存装饰器

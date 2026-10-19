@@ -2,11 +2,14 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"strings"
 
 	einoOpenai "github.com/cloudwego/eino-ext/components/embedding/openai"
 	"github.com/cloudwego/eino/components/embedding"
+	openai "github.com/meguminnnnnnnnn/go-openai"
 )
 
 // EmbeddingClient 基于 eino-ext 实现文本向量化客户端
@@ -83,6 +86,39 @@ func (c *EmbeddingClient) normalizeError(err error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return &EmbeddingError{Code: "timeout", Message: "向量服务响应超时，请稍后重试", Temporary: true}
+	}
+	// HTTP状态从SDK错误类型读取，不能从任意上游正文中的数字猜测。
+	status := 0
+	var apiErr *openai.APIError
+	var requestErr *openai.RequestError
+	if errors.As(err, &apiErr) {
+		status = apiErr.HTTPStatusCode
+	} else if errors.As(err, &requestErr) {
+		status = requestErr.HTTPStatusCode
+	}
+	if status != 0 {
+		switch status {
+		case 401, 403:
+			return &EmbeddingError{Code: "authentication", Message: "向量服务认证失败，请检查 API Key 配置"}
+		case 408, 429, 500, 502, 503, 504:
+			return &EmbeddingError{Code: "unavailable", Message: "向量服务暂时不可用，请稍后重试", Temporary: true}
+		default:
+			return &EmbeddingError{Code: "configuration", Message: "向量服务调用失败，请检查模型与请求配置"}
+		}
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) {
+		code, message := "connection", "向量服务连接失败，请检查 Embedding 服务是否已启动"
+		if networkErr.Timeout() {
+			code, message = "timeout", "向量服务响应超时，请稍后重试"
+		}
+		return &EmbeddingError{Code: code, Message: message, Temporary: true}
+	}
 	errMsg := err.Error()
 	lower := strings.ToLower(errMsg)
 	model := c.model
@@ -90,16 +126,19 @@ func (c *EmbeddingClient) normalizeError(err error) error {
 		model = "当前向量模型"
 	}
 	if strings.Contains(lower, "model") && strings.Contains(lower, "not found") {
-		return fmt.Errorf("向量模型 %q 未安装，请先拉取或切换可用的向量模型", model)
+		return &EmbeddingError{Code: "model", Message: fmt.Sprintf("向量模型 %q 未安装，请先拉取或切换可用的向量模型", model)}
 	}
 	if strings.Contains(lower, "connection refused") || strings.Contains(lower, "actively refused") || strings.Contains(lower, "connectex") {
-		return fmt.Errorf("向量服务连接失败，请检查 Embedding 服务是否已启动")
+		return &EmbeddingError{Code: "connection", Message: "向量服务连接失败，请检查 Embedding 服务是否已启动", Temporary: true}
 	}
 	if strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded") {
-		return fmt.Errorf("向量服务响应超时，请稍后重试")
+		return &EmbeddingError{Code: "timeout", Message: "向量服务响应超时，请稍后重试", Temporary: true}
 	}
-	if strings.Contains(lower, "401") || strings.Contains(lower, "403") || strings.Contains(lower, "unauthorized") || strings.Contains(lower, "forbidden") {
-		return fmt.Errorf("向量服务认证失败，请检查 API Key 配置")
+	if strings.Contains(lower, "unauthorized") || strings.Contains(lower, "forbidden") {
+		return &EmbeddingError{Code: "authentication", Message: "向量服务认证失败，请检查 API Key 配置"}
 	}
-	return fmt.Errorf("向量服务调用失败，请检查 Embedding 配置")
+	if strings.Contains(lower, "connection reset") || strings.Contains(lower, "eof") || strings.Contains(lower, "no such host") || strings.Contains(lower, "temporary failure") {
+		return &EmbeddingError{Code: "connection", Message: "向量服务连接中断，请稍后重试", Temporary: true}
+	}
+	return &EmbeddingError{Code: "configuration", Message: "向量服务调用失败，请检查 Embedding 配置"}
 }

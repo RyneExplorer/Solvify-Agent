@@ -17,12 +17,6 @@ type ChatMessageSearchRow struct {
 	CreatedAt    time.Time `gorm:"column:created_at"`
 }
 
-// MessageEmbeddingUpdate 是批量写向量的一行（ID + 已序列化前的向量）。
-type MessageEmbeddingUpdate struct {
-	ID        string
-	Embedding entity.FloatVector
-}
-
 // ChatMessageRepo 定义聊天消息数据访问接口
 type ChatMessageRepo interface {
 	Create(ctx context.Context, message *entity.ChatMessage) error
@@ -40,10 +34,4 @@ type ChatMessageRepo interface {
 	SearchRecentByKeywords(ctx context.Context, sessionID string, keywords []string, limit int) ([]entity.ChatMessage, error)
 	// SearchRecentByVector 在指定会话中按向量语义检索最近消息（pgvector 余弦距离）
 	SearchRecentByVector(ctx context.Context, sessionID string, queryEmbedding []float32, limit int, distanceThreshold float64) ([]entity.ChatMessage, error)
-	// UpdateEmbedding 更新指定消息的向量表示（后台写入路径，失败不影响主流程）
-	UpdateEmbedding(ctx context.Context, messageID string, embedding entity.FloatVector) error
-	// FindMessagesMissingEmbedding 分批取还没有向量的消息（一次性回填用，判据 embedding IS NULL）
-	FindMessagesMissingEmbedding(ctx context.Context, afterID string, limit int) ([]entity.ChatMessage, error)
-	// BatchUpdateEmbedding 一批一次往返写完向量
-	BatchUpdateEmbedding(ctx context.Context, items []MessageEmbeddingUpdate) error
 }

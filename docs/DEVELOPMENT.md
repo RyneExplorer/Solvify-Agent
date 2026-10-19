@@ -31,14 +31,42 @@ go run ./cmd/server
 用户只配置MCP连接，管理员维护第三方MCP预置；普通HTTP工具入口与执行器已移除。已有库在部署新版本前执行：
 
 ```bash
-psql -h localhost -U <数据库用户> -d <数据库名> -f scripts/migrations/20261017_mcp_connections.sql
+psql -v ON_ERROR_STOP=1 -h localhost -U <数据库用户> -d <数据库名> -f scripts/migrations/20261017_mcp_connections.sql
 ```
 
 脚本可重复执行，只迁移旧MCP配置并保留原ID，不覆盖后续编辑、不重新导入已删除连接。没有迁移标记的旧库首次升级前，应检查同一用户是否重复绑定同一预置；新表对该组合建立唯一约束，冲突会使整个迁移回滚。启动只检查MCP表是否存在，不自动升级业务schema。
 
+若启动提示 `MCP连接表不存在`，表示该进程连接的数据库尚未完成上述升级；不能对已有库重跑完整初始化脚本，也不能跳过缺表检查。先核对最终生效的数据库目标（根目录 `.env` 和进程环境变量可能覆盖YAML），在该库执行迁移后再启动。可用 `SELECT current_database(), to_regclass('public.mcp_connections');` 核对目标与表是否存在；升级完成后，`app_schema_migrations` 应有版本 `20261017_mcp_connections`。
+
+用户点击“保存”时，个人连接地址、认证请求头或预置字段会持久写入PostgreSQL的 `mcp_connections`；重启后按用户归属读取。仅点击“测试连接”不会保存草稿。升级时旧MCP配置从 `user_tool_configs` 迁入新表，保留ID、用户配置及启停状态，旧表不会被此迁移清空。
+
 配置方式、搜索API Key与接口见[MCP配置](mcp-configuration.md)。内置工具使用 `tools.default_timeout`（默认30秒，`TOOLS_DEFAULT_TIMEOUT`可覆盖）；MCP分别配置connect_timeout/call_timeout，默认30/300秒，旧timeout兼容读取。部署预置的管理员超时在启动同步时保留，详见[工具执行时限](tool-timeouts.md)。
 
-### 常用检查
+### 聊天消息向量任务
+
+消息正文与 `embedding_status=queued` 在同一条INSERT中提交，HTTP保存不等待向量服务。`database.postgres.enable_pgvector=false` 时不登记也不执行任务。App管理后台Worker，停止HTTP后取消并等待Worker归还任务，再关闭数据库等依赖。启动只消费已登记任务，不扫描或自动登记旧消息；当前问题用于语义召回的查询向量仍按请求计算，失败降级关键词。
+
+已有库在启动此版本前执行（新库初始化脚本已包含字段、约束和索引）：
+
+```bash
+psql -v ON_ERROR_STOP=1 -h localhost -U <数据库用户> -d <数据库名> -f scripts/migrations/20261017_message_embedding_jobs.sql
+```
+
+迁移可重复执行，旧消息默认 `none`，不改正文和已有向量。新任务状态为 `queued → running → succeeded/failed`，可重试故障退避后回到 `queued`。默认 `embedding.message_jobs`：并发2、轮询2秒、单次超时10秒、最多尝试3次、初始退避15秒（指数增长）；配置项见示例YAML。后台请求直接使用可取消的Embedding客户端，不经过查询侧共享缓存。Worker租约为单次超时加30秒，通过令牌拒绝过期写入；崩溃占用一次尝试，正常停机归还时不消耗次数。网络、超时和HTTP408/429/500/502/503/504重试，认证、非法配置、维度或数值错误直接失败。失败不会删除正文，达到上限后不会在重启时无限重试。
+
+确认向量服务可用后，从项目根目录显式登记历史缺向量消息（读取 `CONFIG_PATH`/默认配置及环境覆盖，必须匹配数据库名）：
+
+```bash
+go run ./cmd/backfill-message-embeddings --database <数据库名> --limit 1000
+# 修复故障后，同时重置并重新登记失败任务：
+go run ./cmd/backfill-message-embeddings --database <数据库名> --limit 1000 --retry-failed
+```
+
+命令只入队，服务运行后异步处理；已嵌入、空文本和处理中任务不重复入队，每次最多10000条。运维可通过 `SELECT embedding_status, count(*) FROM chat_messages GROUP BY embedding_status;` 查看状态，不记录消息正文或上游敏感错误。隔离真实PostgreSQL验证使用 `SOLVIFY_EMBEDDING_DB_TEST=1 go test -race ./internal/repository ./internal/app -run 'TestMessageEmbedding(PostgresRecovery|AppPostgresLifecycle)' -count=1 -v`；测试创建并清理临时schema，App测试向量HTTP为本地模拟，不发送真实聊天。
+
+2026-10-19验收：独立数据库、真实浏览器、真实聊天模型与 `bge-m3`（1024维）验证发送、刷新、用户/助手向量入库；受控HTTP503验证3次后失败且正文保留；强制结束测试进程后由新进程在租约自然过期时恢复，尝试次数1→2并完成。维护命令分别验证旧消息登记和 `--retry-failed` 后收敛。隔离数据库竞争/事务/迁移/独立进程测试、相关六包race、全量Go测试/vet、前端31项及构建通过。新库基线既有会话澄清字段和checkpoint表缺口另行处理，浏览器测试仅在临时库补齐会话字段；本轮不代表语义召回质量或checkpoint恢复验收。
+
+### 常用检查命令
 
 ```bash
 go test ./...

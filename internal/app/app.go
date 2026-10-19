@@ -36,7 +36,6 @@ import (
 	"solvify-agent/pkg/database"
 	"solvify-agent/pkg/documentparser"
 	"solvify-agent/pkg/logger"
-	"solvify-agent/pkg/strutil"
 )
 
 // App 是全局应用结构体，集中持有配置、基础设施和路由实例
@@ -53,6 +52,8 @@ type App struct {
 	// checkpoint 过期清理后台任务的取消函数，由 App 负责生命周期管理
 	checkpointCleanupCancel context.CancelFunc
 	checkpointCleanupDone   chan struct{}
+	messageEmbeddingCancel  context.CancelFunc
+	messageEmbeddingDone    chan struct{}
 
 	// MCP 客户端连接池，由 App 负责生命周期管理
 	mcpClientPool *providers.MCPClientPool
@@ -78,6 +79,7 @@ func (a *App) Initialize() error {
 		return err
 	}
 	if err := a.initDependencies(); err != nil {
+		a.stopMessageEmbeddingWorker()
 		a.stopContextCleanup()
 		if a.mcpClientPool != nil {
 			_ = a.mcpClientPool.Close()
@@ -256,10 +258,9 @@ func (a *App) initEmbedding() {
 			}
 
 			// 层级 3：调 API
-			logger.Infof("[Embedding] 全缓存未命中: key=%s text=%q, 调用 API...", cacheKey[:8], strutil.Truncate(text, 60))
+			logger.Debug("向量缓存未命中，调用向量服务")
 			vec, err := embeddingClient.Embed(ctx, text)
 			if err != nil {
-				logger.Errorf("[Embedding] API 调用失败: %v", err)
 				return nil, err
 			}
 
@@ -388,6 +389,12 @@ func (a *App) initAgentComponents(toolFactory tool.ToolFactory, documentRepo rep
 
 // initDependencies 初始化业务依赖并创建路由
 func (a *App) initDependencies() error {
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err := database.CheckMessageEmbeddingSchema(checkCtx, a.postgresqlDB)
+	checkCancel()
+	if err != nil {
+		return err
+	}
 	if !a.postgresqlDB.Migrator().HasTable(&entity.MCPConnection{}) {
 		return fmt.Errorf("MCP连接表不存在，请先执行 scripts/migrations/20261017_mcp_connections.sql")
 	}
@@ -493,20 +500,6 @@ func (a *App) initDependencies() error {
 		logger.Infof("checkpoint 过期清理任务已启动: interval=%v", cleanupInterval)
 	}
 
-	// 历史消息向量回填（一次性，异步）。语义召回的判据是「消息有向量」，而向量只在
-	// 消息创建时写 —— 引入语义召回之前的历史消息一条都没有。keyset 分页 ⇒ 可续跑，
-	// 熔断 ⇒ embedding 侧整体不可用时立刻中止而不是刷几百行同因失败。
-	if a.cfg.Database.Postgres.EnablePGVector {
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.Errorf("历史消息向量回填 panic 已恢复: %v", r)
-				}
-			}()
-			service.NewMessageEmbeddingBackfiller(chatMessageRepo, a.embedFn).BackfillMessageEmbeddings(context.Background())
-		}()
-	}
-
 	// 初始化 Service
 	prefSvc := service.NewUserPreferenceService(userPreferenceRepo)
 	userSvc := service.NewUserService(userRepo, prefSvc, userModelCache)
@@ -540,7 +533,7 @@ func (a *App) initDependencies() error {
 	}
 
 	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo)
-	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.tracer, feedbackRepo, a.embedFn)
+	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.tracer, feedbackRepo, a.embedFn, a.cfg.Database.Postgres.EnablePGVector)
 	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo, toolProviderRepo, legacyToolConfigRepo, txMgr)
 	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry, legacyToolConfigRepo, txMgr)
 	mcpService := service.NewMCPService(mcpRepo, toolProviderRepo, mcpProvider)
@@ -567,7 +560,7 @@ func (a *App) initDependencies() error {
 		prefSvc,
 	)
 
-	return nil
+	return a.startMessageEmbeddingWorker()
 }
 
 // initRouter 初始化路由
@@ -603,8 +596,10 @@ func (a *App) gracefulShutdown() {
 	defer cancel()
 
 	if err := a.server.Shutdown(ctx); err != nil {
-		logger.Fatal("HTTP 服务关闭失败", zap.Error(err))
+		logger.Warn("HTTP 服务关闭超时，关闭连接后继续释放资源", zap.Error(err))
+		_ = a.server.Close()
 	}
+	a.stopMessageEmbeddingWorker()
 
 	// 三方链路关闭：官方 v2 handler 自己持有 OTLP 批处理器与 TracerProvider，
 	// 必须 Shutdown 才会把队列里剩余的 span 导出并释放 provider。

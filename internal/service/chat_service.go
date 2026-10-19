@@ -45,7 +45,8 @@ type chatService struct {
 	txMgr               repository.TxManager
 	// embedFn 复用 app.initEmbedding 的向量化函数（两级缓存 + singleflight），
 	// 不是裸客户端：同一段文本重复向量化会直接打 API。
-	embedFn rag.EmbeddingFunc
+	embedFn                rag.EmbeddingFunc
+	queueMessageEmbeddings bool
 }
 
 // NewChatService 创建聊天业务服务。
@@ -63,21 +64,23 @@ func NewChatService(
 	tracer *observability.Tracer,
 	feedbackRepo repository.FeedbackRepo,
 	embedFn rag.EmbeddingFunc,
+	queueMessageEmbeddings bool,
 ) ChatServiceInterface {
 	return &chatService{
-		sessionRepo:         sessionRepo,
-		messageRepo:         messageRepo,
-		txMgr:               txMgr,
-		modelRepo:           modelRepo,
-		userModelConfigRepo: userModelConfigRepo,
-		userRepo:            userRepo,
-		userCache:           userCache,
-		agentEngine:         agentEngine,
-		contextSvc:          contextSvc,
-		prefSvc:             prefSvc,
-		tracer:              tracer,
-		feedbackRepo:        feedbackRepo,
-		embedFn:             embedFn,
+		sessionRepo:            sessionRepo,
+		messageRepo:            messageRepo,
+		txMgr:                  txMgr,
+		modelRepo:              modelRepo,
+		userModelConfigRepo:    userModelConfigRepo,
+		userRepo:               userRepo,
+		userCache:              userCache,
+		agentEngine:            agentEngine,
+		contextSvc:             contextSvc,
+		prefSvc:                prefSvc,
+		tracer:                 tracer,
+		feedbackRepo:           feedbackRepo,
+		embedFn:                embedFn,
+		queueMessageEmbeddings: queueMessageEmbeddings,
 	}
 }
 
@@ -477,12 +480,9 @@ func (s *chatService) saveUserMessage(ctx context.Context, sessionID string, req
 		SearchMode:       req.SearchMode,
 		KnowledgeBaseIDs: datatypes.JSON(mustMarshal(req.KnowledgeBaseIDs)),
 	}
-	if err := s.messageRepo.Create(ctx, &userMsg); err != nil {
+	if err := s.persistMessage(ctx, &userMsg); err != nil {
 		return "", err
 	}
-	// 提问也要有向量：只有答案有向量时，多轮指代（「你刚说的那个再展开下」）在
-	// 语义召回里永远命中不了 —— 召回的是答案，匹配的是新问题，两边对不上。
-	s.bgComputeEmbedding(ctx, userMsg.ID, userMsg.Content)
 	return userMsg.ID, nil
 }
 
@@ -498,39 +498,15 @@ func (s *chatService) saveAssistantMessage(ctx context.Context, sessionID, msgID
 		Sources:          datatypes.JSON(mustMarshal(sources)),
 		Metadata:         metadata,
 	}
-	if err := s.messageRepo.Create(ctx, &assistantMsg); err != nil {
-		return err
-	}
-	s.bgComputeEmbedding(ctx, assistantMsg.ID, assistantMsg.Content)
-	return nil
+	return s.persistMessage(ctx, &assistantMsg)
 }
 
-// bgComputeEmbedding 后台为消息计算向量表示，失败不阻塞主流程。
-//
-// ⚠️ 写失败是 Error 而不是 Warn：向量写不进去 ⇒ 这条消息在语义召回里**永远查不到**，
-// 而聊天本身照常工作，没有任何用户可见症状。dim 一并打出来，维度不匹配一眼可见
-// （系统性的维度错配由启动期 EnsureEmbeddingColumnDimension 兜住）。
-func (s *chatService) bgComputeEmbedding(ctx context.Context, messageID, content string) {
-	if s.embedFn == nil || strings.TrimSpace(content) == "" {
-		return
+// 同一INSERT保存正文和任务状态，数据库提交前Worker无法领取。
+func (s *chatService) persistMessage(ctx context.Context, msg *entity.ChatMessage) error {
+	if s.queueMessageEmbeddings && strings.TrimSpace(msg.Content) != "" {
+		msg.EmbeddingStatus = "queued"
 	}
-	go func() {
-		embedCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		vec, err := s.embedFn(embedCtx, content)
-		if err != nil {
-			logger.Warnf("消息向量计算失败: messageID=%s, err=%v", messageID, err)
-			return
-		}
-		f32 := make(entity.FloatVector, len(vec))
-		for i, v := range vec {
-			f32[i] = float32(v)
-		}
-		if err := s.messageRepo.UpdateEmbedding(embedCtx, messageID, f32); err != nil {
-			logger.Errorf("消息向量写入失败（该消息将无法被语义召回）: messageID=%s, dim=%d, err=%v",
-				messageID, len(f32), err)
-		}
-	}()
+	return s.messageRepo.Create(ctx, msg)
 }
 
 // buildContextParams 是 initContext 传给 BuildContext 的那份配置的唯一组装点。
@@ -555,9 +531,8 @@ func buildContextParams(historyBudget, retrievalBudget, memoryBudget int, modelN
 
 // queryEmbedding 同步算当前问题的向量，供语义召回当查询条件。
 //
-// 与 bgComputeEmbedding 分成两个函数而不是共用一个，是因为等待策略相反：
-// 那份是写库，失败只影响「以后还能不能被召回」，所以丢后台；这份是本次请求的
-// 召回条件，拿不到就只能靠关键词通道，这里必须等得起。失败返回 nil，
+// 消息向量写入由持久Worker完成；这里计算本次请求的召回条件。
+// 最多等待5秒，失败返回 nil，
 // BuildContext 会自动关闭语义通道 —— 召回是补充通道，不该拖垮整轮聊天。
 func (s *chatService) queryEmbedding(ctx context.Context, query string) []float64 {
 	if s.embedFn == nil || strings.TrimSpace(query) == "" {

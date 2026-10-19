@@ -99,13 +99,14 @@ type LLMConfig struct {
 
 // EmbeddingConfig 描述 Embedding 模型配置
 type EmbeddingConfig struct {
-	Provider  string `mapstructure:"provider"`
-	Model     string `mapstructure:"model"`
-	APIKey    string `mapstructure:"api_key"`
-	BaseURL   string `mapstructure:"base_url"`
-	Dimension int    `mapstructure:"dimension"`
-	BatchSize int    `mapstructure:"batch_size"`
-	Timeout   int    `mapstructure:"timeout"`
+	MessageJobs MessageEmbeddingConfig `mapstructure:"message_jobs"`
+	Provider    string                 `mapstructure:"provider"`
+	Model       string                 `mapstructure:"model"`
+	APIKey      string                 `mapstructure:"api_key"`
+	BaseURL     string                 `mapstructure:"base_url"`
+	Dimension   int                    `mapstructure:"dimension"`
+	BatchSize   int                    `mapstructure:"batch_size"`
+	Timeout     int                    `mapstructure:"timeout"`
 }
 
 // RAGConfig 描述检索增强配置
@@ -417,11 +418,12 @@ func Default() *Config {
 			StreamIdleTimeout:        30,
 		},
 		Embedding: EmbeddingConfig{
-			Provider:  "openai",
-			Model:     "text-embedding-v4",
-			Dimension: 1024,
-			BatchSize: 10,
-			Timeout:   15,
+			MessageJobs: DefaultMessageEmbeddingConfig(),
+			Provider:    "openai",
+			Model:       "text-embedding-v4",
+			Dimension:   1024,
+			BatchSize:   10,
+			Timeout:     15,
 		},
 		RAG: RAGConfig{
 			Enabled:             true,
@@ -496,6 +498,9 @@ func Default() *Config {
 
 // Validate 校验配置是否满足启动要求
 func (c *Config) Validate() error {
+	if err := c.Embedding.MessageJobs.Validate(); err != nil {
+		return err
+	}
 	if err := c.Agent.RuntimeContext.Validate(); err != nil {
 		return err
 	}

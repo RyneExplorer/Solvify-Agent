@@ -57,6 +57,12 @@ llm:
   stream_idle_timeout: 30 # 正文、思考或工具参数片段的最大连续空闲秒数
 
 embedding:
+  message_jobs:
+    concurrency: 2
+    poll_seconds: 2
+    timeout_seconds: 10
+    max_attempts: 3
+    retry_seconds: 15
   provider: openai
   model: text-embedding-v4
   api_key: ""

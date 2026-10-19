@@ -401,7 +401,7 @@ func TestContextConversationLiveHTTP(t *testing.T) {
 	summaryRepo := repository.NewSummaryRepository(db)
 	contextSvc := conversationMeasuredContext{ContextServiceInterface: service.NewContextService(messageRepo, repository.NewUserMemoryRepository(db), summaryRepo), messages: messageRepo, name: source.ModelID}
 	engine := conversationMeasuredEngine{AgentInterface: agent.NewEngine(nil, cfg.Agent), name: source.ModelID, redact: []string{source.APIKey, source.BaseURL, dbConfig.Password}}
-	chatSvc := service.NewChatService(repository.NewChatSessionRepository(db), messageRepo, repository.NewTxManager(db), repository.NewModelRepository(db), nil, repository.NewUserRepository(db), cache.New(redisClient, schemaName+":", time.Hour), engine, contextSvc, nil, nil, nil, nil)
+	chatSvc := service.NewChatService(repository.NewChatSessionRepository(db), messageRepo, repository.NewTxManager(db), repository.NewModelRepository(db), nil, repository.NewUserRepository(db), cache.New(redisClient, schemaName+":", time.Hour), engine, contextSvc, nil, nil, nil, nil, false)
 	token, err := jwt.GenerateToken(userID, "上下文联调用户", 0)
 	if err != nil {
 		t.Fatal("测试认证生成失败")
