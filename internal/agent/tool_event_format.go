@@ -168,3 +168,13 @@ func formatToolEnd(toolName string, output *toolComp.CallbackOutput, toolDescMap
 
 	return fmt.Sprintf("%s 执行完成", toolName), "", toolResult
 }
+
+func extractQueryFromArgs(args string) string {
+	var params struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal([]byte(args), &params); err == nil {
+		return params.Query
+	}
+	return args
+}

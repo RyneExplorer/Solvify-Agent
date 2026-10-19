@@ -32,6 +32,8 @@ func (e *Engine) runWithRunner(
 	toolDescMap map[string]string,
 	eventCh chan<- Event,
 ) {
+	ctx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
 	var (
 		iter *adk.AsyncIterator[*adk.AgentEvent]
 		err  error
@@ -70,6 +72,10 @@ func (e *Engine) runWithRunner(
 		}
 
 		if agentEvent.Err != nil {
+			if isModelRetryNotification(agentEvent.Err) {
+				eventch.Send(ctx, eventCh, Event{Type: EventThinking, Title: "模型暂未响应，正在重试", Status: "running"})
+				continue
+			}
 			if ctx.Err() != nil {
 				logger.Infof("[Agent] Runner 迭代器因 ctx 取消结束")
 				break
@@ -89,7 +95,7 @@ func (e *Engine) runWithRunner(
 			// 精确种类上；判不出来时归为「Agent 执行失败」——
 			// 它是本函数握着的事实，比笼统的 unknown 更有信息量。
 			// ⚠️ 这里原本写死了「深度思考模式执行异常」，而本函数被快速模式共用
-			// （runQuickAgent 第 69 行也走这里），于是快速模式的失败显示了深度模式的文案。
+			// （runQuickAgent 也走这里），于是快速模式的失败显示了深度模式的文案。
 			kind := apperrors.Classify(agentEvent.Err)
 			if kind == apperrors.KindUnknown {
 				kind = apperrors.KindAgentRunFailed
@@ -168,7 +174,16 @@ func (e *Engine) runWithRunner(
 
 		// ── 流式：消费 MessageStream，逐 chunk 处理 ──
 		if mv.IsStreaming && mv.MessageStream != nil {
-			e.consumeMessageStream(ctx, mv, toolDescMap, &fullAnswer, eventCh)
+			if err := e.consumeMessageStream(ctx, mv, toolDescMap, &fullAnswer, eventCh); err != nil {
+				if ctx.Err() == nil {
+					kind := apperrors.Classify(err)
+					if kind == apperrors.KindUnknown {
+						kind = apperrors.KindAgentStreamFailed
+					}
+					eventch.Send(ctx, eventCh, Event{Type: EventError, Kind: kind, Error: err.Error(), Status: "error", Done: true})
+				}
+				return
+			}
 			continue
 		}
 
@@ -179,6 +194,10 @@ func (e *Engine) runWithRunner(
 		}
 
 		e.handleMessage(ctx, msg, mv.Role, mv.ToolName, toolDescMap, &fullAnswer, eventCh)
+	}
+
+	if ctx.Err() != nil {
+		return
 	}
 
 	// 取一次来源快照：同一轮可能并行跑多个 knowledge_search，工具侧的收集结果由
@@ -238,7 +257,7 @@ func (e *Engine) consumeMessageStream(
 	toolDescMap map[string]string,
 	fullAnswer *strings.Builder,
 	eventCh chan<- Event,
-) {
+) error {
 	stream := mv.MessageStream
 	defer stream.Close()
 
@@ -251,12 +270,16 @@ func (e *Engine) consumeMessageStream(
 			break
 		}
 		if err != nil {
+			if isModelRetryNotification(err) {
+				eventch.Send(ctx, eventCh, Event{Type: EventThinking, Title: "模型暂未响应，正在重试", Status: "running"})
+				return nil
+			}
 			if ctx.Err() != nil {
 				logger.Infof("[Agent] MessageStream 因 ctx 取消结束")
-				return
+				return ctx.Err()
 			}
 			logger.Errorf("[Agent] MessageStream 读取失败: %v", err)
-			return
+			return err
 		}
 		if msg == nil {
 			continue
@@ -316,6 +339,7 @@ func (e *Engine) consumeMessageStream(
 			toolCallPending = false
 		}
 	}
+	return nil
 }
 
 func (e *Engine) handleMessage(

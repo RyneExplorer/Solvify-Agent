@@ -13,14 +13,14 @@ cmd/server                —— 入口，创建并启动 App
        ├── internal/api   —— Gin Router + 13 个 Controller 模块
        │   └── internal/middleware  —— Auth、CORS、Logger、Recovery
        ├── internal/service      —— 16 个业务 Service（接口+实现）
-       ├── internal/repository   —— 16 个数据 Repository（接口+实现）+ 4 个 Redis 缓存装饰器
+       ├── internal/repository   —— 16 个数据 Repository（接口+实现）+ 3 个 Redis 缓存装饰器
        ├── internal/model
        │   ├── entity            —— 15 个 GORM 实体
        │   └── dto/request       —— 13 个请求 DTO
        │   └── dto/response      —— 11 个响应 DTO
        ├── internal/agent        —— eino ReAct Agent 引擎（执行/回调/提示词/类型）
        ├── internal/rag          —— RAG 检索管线（装饰器链）
-       ├── internal/tool         —— 工具系统（Provider 注册表 + HTTP Provider + AgentTool）
+       ├── internal/tool         —— 工具系统（MCP连接解析、连接池、运行适配与内置能力）
        ├── internal/llm          —— LLM 客户端工厂（OpenAI 兼容，连接池复用）
        ├── internal/integration  —— 钉钉集成（OAuth / Wiki / 文档导出）
        ├── pkg/jwt               —— JWT 令牌签发与解析
@@ -85,6 +85,8 @@ ExpandRetriever (装饰器，可选)
 
 ## Chat 双模式架构（策略模式）
 
+Agent 的执行入口、深度计划、工具和上下文代码位置见 [Agent 代码导航](../internal/agent/README.md)；开发约束以 [AGENTS.md](../AGENTS.md) 为准。
+
 ```
 POST /api/v1/chat/sessions/:id/messages (SSE)
   ├── 快速模式 (search_mode=quick)
@@ -95,25 +97,32 @@ POST /api/v1/chat/sessions/:id/messages (SSE)
   └── 深度模式 (search_mode=smart-reasoning)
         └── agent.Engine.Execute() (eino ReAct)
               ├── Think: 分析问题
-              ├── Act: 调用 knowledge_search / web_search
+              ├── Act: 委派知识研究、MCP研究或文档操作子Agent
               ├── Observe: 评估结果
               └── 循环直至生成最终答案
                    → SSE 事件流: thinking / plan / tool_call / tool_result / answer / citation / done
 ```
 
-## Tool 系统（Provider 模式）
+## MCP与内部工具
+
+用户在设置中只管理MCP连接，不再管理普通HTTP工具或逐工具开关。系统预置是第三方MCP连接模板，服务无需由本项目实现；后台维护固定地址、Headers模板和用户字段schema，用户填写凭据后保存个人绑定。用户也可添加公网Streamable HTTP MCP端点。
 
 ```text
-ToolType (数据库定义，如 web_search)
-  └── ToolProvider (HTTP Provider，Template 驱动)
-        ├── URL/Headers/Body 模板渲染 {{placeholder}}
-        ├── Auth: bearer / api_key / basic
-        └── Response Mapping: JSONPath 提取
-
-AgentTool (eino BaseTool 适配器)
-  └── 动态 Schema 生成（参数推断 → jsonschema）
-  └── 执行委托给 Provider
+用户MCP连接（mcp_connections）
+  ├── 个人HTTP连接：URL、Headers、独立时限
+  └── 绑定系统预置：mcp_templates引用 + 用户配置字段
+        └── 固定地址 + Headers中{{api_key}}等变量
+                ↓ 可信用户身份、模板可用性与配置验证
+MCPClient（直接注入，无供应商注册表） → 按用户/连接/有效配置隔离的客户端池
+  └── initialize → tools/list → 工具Schema → BaseTool适配器
+        └── 调用前重新校验连接状态与有效配置 → tools/call
 ```
+
+快速模式不连接MCP。深度PlanExecute的Planner只规划、Executor只委派，MCP由 `web_research` 专业子Agent使用；该角色只可调用实际挂载的能力，非搜索MCP不会自动变成联网搜索能力。知识检索、文档操作分别进入对应内部能力域，汇总角色不直接获得MCP。普通深度单Agent的新请求不挂MCP，历史checkpoint保留原恢复边界。
+
+内部知识检索、文档管理和澄清工具继续由程序注册；HTTP接口与Agent工具共享业务规则。通用供应商、工具类型、注册表及旧管理路由已删除。管理员模板存于 `mcp_templates`，用户连接存于 `mcp_connections`，删除模板通过数据库外键原子清理绑定。升级保留原模板ID和稳定工具前缀，以支持有效checkpoint重新装配；旧工具表只作为升级历史留存，生产代码不再依赖。
+
+个人连接在拨号时解析并固定公网IP，禁用代理、跨源请求和重定向；管理员预置可连接企业内网。认证头覆盖初始化、发现与调用；每个响应体限制8MiB，每个服务最多128个工具。详情只向本人回读凭据用于编辑，列表不含凭据。配置、迁移与已知限制见[MCP配置](mcp-configuration.md)。
 
 ## 请求链路
 
@@ -146,7 +155,7 @@ configs/config.yaml          —— 主配置文件（含所有节点和实际�
   ├── rag:                   检索配置 (top_k, score_threshold, vector_weight, keyword_weight, rrf_k)
   │   ├── reranker:          重排序 (enabled, endpoint, model, api_key, top_n, timeout, score_threshold)
   │   └── expander:          分块扩展 (enabled, window_size, max_chunk_tokens, dedup_threshold)
-  ├── tools:                 工具开关 + 搜索工具 (web_search.api_key, web_search.base_url)
+  ├── tools:                 内置时限 + MCP预置 (default_timeout, mcp_servers)
   ├── dingtalk:              钉钉集成 (app_key, app_secret, oauth_redirect_uri)
   ├── database:              PostgreSQL + Redis 连接配置
   └── email:                 SMTP 邮件配置
@@ -187,6 +196,7 @@ configs/config.yaml          —— 主配置文件（含所有节点和实际�
 - **日志使用 zap + lumberjack**，JSON 格式，双输出，自动轮转
 - **LLM 使用 eino-openai**，支持 OpenAI / DeepSeek / 智谱 / 通义等所有兼容厂商
 - **Embedding 使用 eino-ext embedding/openai**，支持 Redis 缓存（SHA-256，24h TTL）
+- **聊天消息向量化异步持久执行**：消息INSERT同时登记任务状态；App管理有界Worker，数据库租约与令牌保证并发领取和重启恢复，向量结果与终态原子写入。后台直接使用可取消的Embedding客户端，查询侧保留缓存。启动不扫描或登记历史消息，旧数据由维护命令显式入队；有限重试后失败保留正文，排障和命令见[开发指南](DEVELOPMENT.md)。
 - **RAG 使用 pgvector + 中文分词**，支持 IVFFlat 向量索引和 GIN 关键词索引
 - **Agent 使用 eino ReAct**，支持工具调用、回调事件、SSE 流式输出
 - **Repository 使用接口+实现分离**，Model/Tool/UserModelConfig 等高频读仓库使用 Redis 缓存装饰器

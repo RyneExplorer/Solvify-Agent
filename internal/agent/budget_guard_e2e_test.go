@@ -125,6 +125,9 @@ func TestQuickAgentBudgetGuardOnFirstRunAndResume(t *testing.T) {
 	var seen [][]*schema.Message
 	var calls int32
 	model := &deepTestModel{respond: func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
+		if strings.HasPrefix(msgs[0].Content, "总结已完成交互") {
+			return schema.AssistantMessage("旧检索已完成，继续使用最新检索结果。", nil), nil
+		}
 		snap := make([]*schema.Message, len(msgs))
 		copy(snap, msgs)
 		seen = append(seen, snap)
@@ -161,7 +164,7 @@ func TestQuickAgentBudgetGuardOnFirstRunAndResume(t *testing.T) {
 		// 走离屏模型 ID，避免 llm 包里的运行时降级表干扰窗口取值。
 		// 窗口取小值（最坏档位：固定开销 + 输出预留几乎吃满额度）。
 		// 工具结果的截断是**无条件**的，所以结论不随窗口取值变化。
-		ModelID: "e2e-budget-guard-window", ModelName: "gpt-4o", MaxContextLength: 2000,
+		ModelID: "e2e-budget-guard-window", ModelName: "gpt-4o", MaxContextLength: 16000,
 	}
 
 	// ── 首次执行 ──
@@ -253,6 +256,10 @@ func TestQuickAgentBudgetGuardOnFirstRunAndResume(t *testing.T) {
 
 func mustExecute(t *testing.T, ctx context.Context, e *Engine, req Request, m *deepTestModel) <-chan Event {
 	t.Helper()
+	if req.MaxContextLength == 0 {
+		req.MaxContextLength = 64000
+		req.ModelName = "gpt-4o"
+	}
 	events, err := e.Execute(ctx, req, m)
 	if err != nil {
 		t.Fatalf("Execute 失败: %v", err)

@@ -1,9 +1,8 @@
 package agent
 
 import (
-	apperrors "solvify-agent/pkg/errors"
-
 	"solvify-agent/internal/model/entity"
+	apperrors "solvify-agent/pkg/errors"
 )
 
 // PromptUserContext 描述注入到系统提示词中的用户上下文信息
@@ -35,6 +34,8 @@ const (
 
 // Request 描述 Agent 执行请求
 type Request struct {
+	ContextData []ContextMaterial `json:",omitempty"`
+	RunID       string            // 由程序生成并随checkpoint冻结
 	// Profile 问答模式；空值等同 ProfileDeep（保持既有行为不变），判定一律走 effectiveProfile
 	Profile           Profile
 	CheckpointID      string               // 恢复执行时使用的 checkpointID（恢复场景必填）
@@ -56,18 +57,25 @@ type Request struct {
 	// ModelName 是 ModelID 解析后的真实模型名（如 "deepseek-chat"，不是 uuid）。
 	// budgetGuard 据此选 token 编码 —— 传 ModelID 会一路 fallback 到 cl100k_base。
 	ModelName string
-	// MaxContextLength 是模型**声明**的上下文窗口；预算检查再用
-	// llm.GetEffectiveMaxContextLength 收敛到运行时有效值。
+	// MaxContextLength 是用户确认的总窗口，不按模型名或错误猜测。
+	InputLimit       int // 模型声明的独立输入上限，纳入快照及压缩水位
+	OutputLimit      int // 本次实际默认输出上限，调用级覆盖由最终模型保护处理
 	MaxContextLength int
-	Summary          *entity.ChatSummary // 会话摘要（长对话压缩内容）— 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段
+	Summary          *entity.ChatSummary
 	Memories         []entity.UserMemory // 用户长期记忆 — 保留给调试/日志
 	UserCtx          PromptUserContext   // 用户基本信息 + 当前时间 — 保留给调试/日志，System Prompt 注入统一走 SystemPrompt 字段
-	SystemPrompt     string              // 统一入口注入的完整 System Prompt。不为空时 runAgent 完全信任它，不再内部二次拼接摘要/记忆
-	ResumeData       map[string]any      // 恢复执行时的审批数据（key=interruptID, value=用户审批结果）；为 nil 时首次执行
+	SystemPrompt     string
+	ResumeData       map[string]any // 恢复执行时的审批数据（key=interruptID, value=用户审批结果）；为 nil 时首次执行
 	// TaskID/AgentName 用于受控深度编排中的任务归属和事件追踪。
 	TaskID      string
 	AgentName   string
 	ToolDomains []ToolDomain
+}
+
+type ContextMaterial struct {
+	Kind     string
+	Content  string
+	SourceID string `json:",omitempty"`
 }
 
 // effectiveProfile 归一化 Profile：空值按 ProfileDeep 处理。
@@ -152,4 +160,11 @@ const (
 	EventTaskCreated = "task_created"
 	EventTaskUpdated = "task_updated"
 	EventTaskResult  = "task_result"
+)
+
+const (
+	// deepAgentName / quickAgentName 是 Agent 在 eino 里的身份名，会出现在
+	// Langfuse 的 trace 上 —— 两个模式同名的话，平台上分不出是哪条链路。
+	deepAgentName  = "SolvifyDeepAgent"
+	quickAgentName = "SolvifyQuickAgent"
 )

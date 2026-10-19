@@ -2,10 +2,21 @@ package service
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"solvify-agent/internal/agent"
+	apperrors "solvify-agent/pkg/errors"
 )
+
+func TestContextBudgetStreamErrorIsActionableAndTerminal(t *testing.T) {
+	for _, profile := range []agent.Profile{agent.ProfileQuick, agent.ProfileDeep} {
+		event := toStreamEvent(agent.Event{Type: agent.EventError, Kind: apperrors.KindContextBudget, Done: true, Status: "error"}, profile)
+		if event.Type != "error" || !event.Done || event.Retryable || !strings.Contains(event.Title, "上下文") || !strings.Contains(event.Detail, "缩短问题") || !strings.Contains(event.Detail, "更大窗口") {
+			t.Fatalf("超限提示无操作建议或错误标记可重试：%+v", event)
+		}
+	}
+}
 
 func TestAgentSourcesDTOConversionPreservesWireContractAndIsolation(t *testing.T) {
 	input := []agent.SourceInfo{{DocumentID: "doc", KnowledgeBaseID: "kb", Title: "资料", Score: 0.9, Chunks: []agent.ChunkSource{{ID: "chunk", Quote: "引文", Content: "正文", Score: 0.8}}}}

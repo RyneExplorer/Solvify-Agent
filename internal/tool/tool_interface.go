@@ -8,22 +8,10 @@ import (
 	"solvify-agent/internal/model/entity"
 )
 
-// ProviderRegistry 供应商注册表接口
-type ProviderRegistry interface {
-	Register(providerType string, provider Provider)
-	Get(providerType string) Provider
-	List() map[string]Provider
-	Keys() []string
-}
-
-// UserToolConfigStore 用户工具配置存储——tool 层需要的最小读接口
-type UserToolConfigStore interface {
-	ListEnabledByUserID(ctx context.Context, userID string) ([]entity.UserToolConfig, error)
-}
-
-// ToolTypeStore 工具类型存储——tool 层需要的最小接口
-type ToolTypeStore interface {
-	GetByKey(ctx context.Context, toolKey string) (*entity.ToolType, error)
+// MCPConnectionStore 是工具装配需要的用户连接读取能力。
+type MCPConnectionStore interface {
+	ListEnabledByUserID(ctx context.Context, userID string) ([]entity.MCPConnection, error)
+	Get(ctx context.Context, userID, id string) (*entity.MCPConnection, error)
 }
 
 // ToolFactory 工具工厂接口

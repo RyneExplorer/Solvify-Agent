@@ -359,7 +359,7 @@ CREATE TABLE "public"."models" (
   "updated_at" timestamptz(6),
   "base_url" varchar(500) COLLATE "pg_catalog"."default",
   "api_key" varchar(500) COLLATE "pg_catalog"."default",
-  "max_context_length" int4 NOT NULL DEFAULT 8192
+  "max_context_length" int4 NOT NULL
 )
 ;
 COMMENT ON COLUMN "public"."models"."max_context_length" IS '模型最大上下文 token 长度，用于计算历史消息和检索预算';
@@ -527,44 +527,6 @@ COMMENT ON COLUMN "public"."sync_sources"."deleted_at" IS '删除时间';
 COMMENT ON TABLE "public"."sync_sources" IS '同步源配置表，记录钉钉等外部平台同步入口';
 
 -- ----------------------------
--- Table structure for tool_providers
--- ----------------------------
-CREATE TABLE "public"."tool_providers" (
-  "id" varchar(36) COLLATE "pg_catalog"."default" NOT NULL,
-  "tool_type_id" varchar(36) COLLATE "pg_catalog"."default" NOT NULL,
-  "provider_key" varchar(50) COLLATE "pg_catalog"."default" NOT NULL,
-  "name" varchar(100) COLLATE "pg_catalog"."default" NOT NULL,
-  "description" text COLLATE "pg_catalog"."default",
-  "provider_type" varchar(20) COLLATE "pg_catalog"."default" NOT NULL DEFAULT 'http'::character varying,
-  "config_schema" jsonb,
-  "input_schema" jsonb,
-  "provider_config" jsonb,
-  "admin_config" jsonb,
-  "rate_limit" jsonb,
-  "is_enabled" bool DEFAULT true,
-  "display_order" int8 DEFAULT 0,
-  "created_at" timestamptz(6),
-  "updated_at" timestamptz(6)
-)
-;
-
--- ----------------------------
--- Table structure for tool_types
--- ----------------------------
-CREATE TABLE "public"."tool_types" (
-  "id" varchar(36) COLLATE "pg_catalog"."default" NOT NULL,
-  "name" varchar(100) COLLATE "pg_catalog"."default" NOT NULL,
-  "tool_key" varchar(50) COLLATE "pg_catalog"."default" NOT NULL,
-  "description" text COLLATE "pg_catalog"."default",
-  "execution_mode" varchar(20) COLLATE "pg_catalog"."default" DEFAULT 'sync'::character varying,
-  "input_schema" jsonb,
-  "is_enabled" bool DEFAULT true,
-  "created_at" timestamptz(6),
-  "updated_at" timestamptz(6)
-)
-;
-
--- ----------------------------
 -- Table structure for user_memories
 -- ----------------------------
 CREATE TABLE "public"."user_memories" (
@@ -601,7 +563,7 @@ CREATE TABLE "public"."user_model_configs" (
   "config" jsonb,
   "created_at" timestamptz(6),
   "updated_at" timestamptz(6),
-  "max_context_length" int4 NOT NULL DEFAULT 8192
+  "max_context_length" int4 NOT NULL
 )
 ;
 COMMENT ON COLUMN "public"."user_model_configs"."max_context_length" IS '用户自定义模型的最大上下文 token 长度';
@@ -632,22 +594,6 @@ COMMENT ON COLUMN "public"."user_preferences"."auto_deep_threshold" IS '自动�
 COMMENT ON COLUMN "public"."user_preferences"."use_markdown_table" IS '回答尽量用表格呈现结构化数据';
 COMMENT ON COLUMN "public"."user_preferences"."citation_style" IS '引用格式：none(不标)/section_title(章节标题)/doc_title_only(仅文档名)';
 COMMENT ON TABLE "public"."user_preferences" IS '用户偏好：常用模型、常用知识库、回答风格、是否自动深度模式';
-
--- ----------------------------
--- Table structure for user_tool_configs
--- ----------------------------
-CREATE TABLE "public"."user_tool_configs" (
-  "id" varchar(36) COLLATE "pg_catalog"."default" NOT NULL,
-  "user_id" varchar(36) COLLATE "pg_catalog"."default" NOT NULL,
-  "tool_type_id" varchar(36) COLLATE "pg_catalog"."default" NOT NULL,
-  "provider_id" varchar(36) COLLATE "pg_catalog"."default" NOT NULL,
-  "display_name" varchar(100) COLLATE "pg_catalog"."default",
-  "config" jsonb NOT NULL,
-  "is_enabled" bool DEFAULT true,
-  "created_at" timestamptz(6),
-  "updated_at" timestamptz(6)
-)
-;
 
 -- ----------------------------
 -- Table structure for users
@@ -1019,36 +965,6 @@ CREATE INDEX "idx_sync_sources_user_kb" ON "public"."sync_sources" USING btree (
 ALTER TABLE "public"."sync_sources" ADD CONSTRAINT "sync_sources_pkey" PRIMARY KEY ("id");
 
 -- ----------------------------
--- Indexes structure for table tool_providers
--- ----------------------------
-CREATE INDEX "idx_tool_providers_is_enabled" ON "public"."tool_providers" USING btree (
-  "is_enabled" "pg_catalog"."bool_ops" ASC NULLS LAST
-);
-CREATE INDEX "idx_tool_providers_tool_type_id" ON "public"."tool_providers" USING btree (
-  "tool_type_id" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST
-);
-
--- ----------------------------
--- Primary Key structure for table tool_providers
--- ----------------------------
-ALTER TABLE "public"."tool_providers" ADD CONSTRAINT "tool_providers_pkey" PRIMARY KEY ("id");
-
--- ----------------------------
--- Indexes structure for table tool_types
--- ----------------------------
-CREATE INDEX "idx_tool_types_is_enabled" ON "public"."tool_types" USING btree (
-  "is_enabled" "pg_catalog"."bool_ops" ASC NULLS LAST
-);
-CREATE UNIQUE INDEX "idx_tool_types_tool_key" ON "public"."tool_types" USING btree (
-  "tool_key" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST
-);
-
--- ----------------------------
--- Primary Key structure for table tool_types
--- ----------------------------
-ALTER TABLE "public"."tool_types" ADD CONSTRAINT "tool_types_pkey" PRIMARY KEY ("id");
-
--- ----------------------------
 -- Indexes structure for table user_memories
 -- ----------------------------
 CREATE INDEX "idx_user_memories_user_active" ON "public"."user_memories" USING btree (
@@ -1101,18 +1017,6 @@ ALTER TABLE "public"."user_preferences" ADD CONSTRAINT "user_preferences_user_un
 ALTER TABLE "public"."user_preferences" ADD CONSTRAINT "user_preferences_pkey" PRIMARY KEY ("id");
 
 -- ----------------------------
--- Indexes structure for table user_tool_configs
--- ----------------------------
-CREATE INDEX "idx_user_tool_configs_user_id" ON "public"."user_tool_configs" USING btree (
-  "user_id" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST
-);
-
--- ----------------------------
--- Primary Key structure for table user_tool_configs
--- ----------------------------
-ALTER TABLE "public"."user_tool_configs" ADD CONSTRAINT "user_tool_configs_pkey" PRIMARY KEY ("id");
-
--- ----------------------------
 -- Indexes structure for table users
 -- ----------------------------
 CREATE INDEX "idx_users_role_template_id" ON "public"."users" USING btree (
@@ -1124,15 +1028,65 @@ CREATE INDEX "idx_users_role_template_id" ON "public"."users" USING btree (
 -- ----------------------------
 ALTER TABLE "public"."users" ADD CONSTRAINT "users_pkey" PRIMARY KEY ("id");
 
--- ----------------------------
--- Foreign Keys structure for table tool_providers
--- ----------------------------
-ALTER TABLE "public"."tool_providers" ADD CONSTRAINT "fk_tool_providers_tool_type" FOREIGN KEY ("tool_type_id") REFERENCES "public"."tool_types" ("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+CREATE TABLE IF NOT EXISTS mcp_templates (
+ id varchar(36) PRIMARY KEY,
+ template_key text NOT NULL UNIQUE,
+ tool_prefix text NOT NULL,
+ name varchar(100) NOT NULL,
+ description text,
+ connection jsonb NOT NULL,
+ config_schema jsonb,
+ mcp_tool_manifest jsonb,
+ is_enabled boolean NOT NULL DEFAULT true,
+ is_system boolean NOT NULL DEFAULT false,
+ display_order integer NOT NULL DEFAULT 0,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK (jsonb_typeof(connection) = 'object')
+);
 
--- ----------------------------
--- Foreign Keys structure for table user_tool_configs
--- ----------------------------
-ALTER TABLE "public"."user_tool_configs" ADD CONSTRAINT "fk_user_tool_configs_tool_provider" FOREIGN KEY ("provider_id") REFERENCES "public"."tool_providers" ("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
-ALTER TABLE "public"."user_tool_configs" ADD CONSTRAINT "fk_user_tool_configs_tool_type" FOREIGN KEY ("tool_type_id") REFERENCES "public"."tool_types" ("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+CREATE TABLE IF NOT EXISTS public.mcp_connections (
+ id varchar(36) PRIMARY KEY,
+ user_id varchar(36) NOT NULL,
+ template_id varchar(36) REFERENCES public.mcp_templates(id) ON DELETE CASCADE,
+ display_name varchar(100) NOT NULL,
+ connection jsonb NOT NULL DEFAULT '{}'::jsonb,
+ config jsonb NOT NULL DEFAULT '{}'::jsonb,
+ is_enabled boolean NOT NULL DEFAULT true,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK (jsonb_typeof(connection) = 'object' AND jsonb_typeof(config) = 'object'),
+ CHECK (template_id IS NULL OR connection = '{}'::jsonb)
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_connections_user_id ON public.mcp_connections(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_connections_user_template ON public.mcp_connections(user_id,template_id) WHERE template_id IS NOT NULL;
 
+-- 消息向量任务（新库初始化；已有库执行独立迁移）。
+
+-- 历史消息保持none，不在升级或启动时触发向量化。
+ALTER TABLE chat_messages
+ ADD COLUMN IF NOT EXISTS embedding_status varchar(16) NOT NULL DEFAULT 'none',
+ ADD COLUMN IF NOT EXISTS embedding_attempts integer NOT NULL DEFAULT 0,
+ ADD COLUMN IF NOT EXISTS embedding_available_at timestamptz NOT NULL DEFAULT now(),
+ ADD COLUMN IF NOT EXISTS embedding_lease_until timestamptz,
+ ADD COLUMN IF NOT EXISTS embedding_lease_token uuid,
+ ADD COLUMN IF NOT EXISTS embedding_error varchar(40) NOT NULL DEFAULT '';
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='chat_messages'::regclass AND conname='chat_messages_embedding_job_check') THEN
+  ALTER TABLE chat_messages ADD CONSTRAINT chat_messages_embedding_job_check CHECK (
+   embedding_status IN ('none','queued','running','succeeded','failed') AND embedding_attempts >= 0
+   AND ((embedding_status='running' AND embedding_lease_until IS NOT NULL AND embedding_lease_token IS NOT NULL)
+    OR (embedding_status<>'running' AND embedding_lease_until IS NULL AND embedding_lease_token IS NULL))
+  );
+ END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_message_embedding_queued ON chat_messages(embedding_available_at,id) WHERE embedding_status='queued';
+CREATE INDEX IF NOT EXISTS idx_message_embedding_leased ON chat_messages(embedding_lease_until,id) WHERE embedding_status='running';
+CREATE TABLE IF NOT EXISTS app_schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO app_schema_migrations(version) VALUES ('20261017_message_embedding_jobs') ON CONFLICT DO NOTHING;
+
+
+
+CREATE TABLE IF NOT EXISTS public.app_schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO public.app_schema_migrations(version) VALUES ('20261017_mcp_connections'),('20261019_mcp_templates') ON CONFLICT DO NOTHING;
 COMMIT;

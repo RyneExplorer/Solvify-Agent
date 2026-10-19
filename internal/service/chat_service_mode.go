@@ -13,7 +13,6 @@ import (
 	"gorm.io/datatypes"
 
 	"solvify-agent/internal/agent"
-	"solvify-agent/internal/llm"
 	requestdto "solvify-agent/internal/model/dto/request"
 	dto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
@@ -61,7 +60,7 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 		}
 	}
 
-	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content, preToolsTokens)
+	client, enhancedCtx, err := s.initContext(ctx, userID, sessionID, req.ModelID, req.ModelType, req.Content, userMsgID, preToolsTokens)
 	if err != nil {
 		sendErrorEvent(ctx, eventCh, err, profile)
 		return
@@ -79,9 +78,30 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 		WithProfile(enhancedCtx.Profile).
 		WithPreference(enhancedCtx.Preference)
 	agentReq := agentPB.BuildAgentRequestFields(userID, req.Content, req.ModelID, req.ModelType, req.KnowledgeBaseIDs, req.MCPIDs(), req.MCPDisabled(), history)
+	recentIDs := make(map[string]bool, len(enhancedCtx.History))
+	for _, message := range enhancedCtx.History {
+		recentIDs[message.ID] = true
+	}
+	recalledIDs := make(map[string]bool, len(enhancedCtx.RecallHistory))
+	for _, message := range enhancedCtx.RecallHistory {
+		recalledIDs[message.ID] = !recentIDs[message.ID]
+	}
+	for _, message := range history {
+		if recalledIDs[message.ID] {
+			agentReq.ContextData = append(agentReq.ContextData, agent.ContextMaterial{Kind: "recall", Content: message.Content, SourceID: message.ID})
+		} else if strings.HasSuffix(message.Content, truncationMarker) {
+			agentReq.ContextData = append(agentReq.ContextData, agent.ContextMaterial{Kind: "history_fragment", Content: message.Content, SourceID: message.ID})
+		}
+	}
 	agentReq.SessionID = sessionID
 	agentReq.Profile = profile
 	// agent 层拿不到 llm 客户端，预算检查需要的窗口与模型名由这里带过去。
+	if err := client.CheckAgentTools(); err != nil {
+		sendErrorEvent(ctx, eventCh, err, profile)
+		return
+	}
+	agentReq.InputLimit = client.InputLimit()
+	agentReq.OutputLimit = client.OutputLimit()
 	agentReq.ModelName = client.ModelName()
 	agentReq.MaxContextLength = client.MaxContextLength()
 
@@ -92,7 +112,6 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 	agentEventCh, err := s.agentEngine.Execute(agentCtx, agentReq, chatModel)
 	if err != nil {
 		logger.Errorf("Agent 执行失败, sessionID=%s: %v", sessionID, err)
-		llm.ReduceContextBudgetOnError(req.ModelID, apperrors.Classify(err))
 		sendErrorEvent(ctx, eventCh, err, profile)
 		return
 	}
@@ -207,7 +226,6 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 			// 此前把 agentEvent.Error 原样喂给关键词表，裸词 "exceeds" 让
 			// 「exceeds max iterations」也被判成上下文超长，把模型窗口从 64000 砍到 8192。
 			failureDetail = messageFor(agentEvent.Kind, profile).Detail
-			llm.ReduceContextBudgetOnError(req.ModelID, agentEvent.Kind)
 		}
 
 		eventch.Send(ctx, eventCh, toStreamEvent(agentEvent, profile))
@@ -219,6 +237,9 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 	}
 
 	if agentErrorSeen || ctx.Err() != nil {
+		if failureDetail == "" {
+			failureDetail = "执行已取消"
+		}
 		if !agentErrorSeen && agentReq.CheckpointID != "" {
 			clearCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			s.clearPendingResume(clearCtx, sessionID)
@@ -236,10 +257,16 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 					executionPlan.Tasks[i].Status = agent.TaskCanceled
 				}
 			}
+		}
+		if fullContent != "" || executionPlan != nil {
+			content := fullContent + "\n\n（回答已中断，内容不完整）"
+			if fullContent == "" {
+				content = "深度任务未完成：" + failureDetail
+			}
 			metadata := datatypes.JSON(mustMarshal(map[string]any{"execution_plan": executionPlan, "reasoning_steps": reasoningSteps, "execution_error": failureDetail}))
-			saveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if err := s.saveAssistantMessage(saveCtx, sessionID, assistantMsgID, "深度任务未完成："+failureDetail, req, agentSources, metadata); err != nil {
-				logger.Errorf("保存深度任务失败记录失败: sessionID=%s, err=%v", sessionID, err)
+			saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			if err := s.saveAssistantMessage(saveCtx, sessionID, assistantMsgID, content, req, agentSources, metadata); err != nil {
+				logger.Errorf("保存回答中断记录失败: sessionID=%s, err=%v", sessionID, err)
 			}
 			cancel()
 		}

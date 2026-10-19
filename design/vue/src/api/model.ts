@@ -76,11 +76,14 @@ export function deleteUserModelConfig(id: string) {
 
 // 测试用户模型配置连通性
 export function testUserModelConfig(data: {
+	config_id?: string
   provider: string
   model_id: string
   base_url: string
   api_key: string
   config?: Record<string, unknown>
+  max_context_length?: number
+  operation?: 'test' | 'capabilities'
 }) {
   return request<ModelTestResult>('/user/model-configs/test', { method: 'POST', body: data })
 }

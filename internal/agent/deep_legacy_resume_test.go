@@ -20,6 +20,9 @@ type deepTestModel struct {
 	respond func(context.Context, []*schema.Message) (*schema.Message, error)
 }
 
+func (m *deepTestModel) ContextWindow() int { return 64000 }
+func (m *deepTestModel) OutputLimit() int   { return 4096 }
+
 func (m *deepTestModel) Generate(ctx context.Context, msgs []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	return m.respond(ctx, msgs)
 }
@@ -84,7 +87,7 @@ func TestDeepOrchestratorApprovalPreservesIndependentResults(t *testing.T) {
 				return schema.AssistantMessage("恢复后的最终答复", nil), nil
 			}}
 			e := deepTestEngine()
-			req := Request{Query: "联合研究", UserID: "u", SessionID: "s"}
+			req := Request{Query: "联合研究", UserID: "u", SessionID: "s", MaxContextLength: 64000, ModelName: "gpt-4o"}
 			plan := ExecutionPlan{ID: "legacy-plan", Version: 1, Strategy: "parallel", Status: TaskWaiting, Tasks: []TaskSpec{
 				{ID: "knowledge", Agent: "knowledge_research", Title: "知识研究", Status: TaskSuccess},
 				{ID: "web", Agent: "web_research", Title: "外部研究", Status: TaskWaiting},

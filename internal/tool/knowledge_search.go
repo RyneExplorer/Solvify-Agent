@@ -62,7 +62,7 @@ func (t *KnowledgeSearchTool) WithContext(userID string, kbIDs []string) *Knowle
 	return &KnowledgeSearchTool{
 		retriever: t.retriever,
 		userID:    userID,
-		kbIDs:     kbIDs,
+		kbIDs:     append([]string(nil), kbIDs...),
 	}
 }
 
@@ -89,6 +89,7 @@ func (t *KnowledgeSearchTool) InvokableRun(ctx context.Context, argumentsInJSON 
 	if err := json.Unmarshal([]byte(argumentsInJSON), &params); err != nil {
 		return fmt.Sprintf("参数解析失败: %v", err), nil
 	}
+	params.Query = strings.TrimSpace(params.Query)
 	if params.Query == "" {
 		return "query 参数不能为空", nil
 	}
@@ -100,8 +101,11 @@ func (t *KnowledgeSearchTool) InvokableRun(ctx context.Context, argumentsInJSON 
 		UserID:           t.userID,
 	})
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		logger.Errorf("知识库检索异常: query=%q, err=%v", params.Query, err)
-		return fmt.Sprintf("知识库检索暂时不可用（%v），请基于你已有的知识回答用户问题。", err), nil
+		return "知识库检索暂时不可用，请说明检索失败，不要把已有知识当作知识库检索结果。", nil
 	}
 
 	if !result.Hit || len(result.Documents) == 0 {

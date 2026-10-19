@@ -5,11 +5,11 @@ import { marked } from 'marked'
 import * as chatApi from '@/api/chat'
 import * as modelApi from '@/api/model'
 import * as authApi from '@/api/auth'
-import * as toolApi from '@/api/tool'
+import * as toolApi from '@/api/mcp'
 import { request } from '@/api/client'
 import type { ChatSession, ExecutionPlan, FeedbackRequest, PendingApproval, StreamEvent } from '@/types/chat'
 import { applyExecutionPlanEvent, finishExecutionPlan } from './chatExecutionPlan'
-import type { ToolTemplate, UserToolConfigInfo } from '@/types/tool'
+import type { MCPTemplate, MCPConnection } from '@/types/mcp'
 
 // ── UI 展示用的本地类型 ──
 
@@ -107,8 +107,8 @@ export function useChat() {
   const searchMode = ref<'quick' | 'smart-reasoning'>('quick')
 
   // ── MCP 工具（用户启用后可在对话级选择） ──
-  const mcpToolTemplates = ref<ToolTemplate[]>([])
-  const mcpUserConfigs = ref<UserToolConfigInfo[]>([])
+  const mcpToolTemplates = ref<MCPTemplate[]>([])
+  const mcpUserConfigs = ref<MCPConnection[]>([])
   const mcpLoading = ref(true)
   const MCP_SELECTION_KEY = 'solvify:mcp-selection'
   /** 对话级选中的 MCP user config ids；空数组=不使用任何 MCP（不再是「全部」） */
@@ -116,18 +116,9 @@ export function useChat() {
 
   /** 用户已启用的 MCP 服务器列表（用于选择器展示） */
   const enabledMCPOptions = computed<{ id: string; name: string; description: string }[]>(() => {
-    const template = mcpToolTemplates.value.find(t => t.tool_key === 'mcp')
-    const providers = template?.providers ?? []
-    const rows: { id: string; name: string; description: string }[] = []
-    for (const c of mcpUserConfigs.value) {
-      if (c.tool_type_key !== 'mcp' || !c.is_enabled) continue
-      const provider = providers.find(p => p.id === c.provider_id)
-      rows.push({
-        id: c.id,
-        name: c.display_name || provider?.name || c.provider_name || c.provider_id,
-        description: provider?.description || '',
-      })
-    }
+    const rows = mcpUserConfigs.value.filter(c => c.is_enabled && (!c.template_id || mcpToolTemplates.value.some(t => t.id === c.template_id))).map(c => ({
+      id:c.id,name:c.display_name,description:mcpToolTemplates.value.find(t => t.id === c.template_id)?.description || '个人 MCP',
+    }))
     return rows
   })
 
@@ -159,8 +150,8 @@ export function useChat() {
         modelApi.listUserModelConfigs().catch(() => null),
         request<{ data: unknown }>('/knowledge-bases').catch(() => null),
         authApi.getProfile().catch(() => null),
-        toolApi.listToolTemplates().catch(() => null),
-        toolApi.listUserToolConfigs().catch(() => null),
+        toolApi.listMCPTemplates().catch(() => null),
+        toolApi.listMCPConnections().catch(() => null),
       ])
 
       const opts: ModelOption[] = []
@@ -203,7 +194,7 @@ export function useChat() {
         mcpToolTemplates.value = toolTmplRes.data
       }
       if (userToolConfigRes?.code === 0) {
-        mcpUserConfigs.value = userToolConfigRes.data?.configs ?? []
+        mcpUserConfigs.value = userToolConfigRes.data ?? []
       }
       // 从 localStorage 恢复上次的 MCP 选择（空数组也要恢复：它表示「上次选了不使用任何 MCP」，
       // 若当成「没存过」而跳过，用户的「一个都不用」会被静默重置成全选）
@@ -308,7 +299,7 @@ export function useChat() {
 
   // 选中指定会话并加载消息
   function selectSession(sessionId: string) {
-    if (isLoading.value) return
+    if (isLoading.value || activeSessionId.value === sessionId) return
     interruptedAssistantId = ''
     streamPlan.value = null
     activeSessionId.value = sessionId
@@ -405,6 +396,34 @@ export function useChat() {
     let traceId: string | undefined
     let reader: Awaited<ReturnType<typeof chatApi.sendMessage>> | undefined
 
+    const preserveInterruptedAnswer = () => {
+      const partial = streamContent.value || finalContent
+      if (!partial && !streamPlan.value && !streamTimeline.value.length) return
+      streamTimeline.value.forEach(s => { if (s.status === 'running') s.status = 'error' })
+      const message: DisplayMessage = {
+        id: assistantId || 'a-' + Date.now(),
+        role: 'assistant',
+        content: partial ? partial + '\n\n（回答已中断，内容不完整）' : '',
+        sources: finalSources.length ? finalSources : [...(streamSources.value ?? [])],
+        timeline: streamTimeline.value.length ? [...streamTimeline.value] : undefined,
+        execution_plan: streamPlan.value ?? undefined,
+        trace_id: traceId,
+      }
+      const index = messages.value.findIndex(m => m.id === message.id)
+      if (index >= 0) messages.value[index] = message
+      else messages.value.push(message)
+    }
+
+    let lastActivityAt = Date.now()
+    const waitingTimer = setInterval(() => {
+      const silentSeconds = (Date.now() - lastActivityAt) / 1000
+      if (isLoading.value && silentSeconds >= 15) {
+        progressText.value = silentSeconds >= 45
+          ? '等待时间较长，你可以继续等待或停止生成'
+          : '仍在处理，请稍候…'
+      }
+    }, 5000)
+
     const onStreamTimeout = () => {
       if (isLoading.value) {
         abortController?.abort()
@@ -416,7 +435,8 @@ export function useChat() {
         })
       }
     }
-    let safetyTimer = setTimeout(onStreamTimeout, 120000)
+    // 网络兜底留出后端 120 秒调用与错误传递时间；模型超时由后端判定。
+    let safetyTimer = setTimeout(onStreamTimeout, 180000)
 
     try {
       reader = await chatApi.sendMessage(activeSessionId.value, {
@@ -439,7 +459,8 @@ export function useChat() {
         const { done, value } = await reader.read()
         if (done) throw new Error('响应流意外结束，请重试')
         clearTimeout(safetyTimer)
-        safetyTimer = setTimeout(onStreamTimeout, 120000)
+        safetyTimer = setTimeout(onStreamTimeout, 180000)
+        lastActivityAt = Date.now()
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
@@ -535,6 +556,7 @@ export function useChat() {
               case 'error':
                 isLoading.value = false
                 streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
+                preserveInterruptedAnswer()
                 messages.value.push({
                   id: 'e-' + Date.now(),
                   role: 'error',
@@ -636,22 +658,12 @@ export function useChat() {
     } catch (e: unknown) {
       const isAbort = e instanceof DOMException && e.name === 'AbortError'
       if (isAbort) {
-        // 用户中断——保存已有的部分内容 / 推理步骤 / 来源
-        if (finalContent || streamContent.value || streamTimeline.value.length || streamSources.value?.length || streamPlan.value) {
-          streamPlan.value = finishExecutionPlan(streamPlan.value, 'canceled')
-          messages.value.push({
-            id: assistantId || 'a-' + Date.now(),
-            role: 'assistant',
-            content: streamContent.value || finalContent,
-            sources: finalSources.length ? finalSources : (streamSources.value?.length ? [...streamSources.value] : undefined),
-            timeline: streamTimeline.value.length ? [...streamTimeline.value] : undefined,
-            execution_plan: streamPlan.value ?? undefined,
-            trace_id: traceId,
-          })
-        }
+        streamPlan.value = finishExecutionPlan(streamPlan.value, 'canceled')
+        preserveInterruptedAnswer()
       } else {
         const msg = e instanceof Error ? e.message : '请求失败'
         streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
+        preserveInterruptedAnswer()
         messages.value.push({
           id: 'e-' + Date.now(),
           role: 'error',
@@ -661,6 +673,7 @@ export function useChat() {
         })
       }
     } finally {
+      clearInterval(waitingTimer)
       clearTimeout(safetyTimer)
       await reader?.cancel().catch(() => {})
       reader?.releaseLock()

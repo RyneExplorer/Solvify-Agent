@@ -5,7 +5,7 @@ import "fmt"
 // ─── 仓库层 Redis 缓存 key 的**唯一**来源（P1-5）─────────────────────────────
 //
 // 本文件只写 key 的「形态」部分；**实体前缀由 app.go 的 cache.New 给定**
-// （`model:` / `user:model:config:` / `tool:type:` / `tool:config:`），
+// （`model:` / `user:model:config:` / `tool:type:`），
 // 不要在这里手拼实体前缀 —— 曾经出现过 `user:model:user:model:<id>` 这种双重前缀。
 //
 // 为什么要把它们收在一个文件里：
@@ -42,10 +42,3 @@ func toolTypeCacheKeyByID(id string) string { return "id:" + id }
 // toolTypeCacheKeyByToolKey 工具类型：按 tool_key 查（独立索引）。
 // ⚠️ 它是一份**独立**索引，所以任何写操作都必须同时失效本形态与 toolTypeCacheKeyByID。
 func toolTypeCacheKeyByToolKey(toolKey string) string { return "key:" + toolKey }
-
-// userToolConfigCacheKeyByID 用户工具配置：按主键查
-func userToolConfigCacheKeyByID(id string) string { return "id:" + id }
-
-// userToolConfigCacheKeyByUser 用户工具配置：按用户查「已启用列表」。
-// ⚠️ 按用户维度的读最容易被漏失效：只要任何一个用户的配置行发生增删改，就必须删这个 key。
-func userToolConfigCacheKeyByUser(userID string) string { return "user:" + userID }

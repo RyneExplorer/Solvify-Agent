@@ -3,10 +3,12 @@ package agent
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	"solvify-agent/internal/repository"
+	"solvify-agent/pkg/logger"
 )
 
 // CheckpointTTL 是 agent_checkpoints 表中 checkpoint 的默认存活时长
@@ -73,3 +75,24 @@ func (s *DBCheckPointStore) Set(ctx context.Context, checkPointID string, checkP
 func (s *DBCheckPointStore) Delete(ctx context.Context, checkPointID string) error {
 	return s.repo.Delete(ctx, checkPointID)
 }
+
+func (e *Engine) resolveCheckpointID(req Request) string {
+	if req.CheckpointID != "" {
+		logger.Infof("[Agent] 恢复执行：复用 checkpointID=%s", req.CheckpointID)
+		return req.CheckpointID
+	}
+	return fmt.Sprintf("agent-%s-%s-%s-%d", req.SessionID, req.UserID, randomStr8(), time.Now().UnixNano())
+}
+
+func randomStr(n int) string {
+	const alpha = "0123456789abcdef"
+	buf := make([]byte, n)
+	seed := time.Now().UnixNano()
+	for i := 0; i < n; i++ {
+		seed = seed*1103515245 + 12345
+		buf[i] = alpha[int(seed>>16)&15]
+	}
+	return string(buf)
+}
+
+func randomStr8() string { return randomStr(8) }

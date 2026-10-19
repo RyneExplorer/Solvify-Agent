@@ -55,12 +55,16 @@ func TestDeepOperationTaskIncludesInternalDocumentManagement(t *testing.T) {
 		DomainDocMgmt:   {namedTestTool{name: "delete_document"}},
 		DomainExternal:  {namedTestTool{name: "write_file"}},
 	}
-	set := selectRequestTools(sorted, buckets, Request{ToolDomains: taskToolDomains("web_research")})
+	set := selectRequestTools(sorted, buckets, Request{ToolDomains: taskToolDomains("document_operation")})
 	got := set.namesOf()
-	if len(got) != 2 || got[0] != "delete_document" || got[1] != "write_file" {
+	if len(got) != 1 || got[0] != "delete_document" {
 		t.Fatalf("操作任务丢失能力或泄露知识检索工具: %v", got)
 	}
 	if len(set.Entries) != 1 || set.Entries[0].Name != "delete_document" {
 		t.Fatalf("提示词工具清单与挂载工具不一致: %+v", set.Entries)
+	}
+	web := selectRequestTools(sorted, buckets, Request{ToolDomains: taskToolDomains("web_research")})
+	if got := web.namesOf(); len(got) != 1 || got[0] != "write_file" {
+		t.Fatalf("联网研究未隔离用户工具: %v", got)
 	}
 }

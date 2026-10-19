@@ -3,10 +3,16 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 
+	"github.com/bytedance/sonic"
 	einoTool "github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 
+	"solvify-agent/internal/tool"
+	"solvify-agent/pkg/logger"
+	"solvify-agent/pkg/strutil"
 	"solvify-agent/pkg/tokenutil"
 )
 
@@ -89,7 +95,7 @@ func (e *Engine) buildToolsByDomain(ctx context.Context, sorted []internalToolRe
 		}
 		buckets[entry.Domain] = append(buckets[entry.Domain], entry.Build(ctx, userID, kbIDs))
 	}
-	// 动态工具（MCP / HTTP）没有注册表项，统一落 DomainExternal，追加在桶尾。
+	// 动态工具（MCP）没有注册表项，统一落 DomainExternal，追加在桶尾。
 	if want[DomainExternal] && allowDynamic && e.toolFactory != nil {
 		buckets[DomainExternal] = append(buckets[DomainExternal],
 			e.toolFactory.CreateAgentTools(ctx, userID, userToolConfigIDs...)...)
@@ -217,4 +223,120 @@ func (e *Engine) EstimateToolsTokens(ctx context.Context, userID string, kbIDs [
 	total += overhead
 	bundle := prebuiltToolsBundle{Sorted: sorted, Buckets: buckets, TotalTokens: total}
 	return total, withPrebuiltTools(ctx, bundle), nil
+}
+
+// isInternalToolName 判断工具名是否为内置工具
+// registry 里注册过的就是内置，否则是用户配置的
+func (e *Engine) isInternalToolName(name string) bool {
+	for _, entry := range e.internalTools {
+		if entry.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// bucketsFor 优先复用上游 EstimateToolsTokens 预构建的分桶结果。
+//
+// 不复用的话一次请求会构建两遍工具：Build 内部查DB、建检索器，MCP还要握手子进程。
+func (e *Engine) bucketsFor(ctx context.Context, sorted []internalToolRegistryEntry, req Request) (map[ToolDomain][]einoTool.BaseTool, bool) {
+	if bundle, ok := prebuiltToolsFromContext(ctx); ok && len(bundle.Buckets) > 0 {
+		return bundle.Buckets, true
+	}
+	return e.buildToolsByDomain(ctx, sorted, req.UserID, req.KnowledgeBaseIDs, e.toolDomainsFor(req), !req.MCPDisabled, req.UserToolConfigIDs...), false
+}
+
+// toolDomainsFor 取本次执行要挂载的工具域。
+// 优先 req.ToolDomains：深度子任务的白名单（如 web_research 只有 external）与主 profile 不同，
+// 只按 profile 算会漏掉子任务需要的域 ⇒ 静默少工具。
+func (e *Engine) toolDomainsFor(req Request) []ToolDomain {
+	if req.ToolDomains != nil {
+		return req.ToolDomains
+	}
+	return req.effectiveProfile().toolDomains()
+}
+
+func logToolSetReuse(ctx context.Context, profile Profile, ts profileToolSet, reused bool) {
+	if reused {
+		logger.Debugf("[Agent] 复用预构建工具集: profile=%s, tools=%d", profile, len(ts.Tools))
+		return
+	}
+	logger.Debugf("[Agent] 现场构建工具集: profile=%s, tools=%d", profile, len(ts.Tools))
+}
+
+// buildToolsNodeConfig 只含两个模式**完全一致**的兜底 handler；Tools 与中间件由调用方填。
+func buildToolsNodeConfig() compose.ToolsNodeConfig {
+	return compose.ToolsNodeConfig{
+		// 兜底：LLM 传了无效 JSON 时，返回 {} 让 InferTool 给业务函数零值 struct，
+		// 业务函数里会检查必填字段并返回 ToolResponse{Success:false}，
+		// LLM 看到错误信息后可以自行修正参数重试。
+		// 不加这个的话 InferTool 内部 sonic.Unmarshal 失败会直接 return error → 整个 Agent 崩。
+		ToolArgumentsHandler: func(ctx context.Context, toolName, arguments string) (string, error) {
+			// 产物读取自行返回字段级纠错反馈，保留原JSON，避免转成{}后丢失错误原因。
+			if toolName == artifactReadToolName {
+				return arguments, nil
+			}
+			if arguments == "" {
+				return "{}", nil
+			}
+			var tmp map[string]any
+			if err := sonic.UnmarshalString(arguments, &tmp); err != nil {
+				logger.Warnf("[Agent] ToolArgumentsHandler: %s 参数 JSON 解析失败，已降级为空对象: raw=%q, err=%v",
+					toolName, strutil.Truncate(arguments, 200), err)
+				return "{}", nil
+			}
+			return arguments, nil
+		},
+		UnknownToolsHandler: func(ctx context.Context, name, input string) (string, error) {
+			logger.Warnf("[Agent] UnknownToolsHandler: LLM 调用了不存在的工具 %q，参数=%s", name, strutil.Truncate(input, 200))
+			return fmt.Sprintf("⚠️ 工具 %q 不存在，可用工具请查看系统提示。请检查工具名拼写后重试。", name), nil
+		},
+	}
+}
+
+func knowledgeSearchToolOf(allTools []einoTool.BaseTool) *tool.KnowledgeSearchTool {
+	for _, t := range allTools {
+		if k, ok := t.(*tool.KnowledgeSearchTool); ok {
+			return k
+		}
+	}
+	return nil
+}
+
+// logToolSet 打工具清单日志并返回 名称→描述 映射（供 sources 采集用）。
+func logToolSet(ctx context.Context, e *Engine, req Request, allTools []einoTool.BaseTool) map[string]string {
+	toolDescMap := make(map[string]string, len(allTools))
+	userToolsN := 0
+	for _, t := range allTools {
+		info, err := t.Info(ctx)
+		if err != nil || info == nil {
+			logger.Warnf("[Agent] 获取工具信息失败: %v", err)
+			continue
+		}
+		if !e.isInternalToolName(info.Name) {
+			userToolsN++
+		}
+		toolDescMap[info.Name] = info.Desc
+		logger.Infof("[Agent]   工具: name=%s, desc=%s", info.Name, strutil.Truncate(info.Desc, 80))
+	}
+	logger.Infof("[Agent] userID=%s, 工具总数=%d (内置=%d + 用户工具=%d)",
+		req.UserID, len(allTools), len(e.internalTools), userToolsN)
+	if userToolsN == 0 {
+		logger.Warnf("[Agent] 未加载到用户配置的工具（如联网搜索），请检查用户工具配置是否已启用")
+	}
+	return toolDescMap
+}
+
+// taskToolDomains 返回专业任务的工具域白名单，供当前编排和旧 checkpoint 恢复使用。
+func taskToolDomains(agentName string) []ToolDomain {
+	if agentName == "web_research" {
+		return []ToolDomain{DomainExternal}
+	}
+	if agentName == "document_operation" {
+		return []ToolDomain{DomainDocMgmt}
+	}
+	if agentName == "synthesis_review" {
+		return []ToolDomain{}
+	}
+	return []ToolDomain{DomainKnowledge}
 }

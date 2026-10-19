@@ -42,8 +42,31 @@ cors:
   max_age: 0
 
 agent:
+  # 上下文预算策略；省略时沿用代码默认，目标水位必须低于软水位。
+  context:
+    quick_soft_ratio: 0.60
+    quick_target_ratio: 0.50
+    deep_soft_ratio: 0.75
+    deep_target_ratio: 0.65
+    margin_ratio: 0.08
+    margin_floor: 256
+    output_limit: 4096 # 数据库模型配置可覆盖，最终检查使用本次实际输出上限。
   enable_demo: true
+  # 工具原文不可变保存；快速模式不调用摘要模型，深度每任务最多摘要两次。
+  runtime_context:
+    artifact_threshold: 1500
+    artifact_bytes: 2097152
+    run_bytes: 20971520
+    user_bytes: 104857600
+    ttl_hours: 48
+    read_runes: 4000
+    read_tokens: 1200
+    summary_input: 6000
+    summary_output: 800
+    summary_timeout_seconds: 15
+    summary_max_calls: 2
   max_iterations: 10
+  model_max_retries: 3
   quick_agent_max_iterations: 8 # 模型调用轮数，澄清恢复沿用剩余轮数
   score_threshold: 0.7
   deep_plan_execute_enabled: true
@@ -62,10 +85,19 @@ llm:
   base_url: ""
   temperature: 0.7
   max_tokens: 2000
-  timeout: 30
+  timeout: 120 # 单次完整模型调用秒数（含全部输出）；不是 Agent 总时限
+  stream_first_output_timeout: 60 # 从调用开始等待首个有效输出，包含响应头等待
+  stream_idle_timeout: 30 # 正文、思考或工具参数片段的最大连续空闲秒数
 
 # Embedding 向量化模型配置
 embedding:
+  # 聊天消息持久向量任务；旧消息仅通过维护命令入队。
+  message_jobs:
+    concurrency: 2
+    poll_seconds: 2
+    timeout_seconds: 10
+    max_attempts: 3
+    retry_seconds: 15
   provider: openai
   model: text-embedding-v4
   api_key: ""
@@ -105,26 +137,31 @@ rag:
 
 # 工具配置
 tools:
+  default_timeout: 30 # 内置工具单次执行时限（秒）
   enabled: true
-  web_search:
-    api_key: ""
-    base_url: ""
   # 系统预置 MCP 服务器列表（网页版仅支持 http/sse，不支持 stdio）
-  # 启动时自动加载到数据库（is_system=true），用户可在前端勾选启用；
+  # 启动时自动加载到数据库（is_system=true），用户填写预置要求的配置后启用；
   # 也可跳过此处，直接在后台管理页新增（写入数据库，无需重启）
   mcp_servers:
     - name: "council"
       description: "Council of AI 公开 MCP（GSPC 测量板，只读，无需鉴权）"
       transport: "http"
       url: "https://councilof.ai/mcp/free"
-      timeout: 30
+      connect_timeout: 30
+      call_timeout: 300
     # - name: "my-remote-mcp"
     #   description: "远程 MCP 服务器示例"
     #   transport: "sse"
     #   url: "https://example.com/mcp/sse"
     #   headers:
-    #     Authorization: "Bearer xxx"
-    #   timeout: 30
+    #     Authorization: "Bearer {{api_key}}"
+    #   config_schema:
+    #     type: object
+    #     properties:
+    #       api_key: {type: string, title: API Key, secret: true}
+    #     required: [api_key]
+    #   connect_timeout: 30
+    #   call_timeout: 300
 
 # 钉钉集成配置
 dingtalk:

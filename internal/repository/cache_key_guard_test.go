@@ -110,8 +110,6 @@ func TestCacheKeyShapes(t *testing.T) {
 		{"用户模型配置 / (主键,用户)", userModelConfigCacheKeyByID("c1", "u1"), "id:c1:u1"},
 		{"工具类型 / 主键", toolTypeCacheKeyByID("t1"), "id:t1"},
 		{"工具类型 / tool_key", toolTypeCacheKeyByToolKey("weather"), "key:weather"},
-		{"用户工具配置 / 主键", userToolConfigCacheKeyByID("x1"), "id:x1"},
-		{"用户工具配置 / 用户", userToolConfigCacheKeyByUser("u1"), "user:u1"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {

@@ -2,9 +2,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"time"
 
 	"solvify-agent/internal/llm"
 	requestdto "solvify-agent/internal/model/dto/request"
@@ -26,6 +23,17 @@ func NewModelService(modelRepo repository.ModelRepo) ModelServiceInterface {
 
 // Create 创建系统模型
 func (s *modelService) Create(ctx context.Context, req requestdto.CreateModelRequest) (responsedto.ModelInfo, error) {
+	settings, prepareErr := prepareAdminModelSettings(ctx, requestdto.TestModelRequest{Provider: req.Provider, ModelID: req.ModelID, BaseURL: req.BaseURL, APIKey: req.APIKey, Config: req.Config})
+	if prepareErr != nil {
+		return responsedto.ModelInfo{}, prepareErr
+	}
+	req.Config = settings
+	if err := validateModelSettings(req.MaxContextLength, req.Config); err != nil {
+		return responsedto.ModelInfo{}, err
+	}
+	if !llm.SupportsProvider(req.Provider) {
+		return responsedto.ModelInfo{}, apperrors.New(apperrors.CodeInvalidParam, "仅支持已实现的 OpenAI 兼容协议")
+	}
 	// 检查 model_id 是否已存在
 	exists, err := s.modelRepo.ExistsByModelID(ctx, req.ModelID, "")
 	if err != nil {
@@ -42,9 +50,13 @@ func (s *modelService) Create(ctx context.Context, req requestdto.CreateModelReq
 		BaseURL:          req.BaseURL,
 		APIKey:           req.APIKey,
 		IsEnabled:        true,
-		MaxContextLength: llm.InferMaxContextLength(req.ModelID, req.MaxContextLength),
+		MaxContextLength: req.MaxContextLength,
+		Config:           toJSONB(req.Config),
 	}
 
+	if err := verifyModelForSave(ctx, requestdto.TestModelRequest{Provider: model.Provider, ModelID: model.ModelID, BaseURL: model.BaseURL, APIKey: model.APIKey, MaxContextLength: model.MaxContextLength, Config: decodeSettings(model.Config)}); err != nil {
+		return responsedto.ModelInfo{}, err
+	}
 	if err := s.modelRepo.Create(ctx, model); err != nil {
 		return responsedto.ModelInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
@@ -59,6 +71,17 @@ func (s *modelService) Update(ctx context.Context, id string, req requestdto.Upd
 		return apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 
+	candidateIdentityModel, candidateIdentityURL, candidateIdentityProtocol := model.ModelID, model.BaseURL, model.Provider
+	candidate := *model
+	model = &candidate
+	// 上游不可用时仍允许停用；停用不改变模型能力。
+	if req.IsEnabled != nil && !*req.IsEnabled && req.Provider == nil && req.ModelID == nil && req.BaseURL == nil && req.APIKey == nil && req.Config == nil && req.MaxContextLength == nil {
+		model.IsEnabled = false
+		if err := s.modelRepo.Update(ctx, model); err != nil {
+			return apperrors.WrapDefault(apperrors.CodeInternalError, err)
+		}
+		return nil
+	}
 	// 如果修改了 model_id，检查是否重复
 	if req.ModelID != nil && *req.ModelID != model.ModelID {
 		exists, err := s.modelRepo.ExistsByModelID(ctx, *req.ModelID, id)
@@ -80,7 +103,7 @@ func (s *modelService) Update(ctx context.Context, id string, req requestdto.Upd
 	if req.BaseURL != nil {
 		model.BaseURL = *req.BaseURL
 	}
-	if req.APIKey != nil {
+	if req.APIKey != nil && *req.APIKey != "" {
 		model.APIKey = *req.APIKey
 	}
 	if req.IsEnabled != nil {
@@ -88,17 +111,46 @@ func (s *modelService) Update(ctx context.Context, id string, req requestdto.Upd
 	}
 	if req.MaxContextLength != nil {
 		model.MaxContextLength = *req.MaxContextLength
-	} else if req.ModelID != nil {
-		// model_id 变更时重新推断上下文窗口
-		model.MaxContextLength = llm.InferMaxContextLength(*req.ModelID, 0)
+	}
+	if req.Config != nil {
+		settings, prepareErr := prepareAdminModelSettings(ctx, requestdto.TestModelRequest{Provider: model.Provider, ModelID: model.ModelID, BaseURL: model.BaseURL, APIKey: model.APIKey, Config: req.Config})
+		if prepareErr != nil {
+			return prepareErr
+		}
+		req.Config = settings
+		if err := validateModelDraftSettings(model.MaxContextLength, req.Config); err != nil {
+			return err
+		}
+		model.Config = toJSONB(req.Config)
+	}
+	if model.ModelID != candidateIdentityModel || model.BaseURL != candidateIdentityURL || model.Provider != candidateIdentityProtocol {
+		if req.ReconfirmCapabilities {
+			if req.Config == nil || req.MaxContextLength == nil {
+				return apperrors.New(apperrors.CodeInvalidParam, "重新确认需要完整能力配置")
+			}
+			if err := validateModelSettings(model.MaxContextLength, req.Config); err != nil {
+				return err
+			}
+		} else {
+			model.MaxContextLength = 0
+			model.Config = toJSONB(map[string]interface{}{})
+		}
+	}
+	model.Config = toJSONB(managedModelSettings(decodeSettings(model.Config)))
+	if err := validateModelDraft(model.MaxContextLength, model.Config); err != nil {
+		return apperrors.New(apperrors.CodeInvalidParam, err.Error())
+	}
+	if !llm.SupportsProvider(model.Provider) {
+		return apperrors.New(apperrors.CodeInvalidParam, "仅支持已实现的 OpenAI 兼容协议")
+	}
+
+	if err := verifyModelForSave(ctx, requestdto.TestModelRequest{Provider: model.Provider, ModelID: model.ModelID, BaseURL: model.BaseURL, APIKey: model.APIKey, MaxContextLength: model.MaxContextLength, Config: decodeSettings(model.Config)}); err != nil {
+		return err
 	}
 
 	if err := s.modelRepo.Update(ctx, model); err != nil {
 		return apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
-
-	// 配置更新后重置运行时上下文窗口保护，允许使用新的声明值
-	llm.ResetEffectiveMaxContextLength(model.ModelID)
 
 	return nil
 }
@@ -135,58 +187,20 @@ func (s *modelService) GetByID(ctx context.Context, id string) (responsedto.Mode
 	return toModelInfo(*model), nil
 }
 
+// GetForEdit 仅供管理员编辑入口调用，返回配置凭据。
+func (s *modelService) GetForEdit(ctx context.Context, id string) (responsedto.ModelInfo, error) {
+	m, err := s.modelRepo.GetByID(ctx, id)
+	if err != nil {
+		return responsedto.ModelInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
+	}
+	info := toModelInfo(*m)
+	info.APIKey = m.APIKey
+	return info, nil
+}
+
 // Test 测试模型连接
 func (s *modelService) Test(ctx context.Context, req requestdto.TestModelRequest) (responsedto.TestResult, error) {
-	start := time.Now()
-
-	configJSON, _ := json.Marshal(req.Config)
-
-	client, err := llm.NewOpenAIClientDirect(ctx, llm.OpenAIClientConfig{
-		APIKey:  req.APIKey,
-		BaseURL: req.BaseURL,
-		Model:   req.ModelID,
-		Config:  configJSON,
-	})
-	if err != nil {
-		elapsed := time.Since(start)
-		return responsedto.TestResult{
-			Success:      false,
-			Message:      "模型连接失败",
-			Error:        err.Error(),
-			ResponseTime: elapsed.Milliseconds(),
-		}, nil
-	}
-
-	// 真正发送请求验证连接
-	testCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	if err := client.TestConnection(testCtx); err != nil {
-		elapsed := time.Since(start)
-		return responsedto.TestResult{
-			Success:      false,
-			Message:      "模型连接失败",
-			Error:        err.Error(),
-			ResponseTime: elapsed.Milliseconds(),
-		}, nil
-	}
-
-	elapsed := time.Since(start)
-
-	// 尝试通过 /v1/models 探测真实上下文窗口
-	detectedCtx, detectErr := llm.DetectContextLengthViaAPI(ctx, req.BaseURL, req.APIKey, req.ModelID)
-	details := "已发送测试请求并收到响应"
-	if detectErr == nil && detectedCtx > 0 {
-		details = fmt.Sprintf("已发送测试请求并收到响应；探测到上下文窗口 %d", detectedCtx)
-	}
-
-	return responsedto.TestResult{
-		Success:                  true,
-		Message:                  "模型连接成功",
-		ResponseTime:             elapsed.Milliseconds(),
-		Details:                  details,
-		DetectedMaxContextLength: detectedCtx,
-	}, nil
+	return testModelSettings(ctx, req)
 }
 
 // toModelInfo 把系统模型实体转为响应 DTO。
@@ -196,9 +210,10 @@ func (s *modelService) Test(ctx context.Context, req requestdto.TestModelRequest
 // 密钥并盗用配额，密钥还会顺带进入浏览器内存、前端缓存与反向代理响应日志。
 //
 // 内部解析凭据不经过本函数（chat_service 直接用 modelRepo 取 entity），故脱敏无副作用；
-// 管理台也从不回读密钥（AdminPage 编辑时提交空 api_key，服务端保持原值）。
+// 管理台通过独立且受管理员权限保护的 GetForEdit 回读，通用列表/详情继续脱敏。
 func toModelInfo(m entity.Model) responsedto.ModelInfo {
 	return responsedto.ModelInfo{
+		CapabilityStatus: modelCapabilityStatus(m.Config, m.MaxContextLength),
 		ID:               m.ID,
 		Name:             m.Name,
 		Provider:         m.Provider,
@@ -207,5 +222,6 @@ func toModelInfo(m entity.Model) responsedto.ModelInfo {
 		APIKey:           maskAPIKey(m.APIKey),
 		IsEnabled:        m.IsEnabled,
 		MaxContextLength: m.MaxContextLength,
+		Config:           decodeModelConfig(m.Config),
 	}
 }

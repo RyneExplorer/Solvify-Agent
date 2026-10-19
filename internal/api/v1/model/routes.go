@@ -28,6 +28,7 @@ func (ctrl *Controller) RegisterRoutes(router *gin.RouterGroup) {
 
 	modelAdminGroup := router.Group("/models")
 	modelAdminGroup.Use(middleware.RequireAdmin())
+	modelAdminGroup.GET("/:id/edit", ctrl.GetForEdit)
 	modelAdminGroup.POST("", ctrl.Create)
 	modelAdminGroup.PUT("/:id", ctrl.Update)
 	modelAdminGroup.DELETE("/:id", ctrl.Delete)

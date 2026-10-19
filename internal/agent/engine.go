@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/adk"
 	einoTool "github.com/cloudwego/eino/components/tool"
@@ -74,6 +75,8 @@ type internalToolRegistryEntry struct {
 }
 
 type Engine struct {
+	toolTimeout       time.Duration
+	artifactRepo      repository.ContextArtifactRepo
 	internalTools     []internalToolRegistryEntry
 	toolFactory       tool.ToolFactory
 	cfg               config.AgentConfig
@@ -81,6 +84,8 @@ type Engine struct {
 	checkpointOnce    sync.Once
 	memoryCheckpoints *InMemoryCheckPointStore
 }
+
+func (e *Engine) WithToolTimeout(timeout time.Duration) { e.toolTimeout = timeout }
 
 // NewEngine 只收通用依赖。内置工具通过 RegisterInternal 注册。
 func NewEngine(

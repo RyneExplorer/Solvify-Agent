@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sort"
 	"time"
@@ -133,18 +134,21 @@ func (r *RerankRetriever) Retrieve(ctx context.Context, query Query) (Result, er
 
 	reranked, err := r.rerankWithRetry(ctx, query.Question, result.Documents)
 	if err != nil {
+		if ctx.Err() != nil {
+			return Result{}, ctx.Err()
+		}
 		logger.Warnf("[Rerank] Rerank API 调用失败（已重试 %d 次），降级返回原始结果: %v", r.maxRetries, err)
 		return result, nil
 	}
 
+	// API 可能只返回 top_n 项；未返回的候选没有重排分，不能与融合分混排。
+	documents := make([]Document, 0, len(reranked))
 	for _, item := range reranked {
-		if item.Index >= 0 && item.Index < len(result.Documents) {
-			oldScore := result.Documents[item.Index].Score
-			result.Documents[item.Index].Score = item.RelevanceScore
-			logger.Debugf("[Rerank]   文档#%d [%s] 分数: %.4f → %.4f",
-				item.Index, result.Documents[item.Index].DocumentID, oldScore, item.RelevanceScore)
-		}
+		doc := result.Documents[item.Index]
+		doc.Score = item.RelevanceScore
+		documents = append(documents, doc)
 	}
+	result.Documents = documents
 
 	sort.Slice(result.Documents, func(i, j int) bool {
 		if result.Documents[i].Score != result.Documents[j].Score {
@@ -268,6 +272,13 @@ func (r *RerankRetriever) tryRerank(ctx context.Context, query string, docs []Do
 		if err := json.Unmarshal(respBody, &rerankResp); err != nil {
 			// 响应格式错误，可能服务端临时返回异常内容，重试一次看看
 			return nil, true, fmt.Errorf("解析响应失败: %w, status=200, body=%q", err, strutil.Truncate(string(respBody), 200))
+		}
+		seen := make(map[int]bool, len(rerankResp.Results))
+		for _, item := range rerankResp.Results {
+			if item.Index < 0 || item.Index >= len(docs) || seen[item.Index] || math.IsNaN(item.RelevanceScore) || math.IsInf(item.RelevanceScore, 0) {
+				return nil, false, fmt.Errorf("重排响应包含无效或重复的文档索引/分数")
+			}
+			seen[item.Index] = true
 		}
 		return rerankResp.Results, false, nil
 

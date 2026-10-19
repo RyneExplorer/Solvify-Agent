@@ -4,6 +4,7 @@ import "time"
 
 // UserModelConfigInfo 描述用户模型配置信息
 type UserModelConfigInfo struct {
+	CapabilityStatus string      `json:"capability_status"`
 	ID               string      `json:"id"`
 	DisplayName      string      `json:"display_name"`
 	APIFormat        string      `json:"api_format"`

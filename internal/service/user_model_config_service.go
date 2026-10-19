@@ -4,8 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"time"
+	"strings"
 
 	"gorm.io/datatypes"
 
@@ -30,8 +29,7 @@ func isNotFound(err error) bool {
 			apperrors.CodeKnowledgeBaseNotFound,
 			apperrors.CodeDocumentNotFound,
 			apperrors.CodeSessionNotFound,
-			apperrors.CodeToolTypeNotFound,
-			apperrors.CodeToolProviderNotFound,
+			apperrors.CodeMCPTemplateNotFound,
 			apperrors.CodeNotFound:
 			return true
 		}
@@ -41,16 +39,28 @@ func isNotFound(err error) bool {
 
 // userModelConfigService 封装用户模型配置业务用例实现
 type userModelConfigService struct {
-	repo repository.UserModelConfigRepo
+	repo     repository.UserModelConfigRepo
+	profiles modelDeploymentReader
 }
 
 // NewUserModelConfigService 创建用户模型配置服务
-func NewUserModelConfigService(repo repository.UserModelConfigRepo) UserModelConfigServiceInterface {
-	return &userModelConfigService{repo: repo}
+func NewUserModelConfigService(repo repository.UserModelConfigRepo, profiles modelDeploymentReader) UserModelConfigServiceInterface {
+	return &userModelConfigService{repo: repo, profiles: profiles}
 }
 
 // Create 创建用户模型配置
 func (s *userModelConfigService) Create(ctx context.Context, userID string, req requestdto.CreateUserModelConfigRequest) (responsedto.UserModelConfigInfo, error) {
+	settings, err := userDeploymentSettings(ctx, requestdto.TestModelRequest{Provider: req.APIFormat, ModelID: req.ModelID, BaseURL: req.BaseURL, APIKey: req.APIKey, MaxContextLength: req.MaxContextLength, Config: req.Config}, nil, s.profiles)
+	if err != nil {
+		return responsedto.UserModelConfigInfo{}, err
+	}
+	req.Config = settings
+	if err := validateModelSettings(req.MaxContextLength, req.Config); err != nil {
+		return responsedto.UserModelConfigInfo{}, err
+	}
+	if req.APIFormat != "openai" {
+		return responsedto.UserModelConfigInfo{}, apperrors.New(apperrors.CodeInvalidParam, "仅支持OpenAI兼容协议")
+	}
 	// 检查 model_id 是否已存在
 	exists, err := s.repo.ExistsByModelID(ctx, userID, req.ModelID, "")
 	if err != nil {
@@ -68,9 +78,12 @@ func (s *userModelConfigService) Create(ctx context.Context, userID string, req 
 		ModelID:          req.ModelID,
 		APIKey:           req.APIKey,
 		Config:           toJSONB(req.Config),
-		MaxContextLength: llm.InferMaxContextLength(req.ModelID, req.MaxContextLength),
+		MaxContextLength: req.MaxContextLength,
 	}
 
+	if err := verifyModelForSave(ctx, requestdto.TestModelRequest{Provider: config.APIFormat, ModelID: config.ModelID, BaseURL: config.BaseURL, APIKey: config.APIKey, MaxContextLength: config.MaxContextLength, Config: decodeSettings(config.Config)}); err != nil {
+		return responsedto.UserModelConfigInfo{}, err
+	}
 	if err := s.repo.Create(ctx, config); err != nil {
 		return responsedto.UserModelConfigInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
@@ -89,6 +102,9 @@ func (s *userModelConfigService) Update(ctx context.Context, userID string, conf
 	}
 
 	// 如果修改了 model_id，检查是否重复
+	candidateIdentityModel, candidateIdentityURL, candidateIdentityProtocol := config.ModelID, config.BaseURL, config.APIFormat
+	candidate := *config
+	config = &candidate
 	if req.ModelID != nil && *req.ModelID != config.ModelID {
 		exists, err := s.repo.ExistsByModelID(ctx, userID, *req.ModelID, configID)
 		if err != nil {
@@ -113,21 +129,48 @@ func (s *userModelConfigService) Update(ctx context.Context, userID string, conf
 	if req.BaseURL != nil {
 		config.BaseURL = *req.BaseURL
 	}
-	if req.Config != nil {
-		config.Config = toJSONB(req.Config)
+	existingSettings := decodeSettings(config.Config)
+	if config.ModelID != candidateIdentityModel || config.BaseURL != candidateIdentityURL || config.APIFormat != candidateIdentityProtocol {
+		existingSettings = nil
 	}
+	settings, err := userDeploymentSettings(ctx, requestdto.TestModelRequest{Provider: config.APIFormat, ModelID: config.ModelID, BaseURL: config.BaseURL, APIKey: config.APIKey, Config: req.Config}, existingSettings, s.profiles)
+	if err != nil {
+		return responsedto.UserModelConfigInfo{}, err
+	}
+	req.Config = settings
+	if err := validateModelDraftSettings(0, req.Config); err != nil {
+		return responsedto.UserModelConfigInfo{}, err
+	}
+	config.Config = toJSONB(req.Config)
 	if req.MaxContextLength != nil {
 		config.MaxContextLength = *req.MaxContextLength
-	} else if req.ModelID != nil {
-		config.MaxContextLength = llm.InferMaxContextLength(*req.ModelID, 0)
+	}
+	if config.ModelID != candidateIdentityModel || config.BaseURL != candidateIdentityURL || config.APIFormat != candidateIdentityProtocol {
+		if req.ReconfirmCapabilities {
+			if req.MaxContextLength == nil {
+				return responsedto.UserModelConfigInfo{}, apperrors.New(apperrors.CodeInvalidParam, "重新确认需要填写窗口并取得当前部署资料")
+			}
+			if err := validateModelSettings(config.MaxContextLength, req.Config); err != nil {
+				return responsedto.UserModelConfigInfo{}, err
+			}
+		} else {
+			config.MaxContextLength = 0
+			config.Config = toJSONB(map[string]interface{}{})
+		}
+	}
+	if err := validateModelDraft(config.MaxContextLength, config.Config); err != nil {
+		return responsedto.UserModelConfigInfo{}, apperrors.New(apperrors.CodeInvalidParam, err.Error())
+	}
+	if config.APIFormat != "openai" {
+		return responsedto.UserModelConfigInfo{}, apperrors.New(apperrors.CodeInvalidParam, "仅支持OpenAI兼容协议")
 	}
 
+	if err := verifyModelForSave(ctx, requestdto.TestModelRequest{Provider: config.APIFormat, ModelID: config.ModelID, BaseURL: config.BaseURL, APIKey: config.APIKey, MaxContextLength: config.MaxContextLength, Config: decodeSettings(config.Config)}); err != nil {
+		return responsedto.UserModelConfigInfo{}, err
+	}
 	if err := s.repo.Update(ctx, config); err != nil {
 		return responsedto.UserModelConfigInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
-
-	// 配置更新后重置运行时上下文窗口保护，允许使用新的声明值
-	llm.ResetEffectiveMaxContextLength(config.ModelID)
 
 	return toModelConfigInfo(config), nil
 }
@@ -155,7 +198,9 @@ func (s *userModelConfigService) Get(ctx context.Context, userID string, configI
 		return responsedto.UserModelConfigInfo{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 
-	return toModelConfigInfo(config), nil
+	info := toModelConfigInfo(config)
+	info.APIKey = config.APIKey
+	return info, nil
 }
 
 // List 列出用户所有模型配置
@@ -190,68 +235,58 @@ func (s *userModelConfigService) ResolveModelConfig(ctx context.Context, userID 
 }
 
 // Test 测试用户模型连接
-func (s *userModelConfigService) Test(ctx context.Context, req requestdto.TestModelRequest) (responsedto.TestResult, error) {
-	start := time.Now()
-
-	configJSON, _ := json.Marshal(req.Config)
-
-	client, err := llm.NewOpenAIClientDirect(ctx, llm.OpenAIClientConfig{
-		APIKey:  req.APIKey,
-		BaseURL: req.BaseURL,
-		Model:   req.ModelID,
-		Config:  configJSON,
-	})
+func (s *userModelConfigService) Test(ctx context.Context, userID string, req requestdto.TestModelRequest) (responsedto.TestResult, error) {
+	var existing map[string]interface{}
+	var existingWindow int
+	if req.ConfigID != "" {
+		stored, err := s.repo.GetByID(ctx, req.ConfigID, userID)
+		if err != nil {
+			return responsedto.TestResult{}, err
+		}
+		if stored.ModelID == req.ModelID && stored.BaseURL == req.BaseURL && stored.APIFormat == req.Provider {
+			existing, existingWindow = decodeSettings(stored.Config), stored.MaxContextLength
+		}
+	}
+	if req.Operation == "capabilities" {
+		if existing == nil && s.profiles != nil {
+			models, err := s.profiles.List(ctx)
+			if err != nil {
+				return responsedto.TestResult{}, apperrors.WrapDefault(apperrors.CodeInternalError, err)
+			}
+			for _, m := range models {
+				if m.IsEnabled && m.ModelID == req.ModelID && strings.TrimRight(m.BaseURL, "/") == strings.TrimRight(req.BaseURL, "/") {
+					existing, existingWindow = decodeSettings(m.Config), m.MaxContextLength
+					break
+				}
+			}
+		}
+		if existing != nil {
+			raw, _ := json.Marshal(existing)
+			p, err := llm.ParseModelDraft(raw, existingWindow)
+			if err == nil && p.MaxOutputTokens > 0 {
+				return responsedto.TestResult{Success: true, Message: "已读取服务端当前部署资料，保存前仍需验证工具调用", DetectedMaxContextLength: existingWindow, DetectedMaxOutputTokens: p.MaxOutputTokens, DetectedMaxInputTokens: p.MaxInputTokens, CapabilitySource: "manual", SuggestedConfig: existing}, nil
+			}
+		}
+		return acquireModelCapabilities(ctx, req)
+	}
+	settings, err := userDeploymentSettings(ctx, req, existing, s.profiles)
 	if err != nil {
-		elapsed := time.Since(start)
-		return responsedto.TestResult{
-			Success:      false,
-			Message:      "模型连接失败",
-			Error:        err.Error(),
-			ResponseTime: elapsed.Milliseconds(),
-		}, nil
+		return responsedto.TestResult{}, err
 	}
-
-	// 真正发送请求验证连接
-	testCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	if err := client.TestConnection(testCtx); err != nil {
-		elapsed := time.Since(start)
-		return responsedto.TestResult{
-			Success:      false,
-			Message:      "模型连接失败",
-			Error:        err.Error(),
-			ResponseTime: elapsed.Milliseconds(),
-		}, nil
-	}
-
-	elapsed := time.Since(start)
-
-	// 尝试通过 /v1/models 探测真实上下文窗口
-	detectedCtx, detectErr := llm.DetectContextLengthViaAPI(ctx, req.BaseURL, req.APIKey, req.ModelID)
-	details := "已发送测试请求并收到响应"
-	if detectErr == nil && detectedCtx > 0 {
-		details = fmt.Sprintf("已发送测试请求并收到响应；探测到上下文窗口 %d", detectedCtx)
-	}
-
-	return responsedto.TestResult{
-		Success:                  true,
-		Message:                  "模型连接成功",
-		ResponseTime:             elapsed.Milliseconds(),
-		Details:                  details,
-		DetectedMaxContextLength: detectedCtx,
-	}, nil
+	req.Config = settings
+	return testModelSettings(ctx, req)
 }
 
 // toModelConfigInfo 把实体转为响应 DTO
 func toModelConfigInfo(config *entity.UserModelConfig) responsedto.UserModelConfigInfo {
 	info := responsedto.UserModelConfigInfo{
+		CapabilityStatus: modelCapabilityStatus(config.Config, config.MaxContextLength),
 		ID:               config.ID,
 		DisplayName:      config.DisplayName,
 		APIFormat:        config.APIFormat,
 		ModelID:          config.ModelID,
 		BaseURL:          config.BaseURL,
-		APIKey:           config.APIKey,
+		APIKey:           maskAPIKey(config.APIKey),
 		MaxContextLength: config.MaxContextLength,
 		CreatedAt:        config.CreatedAt,
 		UpdatedAt:        config.UpdatedAt,

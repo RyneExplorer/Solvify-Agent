@@ -2,11 +2,14 @@ package chat
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 
 	"solvify-agent/internal/api/v1/shared"
 	"solvify-agent/internal/middleware"
@@ -16,6 +19,8 @@ import (
 	"solvify-agent/pkg/logger"
 	"solvify-agent/pkg/response"
 )
+
+const maxChatRequestBytes = 64 << 10
 
 type Controller struct {
 	chatSvc             service.ChatServiceInterface
@@ -114,9 +119,19 @@ func (ctrl *Controller) SendMessage(c *gin.Context) {
 		return
 	}
 
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxChatRequestBytes)
 	var input requestdto.SendMessageRequest
-	if err := c.ShouldBindJSON(&input); err != nil {
+	if err := c.ShouldBindBodyWith(&input, binding.JSON); err != nil {
+		var sizeError *http.MaxBytesError
+		if errors.As(err, &sizeError) {
+			response.BadRequest(c, "请求体不能超过64KiB，请减少消息或所选配置后重试")
+			return
+		}
 		response.BadRequest(c, "请求体格式错误")
+		return
+	}
+	if err := input.ValidateContent(); err != nil {
+		response.BadRequest(c, err.Error())
 		return
 	}
 

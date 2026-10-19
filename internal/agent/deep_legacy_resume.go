@@ -21,7 +21,7 @@ func (e *Engine) resumeLegacyDeepOrchestrator(ctx context.Context, req Request, 
 	}
 	state := deepRunState{Results: make(map[string]TaskResult), Request: req}
 	checkpointID := req.CheckpointID
-	store := e.buildCheckpointStore(req.SessionID)
+	store := e.contextStore(req)
 	if strings.HasPrefix(req.CheckpointID, "deep-") && len(req.ResumeData) > 0 {
 		checkpointID = req.CheckpointID
 		raw, found, err := store.Get(ctx, checkpointID)
@@ -29,7 +29,19 @@ func (e *Engine) resumeLegacyDeepOrchestrator(ctx context.Context, req Request, 
 			e.emitPlanError(ctx, eventCh, fmt.Errorf("深度任务中断点无效或已过期"))
 			return
 		}
+		state.Request.InputLimit = req.InputLimit
 		state.Request.ResumeData = req.ResumeData
+		if state.Request.RunID == "" {
+			state.Request.RunID = legacyContextRunID(state.Request, state.Plan.ID)
+		}
+		if state.Request.OutputLimit == 0 {
+			state.Request.OutputLimit = req.OutputLimit
+		}
+		if state.Request.ModelName != req.ModelName || state.Request.ModelID != req.ModelID || state.Request.MaxContextLength != req.MaxContextLength {
+			e.emitPlanError(ctx, eventCh, fmt.Errorf("旧深度恢复模型或窗口已变化"))
+			return
+		}
+		store = e.contextStore(state.Request)
 		state.Plan.Status = TaskRunning
 		for i := range state.Plan.Tasks {
 			r := state.Results[state.Plan.Tasks[i].ID]
@@ -159,6 +171,9 @@ func (e *Engine) runParallelTasks(ctx context.Context, req Request, chatModel mo
 }
 
 func (e *Engine) executeDeepTask(ctx context.Context, req Request, chatModel model.ToolCallingChatModel, plan ExecutionPlan, task TaskSpec, results map[string]TaskResult, out chan<- Event) TaskResult {
+	if req.RunID == "" {
+		req.RunID = legacyContextRunID(req, plan.ID)
+	}
 	childReq := req
 	childReq.Profile = ProfileDeep
 	childReq.TaskID = task.ID
@@ -183,6 +198,13 @@ func (e *Engine) executeDeepTask(ctx context.Context, req Request, chatModel mod
 			}
 		}
 		childReq.Query = buildTaskQuery(childReq.Query, inputsTask, results)
+		if task.Agent == "synthesis_review" {
+			evidence, err := e.taskArtifactEvidence(ctx, childReq, inputsTask, results)
+			if err != nil {
+				return TaskResult{TaskID: task.ID, Agent: task.Agent, Status: TaskError, Error: err.Error()}
+			}
+			childReq.Query += evidence
+		}
 	}
 	// 知识检索工具收集本次调用的来源；每个研究任务使用独立实例，避免互相混入引用。
 	if task.Agent == "knowledge_research" {
@@ -200,14 +222,21 @@ func (e *Engine) executeDeepTask(ctx context.Context, req Request, chatModel mod
 	}
 
 	childEvents := make(chan Event, 100)
-	go func() { defer close(childEvents); e.runAgent(ctx, childReq, chatModel, childEvents) }()
+	go func() { defer close(childEvents); e.runDeepAgent(ctx, childReq, chatModel, childEvents) }()
 	var answer strings.Builder
 	var sources []SourceInfo
 	status := TaskSuccess
 	var taskErr string
 	var interrupt *Event
 	var fallback string
+	artifacts := append([]artifactReference(nil), results[task.ID].Artifacts...)
 	for ev := range childEvents {
+		if ev.Type == EventToolResult {
+			var ref artifactReference
+			if json.Unmarshal([]byte(ev.ToolResult), &ref) == nil && ref.ArtifactID != "" {
+				artifacts = appendArtifactReference(artifacts, ref)
+			}
+		}
 		ev.PlanID, ev.TaskID, ev.AgentName = plan.ID, task.ID, task.Agent
 		if ev.Type == EventAnswer {
 			answer.WriteString(ev.Content)
@@ -241,10 +270,15 @@ func (e *Engine) executeDeepTask(ctx context.Context, req Request, chatModel mod
 		}
 	}
 	result := TaskResult{TaskID: task.ID, Agent: task.Agent, Status: status, Summary: strings.TrimSpace(answer.String()), Error: taskErr, Interrupt: interrupt}
+	result.Artifacts = artifacts
 	if len(sources) > 0 {
 		result.Evidence = []AgentEvidence{{ID: task.ID + "-evidence", AgentName: task.Agent, Summary: result.Summary, Sources: sources}}
 	}
 	return result
+}
+
+func legacyContextRunID(req Request, planID string) string {
+	return contentHash("legacy-context\x00" + req.UserID + "\x00" + req.SessionID + "\x00" + planID)
 }
 
 func planComplete(plan ExecutionPlan) bool {

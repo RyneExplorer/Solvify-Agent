@@ -69,11 +69,9 @@ const (
 	CodeSyncSourceStatusInvalid = 9010
 	CodeSyncJobNotFound         = 9011
 
-	// 工具管理错误 10xxx
-	CodeToolTypeExists       = 10001
-	CodeToolTypeNotFound     = 10002
-	CodeToolProviderExists   = 10003
-	CodeToolProviderNotFound = 10004
+	// MCP预置错误 10xxx（保留原业务码数值）
+	CodeMCPTemplateExists   = 10003
+	CodeMCPTemplateNotFound = 10004
 
 	// 钉钉集成错误 11xxx
 	CodeDingTalkConfigMissing     = 11001
@@ -147,10 +145,8 @@ var codeMessages = map[int]string{
 	CodeModelConfigNotFound: "模型配置不存在",
 	CodeModelExists:         "系统模型已存在",
 
-	CodeToolTypeExists:       "工具类型已存在",
-	CodeToolTypeNotFound:     "工具类型不存在",
-	CodeToolProviderExists:   "工具供应商已存在",
-	CodeToolProviderNotFound: "工具供应商不存在",
+	CodeMCPTemplateExists:   "MCP预置已存在",
+	CodeMCPTemplateNotFound: "MCP预置不存在",
 
 	CodeDingTalkConfigMissing:     "钉钉应用配置缺失",
 	CodeDingTalkAccessTokenFailed: "获取钉钉 access_token 失败",

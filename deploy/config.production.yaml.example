@@ -52,9 +52,17 @@ llm:
   base_url: ""
   temperature: 0.7
   max_tokens: 2000
-  timeout: 30
+  timeout: 120 # 单次完整模型调用秒数（含全部输出）；不是 Agent 总时限
+  stream_first_output_timeout: 60 # 从调用开始等待首个有效输出，包含响应头等待
+  stream_idle_timeout: 30 # 正文、思考或工具参数片段的最大连续空闲秒数
 
 embedding:
+  message_jobs:
+    concurrency: 2
+    poll_seconds: 2
+    timeout_seconds: 10
+    max_attempts: 3
+    retry_seconds: 15
   provider: openai
   model: text-embedding-v4
   api_key: ""
@@ -85,10 +93,8 @@ rag:
     dedup_threshold: 0.8
 
 tools:
+  default_timeout: 30 # 内置工具单次执行时限（秒）
   enabled: true
-  web_search:
-    api_key: ""
-    base_url: ""
 
 dingtalk:
   app_key: ""

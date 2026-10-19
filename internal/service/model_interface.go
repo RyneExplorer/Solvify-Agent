@@ -14,5 +14,6 @@ type ModelServiceInterface interface {
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context) (responsedto.ListModelsResponse, error)
 	GetByID(ctx context.Context, id string) (responsedto.ModelInfo, error)
+	GetForEdit(ctx context.Context, id string) (responsedto.ModelInfo, error)
 	Test(ctx context.Context, req requestdto.TestModelRequest) (responsedto.TestResult, error)
 }

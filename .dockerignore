@@ -8,4 +8,7 @@
 !internal/**
 !pkg/
 !pkg/**
+!scripts/
+!scripts/migrations/
+!scripts/migrations/**
 

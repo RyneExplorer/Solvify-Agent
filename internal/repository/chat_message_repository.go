@@ -134,10 +134,7 @@ func (r *chatMessageRepository) SearchRecentByKeywords(ctx context.Context, sess
 		Limit(limit).
 		Find(&messages).Error
 
-	// 反转顺序，使其按时间正序
-	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
-		messages[i], messages[j] = messages[j], messages[i]
-	}
+	// 返回近期匹配排名，展示时间顺序由装配层处理。
 
 	return messages, err
 }
@@ -201,10 +198,6 @@ func (r *chatMessageRepository) SearchRecentByVector(ctx context.Context, sessio
 		return nil, err
 	}
 
-	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
-		messages[i], messages[j] = messages[j], messages[i]
-	}
-
 	return messages, nil
 }
 
@@ -224,71 +217,3 @@ func formatFloatVector(v []float32) string {
 	sb.WriteByte(']')
 	return sb.String()
 }
-
-// UpdateEmbedding 更新指定消息的向量表示
-func (r *chatMessageRepository) UpdateEmbedding(ctx context.Context, messageID string, embedding entity.FloatVector) error {
-	return dbFor(ctx, r.db).Model(&entity.ChatMessage{}).
-		Where("id = ?", messageID).
-		Update("embedding", embedding).Error
-}
-
-// FindMessagesMissingEmbedding 分批取「还没有向量」的消息，供一次性回填任务用。
-//
-// 判据是 embedding IS NULL ⇒ 写完即离开集合，回填天然幂等、中断后从头再来也不会重复写。
-// 翻页用 keyset（id > afterID ORDER BY id）而不是 OFFSET：回填过程中集合在缩小，
-// OFFSET 会漏行；id 是全序（末键就是 id），keyset 不会。
-//
-// ⚠️ afterID 必须用「nil 表示从头」而不是空串：id 是 uuid 列，
-// `id > ''` 会被 PostgreSQL 判为 `invalid input syntax for type uuid: ""`（SQLSTATE 22P02）——
-// 首屏（空游标）直接报错，整轮回填一条都跑不了。
-// 这个 bug 是真库探针跑出来的：单测里替身做的是字符串比较，压根不认 uuid 类型。
-func (r *chatMessageRepository) FindMessagesMissingEmbedding(ctx context.Context, afterID string, limit int) ([]entity.ChatMessage, error) {
-	if limit <= 0 {
-		limit = 200
-	}
-	q := dbFor(ctx, r.db).
-		Model(&entity.ChatMessage{}).
-		Select("id", "session_id", "role", "content", "created_at").
-		Where("embedding IS NULL").
-		Where("content <> ''").
-		Order("id").
-		Limit(limit)
-	if afterID != "" {
-		q = q.Where("id > ?", afterID)
-	}
-
-	var rows []entity.ChatMessage
-	if err := q.Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	return rows, nil
-}
-
-// BatchUpdateEmbedding 一批一次往返写完向量。
-//
-// 单条 `UPDATE ... FROM (VALUES ...)` 而不是循环 Update：回填上千条时逐条往返
-// 差两个数量级；单条语句还天然原子，不必再套事务。
-func (r *chatMessageRepository) BatchUpdateEmbedding(ctx context.Context, items []MessageEmbeddingUpdate) error {
-	if len(items) == 0 {
-		return nil
-	}
-	var (
-		sb   strings.Builder
-		args = make([]any, 0, len(items)*2)
-	)
-	sb.WriteString(`UPDATE chat_messages AS m SET embedding = v.vec::vector FROM (VALUES `)
-	for i, it := range items {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		fmt.Fprintf(&sb, "($%d::uuid, $%d::text)", i*2+1, i*2+2)
-		vec, err := it.Embedding.Value()
-		if err != nil {
-			return fmt.Errorf("消息 %s 的向量序列化失败: %w", it.ID, err)
-		}
-		args = append(args, it.ID, vec)
-	}
-	sb.WriteString(`) AS v(id, vec) WHERE m.id = v.id`)
-	return dbFor(ctx, r.db).Exec(sb.String(), args...).Error
-}
-

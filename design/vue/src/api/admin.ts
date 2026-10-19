@@ -1,6 +1,6 @@
 import { request } from './client'
 import type { ModelInfo, ModelTestResult } from '@/types/model'
-import type { ToolTypeInfo, ToolProviderInfo, ToolTestResult, MCPServerInfo } from '@/types/tool'
+import type { MCPTemplateAdminInfo, MCPTestResult, MCPConfig } from '@/types/mcp'
 import type { AdminUser } from '@/types/auth'
 import type { AdminSession } from '@/types/chat'
 
@@ -69,6 +69,7 @@ export function adminCreateModel(data: {
   model_id: string
   base_url: string
   api_key: string
+  config?: Record<string, unknown>
   max_context_length: number
 }) {
   return request<ModelInfo>('/models', { method: 'POST', body: data })
@@ -83,6 +84,7 @@ export function adminUpdateModel(
     base_url: string
     api_key: string
     is_enabled: boolean
+    config: Record<string, unknown>
     max_context_length: number
   }>,
 ) {
@@ -101,140 +103,24 @@ export function adminTestModel(data: {
   base_url: string
   api_key: string
   config?: Record<string, unknown>
+  max_context_length?: number
+  operation?: 'test' | 'capabilities'
 }) {
   return request<ModelTestResult>('/models/test', { method: 'POST', body: data })
 }
 
-// ── 工具管理 ──
-
-// 获取工具类型列表
-export function adminListToolTypes() {
-  return request<{ tool_types: ToolTypeInfo[] }>('/admin/tool-types')
+// ── MCP预置管理 ──
+export function adminListMCPTemplates() { return request<MCPTemplateAdminInfo[]>('/admin/mcp-templates') }
+export function adminGetMCPTemplate(id: string) { return request<MCPTemplateAdminInfo>(`/admin/mcp-templates/${id}`) }
+export function adminCreateMCPTemplate(data: {key:string;name:string;description:string;connection:MCPConfig;config_schema:Record<string,unknown>}) {
+ return request<MCPTemplateAdminInfo>('/admin/mcp-templates', {method:'POST',body:data})
 }
-
-// 创建工具类型
-export function adminCreateToolType(data: {
-  name: string
-  tool_key: string
-  description: string
-  execution_mode: string
-}) {
-  return request<ToolTypeInfo>('/admin/tool-types', { method: 'POST', body: data })
+export function adminUpdateMCPTemplate(id:string,data:Partial<{name:string;description:string;connection:Partial<MCPConfig>;config_schema:Record<string,unknown>;is_enabled:boolean}>) {
+ return request<MCPTemplateAdminInfo>(`/admin/mcp-templates/${id}`, {method:'PUT',body:data})
 }
-
-// 更新工具类型
-export function adminUpdateToolType(
-  id: string,
-  data: Partial<{
-    name: string
-    tool_key: string
-    description: string
-    execution_mode: string
-    is_enabled: boolean
-  }>,
-) {
-  return request<ToolTypeInfo>(`/admin/tool-types/${id}`, { method: 'PUT', body: data })
-}
-
-// 删除工具类型
-export function adminDeleteToolType(id: string) {
-  return request<null>(`/admin/tool-types/${id}`, { method: 'DELETE' })
-}
-
-// 获取指定工具类型下的供应商列表
-export function adminListToolProviders(toolTypeId: string) {
-  return request<{ providers: ToolProviderInfo[] }>(`/admin/tool-types/${toolTypeId}/providers`)
-}
-
-// 创建工具供应商
-export function adminCreateToolProvider(
-  toolTypeId: string,
-  data: {
-    name: string
-    provider_key: string
-    provider_type: string
-    description: string
-    config_schema?: Record<string, unknown>
-    provider_config?: Record<string, unknown>
-    admin_config?: Record<string, unknown>
-    rate_limit?: Record<string, unknown>
-  },
-) {
-  return request<ToolProviderInfo>(`/admin/tool-types/${toolTypeId}/providers`, {
-    method: 'POST',
-    body: { ...data, tool_type_id: toolTypeId },
-  })
-}
-
-// 更新工具供应商
-export function adminUpdateToolProvider(
-  toolTypeId: string,
-  providerId: string,
-  data: Partial<{
-    name: string
-    provider_key: string
-    provider_type: string
-    description: string
-    config_schema: Record<string, unknown>
-    provider_config: Record<string, unknown>
-    admin_config: Record<string, unknown>
-    rate_limit: Record<string, unknown>
-    is_enabled: boolean
-  }>,
-) {
-  return request<ToolProviderInfo>(`/admin/tool-types/${toolTypeId}/providers/${providerId}`, {
-    method: 'PUT',
-    body: data,
-  })
-}
-
-// 删除工具供应商
-export function adminDeleteToolProvider(toolTypeId: string, providerId: string) {
-  return request<null>(`/admin/tool-types/${toolTypeId}/providers/${providerId}`, {
-    method: 'DELETE',
-  })
-}
-
-// 列出已注册的供应商类型（http, mcp, custom 等）
-export function adminListProviderTypes() {
-  return request<string[]>('/admin/provider-types')
-}
-
-// 测试工具连通性（MCP 场景返回工具清单；传 provider_id 时后端会持久化 MCP 工具清单）
-export function adminTestTool(data: {
-  provider_type: string
-  provider_id?: string
-  provider_config?: Record<string, unknown>
-  user_config?: Record<string, unknown>
-  admin_config?: Record<string, unknown>
-  tool_input?: Record<string, unknown>
-}) {
-  return request<ToolTestResult>('/admin/tools/test', { method: 'POST', body: data })
-}
-
-// 探测 MCP 供应商的工具清单（只拉取 tools/list，不做工具调用）；传 provider_id 时后端持久化
-export function adminProbeTool(data: {
-  provider_type: string
-  provider_id?: string
-  provider_config?: Record<string, unknown>
-  admin_config?: Record<string, unknown>
-}) {
-  return request<ToolTestResult>('/admin/tools/test/probe', { method: 'POST', body: data })
-}
-
-// 列出全部 MCP 供应商（含所属工具类型信息）
-export function adminListMCPServers() {
-  return request<{ servers: MCPServerInfo[] }>('/admin/mcp-servers')
-}
-
-// 删除 MCP 供应商；所属工具类型若变空且非 mcp 容器，级联删除空壳类型
-export function adminDeleteMCPServer(providerId: string) {
-  return request<null>(`/admin/mcp-servers/${providerId}`, { method: 'DELETE' })
-}
-
-// 清理所有无供应商的非容器工具类型，返回删除数量
-export function adminCleanupEmptyToolTypes() {
-  return request<{ deleted: number }>('/admin/tool-types/cleanup-empty', { method: 'POST' })
+export function adminDeleteMCPTemplate(id:string) { return request<null>(`/admin/mcp-templates/${id}`, {method:'DELETE'}) }
+export function adminProbeMCPTemplate(data:{id?:string;connection?:MCPConfig}) {
+ return request<MCPTestResult>('/admin/mcp-templates/probe', {method:'POST',body:data})
 }
 
 // ── 会话管理 ──
@@ -262,4 +148,9 @@ export function adminDeleteSession(id: string) {
 // 清理过期会话
 export function adminCleanupSessions() {
   return request<{ deleted: number }>('/admin/sessions/cleanup', { method: 'POST' })
+}
+
+// 仅管理员编辑时读取完整凭据。
+export function adminGetModelForEdit(id: string) {
+  return request<ModelInfo>(`/models/${id}/edit`)
 }

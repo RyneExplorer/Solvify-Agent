@@ -210,55 +210,6 @@ func EnsureContextIndexes(db *gorm.DB) error {
 	return nil
 }
 
-// EnsureToolProviderSchema 补齐 tool_providers 表缺失的列。
-// 早期 AutoMigrate 建表后 entity 新增了 is_system 列，AutoMigrate 不会为已存在的表 ADD COLUMN，
-// 需要手动补齐以区分系统预置和管理员自定义的 MCP 供应商。
-func EnsureToolProviderSchema(db *gorm.DB) error {
-	var tableExists bool
-	if err := db.Raw(
-		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'tool_providers')`,
-	).Scan(&tableExists).Error; err != nil {
-		return fmt.Errorf("检查 tool_providers 表存在性失败: %w", err)
-	}
-	if !tableExists {
-		return nil
-	}
-
-	type colDef struct {
-		name string
-		ddl  string
-	}
-	missingCols := []colDef{
-		{name: "is_system", ddl: "boolean NOT NULL DEFAULT false"},
-		{name: "mcp_tool_manifest", ddl: "jsonb"},
-	}
-
-	for _, mc := range missingCols {
-		var exists bool
-		if err := db.Raw(
-			`SELECT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_name = 'tool_providers' AND column_name = ?
-			)`, mc.name,
-		).Scan(&exists).Error; err != nil {
-			logger.Warnf("[tool_provider] 检查列 %s 失败: %v", mc.name, err)
-			continue
-		}
-		if exists {
-			continue
-		}
-		logger.Infof("[tool_provider] 列 %s 不存在，正在 ALTER TABLE ADD COLUMN", mc.name)
-		if err := db.Exec(
-			fmt.Sprintf("ALTER TABLE tool_providers ADD COLUMN IF NOT EXISTS %s %s", mc.name, mc.ddl),
-		).Error; err != nil {
-			logger.Warnf("[tool_provider] 自动补列 %s 失败: %v", mc.name, err)
-		} else {
-			logger.Infof("[tool_provider] 列 %s 已补齐", mc.name)
-		}
-	}
-	return nil
-}
-
 // EnsureChatMessageEmbeddingSchema 补齐 chat_messages.embedding 列并核对维度。
 //
 // 语义召回要读写这一列，而它不进 AutoMigrate 也没有启动期检查，于是出现过
@@ -328,20 +279,7 @@ func EnsureChatMessageEmbeddingSchema(db *gorm.DB, wantDim int) error {
 		return nil
 	}
 
-	// 4) 已写入多少行 —— 维度对得上但一行都没有，说明向量侧从未真正落库，
-	// 这跟「维度错配」是两种完全不同的故障，必须分开报。
-	var filled, total int64
-	if err := db.Raw(
-		`SELECT COUNT(*) AS total, COUNT(embedding) AS filled FROM chat_messages`,
-	).Row().Scan(&total, &filled); err != nil {
-		return fmt.Errorf("统计 chat_messages 向量覆盖率失败: %w", err)
-	}
-	if total > 0 && filled == 0 {
-		logger.Warnf("[embedding] chat_messages.embedding 列已就绪（%s），但 %d 条历史消息全部没有向量：语义召回在历史数据上无效。"+
-			"新消息会自动写入，历史消息需运行一次回填任务", colType, total)
-		return nil
-	}
-	logger.Infof("[embedding] chat_messages.embedding 已就绪（%s），向量覆盖 %d/%d 条消息", colType, filled, total)
+	logger.Infof("聊天消息向量列已就绪: column_type=%s", colType)
 	return nil
 }
 

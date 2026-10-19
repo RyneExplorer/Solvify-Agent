@@ -15,7 +15,7 @@ import (
 
 // runQuickAgent 快速模式：单个 ChatModelAgent + 知识检索域工具。
 //
-// 与 runAgent（深度模式）刻意保持两套独立函数，而不是塞进一个带if 的巨型函数：
+// 与 runDeepAgent（深度模式）刻意保持两套独立函数，而不是塞进一个带if 的巨型函数：
 // 两者的工具集、迭代上限、Agent 身份都不同，合并后每加一个分支都要重读全函数。
 // 共享的部分只有 runWithRunner（事件消费与中断冒泡）。
 func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model.ToolCallingChatModel, eventCh chan<- Event) {
@@ -25,7 +25,7 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 	buckets, reused := e.bucketsFor(ctx, sorted, req)
 	ts := selectProfileTools(sorted, buckets, profile)
 	logToolSetReuse(ctx, profile, ts, reused)
-	allTools := ts.Tools
+	allTools := e.addArtifactTool(req, ts.Tools)
 	toolDescMap := logToolSet(ctx, e, req, allTools)
 
 	// 澄清中间件与迭代预算读同一个结果：澄清是一次普通工具调用，会占掉一轮模型调用，
@@ -37,9 +37,10 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 	systemPromptFinal := composeSystemPrompt(baseSystemPrompt, req.SystemPrompt)
 	logger.Infof("[Agent] SystemPrompt (前400字符): %s", strutil.Truncate(systemPromptFinal, 400))
 
-	inputMessages := buildInputMessages(req.Query, req.History)
+	inputMessages := buildInputMessages(req.Query, req.History, req.ContextData...)
 	toolsNodeConfig := buildToolsNodeConfig()
 	toolsNodeConfig.Tools = allTools
+	toolsNodeConfig.ToolCallMiddlewares = append(toolsNodeConfig.ToolCallMiddlewares, compose.ToolMiddleware{Invokable: e.artifactMiddleware(req)})
 	if len(clarifyNames) > 0 {
 		toolsNodeConfig.ToolCallMiddlewares = append(toolsNodeConfig.ToolCallMiddlewares,
 			compose.ToolMiddleware{Invokable: buildClarifyMiddleware(clarifyNames)})
@@ -47,14 +48,15 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 	}
 
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name:          quickAgentName,
-		Description:   "快速模式 Agent，基于知识库回答问题，必要时向用户澄清",
-		Instruction:   systemPromptFinal,
-		Model:         chatModel,
-		ToolsConfig:   adk.ToolsConfig{ToolsNodeConfig: toolsNodeConfig},
-		MaxIterations: iterations,
+		Name:             quickAgentName,
+		Description:      "快速模式 Agent，基于知识库回答问题，必要时向用户澄清",
+		Instruction:      systemPromptFinal,
+		Model:            chatModel,
+		ToolsConfig:      adk.ToolsConfig{ToolsNodeConfig: e.withToolExecutionTimeout(toolsNodeConfig)},
+		MaxIterations:    iterations,
+		ModelRetryConfig: e.modelRetryConfig(),
 		// 每次模型调用前的总预算检查（首次执行 / 每轮迭代 / 中断恢复三条路径共用）。
-		Handlers: []adk.ChatModelAgentMiddleware{newBudgetGuard(req, systemPromptFinal)},
+		Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, systemPromptFinal, chatModel), newBudgetGuard(req)},
 	})
 	if err != nil {
 		logger.Errorf("[Agent] ChatModelAgent 初始化失败: %v", err)
@@ -68,7 +70,7 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 		return
 	}
 
-	store := e.buildCheckpointStore(req.SessionID)
+	store := e.contextStore(req)
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:           agent,
 		EnableStreaming: true,

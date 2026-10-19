@@ -40,6 +40,9 @@ docs/superpowers/
 docs/*
 !docs/architecture.md
 !docs/DEVELOPMENT.md
+!docs/model-configuration.md
+!docs/tool-timeouts.md
+!docs/mcp-configuration.md
 !docs/PRD.md
 design/solvify-prototype
 design/vue/node_modules/

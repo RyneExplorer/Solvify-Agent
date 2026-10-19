@@ -59,6 +59,7 @@ func (ctrl *Controller) Create(ctx *gin.Context) {
 
 // Get 获取单个用户模型配置
 func (ctrl *Controller) Get(ctx *gin.Context) {
+	ctx.Header("Cache-Control", "no-store")
 	userID, ok := middleware.CurrentUserID(ctx)
 	if !ok {
 		return
@@ -115,13 +116,17 @@ func (ctrl *Controller) Delete(ctx *gin.Context) {
 
 // Test 测试用户模型配置连接
 func (ctrl *Controller) Test(ctx *gin.Context) {
+	userID, ok := middleware.CurrentUserID(ctx)
+	if !ok {
+		return
+	}
 	var req requestdto.TestModelRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(ctx, "请求参数错误")
 		return
 	}
 
-	result, err := ctrl.userModelConfigService.Test(ctx.Request.Context(), req)
+	result, err := ctrl.userModelConfigService.Test(ctx.Request.Context(), userID, req)
 	if err != nil {
 		response.BizError(ctx, err)
 		return

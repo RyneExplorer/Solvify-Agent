@@ -32,7 +32,7 @@ import (
 //   - 新增一条 `.Order("...")`、一段含 `ORDER BY` 的 SQL、或一个 `sort.Slice`，**自动进入检查范围**。
 //
 // 头一次运行就抓到了两处人工清点漏掉的位置（`pkg/database/index_guard.go` 的索引内省 SQL、
-// `internal/tool/providers/mcp_pool.go` 的 LRU 淘汰）—— 这就是「自动发现」相对「人工登记」的价值。
+// `internal/tool/mcpclient/mcp_pool.go` 的 LRU 淘汰）—— 这就是「自动发现」相对「人工登记」的价值。
 //
 // ## 判据
 //
@@ -77,12 +77,12 @@ var orderExemptions = map[string]string{
 
 // goSortExemptions 是 Go 侧「比较函数没有显式处理相等输入」的例外白名单。
 var goSortExemptions = map[string]string{
-	exemptionKey("internal/tool/providers/mcp_pool.go", "(*MCPClientPool).sweep"): "连接池 LRU 淘汰：等空闲时淘汰哪一个都不影响正确性，补 tie-breaker 无意义。",
+	exemptionKey("internal/tool/mcpclient/mcp_pool.go", "(*MCPClientPool).sweep"): "连接池 LRU 淘汰：等空闲时淘汰哪一个都不影响正确性，补 tie-breaker 无意义。",
 }
 
 // scanScopes 遍历 internal/ 与 pkg/ 下每个非测试 .go 文件的每个顶层声明。
 //
-// ⚠️ 实测提醒：`internal/tool/providers/` 这类目录是**递归**扫到的 —— 早先按「写死几个目录」
+// ⚠️ 实测提醒：`internal/tool/mcpclient/` 这类目录是**递归**扫到的 —— 早先按「写死几个目录」
 // 做清点时漏掉了它，说明清点范围本身也得自动推导。
 func scanScopes(t *testing.T, root string, visit func(rel, scope string, node ast.Node, fset *token.FileSet)) {
 	t.Helper()
