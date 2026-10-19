@@ -91,10 +91,7 @@ func protectedToolResult(content string) bool {
 	if strings.Contains(content, "拒绝") || strings.Contains(content, "未执行") {
 		return true
 	}
-	var result struct {
-		Success *bool `json:"success"`
-	}
-	return json.Unmarshal([]byte(content), &result) == nil && result.Success != nil && !*result.Success
+	return classifyToolResult(content).Failed
 }
 
 type artifactReadTool struct {

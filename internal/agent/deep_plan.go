@@ -199,6 +199,8 @@ type peState struct {
 	Denied    bool
 	Blocked   bool
 	Failures  map[string]string
+
+	ToolProgress map[string]peToolProgress `json:",omitempty"`
 	// 与终止失败分开保存；模型纠正后清除，忽略错误不能标记任务成功。
 	ArtifactArgumentFailures map[string]string `json:",omitempty"`
 }
