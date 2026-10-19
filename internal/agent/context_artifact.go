@@ -25,12 +25,13 @@ const artifactReadToolName = "read_context_artifact"
 func (e *Engine) WithArtifactRepo(repo repository.ContextArtifactRepo) { e.artifactRepo = repo }
 
 type artifactReference struct {
-	ArtifactID string `json:"artifact_id"`
-	Hash       string `json:"hash"`
-	Version    int    `json:"version"`
-	Runes      int    `json:"runes"`
-	Preview    string `json:"preview"`
-	Read       string `json:"read"`
+	ArtifactID   string `json:"artifact_id"`
+	Hash         string `json:"hash"`
+	Version      int    `json:"version"`
+	Runes        int    `json:"runes"`
+	Preview      string `json:"preview"`
+	Read         string `json:"read"`
+	MaxReadRunes int    `json:"max_read_runes,omitempty"`
 }
 
 func contentHash(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:]) }
@@ -70,7 +71,11 @@ func (e *Engine) artifactMiddleware(req Request) compose.InvokableToolMiddleware
 				return out, nil
 			}
 			preview, _ := tokenutil.TruncateByTokens(out.Result, req.ModelName, min(p.ReadTokens, 500))
-			raw, err := json.Marshal(artifactReference{ArtifactID: id, Hash: hash, Version: 1, Runes: len([]rune(out.Result)), Preview: preview, Read: "原文已保存；预览不代表全部内容。使用 read_context_artifact 按 offset/limit 分段读取。"})
+			raw, err := json.Marshal(artifactReference{
+				ArtifactID: id, Hash: hash, Version: 1, Runes: len([]rune(out.Result)), Preview: preview,
+				MaxReadRunes: p.ReadRunes,
+				Read:         fmt.Sprintf("原文已保存；预览不代表全部内容。使用 read_context_artifact 分段读取，每次最多%d个字符，超大limit自动缩小。实际长度还受token预算限制；complete=false时用返回的next_offset继续，不要按请求limit推算偏移。", p.ReadRunes),
+			})
 			if err != nil {
 				return out, nil
 			}
@@ -99,7 +104,15 @@ type artifactReadTool struct {
 }
 
 func (t artifactReadTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return &schema.ToolInfo{Name: artifactReadToolName, Desc: "读取本运行本任务工具产物的一段原文；偏移/长度以字符计数，返回next_offset继续。只能读取工具结果给出的artifact_id。", ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{"artifact_id": {Type: schema.String, Required: true}, "offset": {Type: schema.Integer}, "limit": {Type: schema.Integer}})}, nil
+	return &schema.ToolInfo{
+		Name: artifactReadToolName,
+		Desc: fmt.Sprintf("读取本运行本任务工具产物的一段原文；偏移/长度以字符计数，每次最多%d个字符，超大limit自动缩小。实际返回长度还受token预算限制；complete=false时必须使用返回的next_offset继续，不要按请求limit推算偏移。只能读取工具结果给出的artifact_id。", t.policy.ReadRunes),
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"artifact_id": {Type: schema.String, Required: true, Desc: "工具结果提供的产物ID"},
+			"offset":      {Type: schema.Integer, Desc: "从0开始的字符偏移；省略为0，后续分页使用上次返回的next_offset"},
+			"limit":       {Type: schema.Integer, Desc: fmt.Sprintf("请求读取的字符数；省略或0默认%d，超过%d自动缩小；实际返回可能因token预算进一步减少", t.policy.ReadRunes, t.policy.ReadRunes)},
+		}),
+	}, nil
 }
 
 func (t artifactReadTool) InvokableRun(ctx context.Context, args string, _ ...einoTool.Option) (string, error) {
@@ -111,11 +124,9 @@ func (t artifactReadTool) InvokableRun(ctx context.Context, args string, _ ...ei
 	if json.Unmarshal([]byte(args), &req) != nil || len(req.ID) != 64 || req.Offset < 0 || req.Limit < 0 {
 		return "", fmt.Errorf("产物读取参数无效")
 	}
-	if req.Limit == 0 {
+	// limit是请求的页长；缩小超大请求即可继续读取，无需终止任务或额外纠错调用。
+	if req.Limit == 0 || req.Limit > t.policy.ReadRunes {
 		req.Limit = t.policy.ReadRunes
-	}
-	if req.Limit > t.policy.ReadRunes {
-		return "", fmt.Errorf("产物读取范围过大")
 	}
 	a, err := t.repo.FindScoped(ctx, t.scope, req.ID)
 	if err != nil {
@@ -129,23 +140,27 @@ func (t artifactReadTool) InvokableRun(ctx context.Context, args string, _ ...ei
 		return "", fmt.Errorf("产物偏移超出范围")
 	}
 	end := req.Offset + min(len(runes)-req.Offset, req.Limit)
-	piece := string(runes[req.Offset:end])
-	pieceBudget := t.policy.ReadTokens
-	for range 8 {
-		piece, _ = tokenutil.TruncateByTokens(piece, t.model, pieceBudget)
-		next := req.Offset + len([]rune(piece))
-		raw, err := json.Marshal(map[string]any{"artifact_id": a.ID, "hash": a.Hash, "version": a.Version, "offset": req.Offset, "next_offset": next, "total_runes": len(runes), "content": piece, "complete": next == len(runes)})
+	// 按完整字符缩短，并以最终JSON计费，避免转义膨胀、短末页空转和半个UTF-8字符。
+	// 搜索范围受ReadRunes限制；非末尾至少返回一个字符，否则明确报告额度不足。
+	low, high := min(1, end-req.Offset), end-req.Offset
+	var result string
+	for low <= high {
+		size := low + (high-low)/2
+		next := req.Offset + size
+		piece := string(runes[req.Offset:next])
+		raw, err := json.Marshal(map[string]any{"artifact_id": a.ID, "hash": a.Hash, "version": a.Version, "offset": req.Offset, "next_offset": next, "total_runes": len(runes), "content": piece, "complete": next == len(runes), "max_read_runes": t.policy.ReadRunes})
 		if err != nil {
 			return "", err
 		}
-		cost := tokenutil.CountTokens(string(raw), t.model)
-		if cost <= t.policy.ReadTokens && (next > req.Offset || next == len(runes)) {
-			return string(raw), nil
+		if tokenutil.CountTokens(string(raw), t.model) <= t.policy.ReadTokens {
+			result = string(raw)
+			low = size + 1
+		} else {
+			high = size - 1
 		}
-		pieceBudget -= max(1, cost-t.policy.ReadTokens)
-		if pieceBudget <= 0 {
-			break
-		}
+	}
+	if result != "" {
+		return result, nil
 	}
 	return "", fmt.Errorf("产物读取额度不足，无法返回有效片段")
 }

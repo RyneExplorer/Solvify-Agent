@@ -40,6 +40,8 @@
 - `checkpoint_store.go`：内存/数据库 checkpoint 存储和通用 checkpoint ID。
 - `context_checkpoint.go`：checkpoint 上下文封装、请求恢复与兼容识别。
 
+`read_context_artifact` 的 `offset`、`limit` 均按字符计数，工具定义及产物引用公开当前 `max_read_runes`。省略或零 `limit` 使用配置上限，超大正整数自动缩小到该上限；完整 JSON 输出仍受 `read_tokens` 限制，因此 `complete=false` 时必须使用返回的 `next_offset` 继续，不能按请求页长累加偏移。非法参数、越界偏移、归属、存储、取消与版本/哈希错误仍返回失败。
+
 ### 输出和错误
 
 - `runner_adapter.go`：消费 Eino Runner 事件，处理流式消息、中断、来源和最终输出。

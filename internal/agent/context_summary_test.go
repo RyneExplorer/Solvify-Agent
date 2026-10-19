@@ -113,7 +113,7 @@ func TestContextArtifactSaveReadAndFailure(t *testing.T) {
 			t.Fatal("越权读取")
 		}
 	}
-	for _, args := range []string{`{"artifact_id":"../secret"}`, fmt.Sprintf(`{"artifact_id":%q,"offset":-1}`, ref.ArtifactID), fmt.Sprintf(`{"artifact_id":%q,"limit":4001}`, ref.ArtifactID), fmt.Sprintf(`{"artifact_id":%q,"offset":999999}`, ref.ArtifactID)} {
+	for _, args := range []string{`{`, `{"artifact_id":"../secret"}`, fmt.Sprintf(`{"artifact_id":%q,"offset":-1}`, ref.ArtifactID), fmt.Sprintf(`{"artifact_id":%q,"limit":-1}`, ref.ArtifactID), fmt.Sprintf(`{"artifact_id":%q,"offset":999999}`, ref.ArtifactID)} {
 		if _, err = reader.InvokableRun(context.Background(), args); err == nil {
 			t.Fatal("非法范围放行")
 		}
