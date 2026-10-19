@@ -51,16 +51,20 @@ func runGrepChunks(ctx context.Context, chunkRepo repository.DocumentChunkReposi
 	}
 
 	type GrepResult struct {
-		DocumentID string `json:"document_id"`
-		Title      string `json:"title"`
-		Snippet    string `json:"snippet"`
+		ChunkID         string `json:"chunk_id"`
+		KnowledgeBaseID string `json:"knowledge_base_id"`
+		DocumentID      string `json:"document_id"`
+		Title           string `json:"title"`
+		Snippet         string `json:"snippet"`
 	}
 	grepResults := make([]GrepResult, 0, len(results))
 	for _, r := range results {
 		grepResults = append(grepResults, GrepResult{
-			DocumentID: r.DocumentID,
-			Title:      r.Title,
-			Snippet:    strutil.Truncate(r.Content, 200),
+			ChunkID:         r.ID,
+			KnowledgeBaseID: r.KnowledgeBaseID,
+			DocumentID:      r.DocumentID,
+			Title:           r.Title,
+			Snippet:         strutil.Truncate(r.Content, 200),
 		})
 	}
 

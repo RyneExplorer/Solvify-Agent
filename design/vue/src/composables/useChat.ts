@@ -845,65 +845,39 @@ export function useChat() {
   function formatContent(content: string, _sources?: unknown[]): string {
     if (!content) return ''
 
-    const cites: {
-      type: string
-      doc?: string
-      chunkId?: string
-      url?: string
-      title?: string
-    }[] = []
-
-    let processed = content
-    processed = processed.replace(
+    const urlToNumMap = new Map<string, number>()
+    // 只解析 Markdown 的 HTML token，代码块和行内代码由 marked 原样转义。
+    const renderer = new marked.Renderer()
+    renderer.html = ({ text }) => text.replace(
       /<kb\s+[^>]*?doc="([^"]*)"[^>]*?chunk_id="([^"]*)"[^>]*?\/?>/gi,
       (_, doc: string, chunkId: string) => {
-        const idx = cites.length
-        cites.push({ type: 'kb', doc, chunkId })
-        return `%%CITE${idx}%%`
+        doc = decodeCitationAttribute(doc)
+        chunkId = decodeCitationAttribute(chunkId)
+        return `<span class="inline-cite-kb" data-chunk-id="${escapeAttr(chunkId)}" data-doc="${escapeAttr(doc)}">📄${escapeHtml(doc)}</span>`
       },
     )
-    processed = processed.replace(
+    .replace(
       /<web\s+[^>]*?url="([^"]*)"[^>]*?title="([^"]*)"[^>]*?\/?>/gi,
       (_, url: string, title: string) => {
-        const idx = cites.length
-        cites.push({ type: 'web', url, title })
-        return `%%CITE${idx}%%`
+        url = decodeCitationAttribute(url)
+        title = decodeCitationAttribute(title)
+        let num = urlToNumMap.get(url)
+        if (num === undefined) {
+          num = urlToNumMap.size + 1
+          urlToNumMap.set(url, num)
+        }
+        const tipKey = nextTipKey()
+        tooltipStore.set(tipKey, title)
+        return `<a class="inline-cite-web" href="${escapeAttr(url)}" target="_blank" rel="noopener" data-tip-key="${tipKey}">[${num}]</a>`
       },
     )
 
-    let html = marked.parse(processed, {
+    return marked.parse(content, {
       breaks: true,
       gfm: true,
+      renderer,
     }) as string
 
-    const urlToNumMap = new Map<string, number>()
-    let webNum = 0
-    for (let i = 0; i < cites.length; i++) {
-      const c = cites[i]
-      let citeHtml: string
-      if (c.type === 'kb') {
-        const docName = escapeHtml(c.doc ?? '知识库文档')
-        const chunkId = c.chunkId ?? ''
-        const docTitle = escapeAttr(c.doc ?? '')
-        citeHtml = `<span class="inline-cite-kb" data-chunk-id="${escapeAttr(chunkId)}" data-doc="${docTitle}">📄${docName}</span>`
-      } else {
-        const url = c.url ?? ''
-        let num = urlToNumMap.get(url)
-        if (num === undefined) {
-          webNum++
-          num = webNum
-          urlToNumMap.set(url, num)
-        }
-        const title = c.title ?? '网页链接'
-        const tipKey = nextTipKey()
-        tooltipStore.set(tipKey, title)
-        const safeUrl = escapeAttr(url)
-        citeHtml = `<a class="inline-cite-web" href="${safeUrl}" target="_blank" rel="noopener" data-tip-key="${tipKey}">[${num}]</a>`
-      }
-      html = html.replace(`%%CITE${i}%%`, citeHtml)
-    }
-
-    return html
   }
 
   // 清理 tooltip 文本中的元数据标签
@@ -936,14 +910,18 @@ export function useChat() {
   function extractWebSources(content: string): { url: string; title: string }[] {
     const result: { url: string; title: string }[] = []
     const seen = new Set<string>()
-    const re = /<web\s+url="([^"]*)"\s+title="([^"]*)"\s*\/>/g
-    let m
-    while ((m = re.exec(String(content))) !== null) {
-      if (!seen.has(m[1])) {
-        seen.add(m[1])
-        result.push({ url: m[1], title: m[2] })
+    marked.walkTokens(marked.lexer(content), token => {
+      if (token.type !== 'html') return
+      const re = /<web\s+url="([^"]*)"\s+title="([^"]*)"\s*\/>/g
+      let m
+      while ((m = re.exec(token.text)) !== null) {
+        const url = decodeCitationAttribute(m[1])
+        if (!seen.has(url)) {
+          seen.add(url)
+          result.push({ url, title: decodeCitationAttribute(m[2]) })
+        }
       }
-    }
+    })
     return result
   }
 
@@ -1008,6 +986,15 @@ export function useChat() {
 }
 
 // ── 工具函数 ──
+
+function decodeCitationAttribute(value: string): string {
+  const entities: Record<string, string> = {
+    '&quot;': '"', '&#34;': '"', '&#x22;': '"',
+    '&apos;': "'", '&#39;': "'", '&#x27;': "'",
+    '&lt;': '<', '&gt;': '>', '&amp;': '&',
+  }
+  return value.replace(/&(?:quot|apos|lt|gt|amp|#34|#39|#x22|#x27);/gi, entity => entities[entity.toLowerCase()] ?? entity)
+}
 
 // HTML 转义
 function escapeHtml(s: string): string {

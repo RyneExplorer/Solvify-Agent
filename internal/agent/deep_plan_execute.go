@@ -62,6 +62,7 @@ func (r *peRuntime) session(ctx context.Context) (*peState, error) {
 			}
 		}
 		r.state = &s
+		r.state.Request.citations = r.request.citations
 	}
 	return r.state, nil
 }

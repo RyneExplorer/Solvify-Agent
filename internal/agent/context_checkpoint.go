@@ -20,6 +20,7 @@ type contextCheckpoint struct {
 	RuntimePolicy config.RuntimeContextPolicy
 	Data          []byte
 	Hash          string
+	Citations     []citationSource `json:",omitempty"`
 }
 
 type contextCheckpointStore struct {
@@ -35,6 +36,7 @@ func (s contextCheckpointStore) Set(ctx context.Context, id string, data []byte)
 	req.CheckpointID = ""
 	req.History = append(req.History[:0:0], req.History...)
 	envelope := contextCheckpoint{Version: 1, Request: req, Policy: s.policy, RuntimePolicy: s.runtimePolicy, Data: data}
+	envelope.Citations = req.citations.snapshot()
 	unsigned, err := json.Marshal(envelope)
 	if err != nil {
 		return err
@@ -125,5 +127,9 @@ func (e *Engine) restoreContextRequest(ctx context.Context, req Request) (Reques
 	old.InputLimit = req.InputLimit
 	old.ResumeData = req.ResumeData
 	old.CheckpointID = req.CheckpointID
+	old.citations = &citationRegistry{}
+	for _, source := range cp.Citations {
+		old.citations.add(source)
+	}
 	return old, nil
 }

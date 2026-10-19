@@ -30,6 +30,7 @@ func (e *Engine) resumeLegacyDeepOrchestrator(ctx context.Context, req Request, 
 			return
 		}
 		state.Request.InputLimit = req.InputLimit
+		state.Request.citations = req.citations
 		state.Request.ResumeData = req.ResumeData
 		if state.Request.RunID == "" {
 			state.Request.RunID = legacyContextRunID(state.Request, state.Plan.ID)

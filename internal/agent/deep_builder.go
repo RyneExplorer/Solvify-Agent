@@ -102,7 +102,9 @@ func (r *peRuntime) build(ctx context.Context) (adk.ResumableAgent, error) {
 		if err != nil {
 			return nil, err
 		}
-		data, err := json.Marshal(replannerContext(s))
+		input := replannerContext(s)
+		input.CitationSources = r.request.citations.snapshot()
+		data, err := json.Marshal(input)
 		if err != nil {
 			return nil, fmt.Errorf("组装重规划上下文失败: %w", err)
 		}
@@ -123,6 +125,7 @@ func (r *peRuntime) replannerInstruction() string {
 	instruction := strings.Replace(r.plannerInstruction(), "你是 Solvify Planner，只规划，不执行研究。必须调用 plan 工具提交结构化计划，不得用普通文本回答。", "你是 Replanner，评估执行状态并决定继续规划或交付最终回答。", 1)
 	instruction += "\n评估完成情况，调用 plan 调整或保留剩余任务；仅全部必要任务完成且最新审查覆盖全部成功研究时调用 respond。失败只允许一次只读重试或替代研究，副作用失败与审批拒绝不得绕过。失败或取消任务只能保留为历史事实，不能出现在待执行任务的 depends_on 中。审批拒绝后取消依赖失败操作的旧待执行任务，保留已成功研究，安排仅依赖成功结果的 synthesis_review；无成功研究时 depends_on=[]，审查明确说明用户拒绝、操作未执行，不再安排操作或替代研究。已结束任务原字段不得改写，可从新计划省略，程序会保留历史。尚未完成有效审查前不得调用 respond。respond.response 基于审查要点与证据生成唯一最终正文，保留引用，不输出计划 JSON。"
 	var answer strings.Builder
+	instruction += "\n" + citationInstruction
 	writeAnswerRequirements(&answer)
 	instruction += "\n" + answer.String()
 	instruction += "\n回答先给直接结论，再给通常3至5个关键要点和必要依据；不复述任务过程，不堆砌全部检索材料。普通问题回答紧凑。用户明确要求最详细、教程或长文时尊重该要求，先给摘要和目录再分章节展开；避免重复论述，用少量典型代码代替重复示例。在单次输出预算内完成论述与收尾，无法一次覆盖全部细节时明确本次范围及未展开部分，不声称已完整覆盖。"
@@ -134,11 +137,12 @@ func (r *peRuntime) replannerInstruction() string {
 
 // peReplannerContext 是模型输入投影，不替换 checkpoint 中的业务状态。
 type peReplannerContext struct {
-	Plan      ExecutionPlan
-	Results   map[string]TaskResult
-	RetryUsed bool
-	Denied    bool
-	Blocked   bool
+	CitationSources []citationSource `json:",omitempty"`
+	Plan            ExecutionPlan
+	Results         map[string]TaskResult
+	RetryUsed       bool
+	Denied          bool
+	Blocked         bool
 }
 
 func replannerContext(s *peState) peReplannerContext {

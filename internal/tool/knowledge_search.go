@@ -114,7 +114,7 @@ func (t *KnowledgeSearchTool) InvokableRun(ctx context.Context, argumentsInJSON 
 	var contentBuilder strings.Builder
 	var sources []SourceDocument
 	contentBuilder.WriteString("sources按相关度排列，content为各分块完整原文，id即真实chunk_id。根据相关证据回答。\n")
-	contentBuilder.WriteString("回答时必须在句末插入引用标签，格式为 <kb doc=\"文档名\" chunk_id=\"真实ID\" />。\n")
+	contentBuilder.WriteString("引用来源时只选择程序给出的标识：<cite id=\"真实chunk_id\" />，不自行填写文档名或URL。\n")
 	seen := map[string]bool{}
 	for _, doc := range result.Documents {
 		if doc.ID != "" && seen[doc.ID] {

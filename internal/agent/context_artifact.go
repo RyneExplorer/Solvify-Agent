@@ -67,6 +67,11 @@ func (e *Engine) artifactMiddleware(req Request) compose.InvokableToolMiddleware
 	return func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 		return func(ctx context.Context, in *compose.ToolInput) (*compose.ToolOutput, error) {
 			out, err := next(ctx, in)
+			if err == nil && out != nil && in.Name != artifactReadToolName {
+				copy := *out
+				copy.Result = citationToolResult(req, in.Name, out.Result)
+				out = &copy
+			}
 			if err != nil || out == nil || e.artifactRepo == nil || in.Name == artifactReadToolName {
 				return out, err
 			}
