@@ -14,6 +14,30 @@
 
 联网搜索由提供搜索能力的MCP实现。本项目不再直接调用Tavily、Brave等搜索HTTP API，也不再读取 `tools.web_search`。搜索MCP的地址、认证方式和Key种类应以服务商接入说明为准，搜索API Key不一定就是远程MCP的认证Token。
 
+### Exa官方免费搜索预置
+
+Exa维护的[官方MCP服务与接入说明](https://github.com/exa-labs/exa-mcp-server#authentication)支持有限额的匿名访问，无需API Key。匿名限额由服务商调整，官方说明未承诺固定免费次数；被限流时需稍后重试，或按官方方案申请认证。本预置不启用需要认证的Exa Agent能力。
+
+将以下条目添加到部署配置 `tools.mcp_servers`，启动时同步为系统预置。已有运行环境也可由管理员在MCP预置中填写相同连接，无需重启；不要重复添加同一服务。
+
+```yaml
+- name: "exa-search"
+  description: "Exa 官方联网搜索：搜索网页并读取正文；免 API Key，有匿名用量限制"
+  transport: "http"
+  url: "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa"
+  config_schema:
+    type: object
+    properties: {}
+  connect_timeout: 30
+  call_timeout: 90
+```
+
+在「设置 → MCP」中添加 `exa-search` 预置，无需填写凭据；随后在深度模式输入框选择该连接。系统预置不会自动为所有用户创建连接或绕过对话选择。
+
+该端点显式选择两个工具，工具定义由服务商发现接口提供：`web_search_exa`搜索网页并返回来源与摘要；`web_fetch_exa`读取指定URL的正文，支持多个URL。它们分别对应search和fetch，但MCP协议不要求工具必须使用这两个名称，也不要求每个服务只能有两个工具。2026-10-19使用本项目客户端匿名实测工具发现、Go官方发布说明搜索与正文读取成功；具体工具参数以运行时schema为准。
+
+### 需要API Key的搜索服务
+
 若远程MCP要求请求头 `Authorization: Bearer <key>`，管理员可添加如下预置：
 
 ```yaml
