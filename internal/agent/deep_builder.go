@@ -42,13 +42,13 @@ func (r *peRuntime) describeTools(ctx context.Context, buckets map[ToolDomain][]
 
 func (r *peRuntime) plannerInstruction() string {
 	return fmt.Sprintf(`你是 Solvify Planner，只规划，不执行研究。必须调用 plan 工具提交结构化计划，不得用普通文本回答。可用角色 knowledge_research、synthesis_review；web_research 可用=%t。
-角色职责：knowledge_research 仅查询知识库；web_research 仅使用用户配置的外部工具；document_operation 仅使用系统文档管理工具；synthesis_review 仅生成文本与汇总，不具备工具权限，不能执行工具操作或触发审批。
+角色职责：knowledge_research 仅查询知识库；web_research 仅使用用户配置的外部工具；document_operation 仅使用系统文档管理工具；synthesis_review 仅审查证据、提炼重点与回答大纲，不撰写面向用户的完整文章，不具备工具权限，不能执行工具操作或触发审批。完整最终正文仅由 Replanner 的 respond 生成一次。
 知识检索工具（名称与用途）：%s。需要这些工具取得的事实必须安排 knowledge_research，再由依赖该结果的 synthesis_review 汇总。
 用户配置工具（名称与用途）：%s。只有用途支持联网查询的工具才可安排联网研究；用户工具非空不代表有联网能力。
 系统文档操作可用=%t，工具：%s。文档操作分配 document_operation，之后安排依赖该结果的 synthesis_review。缺少对应能力时汇总中明确说明限制，不安排虚假的研究或无工具重试。
 每版最多 %d 个待执行任务，并行允许=%t。strategy 为 direct/sequential/parallel。
 每个任务必须输出 depends_on，无依赖填 []，汇总填写所依赖的研究任务 ID；依赖必须存在且无环；最后一个汇总必须覆盖全部有效研究。
-无需检索或工具的简单问题只有 synthesis_review；明确要求工具取得的事实不能直接汇总。任务 ID 唯一且稳定；历史终态任务不可改写，重试或新汇总用新 ID。
+无需检索或工具的简单问题只有 synthesis_review，给出简短回答要点；用户要求详细介绍也不要安排先写全文再重写全文。明确要求工具取得的事实不能直接汇总。任务 ID 唯一且稳定；历史终态任务不可改写，重试或新汇总用新 ID。
 重规划必须填写 replan_reason，保留已成功任务的原描述和依赖，移除不再需要的待执行任务。
 不得规划文档、视频或 PPT 等未实现功能。`, r.external, strings.Join(r.knowledgeNames, "、"), strings.Join(r.externalNames, "、"), r.document, strings.Join(r.documentNames, "、"), deepMaxPlanTasks(r.engine.cfg), r.engine.cfg.DeepParallelEnabled)
 }
@@ -95,7 +95,7 @@ func (r *peRuntime) build(ctx context.Context) (adk.ResumableAgent, error) {
 	if err != nil {
 		return nil, err
 	}
-	replanner, err := planexecute.NewReplanner(ctx, &planexecute.ReplannerConfig{ChatModel: &peControlModel{inner: r.model, runtime: r}, PlanTool: planTool, NewPlan: newPlan, GenInputFn: func(ctx context.Context, in *planexecute.ExecutionContext) ([]adk.Message, error) {
+	replanner, err := planexecute.NewReplanner(ctx, &planexecute.ReplannerConfig{ChatModel: &peControlModel{inner: r.model, runtime: r, streamAnswer: true}, PlanTool: planTool, NewPlan: newPlan, GenInputFn: func(ctx context.Context, in *planexecute.ExecutionContext) ([]adk.Message, error) {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		s, err := r.session(ctx)
@@ -106,7 +106,7 @@ func (r *peRuntime) build(ctx context.Context) (adk.ResumableAgent, error) {
 		if err != nil {
 			return nil, fmt.Errorf("组装重规划上下文失败: %w", err)
 		}
-		return []*schema.Message{schema.SystemMessage(r.plannerInstruction() + "\n你是 Replanner：评估完成情况，调用 plan 调整或保留剩余任务；仅全部必要任务完成且最新汇总覆盖全部成功研究时调用 respond。失败只允许一次只读重试或替代研究，副作用失败与审批拒绝不得绕过。失败或取消任务只能保留为历史事实，不能出现在待执行任务的 depends_on 中。审批拒绝后取消依赖失败操作的旧待执行任务，保留已成功研究，安排仅依赖成功结果的 synthesis_review；无成功研究时 depends_on=[]，汇总明确说明用户拒绝、操作未执行，不再安排操作或替代研究。已结束任务原字段不得改写，可从新计划省略，程序会保留历史。尚未完成有效汇总前不得调用 respond。respond.response 必须基于汇总，保留引用，不输出计划 JSON。"), schema.UserMessage(s.Request.Query + "\n执行状态：" + string(data))}, nil
+		return []*schema.Message{schema.SystemMessage(r.replannerInstruction()), schema.UserMessage(s.Request.Query + "\n执行状态：" + string(data))}, nil
 	}})
 	if err != nil {
 		return nil, err
@@ -116,6 +116,20 @@ func (r *peRuntime) build(ctx context.Context) (adk.ResumableAgent, error) {
 		rounds = 8
 	}
 	return planexecute.New(ctx, &planexecute.Config{Planner: &peStage{runtime: r, inner: planner, phase: "planning"}, Executor: &peStage{runtime: r, inner: executor, phase: "executing"}, Replanner: &peStage{runtime: r, inner: replanner, phase: "replanning"}, MaxIterations: rounds})
+}
+
+func (r *peRuntime) replannerInstruction() string {
+	// Replanner 可提交最终回答，不能沿用 Planner 的“只能调用 plan”指令。
+	instruction := strings.Replace(r.plannerInstruction(), "你是 Solvify Planner，只规划，不执行研究。必须调用 plan 工具提交结构化计划，不得用普通文本回答。", "你是 Replanner，评估执行状态并决定继续规划或交付最终回答。", 1)
+	instruction += "\n评估完成情况，调用 plan 调整或保留剩余任务；仅全部必要任务完成且最新审查覆盖全部成功研究时调用 respond。失败只允许一次只读重试或替代研究，副作用失败与审批拒绝不得绕过。失败或取消任务只能保留为历史事实，不能出现在待执行任务的 depends_on 中。审批拒绝后取消依赖失败操作的旧待执行任务，保留已成功研究，安排仅依赖成功结果的 synthesis_review；无成功研究时 depends_on=[]，审查明确说明用户拒绝、操作未执行，不再安排操作或替代研究。已结束任务原字段不得改写，可从新计划省略，程序会保留历史。尚未完成有效审查前不得调用 respond。respond.response 基于审查要点与证据生成唯一最终正文，保留引用，不输出计划 JSON。"
+	var answer strings.Builder
+	writeAnswerRequirements(&answer)
+	instruction += "\n" + answer.String()
+	instruction += "\n回答先给直接结论，再给通常3至5个关键要点和必要依据；不复述任务过程，不堆砌全部检索材料。普通问题回答紧凑。用户明确要求最详细、教程或长文时尊重该要求，先给摘要和目录再分章节展开；避免重复论述，用少量典型代码代替重复示例。在单次输出预算内完成论述与收尾，无法一次覆盖全部细节时明确本次范围及未展开部分，不声称已完整覆盖。"
+	if bounded, ok := r.model.(interface{ OutputLimit() int }); ok && bounded.OutputLimit() > 0 {
+		instruction += fmt.Sprintf("\n本次单次模型输出上限为%d tokens（包含工具参数JSON及转义），安排篇幅时预留引用、结尾和JSON闭合空间。", bounded.OutputLimit())
+	}
+	return instruction
 }
 
 // peReplannerContext 是模型输入投影，不替换 checkpoint 中的业务状态。
@@ -141,7 +155,7 @@ func replannerContext(s *peState) peReplannerContext {
 			copy.Artifacts[i].Preview = ""
 			copy.Artifacts[i].Read = ""
 		}
-		// 汇总答复是 respond 的直接依据，不能静默裁掉；研究结果仅供进度决策。
+		// 审查要点是 respond 的直接依据，不能静默裁掉；研究预览保留进度与来源。
 		if result.Agent != "synthesis_review" && tokenutil.CountTokens(result.Summary, s.Request.ModelName) > 600 {
 			copy.Summary, _ = tokenutil.TruncateByTokens(result.Summary, s.Request.ModelName, 560)
 			copy.Summary += "\n（研究结果预览，完整内容仍在任务状态中）"

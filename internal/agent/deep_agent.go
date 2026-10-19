@@ -68,6 +68,8 @@ func (e *Engine) runDeepAgent(ctx context.Context, req Request, chatModel model.
 	if req.AgentName != "" {
 		agentName = req.AgentName
 	}
+	guard := newBudgetGuard(req)
+	guard.finalCheckElsewhere = true
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:        agentName,
 		Description: "深度模式 Agent，能够调用知识库和外部工具进行多步推理",
@@ -78,7 +80,7 @@ func (e *Engine) runDeepAgent(ctx context.Context, req Request, chatModel model.
 		},
 		MaxIterations:    iterations,
 		ModelRetryConfig: e.modelRetryConfig(),
-		Handlers:         []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, systemPromptFinal, chatModel), newBudgetGuard(req)},
+		Handlers:         []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, systemPromptFinal, chatModel), guard, &completionGuard{}},
 	})
 	if err != nil {
 		logger.Errorf("[Agent] ChatModelAgent 初始化失败: %v", err)

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
@@ -206,7 +207,7 @@ func (m *budgetModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChat
 	return &budgetModel{inner: inner, guard: m.guard, tools: append([]*schema.ToolInfo(nil), tools...)}, nil
 }
 
-func (m *budgetModel) prepare(ctx context.Context, messages []*schema.Message, opts []model.Option) (context.Context, []*schema.Message, error) {
+func (m *budgetModel) prepare(ctx context.Context, messages []*schema.Message, opts []model.Option) (context.Context, []*schema.Message, []model.Option, error) {
 	options := model.GetCommonOptions(nil, opts...)
 	tools := m.tools
 	if options.Tools != nil {
@@ -220,25 +221,48 @@ func (m *budgetModel) prepare(ctx context.Context, messages []*schema.Message, o
 		guard.modelName = *options.Model
 		guard.declaredCtx = 0
 	}
-	if final, ok := m.inner.(interface{ FinalBudgetChecked() bool }); ok {
-		guard.finalCheckElsewhere = final.FinalBudgetChecked()
-	}
+	// 此处完成调用级输出分配；中间件先压缩副本，不能因默认输出预留提前拒绝。
+	guard.finalCheckElsewhere = true
 	ctx, state, err := guard.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: messages, ToolInfos: tools}, nil)
-	return ctx, state.Messages, err
-}
-
-func (m *budgetModel) Generate(ctx context.Context, messages []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	ctx, input, err := m.prepare(ctx, messages, opts)
 	if err != nil {
-		return nil, err
+		return ctx, messages, opts, err
 	}
-	return m.inner.Generate(ctx, input, opts...)
-}
-
-func (m *budgetModel) Stream(ctx context.Context, messages []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	ctx, input, err := m.prepare(ctx, messages, opts)
+	requested := guard.outputLimit
+	if requested == 0 {
+		requested = guard.policy.OutputLimit
+	}
+	ceiling := m.guard.outputLimit
+	if ceiling == 0 {
+		ceiling = guard.policy.OutputLimit
+	}
+	if requested > ceiling {
+		// 不能用自适应逻辑掩盖超过本次授权额度的显式覆盖。
+		return ctx, state.Messages, opts, fmt.Errorf("%w: 请求输出=%d 本次输出上限=%d", llm.ErrContextBudget, requested, ceiling)
+	}
+	used := llm.MessagesTokens(state.Messages, guard.modelName) + llm.ToolsTokens(tools, guard.modelName)
+	output, err := llm.FitOutputLimit(guard.declaredCtx, guard.inputLimit, requested, used, guard.policy)
 	if err != nil {
-		return nil, err
+		return ctx, state.Messages, opts, err
 	}
-	return m.inner.Stream(ctx, input, opts...)
+	if output < requested {
+		// 只改调用副本；实际HTTP输出字段由contextModel同步转换。
+		input := append([]*schema.Message(nil), state.Messages...)
+		const notice = "\n本次输入较长，输出额度已缩小；优先给出结论和必要要点，及时收尾，明确未展开的范围。"
+		if len(input) > 0 && input[0].Role == schema.System {
+			first := *input[0]
+			first.Content += notice
+			input[0] = &first
+		} else {
+			input = append([]*schema.Message{schema.SystemMessage(notice)}, input...)
+		}
+		noticeUsed := llm.MessagesTokens(input, guard.modelName) + llm.ToolsTokens(tools, guard.modelName)
+		// 提示是可选内容，不能挤掉恰好满足输入上限或最低输出的必要材料。
+		if noticeOutput, noticeErr := llm.FitOutputLimit(guard.declaredCtx, guard.inputLimit, requested, noticeUsed, guard.policy); noticeErr == nil {
+			state.Messages = input
+			output, used = noticeOutput, noticeUsed
+		}
+		opts = append(append([]model.Option(nil), opts...), model.WithMaxTokens(output))
+		logger.Infof("上下文输出调整：原额度=%d 本次额度=%d 输入=%d", requested, output, used)
+	}
+	return ctx, state.Messages, opts, nil
 }

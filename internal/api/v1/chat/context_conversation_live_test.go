@@ -162,7 +162,6 @@ func (measured *conversationMeasuredModel) InputLimit() int {
 func (measured *conversationMeasuredModel) ContextWindow() int {
 	return measured.inner.(interface{ ContextWindow() int }).ContextWindow()
 }
-func (measured *conversationMeasuredModel) FinalBudgetChecked() bool { return true }
 func (measured *conversationMeasuredModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	inner, err := measured.inner.WithTools(tools)
 	if err != nil {

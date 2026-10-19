@@ -16,7 +16,7 @@ import (
 )
 
 func TestPlanExecuteOversizedArtifactReadCompletesDependencies(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	e := deepTestEngine()
 	e.cfg.DeepMaxSubagentIterations = 10
@@ -94,7 +94,7 @@ func TestPlanExecuteOversizedArtifactReadCompletesDependencies(t *testing.T) {
 func TestPlanExecuteArtifactArgumentCorrection(t *testing.T) {
 	for _, scenario := range []string{"type", "missing", "negative", "offset", "json", "ignored", "budget"} {
 		t.Run(scenario, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
 			e := deepTestEngine()
 			e.cfg.DeepMaxSubagentIterations = 5

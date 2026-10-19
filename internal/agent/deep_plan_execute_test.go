@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/components/model"
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 
@@ -31,10 +32,12 @@ func (f *peRestoreToolFactory) CreateAgentTools(_ context.Context, userID string
 
 func peCall(name string, args any) *schema.Message {
 	data, _ := json.Marshal(args)
-	return schema.AssistantMessage("", []schema.ToolCall{{ID: "call-" + name, Type: "function", Function: schema.FunctionCall{Name: name, Arguments: string(data)}}})
+	msg := schema.AssistantMessage("", []schema.ToolCall{{ID: "call-" + name, Type: "function", Function: schema.FunctionCall{Name: name, Arguments: string(data)}}})
+	msg.ResponseMeta = &schema.ResponseMeta{FinishReason: "tool_calls"}
+	return msg
 }
 
-func collectPEEvents(t *testing.T, ctx context.Context, e *Engine, req Request, m *deepTestModel) []Event {
+func collectPEEvents(t *testing.T, ctx context.Context, e *Engine, req Request, m model.ToolCallingChatModel) []Event {
 	t.Helper()
 	if req.MaxContextLength == 0 {
 		req.MaxContextLength = 64000

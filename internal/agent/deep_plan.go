@@ -207,6 +207,7 @@ type peChildState struct {
 	RuntimeContext string
 	TaskID         string
 	Data           []byte
+	ModelBudget    *taskModelBudget `json:",omitempty"`
 }
 
 func init() {

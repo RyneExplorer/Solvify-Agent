@@ -3,13 +3,54 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"testing"
 
 	"github.com/cloudwego/eino/schema"
+
+	"solvify-agent/pkg/config"
 )
+
+func TestFitOutputLimitPreservesInputAndMinimum(t *testing.T) {
+	p := config.ContextDefaults()
+	b, err := ResolveContextBudget("", "", 8192, 4096, false, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name                              string
+		requested, used, inputLimit, want int
+		fail                              bool
+	}{
+		{"预算充足", 4096, 100, 0, 4096, false},
+		{"原输出预留占满窗口", 8192, 100, 0, 8192 - b.Margin - 100, false},
+		{"必要输入让出输出空间", 4096, 4000, 0, 8192 - b.Margin - 4000, false},
+		{"输出下限边界", 4096, 8192 - b.Margin - MinimumAdaptiveOutput, 0, MinimumAdaptiveOutput, false},
+		{"下限少一token", 4096, 8192 - b.Margin - MinimumAdaptiveOutput + 1, 0, 0, true},
+		{"独立输入上限", 4096, 1025, 1024, 0, true},
+		{"显式小输出不提高", 128, 100, 0, 128, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := FitOutputLimit(8192, tc.inputLimit, tc.requested, tc.used, p)
+			if tc.fail {
+				if !errors.Is(err, ErrContextBudget) {
+					t.Fatalf("未拒绝不可恢复输入: %v", err)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("分配错误: output=%d want=%d err=%v", got, tc.want, err)
+			}
+			actual, err := ResolveContextBudget("", "", 8192, got, false, p)
+			if err != nil || actual.WithInputLimit(tc.inputLimit).Check(tc.used) != nil {
+				t.Fatal("分配后仍超预算", err)
+			}
+		})
+	}
+}
 
 func TestManagedExecutionPreservesCapabilities(t *testing.T) {
 	for _, tc := range []struct{ window, maxOutput, output int }{{32768, 16384, 8192}, {8192, 4096, 2048}, {8192, 1024, 1024}, {8192, 128000, 2048}} {

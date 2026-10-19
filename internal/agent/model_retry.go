@@ -7,6 +7,7 @@ import (
 	"net"
 	"syscall"
 
+	einoOpenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 	openai "github.com/meguminnnnnnnnn/go-openai"
@@ -40,6 +41,10 @@ func modelRetryHasOutput(message *schema.Message) bool {
 func retryableModelError(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) {
 		return false
+	}
+	var einoAPI *einoOpenai.APIError
+	if errors.As(err, &einoAPI) {
+		return retryableModelStatus(einoAPI.HTTPStatusCode)
 	}
 	var apiErr *openai.APIError
 	if errors.As(err, &apiErr) {

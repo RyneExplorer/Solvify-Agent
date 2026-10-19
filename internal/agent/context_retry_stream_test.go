@@ -26,7 +26,9 @@ func TestContextRetryStreamCreationFailureTerminates(t *testing.T) {
 		if calls.Add(1) == 1 {
 			return nil, modelDNSTimeout()
 		}
-		return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("成功答案", nil)}), nil
+		msg := schema.AssistantMessage("成功答案", nil)
+		msg.ResponseMeta = &schema.ResponseMeta{FinishReason: "stop"}
+		return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
 	}}
 	events := collectModelRetryEvents(t, ctx, engine, Request{Profile: ProfileQuick, Query: "确认项目资料", MaxContextLength: 8192, OutputLimit: 1024}, chatModel)
 	if calls.Load() != 2 || !hasRetryDone(events, "成功答案") {

@@ -49,7 +49,7 @@ func isToolChoiceUnsupportedError(errMsg string) bool {
 // 面向用户的措辞统一由 service 层按种类 × 模式给出（见 internal/service/chat_error_messages.go）。
 func (e *Engine) emitPlanError(ctx context.Context, out chan<- Event, err error) {
 	kind := apperrors.Classify(err)
-	if isToolChoiceUnsupportedError(err.Error()) {
+	if kind == apperrors.KindUnknown && isToolChoiceUnsupportedError(err.Error()) {
 		kind = apperrors.KindToolUnsupported
 	} else if kind == apperrors.KindUnknown {
 		kind = apperrors.KindAgentRunFailed

@@ -71,14 +71,18 @@ func messageResponse(msg entity.ChatMessage) response.MessageResponse {
 
 	if len(msg.Metadata) > 0 {
 		var meta struct {
-			ReasoningSteps []response.ReasoningStep `json:"reasoning_steps"`
-			ExecutionPlan  *response.ExecutionPlan  `json:"execution_plan"`
+			ReasoningSteps     []response.ReasoningStep `json:"reasoning_steps"`
+			ExecutionPlan      *response.ExecutionPlan  `json:"execution_plan"`
+			ExecutionError     string                   `json:"execution_error"`
+			ExecutionRetryable bool                     `json:"execution_retryable"`
 		}
 		if err := json.Unmarshal(msg.Metadata, &meta); err != nil {
 			logger.Errorf("解析 Metadata 失败, messageID=%s: %v", msg.ID, err)
 		} else {
 			resp.ReasoningSteps = meta.ReasoningSteps
 			resp.ExecutionPlan = meta.ExecutionPlan
+			resp.ExecutionError = meta.ExecutionError
+			resp.ExecutionRetryable = meta.ExecutionRetryable
 		}
 	}
 

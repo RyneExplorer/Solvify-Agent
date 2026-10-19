@@ -81,7 +81,7 @@ func (e *Engine) runWithRunner(
 				break
 			}
 			logger.Errorf("[Agent] Runner 事件错误: %v", agentEvent.Err)
-			if isToolChoiceUnsupportedError(agentEvent.Err.Error()) {
+			if apperrors.Classify(agentEvent.Err) == apperrors.KindUnknown && isToolChoiceUnsupportedError(agentEvent.Err.Error()) {
 				eventch.Send(ctx, eventCh, Event{
 					Type:   EventError,
 					Kind:   apperrors.KindToolUnsupported,

@@ -46,7 +46,7 @@ func TestModelHTTPTimeoutRetryBoundaries(t *testing.T) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
 				if attempt > 1 {
-					fmt.Fprint(w, "data: {\"id\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"重试完成\"}}]}\n\ndata: [DONE]\n\n")
+					fmt.Fprint(w, "data: {\"id\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"重试完成\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 					return
 				}
 				if partial {
