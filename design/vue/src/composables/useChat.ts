@@ -9,16 +9,13 @@ import * as toolApi from '@/api/mcp'
 import { request } from '@/api/client'
 import type { ChatSession, ExecutionPlan, FeedbackRequest, PendingApproval, StreamEvent } from '@/types/chat'
 import { applyExecutionPlanEvent, finishExecutionPlan } from './chatExecutionPlan'
+import type { ExecutionTraceStep } from './chatExecutionTrace'
 import type { MCPTemplate, MCPConnection } from '@/types/mcp'
 
 // ── UI 展示用的本地类型 ──
 
 // 推理时间线步骤
-interface TimelineStep {
-  title: string
-  detail?: string
-  status: string
-}
+type TimelineStep = ExecutionTraceStep
 
 // 聊天消息展示结构
 interface DisplayMessage {
@@ -268,6 +265,12 @@ export function useChat() {
           partial_content: m.execution_error && m.content !== '深度任务未完成：' + m.execution_error ? m.content : undefined,
           sources: m.sources,
           timeline: m.reasoning_steps?.map((s) => ({
+            type: s.type,
+            tool_call_id: s.tool_call_id,
+            tool_name: s.tool_name,
+            task_id: s.task_id,
+            plan_id: s.plan_id,
+            plan_version: s.plan_version,
             title: s.content ?? s.type,
             detail: s.detail,
             status: s.status ?? 'success',
@@ -404,7 +407,7 @@ export function useChat() {
     const preserveInterruptedAnswer = () => {
       const partial = streamContent.value || finalContent
       if (!partial && !streamPlan.value && !streamTimeline.value.length) return
-      streamTimeline.value.forEach(s => { if (s.status === 'running') s.status = 'error' })
+      streamTimeline.value.forEach(s => { if (s.status === 'running') s.status = 'ended' })
       const message: DisplayMessage = {
         id: assistantId || 'a-' + Date.now(),
         role: 'assistant',
@@ -422,7 +425,7 @@ export function useChat() {
     // 一个执行只生成一条终态消息，部分正文、计划和失败原因归属同一消息。
     const finishWithError = (title: string, detail?: string, retryable = true) => {
       streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
-      streamTimeline.value.forEach(s => { if (s.status === 'running') s.status = 'error' })
+      streamTimeline.value.forEach(s => { if (s.status === 'running') s.status = 'ended' })
       const partial = streamContent.value || finalContent
       const message: DisplayMessage = {
         id: assistantId || 'e-' + Date.now(),
@@ -517,14 +520,16 @@ export function useChat() {
               case 'tool_call':
               case 'tool_result':
               case 'warning':
-                // 添加新步骤前，将所有运行中的步骤标记为成功
-                streamTimeline.value.forEach(
-                  (s) => s.status === 'running' && (s.status = 'success'),
-                )
                 streamTimeline.value.push({
+                  type: evt.type,
+                  tool_call_id: evt.tool_call_id,
+                  tool_name: evt.tool_name,
+                  task_id: evt.task_id,
+                  plan_id: evt.plan_id,
+                  plan_version: evt.plan_version,
                   title: evt.title ?? evt.content ?? '',
                   detail: evt.detail,
-                  status: evt.status ?? 'running',
+                  status: evt.status ?? (evt.type === 'warning' ? 'warning' : evt.type === 'tool_call' ? 'running' : 'unknown'),
                 })
                 progressText.value = ''
                 break
@@ -535,7 +540,7 @@ export function useChat() {
 
                 // 查找是否已有同名的 running 状态事件
                 const existingIdx = streamTimeline.value.findIndex(
-                  (s) => s.title === thinkTitle && s.status === 'running',
+                  (s) => s.type === 'thinking' && s.title === thinkTitle && s.status === 'running',
                 )
 
                 if (existingIdx >= 0) {
@@ -547,9 +552,10 @@ export function useChat() {
                 } else {
                   // 没有找到同名 running 事件，直接添加
                   streamTimeline.value.forEach(
-                    (s) => s.status === 'running' && (s.status = 'success'),
+                    (s) => s.type === 'thinking' && s.status === 'running' && (s.status = 'success'),
                   )
                   streamTimeline.value.push({
+                    type: evt.type,
                     title: thinkTitle,
                     detail: evt.detail,
                     status: evt.status ?? 'running',
@@ -567,7 +573,7 @@ export function useChat() {
               case 'answer':
                 progressText.value = ''
                 streamTimeline.value.forEach(
-                  (s) => s.status === 'running' && (s.status = 'success'),
+                  (s) => s.type === 'thinking' && s.status === 'running' && (s.status = 'success'),
                 )
                 finalContent += evt.content ?? ''
                 streamContent.value = finalContent
@@ -622,7 +628,7 @@ export function useChat() {
                 if (evt.plan) streamPlan.value = applyExecutionPlanEvent(streamPlan.value, { ...evt, type: 'plan' })
                 streamPlan.value = finishExecutionPlan(streamPlan.value, 'success')
                 streamTimeline.value.forEach(
-                  (s) => s.status === 'running' && (s.status = 'success'),
+                  (s) => s.type === 'thinking' && s.status === 'running' && (s.status = 'success'),
                 )
                 if (evt.sources?.length) {
                   finalSources = evt.sources

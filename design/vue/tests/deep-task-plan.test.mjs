@@ -100,7 +100,9 @@ test('实时和历史任务卡渲染状态、中文角色、依赖与安全文�
     plan.tasks[1].status = 'waiting'
     plan.tasks[1].summary = '<script>alert(1)</script>'
     const html = await renderToString(createSSRApp(component, { plan }))
-    for (const text of ['深度任务 · 1/3', '并行执行', '已完成', '等待审批', '依赖：研究 A、研究 B', '外部工具研究', '计划版本 2', '执行批次 3', '评估与重规划', '调整原因：补充来源验证', '版本 2 新增']) assert.ok(html.includes(text), text)
+    for (const text of ['任务计划', '1 / 3 项完成', '并行执行', '已完成', '等待审批', '依赖：研究 A', '依赖：研究 B', '步骤 1', '步骤 2', '外部工具研究', '计划版本 2', '执行批次 3', '评估与重规划', '调整原因：补充来源验证', '版本 2 新增']) assert.ok(html.includes(text), text)
+    assert.match(html, /role="progressbar"[^>]*aria-valuenow="1"[^>]*aria-valuemax="3"/)
+    assert.ok(!html.includes('<details open'), '结果与计划详情默认折叠')
     assert.ok(!html.includes('<script>alert(1)</script>'))
     assert.ok(html.includes('&lt;script&gt;'))
     plan.status = 'error'

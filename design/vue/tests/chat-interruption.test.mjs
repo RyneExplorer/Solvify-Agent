@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { transformWithEsbuild } from 'vite'
 import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
+import { normalizeExecutionTrace } from '../src/composables/chatExecutionTrace.ts'
 
 // 执行真实 composable，替换网络与路由边界，不把状态处理逻辑复制到测试。
 let source = await readFile(new URL('../src/composables/useChat.ts', import.meta.url), 'utf8')
@@ -137,4 +138,58 @@ test('重新打开失败会话保留一份计划、部分正文及失败说明',
   assert.equal(message.retryable, true)
   assert.match(message.partial_content, /部分回答/)
   assert.equal(message.execution_plan.id, 'p')
+})
+
+test('真实SSE并行工具结果只完成对应调用，刷新后保持相同状态', async (t) => {
+  t.after(() => { delete globalThis.__timeoutChatAPI })
+  const encoder = new TextEncoder()
+  let chat
+  let reads = 0
+  let saved = []
+  const identity = { plan_id: 'p', plan_version: 2, tool_name: 'grep_chunks' }
+  const events = [
+    { type: 'tool_call', title: '调用工具 grep_chunks', status: 'running', tool_call_id: 'a', task_id: 'knowledge', ...identity },
+    { type: 'tool_call', title: '调用工具 grep_chunks', status: 'running', tool_call_id: 'b', task_id: 'web', ...identity },
+    { type: 'tool_result', title: '工具执行结果', status: 'error', detail: '查询限流', tool_call_id: 'b', task_id: 'web', ...identity },
+    { type: 'tool_result', title: '工具执行结果', status: 'success', tool_call_id: 'a', task_id: 'knowledge', ...identity },
+  ]
+  const packet = events => ({ done: false, value: encoder.encode(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')) })
+  globalThis.__timeoutChatAPI = {
+    async sendMessage() {
+      return {
+        async read() {
+          reads++
+          if (reads === 1) return packet([{ type: 'start', message_id: 'tool-run' }, ...events.slice(0, 2)])
+          if (reads === 2) {
+            assert.deepEqual(normalizeExecutionTrace(chat.streamTimeline.value, true).map(row => row.status), ['running', 'running'])
+            return packet([events[2]])
+          }
+          if (reads === 3) {
+            assert.deepEqual(normalizeExecutionTrace(chat.streamTimeline.value, true).map(row => row.status), ['running', 'error'])
+            return packet([events[3]])
+          }
+          assert.deepEqual(normalizeExecutionTrace(chat.streamTimeline.value, true).map(row => row.status), ['success', 'error'])
+          saved = chat.streamTimeline.value.map(step => ({ ...step, content: step.title }))
+          return packet([{ type: 'done', content: '基于可用资料回答', done: true }])
+        },
+        async cancel() {}, releaseLock() {},
+      }
+    },
+    async getMessages() { return { data: { messages: [{ id: 'tool-run', role: 'assistant', content: '基于可用资料回答', reasoning_steps: saved }] } } },
+  }
+  const { useChat } = await import(`data:text/javascript;base64,${Buffer.from(code + '\n// correlated-tools').toString('base64')}`)
+  const app = createSSRApp({ setup() { chat = useChat(); return () => null } })
+  app.provide('refreshHistory', async () => {})
+  await renderToString(app)
+  chat.activeSessionId.value = 'tool-session'
+  chat.selectedModel.value = 'model'
+  chat.input.value = '查询资料'
+  await chat.sendMessage()
+  const live = normalizeExecutionTrace(chat.messages.value.find(message => message.id === 'tool-run').timeline, false)
+  assert.deepEqual(live.map(row => row.status), ['success', 'error'])
+  chat.selectSession('reloaded-session')
+  await new Promise(resolve => setImmediate(resolve))
+  const history = normalizeExecutionTrace(chat.messages.value.find(message => message.id === 'tool-run').timeline, false)
+  assert.deepEqual(history, live)
+  assert.equal(history[1].resultDetail, '查询限流')
 })
