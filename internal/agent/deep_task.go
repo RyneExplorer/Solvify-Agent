@@ -204,10 +204,10 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 						artifacts = appendArtifactReference(artifacts, ref)
 					}
 					toolEvent := Event{Type: EventToolResult, TaskID: task.ID, AgentName: task.Agent, Title: "工具执行结果", ToolResult: msg.Content, Status: TaskSuccess}
-					if message, recoverable := artifactArgumentFailure(mv.ToolName, msg.Content); recoverable {
-						toolEvent.Status, toolEvent.Retryable, toolEvent.Detail = TaskError, true, message
-					}
-					peEvent(g, toolEvent)
+					r.mu.Lock()
+					terminal := s.Denied || s.Blocked || s.Unsafe[task.ID]
+					r.mu.Unlock()
+					peEvent(g, peToolResultEvent(mv.ToolName, toolEvent, terminal))
 				} else if mv.Role == schema.Assistant {
 					answer = msg.Content
 					// 非空正文仍可能因长度或过滤结束，保存部分材料但不标记成功。
@@ -252,6 +252,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 			} else if reason := s.ArtifactArgumentFailures[task.ID]; reason != "" && taskError == nil && interrupt == nil {
 				result.Status, result.Error = TaskError, "产物读取参数尚未纠正："+reason
 			}
+			applyPEToolProgress(s, &result)
 			mergeTaskResult(&s.Plan, s.Results, result)
 			detail := truncateTaskSummary(result.Summary, 500)
 			if result.Error != "" {
@@ -355,7 +356,7 @@ func (a *peTaskAgent) resultMiddleware(taskID string, dangerous map[string]bool)
 			if err == nil {
 				if reason := s.Failures[taskID]; reason != "" && (s.Denied || s.Blocked || s.Unsafe[taskID]) {
 					r.mu.Unlock()
-					return &compose.ToolOutput{Result: reason}, nil
+					return &compose.ToolOutput{Result: failedToolOutput(reason, 0)}, nil
 				}
 				if dangerous[input.Name] {
 					s.Unsafe[taskID] = true
@@ -372,16 +373,18 @@ func (a *peTaskAgent) resultMiddleware(taskID string, dangerous map[string]bool)
 			}
 			output, err := next(ctx, input)
 			var biz *bizerrors.BizError
-			var failure string
-			blocked := false
 			if errors.As(err, &biz) {
-				blocked = biz.Code == bizerrors.CodeForbidden || biz.Code == bizerrors.CodeUnauthorized
-				if blocked || biz.Err == nil {
-					failure = biz.Message
-					output, err = &compose.ToolOutput{Result: failure}, nil
+				if biz.Code == bizerrors.CodeForbidden || biz.Code == bizerrors.CodeUnauthorized || biz.Err == nil {
+					output, err = &compose.ToolOutput{Result: failedToolOutput(biz.Message, biz.Code)}, nil
 				}
 			}
 			if output != nil && err == nil {
+				r.mu.Lock()
+				if reason := s.Failures[taskID]; reason != "" && (s.Denied || s.Blocked || s.Unsafe[taskID]) {
+					// 审批中间件可能返回纯文本；事件仍以可信拒绝事实判定失败。
+					output = &compose.ToolOutput{Result: failedToolOutput(reason, 0)}
+				}
+				r.mu.Unlock()
 				if input.Name == artifactReadToolName {
 					message, recoverable := artifactArgumentFailure(input.Name, output.Result)
 					r.mu.Lock()
@@ -398,21 +401,16 @@ func (a *peTaskAgent) resultMiddleware(taskID string, dangerous map[string]bool)
 						return output, nil
 					}
 				}
-				var response struct {
-					Success *bool  `json:"success"`
-					Message string `json:"message"`
-				}
-				if json.Unmarshal([]byte(output.Result), &response) == nil && response.Success != nil && !*response.Success {
-					failure = response.Message
-					if failure == "" {
-						failure = "研究工具未返回成功结果"
-					}
-				}
-			}
-			if failure != "" {
+				outcome := classifyToolResult(output.Result)
 				r.mu.Lock()
-				s.Failures[taskID] = failure
-				s.Blocked = s.Blocked || blocked
+				if input.Name != artifactReadToolName && !r.engine.clarifyToolNames()[input.Name] {
+					recordPEToolResult(s, taskID, input.Name, outcome)
+				}
+				// 只有真实安全边界失败不可被后续查询纠正；一般只读失败由进度记录处理。
+				if outcome.Failed && (outcome.Blocked || s.Unsafe[taskID]) {
+					s.Failures[taskID] = outcome.Message
+					s.Blocked = s.Blocked || outcome.Blocked
+				}
 				r.mu.Unlock()
 			}
 			return output, err
