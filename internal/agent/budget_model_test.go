@@ -8,8 +8,6 @@ import (
 
 	einoTool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
-
-	"solvify-agent/pkg/tokenutil"
 )
 
 func TestBudgetModelCopiesToolMessages(t *testing.T) {
@@ -19,8 +17,8 @@ func TestBudgetModelCopiesToolMessages(t *testing.T) {
 		checked := false
 		inner := &deepTestModel{respond: func(_ context.Context, input []*schema.Message) (*schema.Message, error) {
 			checked = true
-			if input[0].Content != "系统要求" || input[1].ToolCallID != "probe" || strings.Contains(input[1].Content, guardProbeTail) || tokenutil.CountTokens(input[1].Content, "gpt-4o") > toolResultCap {
-				t.Fatal("预算压缩未保留消息契约")
+			if input[0].Content != "系统要求" || input[1].ToolCallID != "probe" || input[1].Content != raw {
+				t.Fatal("窗口充足时未保留完整工具结果或消息契约")
 			}
 			return schema.AssistantMessage("结果", nil), nil
 		}}
@@ -43,7 +41,7 @@ func TestBudgetModelCopiesToolMessages(t *testing.T) {
 	}
 }
 
-func TestPlanExecuteBudgetCompressesProfessionalToolResults(t *testing.T) {
+func TestPlanExecuteBudgetRetainsProfessionalToolResultsWhenTheyFit(t *testing.T) {
 	var calls, research atomic.Int32
 	e := deepTestEngine()
 	e.RegisterInternal("guard_probe", 1, false, DomainKnowledge, func(context.Context, string, []string) einoTool.BaseTool { return guardProbeTool{calls: &calls} })
@@ -55,8 +53,8 @@ func TestPlanExecuteBudgetCompressesProfessionalToolResults(t *testing.T) {
 			for _, message := range input {
 				if message.Role == schema.Tool {
 					checked = true
-					if strings.Contains(message.Content, guardProbeTail) || tokenutil.CountTokens(message.Content, "gpt-4o") > toolResultCap {
-						t.Error("专业 Agent 看到未压缩工具结果")
+					if !strings.Contains(message.Content, guardProbeTail) {
+						t.Error("专业 Agent 的证据在窗口充足时仍被裁剪")
 					}
 					return schema.AssistantMessage("研究结果", nil), nil
 				}

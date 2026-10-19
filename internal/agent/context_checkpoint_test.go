@@ -77,3 +77,26 @@ func TestContextRestoreFreezesMaterialsAndRejectsModelChanges(t *testing.T) {
 		t.Fatal("恢复未拒绝策略变化")
 	}
 }
+
+func TestContextCheckpointBeforeDynamicReadingStillVerifies(t *testing.T) {
+	// 固定旧策略字段及顺序，不能用新结构生成这个兼容性样本。
+	legacyPolicy := json.RawMessage(`{"ArtifactThreshold":1500,"ArtifactBytes":2097152,"RunBytes":20971520,"UserBytes":104857600,"TTLHours":48,"ReadRunes":4000,"ReadTokens":1200,"SummaryInput":6000,"SummaryOutput":800,"SummaryTimeoutSeconds":15,"SummaryMaxCalls":2}`)
+	old := struct {
+		Version       int
+		Request       Request
+		Policy        config.ContextPolicy
+		RuntimePolicy json.RawMessage
+		Data          []byte
+		Hash          string
+	}{Version: 1, Request: Request{UserID: "u", SessionID: "s", RunID: "r"}, Policy: config.DefaultContextPolicy(), RuntimePolicy: legacyPolicy, Data: []byte("old-eino-state")}
+	unsigned, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.Hash = contentHash(string(unsigned))
+	raw, _ := json.Marshal(old)
+	cp, wrapped, err := decodeContextCheckpoint(append(append([]byte(nil), checkpointEnvelopePrefix...), raw...))
+	if err != nil || !wrapped || cp.RuntimePolicy != config.DefaultRuntimeContextPolicy() || cp.RuntimePolicy.ToolContextShare() != 0.5 || string(cp.Data) != "old-eino-state" {
+		t.Fatal("新增动态比例破坏旧checkpoint的哈希或默认策略", err)
+	}
+}

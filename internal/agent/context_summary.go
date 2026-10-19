@@ -79,6 +79,10 @@ func (m *runtimeContextMiddleware) BeforeModelRewriteState(ctx context.Context, 
 	if state == nil {
 		return ctx, state, nil
 	}
+	state, err := m.engine.expandToolContext(ctx, m.req, state)
+	if err != nil {
+		return ctx, nil, err
+	}
 	request := m.req
 	snapshot := runtimeSnapshot{Version: 1, UserID: request.UserID, SessionID: request.SessionID, RunID: request.RunID, AgentID: request.AgentName, TaskID: request.TaskID, InstructionHash: contentHash(m.instruction)}
 	previousValue, hadPrevious := getRuntimeSnapshot(ctx, m.key())
@@ -92,12 +96,16 @@ func (m *runtimeContextMiddleware) BeforeModelRewriteState(ctx context.Context, 
 	for _, ref := range snapshot.References {
 		seen[ref.ArtifactID] = true
 	}
+	for i := range snapshot.References {
+		snapshot.References[i].Content, snapshot.References[i].Preview = "", ""
+	}
 	for _, message := range state.Messages {
 		if message == nil || message.Role != schema.Tool {
 			continue
 		}
 		var ref artifactReference
 		if json.Unmarshal([]byte(message.Content), &ref) == nil && ref.ArtifactID != "" && !seen[ref.ArtifactID] {
+			ref.Content, ref.Preview = "", ""
 			snapshot.References = append(snapshot.References, ref)
 			seen[ref.ArtifactID] = true
 		}
@@ -235,6 +243,7 @@ func (m *runtimeContextMiddleware) BeforeModelRewriteState(ctx context.Context, 
 		return ctx, state, err
 	}
 	setRuntimeSnapshot(ctx, m.key(), string(raw))
+	m.publishArtifactReadBudget(ctx, next, budget)
 	return ctx, next, nil
 }
 
