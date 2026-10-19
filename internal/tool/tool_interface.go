@@ -8,13 +8,6 @@ import (
 	"solvify-agent/internal/model/entity"
 )
 
-// ProviderRegistry 供应商注册表接口
-type ProviderRegistry interface {
-	Register(providerType string, provider Provider)
-	Get(providerType string) Provider
-	Keys() []string
-}
-
 // MCPConnectionStore 是工具装配需要的用户连接读取能力。
 type MCPConnectionStore interface {
 	ListEnabledByUserID(ctx context.Context, userID string) ([]entity.MCPConnection, error)

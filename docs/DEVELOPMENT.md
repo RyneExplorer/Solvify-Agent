@@ -32,11 +32,12 @@ go run ./cmd/server
 
 ```bash
 psql -v ON_ERROR_STOP=1 -h localhost -U <数据库用户> -d <数据库名> -f scripts/migrations/20261017_mcp_connections.sql
+psql -v ON_ERROR_STOP=1 -h localhost -U <数据库用户> -d <数据库名> -f scripts/migrations/20261019_mcp_templates.sql
 ```
 
-脚本可重复执行，只迁移旧MCP配置并保留原ID，不覆盖后续编辑、不重新导入已删除连接。没有迁移标记的旧库首次升级前，应检查同一用户是否重复绑定同一预置；新表对该组合建立唯一约束，冲突会使整个迁移回滚。启动只检查MCP表是否存在，不自动升级业务schema。
+两步脚本均可重复执行：第一步升级用户连接（已执行过可跳过）；第二步创建独立MCP模板，保留原模板和连接ID、配置与工具前缀，重建用户绑定外键。新库直接初始化新表，不再创建工具类型和供应商表。只迁移旧MCP配置并保留原ID，不覆盖后续编辑、不重新导入已删除连接。没有迁移标记的旧库首次升级前，应检查同一用户是否重复绑定同一预置；新表对该组合建立唯一约束，冲突会使整个迁移回滚。启动检查MCP连接和模板表是否存在，不自动升级业务schema。
 
-若启动提示 `MCP连接表不存在`，表示该进程连接的数据库尚未完成上述升级；不能对已有库重跑完整初始化脚本，也不能跳过缺表检查。先核对最终生效的数据库目标（根目录 `.env` 和进程环境变量可能覆盖YAML），在该库执行迁移后再启动。可用 `SELECT current_database(), to_regclass('public.mcp_connections');` 核对目标与表是否存在；升级完成后，`app_schema_migrations` 应有版本 `20261017_mcp_connections`。
+若启动提示 `MCP连接表不存在` 或 `MCP模板表不存在`，表示该进程连接的数据库尚未完成上述升级；不能对已有库重跑完整初始化脚本，也不能跳过缺表检查。先核对最终生效的数据库目标（根目录 `.env` 和进程环境变量可能覆盖YAML），在该库执行迁移后再启动。可用 `SELECT current_database(), to_regclass('public.mcp_connections'), to_regclass('public.mcp_templates');` 核对目标与表是否存在；升级完成后，`app_schema_migrations` 应有版本 `20261017_mcp_connections` 与 `20261019_mcp_templates`。
 
 用户点击“保存”时，个人连接地址、认证请求头或预置字段会持久写入PostgreSQL的 `mcp_connections`；重启后按用户归属读取。仅点击“测试连接”不会保存草稿。升级时旧MCP配置从 `user_tool_configs` 迁入新表，保留ID、用户配置及启停状态，旧表不会被此迁移清空。
 
@@ -123,7 +124,7 @@ Service 实现文件使用 `xxx_service.go`；需要独立接口文件时使用 
 
 **禁止**：写 HTTP、DTO 转换、权限判断、业务编排、日志输出。
 
-**缓存装饰**：高频读取的仓库（Model、ToolType、UserModelConfig、UserToolConfig）使用 `RepositoryCached` 装饰器，采用 Redis 写入失效 + TTL 兜底策略。
+**缓存装饰**：高频读取的仓库（Model、UserModelConfig）使用 `RepositoryCached` 装饰器，采用 Redis 写入失效 + TTL 兜底策略。
 
 ### DTO（`internal/model/dto`）
 
@@ -147,7 +148,7 @@ Service 实现文件使用 `xxx_service.go`；需要独立接口文件时使用 
 
 Controller **不直接调用**这些包，业务入口统一经过 Service。
 
-LLM 客户端在首次使用模型配置时按需创建，后续相同配置复用进程内缓存（最多 64 个条目，LRU 淘汰）。启动时不预热模型客户端；创建客户端不发起模型请求，也不验证远端连接。MCP 工具列表仍在 HTTP 服务启动后异步预热。
+LLM 客户端在首次使用模型配置时按需创建，后续相同配置复用进程内缓存（最多 64 个条目，LRU 淘汰）。启动时不预热模型客户端；创建客户端不发起模型请求，也不验证远端连接。MCP按实际用户连接按需初始化和发现工具，启动时不预热MCP工具。
 
 ## 新增业务模块流程
 
@@ -328,7 +329,7 @@ knowledgeBaseSvc := service.NewKnowledgeBaseService(knowledgeBaseRepo)
 
 ### 工具管理（`internal/api/v1/tool`）
 
-- 管理员：ToolType CRUD → ToolProvider CRUD（关联 ProviderRegistry 校验）
+- 管理员：MCPTemplate CRUD → MCP客户端静态配置校验；探测只发现工具，不执行tools/call。
 - 用户：查看模板 → 创建/管理 UserToolConfig
 - Provider 类型：`http`（Template 驱动）、`mcp`（连接池与工具发现）
 

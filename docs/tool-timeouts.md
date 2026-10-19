@@ -1,16 +1,16 @@
 # 工具执行时限
 
-开发约束见[AGENTS.md](../AGENTS.md)，MCP配置与升级步骤见[MCP配置](mcp-configuration.md)。普通HTTP Provider已移除；外部能力统一通过MCP配置。
+开发约束见[AGENTS.md](../AGENTS.md)，MCP配置与升级步骤见[MCP配置](mcp-configuration.md)。通用工具供应商框架已移除；外部能力统一通过MCP配置。
 
 ## 配置归属
 
-管理员在「后台管理 → MCP预置 → 添加/编辑」设置连接初始化超时和单次调用超时，保存于既有 `tool_providers.provider_config.mcp` 的 `connect_timeout`、`call_timeout`。个人HTTP MCP在用户设置的高级配置中保存于 `mcp_connections.connection`；用户不能覆盖所绑定预置的管理员时限。
+管理员在「后台管理 → MCP预置 → 添加/编辑」设置连接初始化超时和单次调用超时，保存于`mcp_templates.connection` 的 `connect_timeout`、`call_timeout`。个人HTTP MCP在用户设置的高级配置中保存于 `mcp_connections.connection`；用户不能覆盖所绑定预置的管理员时限。
 
 两项均为1～86400秒整数，留空分别使用30秒、300秒。连接时限覆盖Start与Initialize握手；调用时限覆盖tools/list与每次tools/call，分别计时。旧 `timeout` 只兼容读取：新字段优先，再回退旧值，最后使用默认值；编辑旧配置回显旧值，新保存转为两个独立字段。
 
 部署预置由YAML维护连接地址、认证模板及字段。后台允许仅调整超时，后端拒绝混入连接信息；清空后保存明确的30/300秒，以 `admin_timeouts` 标记管理员归属。启动同步保留该超时，也保留停用状态。
 
-内部知识检索、文档工具及 `read_context_artifact` 没有供应商记录，统一使用系统配置：
+内部知识检索、文档工具及 `read_context_artifact` 由程序注册，统一使用系统配置：
 
 ```yaml
 tools:
@@ -34,7 +34,7 @@ tools:
 ```shell
 go test ./...
 go vet ./...
-go test -race ./internal/agent ./internal/service ./internal/tool/... ./internal/api/v1/mcp ./internal/api/v1/tool ./internal/repository ./internal/app ./pkg/config -count=1 -timeout 300s
+go test -race ./internal/agent ./internal/service ./internal/tool/... ./internal/api/v1/mcp ./internal/repository ./internal/app ./pkg/config -count=1 -timeout 300s
 ```
 
-本地JSON-RPC服务器与真实MCP SDK验证初始化、发现及调用认证，61秒握手在65秒配置下成功，单次调用超时、父deadline、共享取消隔离和关闭池清理；Agent验证审批边界。前端在 `design/vue` 运行 `node --test tests/*.test.mjs` 和 `node node_modules/vite/bin/vite.js build`，覆盖MCP表单保存、真实凭据探测、超时回显、字段schema保留与API路由。未使用真实供应商或外部副作用验证。
+本地JSON-RPC服务器与真实MCP SDK验证初始化、发现及调用认证，61秒握手在65秒配置下成功，单次调用超时、父deadline、共享取消隔离和关闭池清理；Agent验证审批边界。前端在 `design/vue` 运行 `node --test tests/*.test.mjs` 和 `node node_modules/vite/bin/vite.js build`，覆盖MCP表单保存、真实凭据探测、超时回显、字段schema保留与API路由。认证测试使用本地受控服务；第三方只读MCP与浏览器验收见[MCP配置](mcp-configuration.md)，未执行真实外部副作用。

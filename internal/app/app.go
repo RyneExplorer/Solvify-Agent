@@ -30,7 +30,7 @@ import (
 	"solvify-agent/internal/repository"
 	"solvify-agent/internal/service"
 	"solvify-agent/internal/tool"
-	"solvify-agent/internal/tool/providers"
+	"solvify-agent/internal/tool/mcpclient"
 	"solvify-agent/pkg/cache"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/database"
@@ -56,7 +56,7 @@ type App struct {
 	messageEmbeddingDone    chan struct{}
 
 	// MCP 客户端连接池，由 App 负责生命周期管理
-	mcpClientPool *providers.MCPClientPool
+	mcpClientPool *mcpclient.MCPClientPool
 	// embedFn 是带两级缓存 + singleflight 的向量化函数，由 initEmbedding 赋值一次。
 	// 存字段而不是当参数传：retriever 与 chatService 都用它，两处各建一份会白付缓存与握手。
 	embedFn rag.EmbeddingFunc
@@ -186,11 +186,6 @@ func (a *App) initDatabase() error {
 	// message_feedback 表 schema 补齐（早期 AutoMigrate 建表后 entity 新增列，AutoMigrate 不会 ADD COLUMN）
 	if err := database.EnsureMessageFeedbackSchema(postgresqlDB); err != nil {
 		logger.Warnf("message_feedback schema 补齐异常（不阻塞启动）: %v", err)
-	}
-
-	// tool_providers 表 schema 补齐（新增 is_system 列，区分系统预置与管理员自定义 MCP 供应商）
-	if err := database.EnsureToolProviderSchema(postgresqlDB); err != nil {
-		logger.Warnf("tool_providers schema 补齐异常（不阻塞启动）: %v", err)
 	}
 
 	// chat_messages.embedding 列补齐 + 维度核对（语义召回的读写两侧都靠它；
@@ -398,6 +393,9 @@ func (a *App) initDependencies() error {
 	if !a.postgresqlDB.Migrator().HasTable(&entity.MCPConnection{}) {
 		return fmt.Errorf("MCP连接表不存在，请先执行 scripts/migrations/20261017_mcp_connections.sql")
 	}
+	if !a.postgresqlDB.Migrator().HasTable(&entity.MCPTemplate{}) {
+		return fmt.Errorf("MCP模板表不存在，请先执行 scripts/migrations/20261019_mcp_templates.sql")
+	}
 	// 初始化 Repository
 	knowledgeBaseRepo := repository.NewKnowledgeBaseRepository(a.postgresqlDB)
 	documentRepo := repository.NewDocumentRepository(a.postgresqlDB)
@@ -425,30 +423,12 @@ func (a *App) initDependencies() error {
 	chatMessageRepo := repository.NewChatMessageRepository(a.postgresqlDB)
 	memoryRepo := repository.NewUserMemoryRepository(a.postgresqlDB)
 	summaryRepo := repository.NewSummaryRepository(a.postgresqlDB)
-	// 工具配置——原始仓库
-	toolTypeRepo := repository.NewToolTypeRepository(a.postgresqlDB)
-	toolProviderRepo := repository.NewToolProviderRepository(a.postgresqlDB)
-	legacyToolConfigRepo := repository.NewUserToolConfigRepository(a.postgresqlDB)
-
-	// Redis 缓存（写时失效，10 分钟 TTL 兜底）
-	toolTypeCache := cache.New(a.redis, "tool:type:", 10*time.Minute)
+	templateRepo := repository.NewMCPTemplateRepository(a.postgresqlDB)
 	userModelCache := cache.New(a.redis, "user:model:", 24*time.Hour)
-
-	// 缓存装饰器
-	cachedToolTypeRepo := repository.NewCachedToolTypeRepository(toolTypeRepo, toolTypeCache)
-
-	// 初始化工具 Provider 注册表——注册通用 Provider 类型
-	toolRegistry := tool.NewProviderRegistry()
 	mcpRepo := repository.NewMCPRepository(a.postgresqlDB)
-
-	// MCP Provider：一个 MCP Server 可提供多个工具（一对多映射）
-	a.mcpClientPool = providers.NewMCPClientPool()
-	mcpProvider := providers.NewMCPProvider(a.mcpClientPool)
-	toolRegistry.Register("mcp", mcpProvider)
-
-	// ToolFactory——Agent 引擎从 DB/Redis 加载用户配置的工具
-	// 执行时直接读取供应商关联，避免用户配置缓存中的旧timeout延迟生效。
-	toolFactory := tool.NewFactory(toolRegistry, mcpRepo)
+	a.mcpClientPool = mcpclient.NewMCPClientPool()
+	mcpClient := mcpclient.NewMCPClient(a.mcpClientPool)
+	toolFactory := tool.NewFactory(mcpClient, mcpRepo)
 
 	// 加载系统预置 MCP 服务器（从 config.yaml 同步到数据库）
 	a.loadSystemMCPServersWithTimeout()
@@ -534,9 +514,8 @@ func (a *App) initDependencies() error {
 
 	contextSvc := service.NewContextService(chatMessageRepo, memoryRepo, summaryRepo)
 	chatSvc := service.NewChatService(chatSessionRepo, chatMessageRepo, txMgr, modelRepo, userModelConfigRepo, userRepo, userModelCache, ai.AgentEngine, contextSvc, prefSvc, a.tracer, feedbackRepo, a.embedFn, a.cfg.Database.Postgres.EnablePGVector)
-	toolTypeService := service.NewToolTypeService(cachedToolTypeRepo, toolProviderRepo, legacyToolConfigRepo, txMgr)
-	toolProviderService := service.NewToolProviderService(toolProviderRepo, cachedToolTypeRepo, toolRegistry, legacyToolConfigRepo, txMgr)
-	mcpService := service.NewMCPService(mcpRepo, toolProviderRepo, mcpProvider)
+	templateService := service.NewMCPTemplateService(templateRepo, mcpClient)
+	mcpService := service.NewMCPService(mcpRepo, templateRepo, mcpClient)
 	searchSvc := service.NewSearchService(chatMessageRepo, chunkRepo)
 
 	// 路由
@@ -554,8 +533,7 @@ func (a *App) initDependencies() error {
 		chatSvc,
 		syncSvc,
 		dingtalkSvc,
-		toolTypeService,
-		toolProviderService,
+		templateService,
 		mcpService,
 		prefSvc,
 	)

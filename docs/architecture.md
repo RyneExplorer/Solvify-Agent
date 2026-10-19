@@ -110,17 +110,17 @@ POST /api/v1/chat/sessions/:id/messages (SSE)
 ```text
 用户MCP连接（mcp_connections）
   ├── 个人HTTP连接：URL、Headers、独立时限
-  └── 绑定系统预置：tool_providers引用 + 用户配置字段
+  └── 绑定系统预置：mcp_templates引用 + 用户配置字段
         └── 固定地址 + Headers中{{api_key}}等变量
                 ↓ 可信用户身份、模板可用性与配置验证
-MCP Provider → 按用户/连接/有效配置隔离的客户端池
+MCPClient（直接注入，无供应商注册表） → 按用户/连接/有效配置隔离的客户端池
   └── initialize → tools/list → 工具Schema → BaseTool适配器
         └── 调用前重新校验连接状态与有效配置 → tools/call
 ```
 
 快速模式不连接MCP。深度PlanExecute的Planner只规划、Executor只委派，MCP由 `web_research` 专业子Agent使用；该角色只可调用实际挂载的能力，非搜索MCP不会自动变成联网搜索能力。知识检索、文档操作分别进入对应内部能力域，汇总角色不直接获得MCP。普通深度单Agent的新请求不挂MCP，历史checkpoint保留原恢复边界。
 
-内部知识检索、文档管理和澄清工具继续由程序注册；HTTP接口与Agent工具共享业务规则。普通HTTP Provider已删除，旧用户工具路由不保留兼容。`tool_providers`/`tool_types`仍作为MCP预置基础设施，旧 `user_tool_configs` 只保留迁移与清理用途，仓库仅提供级联删除，不保留旧用户工具CRUD与缓存层，运行时不再从中加载工具。
+内部知识检索、文档管理和澄清工具继续由程序注册；HTTP接口与Agent工具共享业务规则。通用供应商、工具类型、注册表及旧管理路由已删除。管理员模板存于 `mcp_templates`，用户连接存于 `mcp_connections`，删除模板通过数据库外键原子清理绑定。升级保留原模板ID和稳定工具前缀，以支持有效checkpoint重新装配；旧工具表只作为升级历史留存，生产代码不再依赖。
 
 个人连接在拨号时解析并固定公网IP，禁用代理、跨源请求和重定向；管理员预置可连接企业内网。认证头覆盖初始化、发现与调用；每个响应体限制8MiB，每个服务最多128个工具。详情只向本人回读凭据用于编辑，列表不含凭据。配置、迁移与已知限制见[MCP配置](mcp-configuration.md)。
 

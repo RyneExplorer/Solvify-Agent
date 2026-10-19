@@ -51,32 +51,27 @@ func (r *mcpMemoryRepo) List(_ context.Context, userID string) ([]entity.MCPConn
 }
 
 type mcpTemplateRepo struct {
-	repository.ToolProviderRepository
-	p entity.ToolProvider
+	repository.MCPTemplateRepository
+	p entity.MCPTemplate
 }
 
-func (r *mcpTemplateRepo) GetByID(context.Context, string) (*entity.ToolProvider, error) {
+func (r *mcpTemplateRepo) GetByID(context.Context, string) (*entity.MCPTemplate, error) {
 	p := r.p
 	return &p, nil
 }
 
-func (r *mcpTemplateRepo) ListMCPProviders(context.Context) ([]repository.MCPServerRow, error) {
-	return []repository.MCPServerRow{{ToolProvider: r.p}}, nil
+func (r *mcpTemplateRepo) List(context.Context) ([]entity.MCPTemplate, error) {
+	return []entity.MCPTemplate{r.p}, nil
 }
 
 func TestMCPTemplateListFiltersDisabledAndHidesConnectionSecrets(t *testing.T) {
-	r := &mcpTemplateRepo{p: entity.ToolProvider{ID: "template", IsEnabled: true, ToolType: entity.ToolType{IsEnabled: true}, ProviderConfig: datatypes.JSON(`{"mcp":{"headers":{"Authorization":"secret"}}}`), ConfigSchema: datatypes.JSON(`{"type":"object","properties":{}}`)}}
+	r := &mcpTemplateRepo{p: entity.MCPTemplate{ID: "template", IsEnabled: true, Connection: datatypes.JSON(`{"headers":{"Authorization":"secret"}}`), ConfigSchema: datatypes.JSON(`{"type":"object","properties":{}}`)}}
 	s := NewMCPService(nil, r, nil)
 	rows, err := s.Templates(context.Background())
 	data, _ := json.Marshal(rows)
 	if err != nil || len(rows) != 1 || strings.Contains(string(data), "secret") {
 		t.Fatalf("预置列表不正确: %s %v", data, err)
 	}
-	r.p.ToolType.IsEnabled = false
-	if rows, err = s.Templates(context.Background()); err != nil || len(rows) != 0 {
-		t.Fatal("停用类型仍可绑定")
-	}
-	r.p.ToolType.IsEnabled = true
 	r.p.IsEnabled = false
 	if rows, err = s.Templates(context.Background()); err != nil || len(rows) != 0 {
 		t.Fatal("停用预置仍可绑定")
@@ -84,16 +79,14 @@ func TestMCPTemplateListFiltersDisabledAndHidesConnectionSecrets(t *testing.T) {
 }
 
 type probeMCPProvider struct {
-	cfg   *tool.MCPProviderConfig
+	cfg   *tool.MCPConfig
 	calls int
 }
 
-func (p *probeMCPProvider) Validate(*tool.ExecuteConfig) error { return nil }
-func (p *probeMCPProvider) Execute(context.Context, *tool.ExecuteConfig) (string, error) {
-	panic("探测不能执行工具")
-}
-func (p *probeMCPProvider) GetTools(_ context.Context, c *tool.ProviderConfig) ([]einotool.BaseTool, error) {
-	p.cfg = c.MCP
+func (p *probeMCPProvider) Validate(*tool.MCPConfig) error { return nil }
+
+func (p *probeMCPProvider) GetTools(_ context.Context, c *tool.MCPConfig) ([]einotool.BaseTool, error) {
+	p.cfg = c
 	p.calls++
 	return nil, nil
 }
@@ -101,7 +94,7 @@ func TestMCPServiceTemplateCredentialsAndOwnership(t *testing.T) {
 	ctx := context.Background()
 	id := "template"
 	repo := &mcpMemoryRepo{rows: map[string]entity.MCPConnection{}}
-	templates := &mcpTemplateRepo{p: entity.ToolProvider{ID: id, ProviderType: "mcp", ProviderKey: "search", IsEnabled: true, ToolType: entity.ToolType{ToolKey: "mcp", IsEnabled: true}, ConfigSchema: datatypes.JSON(`{"type":"object","properties":{"api_key":{"type":"string","secret":true}},"required":["api_key"]}`), ProviderConfig: datatypes.JSON(`{"mcp":{"transport":"http","url":"https://search.example/mcp","headers":{"Authorization":"Bearer {{api_key}}"}}}`)}}
+	templates := &mcpTemplateRepo{p: entity.MCPTemplate{ID: id, Key: "search", IsEnabled: true, ToolPrefix: "mcp_filesystem", ConfigSchema: datatypes.JSON(`{"type":"object","properties":{"api_key":{"type":"string","secret":true}},"required":["api_key"]}`), Connection: datatypes.JSON(`{"transport":"http","url":"https://search.example/mcp","headers":{"Authorization":"Bearer {{api_key}}"}}`)}}
 	p := &probeMCPProvider{}
 	s := NewMCPService(repo, templates, p)
 	req := request.CreateMCPConnectionRequest{TemplateID: &id, DisplayName: "搜索", Config: json.RawMessage(`{}`)}
@@ -133,9 +126,9 @@ func TestMCPServiceTemplateCredentialsAndOwnership(t *testing.T) {
 	if p.cfg.Headers["Authorization"] != "Bearer alice-secret" || p.cfg.ScopeKey != "alice:new-id" {
 		t.Fatal("用户Key未绑定或连接未隔离")
 	}
-	var original tool.ProviderConfig
-	_ = json.Unmarshal(templates.p.ProviderConfig, &original)
-	if original.MCP.Headers["Authorization"] != "Bearer {{api_key}}" {
+	var original tool.MCPConfig
+	_ = json.Unmarshal(templates.p.Connection, &original)
+	if original.Headers["Authorization"] != "Bearer {{api_key}}" {
 		t.Fatal("共享模板被改写")
 	}
 	override := json.RawMessage(`{"url":"https://attacker.example/mcp"}`)

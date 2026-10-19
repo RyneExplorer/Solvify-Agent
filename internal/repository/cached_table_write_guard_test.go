@@ -120,7 +120,6 @@ func TestCachedTableOwnersDerivationIsNotVacuous(t *testing.T) {
 
 	want := map[string]string{
 		"Model":           "model_repository.go",
-		"ToolType":        "tool_type_repository.go",
 		"UserModelConfig": "user_model_config_repository.go",
 	}
 

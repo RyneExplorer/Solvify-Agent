@@ -30,38 +30,37 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import AppButton from './ui/AppButton.vue'
 import AppSelect from './ui/AppSelect.vue'
 import * as api from '@/api/admin'
-import type { MCPServerInfo, ToolTestResult } from '@/types/tool'
+import type { MCPTemplateAdminInfo, MCPTestResult } from '@/types/mcp'
 import { toolTimeoutValue,toolTimeoutFromConfig } from '@/lib/tool-timeout.mjs'
 interface MCPFormState {transport:'http'|'sse';url:string;headers:Record<string,string>;connect_timeout:number|string;call_timeout:number|string}
 function createEmptyMCPForm():MCPFormState {return {transport:'http',url:'',headers:{},connect_timeout:'',call_timeout:''}}
-function mcpFromJSON(raw:unknown):MCPFormState {const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;const cfg = obj?.mcp || obj || {};return {...createEmptyMCPForm(),...cfg,connect_timeout:toolTimeoutFromConfig(cfg.connect_timeout ?? cfg.timeout),call_timeout:toolTimeoutFromConfig(cfg.call_timeout ?? cfg.timeout)}}
+function mcpFromJSON(raw:unknown):MCPFormState {const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;const cfg = obj || {};return {...createEmptyMCPForm(),...cfg,connect_timeout:toolTimeoutFromConfig(cfg.connect_timeout ?? cfg.timeout),call_timeout:toolTimeoutFromConfig(cfg.call_timeout ?? cfg.timeout)}}
 function buildMCPTimeoutConfig(f:MCPFormState) {return {connect_timeout:toolTimeoutValue(f.connect_timeout),call_timeout:toolTimeoutValue(f.call_timeout)}}
-function buildMCPProviderConfig(f:MCPFormState) {if(!f.url.trim()) throw new Error('请填写 MCP 地址');return {transport:f.transport,url:f.url.trim(),headers:f.headers,...buildMCPTimeoutConfig(f)}}
-const servers = ref<MCPServerInfo[]>([]), visible = ref(false), busy = ref(false), error = ref(''), editing = ref(''), typeId = ref(''), system = ref(false)
-const name=ref(''),key=ref(''),description=ref(''),headersText=ref('{}'),form=ref(createEmptyMCPForm()),fields=ref<{key:string;title:string;type:string;secret:boolean;required:boolean;definition:Record<string,unknown>}[]>([]),result=ref<ToolTestResult|null>(null)
+function buildMCPConnection(f:MCPFormState) {if(!f.url.trim()) throw new Error('请填写 MCP 地址');return {transport:f.transport,url:f.url.trim(),headers:f.headers,...buildMCPTimeoutConfig(f)}}
+const servers = ref<MCPTemplateAdminInfo[]>([]), visible = ref(false), busy = ref(false), error = ref(''), editing = ref(''), system = ref(false)
+const name=ref(''),key=ref(''),description=ref(''),headersText=ref('{}'),form=ref(createEmptyMCPForm()),fields=ref<{key:string;title:string;type:string;secret:boolean;required:boolean;definition:Record<string,unknown>}[]>([]),result=ref<MCPTestResult|null>(null)
 const schemaBase = ref<Record<string,unknown>>({})
-async function load() {try {servers.value = (await api.adminListMCPServers()).data.servers;error.value=''} catch(e) {error.value=e instanceof Error?e.message:'加载失败'}}
-async function open(s?:MCPServerInfo) {try {
-  editing.value=s?.id || '';system.value=!!s?.is_system;typeId.value=s?.tool_type_id || '';name.value=s?.name || '';key.value=s?.provider_key || '';description.value=s?.description || '';fields.value=[];schemaBase.value={};form.value=createEmptyMCPForm();result.value=null
-  if(s) {const p=(await api.adminListToolProviders(s.tool_type_id)).data.providers.find(p=>p.id===s.id);if(!p) throw new Error('预置不存在');form.value=mcpFromJSON(p.provider_config);const schema=p.config_schema as any;schemaBase.value={...schema};fields.value=Object.entries(schema?.properties || {}).map(([k,v]:[string,any])=>({key:k,title:v.title || k,type:v.type || 'string',secret:!!v.secret,required:!!schema.required?.includes(k),definition:{...v}}))}
+async function load() {try {servers.value = (await api.adminListMCPTemplates()).data;error.value=''} catch(e) {error.value=e instanceof Error?e.message:'加载失败'}}
+async function open(s?:MCPTemplateAdminInfo) {try {
+  editing.value=s?.id || '';system.value=!!s?.is_system;name.value=s?.name || '';key.value=s?.key || '';description.value=s?.description || '';fields.value=[];schemaBase.value={};form.value=createEmptyMCPForm();result.value=null
+  if(s) {const p=(await api.adminGetMCPTemplate(s.id)).data;form.value=mcpFromJSON(p.connection);const schema=p.config_schema as any;schemaBase.value={...schema};fields.value=Object.entries(schema?.properties || {}).map(([k,v]:[string,any])=>({key:k,title:v.title || k,type:v.type || 'string',secret:!!v.secret,required:!!schema.required?.includes(k),definition:{...v}}))}
   headersText.value=JSON.stringify(form.value.headers,null,2);visible.value=true
 } catch(e) {ElMessage.error(e instanceof Error?e.message:'读取失败')}}
 function close() {if(busy.value)return;visible.value=false;headersText.value='{}';form.value=createEmptyMCPForm();fields.value=[];schemaBase.value={};result.value=null}
-function providerConfig() {const headers=JSON.parse(headersText.value);if(!headers || typeof headers !== 'object' || Array.isArray(headers) || Object.values(headers).some(v=>typeof v!=='string')) throw new Error('请求头必须为字符串值的JSON对象');return buildMCPProviderConfig({...form.value,headers})}
+function connectionConfig() {const headers=JSON.parse(headersText.value);if(!headers || typeof headers !== 'object' || Array.isArray(headers) || Object.values(headers).some(v=>typeof v!=='string')) throw new Error('请求头必须为字符串值的JSON对象');return buildMCPConnection({...form.value,headers})}
 function schema() {const properties:Record<string,unknown>={},required:string[]=[];for(const f of fields.value) {if(!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(f.key) || properties[f.key]) throw new Error('配置字段名无效或重复');properties[f.key]={...f.definition,type:f.type,title:f.title || f.key,secret:f.secret};if(f.required)required.push(f.key)};return {...schemaBase.value,type:'object',properties,required}}
 async function save() {busy.value=true;try {
- if(system.value) await api.adminUpdateToolProvider(typeId.value,editing.value,{provider_config:{mcp:buildMCPTimeoutConfig(form.value)}})
+ if(system.value) await api.adminUpdateMCPTemplate(editing.value,{connection:buildMCPTimeoutConfig(form.value)})
  else {
-  if(!name.value.trim() || !/^[a-zA-Z0-9_-]+$/.test(key.value)) throw new Error('请填写名称和稳定标识（字母、数字、下划线或连字符）')
-  if(!typeId.value) {const types=(await api.adminListToolTypes()).data.tool_types;typeId.value=types.find(t=>t.tool_key==='mcp')?.id || '';if(!typeId.value)throw new Error('MCP配置未初始化，请联系管理员')}
-  const payload={name:name.value,provider_key:key.value,description:description.value,provider_type:'mcp',provider_config:providerConfig(),config_schema:schema()}
-  if(editing.value)await api.adminUpdateToolProvider(typeId.value,editing.value,payload);else await api.adminCreateToolProvider(typeId.value,payload)
+  if(!name.value.trim() || (!editing.value && !/^[a-zA-Z0-9_-]+$/.test(key.value))) throw new Error('请填写名称和稳定标识（字母、数字、下划线或连字符）')
+  const payload={name:name.value,key:key.value,description:description.value,connection:connectionConfig(),config_schema:schema()}
+  if(editing.value)await api.adminUpdateMCPTemplate(editing.value,payload);else await api.adminCreateMCPTemplate(payload)
  }
  busy.value=false;close();await load();ElMessage.success('MCP预置已保存')
 } catch(e) {ElMessage.error(e instanceof Error?e.message:'保存失败')} finally {busy.value=false}}
-async function probe() {busy.value=true;try {const config=providerConfig();if(Object.values(config.headers).some(v=>v.includes('{{'))) throw new Error('此预置需要用户填写凭据，请保存后在个人 MCP 配置中测试');result.value=(await api.adminProbeTool({provider_type:'mcp',provider_config:config})).data} catch(e) {result.value={success:false,message:e instanceof Error?e.message:'连接失败',response_time_ms:0}} finally {busy.value=false}}
-async function toggle(s:MCPServerInfo) {busy.value=true;try {await api.adminUpdateToolProvider(s.tool_type_id,s.id,{is_enabled:!s.is_enabled});await load()}catch(e){ElMessage.error(e instanceof Error?e.message:'操作失败')}finally{busy.value=false}}
-async function remove(s:MCPServerInfo) {try {await ElMessageBox.confirm(`删除预置「${s.name}」及用户绑定？`,'删除预置',{type:'warning'});await api.adminDeleteMCPServer(s.id);await load()} catch(e) {if(e!=='cancel' && e!=='close')ElMessage.error(e instanceof Error?e.message:'删除失败')}}
+async function probe() {busy.value=true;try {const config=connectionConfig();if(Object.values(config.headers).some(v=>v.includes('{{'))) throw new Error('此预置需要用户填写凭据，请保存后在个人 MCP 配置中测试');result.value=(await api.adminProbeMCPTemplate({connection:config})).data} catch(e) {result.value={success:false,message:e instanceof Error?e.message:'连接失败',response_time_ms:0}} finally {busy.value=false}}
+async function toggle(s:MCPTemplateAdminInfo) {busy.value=true;try {await api.adminUpdateMCPTemplate(s.id,{is_enabled:!s.is_enabled});await load()}catch(e){ElMessage.error(e instanceof Error?e.message:'操作失败')}finally{busy.value=false}}
+async function remove(s:MCPTemplateAdminInfo) {try {await ElMessageBox.confirm(`删除预置「${s.name}」及用户绑定？`,'删除预置',{type:'warning'});await api.adminDeleteMCPTemplate(s.id);await load()} catch(e) {if(e!=='cancel' && e!=='close')ElMessage.error(e instanceof Error?e.message:'删除失败')}}
 onMounted(load)
 </script>
 <style scoped>

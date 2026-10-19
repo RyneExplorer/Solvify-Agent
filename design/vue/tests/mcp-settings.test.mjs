@@ -124,3 +124,18 @@ test('MCP API使用连接路由，探测和停用独立于工具执行', async (
     assert.equal(calls[6].method, 'DELETE')
   } finally { delete globalThis.__mcpRequest }
 })
+
+test('迁移后的MCP模板保留稳定标识仍可编辑保存，不重新选择工具类型', async () => {
+  let saved
+  const scope = {
+    busy:ref(false),system:ref(false),editing:ref('legacy-template'),name:ref('旧搜索'),key:ref('legacy/old-template-id'),description:ref('保留绑定'),
+    connectionConfig:()=>({transport:'http',url:'https://example.invalid/mcp'}),schema:()=>({type:'object',properties:{}}),
+    api:{adminUpdateMCPTemplate:async(id,body)=>{saved={id,body}}},close(){},load:async()=>{},ElMessage:{success(){},error(message){throw Error(message)}},
+  }
+  const {save}=await componentFunctions('MCPAdminSettings',['save'],scope)
+  await save()
+  assert.equal(saved.id,'legacy-template')
+  assert.equal(saved.body.key,'legacy/old-template-id')
+  assert.equal(saved.body.connection.transport,'http')
+  assert.equal(scope.busy.value,false)
+})

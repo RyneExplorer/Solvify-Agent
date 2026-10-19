@@ -17,19 +17,19 @@ func TestSystemMCPTimeoutsSurviveStartupSync(t *testing.T) {
 		connect, call int
 	}{
 		{"", 20, 60},
-		{`{"mcp":{"connect_timeout":90,"call_timeout":120}}`, 20, 60},
-		{`{"mcp":{"admin_timeouts":true,"connect_timeout":90,"call_timeout":120,"url":"https://old.invalid"}}`, 90, 120},
-		{`{"mcp":{"admin_timeouts":true,"connect_timeout":30,"call_timeout":300}}`, 30, 300},
+		{`{"connect_timeout":90,"call_timeout":120}`, 20, 60},
+		{`{"admin_timeouts":true,"connect_timeout":90,"call_timeout":120,"url":"https://old.invalid"}`, 90, 120},
+		{`{"admin_timeouts":true,"connect_timeout":30,"call_timeout":300}`, 30, 300},
 	} {
-		raw, err := systemMCPProviderConfig(srv, []byte(tc.existing))
+		raw, err := systemMCPConnection(srv, []byte(tc.existing))
 		if err != nil {
 			t.Fatal(err)
 		}
-		var pc tool.ProviderConfig
+		var pc tool.MCPConfig
 		if err = json.Unmarshal(raw, &pc); err != nil {
 			t.Fatal(err)
 		}
-		if pc.MCP.URL != srv.URL || pc.MCP.ConnectionTimeout() != time.Duration(tc.connect)*time.Second || pc.MCP.ToolCallTimeout() != time.Duration(tc.call)*time.Second {
+		if pc.URL != srv.URL || pc.ConnectionTimeout() != time.Duration(tc.connect)*time.Second || pc.ToolCallTimeout() != time.Duration(tc.call)*time.Second {
 			t.Fatal(string(raw))
 		}
 	}

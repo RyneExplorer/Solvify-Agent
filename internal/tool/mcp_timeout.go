@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func (cfg *MCPProviderConfig) ValidateTimeouts() error {
+func (cfg *MCPConfig) ValidateTimeouts() error {
 	if cfg.Timeout < 0 || cfg.Timeout > 86400 {
 		return fmt.Errorf("MCP旧超时时间须为0～86400秒")
 	}
@@ -22,15 +22,15 @@ func (cfg *MCPProviderConfig) ValidateTimeouts() error {
 	return nil
 }
 
-func (cfg *MCPProviderConfig) ConnectionTimeout() time.Duration {
+func (cfg *MCPConfig) ConnectionTimeout() time.Duration {
 	return cfg.timeoutValue(cfg.ConnectTimeout, 30)
 }
 
-func (cfg *MCPProviderConfig) ToolCallTimeout() time.Duration {
+func (cfg *MCPConfig) ToolCallTimeout() time.Duration {
 	return cfg.timeoutValue(cfg.CallTimeout, 300)
 }
 
-func (cfg *MCPProviderConfig) timeoutValue(explicit *int, fallback int) time.Duration {
+func (cfg *MCPConfig) timeoutValue(explicit *int, fallback int) time.Duration {
 	seconds := fallback
 	if cfg.Timeout > 0 {
 		seconds = cfg.Timeout

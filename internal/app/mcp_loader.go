@@ -8,6 +8,8 @@ import (
 
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	gormlogger "gorm.io/gorm/logger"
 
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/internal/tool"
@@ -15,159 +17,76 @@ import (
 	"solvify-agent/pkg/logger"
 )
 
-// mcpToolKey 系统预置 MCP 服务的 ToolType.ToolKey
-const mcpToolKey = "mcp"
-
-// loadSystemMCPServers 从配置文件加载系统预置 MCP 服务器到数据库
-// 启动时调用：确保 config.yaml 中配置的 MCP 服务器在数据库中存在（is_system=true）
 func (a *App) loadSystemMCPServers(ctx context.Context) error {
-	if _, err := a.ensureMCPToolType(ctx); err != nil {
-		return err
-	}
-	mcpServers := a.cfg.Tools.MCPServers
-	if len(mcpServers) == 0 {
-		return nil
-	}
-
-	logger.Infof("[MCPLoader] 开始加载系统预置 MCP 服务器: count=%d", len(mcpServers))
-
-	// 1. 确保存在 "mcp" ToolType
-	mcpToolType, err := a.ensureMCPToolType(ctx)
-	if err != nil {
-		return err
-	}
-
-	// 2. 遍历配置中的 MCP 服务器，同步到数据库
-	for i := range mcpServers {
-		srv := &mcpServers[i]
-		if err := a.upsertSystemMCPProvider(ctx, mcpToolType.ID, srv); err != nil {
-			logger.Warnf("[MCPLoader] 加载系统预置 MCP 服务器失败，跳过: name=%s, err=%v", srv.Name, err)
-			continue
-		}
-	}
-
-	logger.Info("[MCPLoader] 系统预置 MCP 服务器加载完成")
-	return nil
-}
-
-// ensureMCPToolType 确保数据库中存在 "mcp" ToolType，不存在则创建
-func (a *App) ensureMCPToolType(ctx context.Context) (*entity.ToolType, error) {
-	db := a.postgresqlDB.WithContext(ctx)
-
-	var toolType entity.ToolType
-	err := db.Where("tool_key = ?", mcpToolKey).First(&toolType).Error
-	if err == nil {
-		// 已存在
-		return &toolType, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
-	}
-
-	// 创建 MCP ToolType
-	toolType = entity.ToolType{
-		Name:          "MCP 工具集",
-		ToolKey:       mcpToolKey,
-		Description:   "通过 MCP 协议接入的外部工具服务器，一个 MCP Server 可提供多个工具",
-		ExecutionMode: "sync",
-		IsEnabled:     true,
-	}
-	if err := db.Create(&toolType).Error; err != nil {
-		return nil, err
-	}
-	logger.Infof("[MCPLoader] 创建 MCP ToolType 成功: id=%s", toolType.ID)
-	return &toolType, nil
-}
-
-// upsertSystemMCPProvider 创建或更新系统预置 MCP Provider
-func (a *App) upsertSystemMCPProvider(ctx context.Context, toolTypeID string, srv *config.SystemMCPServerConfig) error {
-	db := a.postgresqlDB.WithContext(ctx)
-
-	// 查找是否已存在同 provider_key 的记录
-	schemaJSON, schemaErr := json.Marshal(srv.ConfigSchema)
-	if schemaErr != nil {
-		return schemaErr
-	}
-	var provider entity.ToolProvider
-	err := db.Where("tool_type_id = ? AND provider_key = ?", toolTypeID, srv.Name).First(&provider).Error
-	if err == nil {
-		providerConfigJSON, configErr := systemMCPProviderConfig(srv, provider.ProviderConfig)
-		if configErr != nil {
-			return configErr
-		}
-		// 已存在：仅更新配置（保留 is_system 标记）
-		provider.Name = srv.Name
-		provider.Description = srv.Description
-		provider.ProviderConfig = datatypes.JSON(providerConfigJSON)
-		provider.ConfigSchema = datatypes.JSON(schemaJSON)
-		provider.IsSystem = true
-		if err := db.Save(&provider).Error; err != nil {
+	for i := range a.cfg.Tools.MCPServers {
+		if err := a.upsertSystemMCPTemplate(ctx, &a.cfg.Tools.MCPServers[i]); err != nil {
 			return err
 		}
-		logger.Infof("[MCPLoader] 更新系统预置 MCP 服务器: name=%s", srv.Name)
-		return nil
 	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
-	providerConfigJSON, err := systemMCPProviderConfig(srv, nil)
-	if err != nil {
-		return err
-	}
-
-	// 不存在：创建
-	provider = entity.ToolProvider{
-		ToolTypeID:     toolTypeID,
-		ProviderKey:    srv.Name,
-		Name:           srv.Name,
-		Description:    srv.Description,
-		ProviderType:   "mcp",
-		ProviderConfig: datatypes.JSON(providerConfigJSON),
-		ConfigSchema:   datatypes.JSON(schemaJSON),
-		IsEnabled:      true,
-		IsSystem:       true,
-	}
-	if err := db.Create(&provider).Error; err != nil {
-		return err
-	}
-	logger.Infof("[MCPLoader] 创建系统预置 MCP 服务器: name=%s, id=%s", srv.Name, provider.ID)
 	return nil
+}
+func (a *App) upsertSystemMCPTemplate(ctx context.Context, srv *config.SystemMCPServerConfig) error {
+	return a.postgresqlDB.Session(&gorm.Session{Logger: a.postgresqlDB.Logger.LogMode(gormlogger.Silent)}).WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		// 串行化同名模板的启动同步，唯一约束负责最终防重。
+		if err := db.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", "mcp-template:"+srv.Name).Error; err != nil {
+			return err
+		}
+		var t entity.MCPTemplate
+		err := db.Clauses(clause.Locking{Strength: "UPDATE"}).Where("template_key = ?", srv.Name).First(&t).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		exists := err == nil
+		raw, err := systemMCPConnection(srv, t.Connection)
+		if err != nil {
+			return err
+		}
+		schema, err := json.Marshal(srv.ConfigSchema)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			t = entity.MCPTemplate{Key: srv.Name, ToolPrefix: tool.MCPToolPrefix("mcp", srv.Name), IsEnabled: true}
+		}
+		t.Name = srv.Name
+		t.Description = srv.Description
+		t.Connection = datatypes.JSON(raw)
+		t.ConfigSchema = datatypes.JSON(schema)
+		t.IsSystem = true
+		if exists {
+			return db.Model(&entity.MCPTemplate{}).Where("id = ?", t.ID).Select("name", "description", "connection", "config_schema", "is_system", "updated_at").Updates(&t).Error
+		}
+		return db.Create(&t).Error
+	})
 }
 
 // YAML管理连接信息；已由管理员保存的超时在重启同步时保留。
-func systemMCPProviderConfig(srv *config.SystemMCPServerConfig, existing []byte) ([]byte, error) {
-	cfg := tool.MCPProviderConfig{
-		Transport: srv.Transport, Command: srv.Command, Args: srv.Args, Env: srv.Env,
-		URL: srv.URL, Headers: srv.Headers, Timeout: srv.Timeout,
-		ConnectTimeout: srv.ConnectTimeout, CallTimeout: srv.CallTimeout,
-	}
+func systemMCPConnection(srv *config.SystemMCPServerConfig, existing []byte) ([]byte, error) {
+	cfg := tool.MCPConfig{Transport: srv.Transport, Command: srv.Command, Args: srv.Args, Env: srv.Env, URL: srv.URL, Headers: srv.Headers, Timeout: srv.Timeout, ConnectTimeout: srv.ConnectTimeout, CallTimeout: srv.CallTimeout}
 	if err := cfg.ValidateTimeouts(); err != nil {
 		return nil, err
 	}
 	if len(existing) > 0 {
-		var stored tool.ProviderConfig
+		var stored tool.MCPConfig
 		if err := json.Unmarshal(existing, &stored); err != nil {
 			return nil, err
 		}
-		if stored.MCP != nil && stored.MCP.AdminTimeouts {
+		if stored.AdminTimeouts {
 			cfg.Timeout = 0
-			cfg.ConnectTimeout = stored.MCP.ConnectTimeout
-			cfg.CallTimeout = stored.MCP.CallTimeout
+			cfg.ConnectTimeout = stored.ConnectTimeout
+			cfg.CallTimeout = stored.CallTimeout
 			cfg.AdminTimeouts = true
 		}
 	}
 	if err := cfg.ValidateTimeouts(); err != nil {
 		return nil, err
 	}
-	return json.Marshal(tool.ProviderConfig{MCP: &cfg})
+	return json.Marshal(cfg)
 }
-
-// loadSystemMCPServersWithTimeout 带超时的加载包装
 func (a *App) loadSystemMCPServersWithTimeout() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
 	if err := a.loadSystemMCPServers(ctx); err != nil {
-		logger.Errorf("[MCPLoader] 加载系统预置 MCP 服务器失败: %v", err)
+		logger.Error("加载部署MCP预置失败，请检查配置和数据库")
 	}
 }

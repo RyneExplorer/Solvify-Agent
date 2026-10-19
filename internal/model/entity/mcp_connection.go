@@ -19,7 +19,7 @@ type MCPConnection struct {
 	IsEnabled   bool           `json:"is_enabled"`
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
-	Template    *ToolProvider  `gorm:"foreignKey:TemplateID" json:"-"`
+	Template    *MCPTemplate   `gorm:"foreignKey:TemplateID" json:"-"`
 }
 
 func (*MCPConnection) TableName() string { return "mcp_connections" }

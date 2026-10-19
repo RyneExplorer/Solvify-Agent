@@ -13,7 +13,6 @@ import (
 	"solvify-agent/internal/api/v1/search"
 	"solvify-agent/internal/api/v1/storage"
 	syncapi "solvify-agent/internal/api/v1/sync"
-	"solvify-agent/internal/api/v1/tool"
 	"solvify-agent/internal/api/v1/user"
 	usermodelconfigapi "solvify-agent/internal/api/v1/user_model_config"
 	"solvify-agent/internal/middleware"
@@ -34,7 +33,7 @@ type Router struct {
 	chatCtrl          *chat.Controller
 	syncCtrl          *syncapi.Controller
 	dingtalkCtrl      *dingtalkapi.Controller
-	toolCtrl          *tool.Controller
+	templateCtrl      *mcpapi.TemplateController
 	mcpCtrl           *mcpapi.Controller
 	authService       service.AuthServiceInterface
 }
@@ -54,8 +53,7 @@ func NewRouter(
 	chatSvc service.ChatServiceInterface,
 	syncSvc service.SyncServiceInterface,
 	dingtalkSvc service.DingTalkServiceInterface,
-	toolTypeService service.ToolTypeService,
-	toolProviderService service.ToolProviderService,
+	templateService service.MCPTemplateService,
 	mcpService service.MCPService,
 	prefService service.UserPreferenceService,
 ) *Router {
@@ -71,7 +69,7 @@ func NewRouter(
 		syncCtrl:          syncapi.NewController(syncSvc),
 		dingtalkCtrl:      dingtalkapi.NewController(dingtalkSvc),
 		chatCtrl:          chat.NewController(chatSvc, adminSessionService),
-		toolCtrl:          tool.NewController(toolTypeService, toolProviderService),
+		templateCtrl:      mcpapi.NewTemplateController(templateService),
 		mcpCtrl:           mcpapi.NewController(mcpService),
 		authService:       authService,
 	}
@@ -122,7 +120,7 @@ func (r *Router) Setup(engine *gin.Engine) {
 	r.storageCtrl.RegisterRoutes(v1)
 
 	// 工具
-	r.toolCtrl.RegisterRoutes(v1)
+	r.templateCtrl.RegisterRoutes(v1)
 	r.mcpCtrl.RegisterRoutes(v1)
 }
 

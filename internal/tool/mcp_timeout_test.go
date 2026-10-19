@@ -16,7 +16,7 @@ func TestMCPIndependentTimeoutCompatibility(t *testing.T) {
 		{`{"timeout":45,"call_timeout":120}`, 45, 120},
 		{`{"connect_timeout":90,"call_timeout":120}`, 90, 120},
 	} {
-		var cfg MCPProviderConfig
+		var cfg MCPConfig
 		if err := json.Unmarshal([]byte(tc.raw), &cfg); err != nil {
 			t.Fatal(err)
 		}
@@ -28,7 +28,7 @@ func TestMCPIndependentTimeoutCompatibility(t *testing.T) {
 		}
 	}
 	for _, raw := range []string{`{"connect_timeout":0}`, `{"call_timeout":-1}`, `{"call_timeout":86401}`, `{"connect_timeout":1.5}`, `{"call_timeout":"30"}`} {
-		var cfg MCPProviderConfig
+		var cfg MCPConfig
 		if err := json.Unmarshal([]byte(raw), &cfg); err == nil && cfg.ValidateTimeouts() == nil {
 			t.Fatal("非法配置被接受", raw)
 		}

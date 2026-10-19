@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"solvify-agent/internal/llm"
 	"strings"
 
 	"gorm.io/datatypes"
 
+	"solvify-agent/internal/llm"
 	requestdto "solvify-agent/internal/model/dto/request"
 	responsedto "solvify-agent/internal/model/dto/response"
 	"solvify-agent/internal/model/entity"
@@ -29,8 +29,7 @@ func isNotFound(err error) bool {
 			apperrors.CodeKnowledgeBaseNotFound,
 			apperrors.CodeDocumentNotFound,
 			apperrors.CodeSessionNotFound,
-			apperrors.CodeToolTypeNotFound,
-			apperrors.CodeToolProviderNotFound,
+			apperrors.CodeMCPTemplateNotFound,
 			apperrors.CodeNotFound:
 			return true
 		}

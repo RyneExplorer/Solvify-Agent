@@ -15,12 +15,12 @@ import (
 )
 
 type toolFactory struct {
-	registry   ProviderRegistry
+	client     MCPClient
 	configRepo MCPConnectionStore
 }
 
-func NewFactory(registry ProviderRegistry, configRepo MCPConnectionStore) ToolFactory {
-	return &toolFactory{registry, configRepo}
+func NewFactory(client MCPClient, configRepo MCPConnectionStore) ToolFactory {
+	return &toolFactory{client, configRepo}
 }
 func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string, ids ...string) []einoTool.BaseTool {
 	configs, err := f.configRepo.ListEnabledByUserID(ctx, userID)
@@ -32,10 +32,6 @@ func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string, ids .
 	for _, id := range ids {
 		allowed[id] = true
 	}
-	multi, ok := f.registry.Get("mcp").(MultiToolProvider)
-	if !ok {
-		return nil
-	}
 	out := make([]einoTool.BaseTool, 0)
 	for _, c := range configs {
 		if c.UserID != userID || !c.IsEnabled || (len(ids) > 0 && !allowed[c.ID]) {
@@ -46,7 +42,7 @@ func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string, ids .
 			logger.Warnf("MCP连接配置不可用: connection_id=%s", c.ID)
 			continue
 		}
-		tools, err := multi.GetTools(ctx, &ProviderConfig{MCP: cfg})
+		tools, err := f.client.GetTools(ctx, cfg)
 		if err != nil {
 			logger.Warnf("MCP连接或工具发现失败: connection_id=%s", c.ID)
 			continue
@@ -66,12 +62,12 @@ func (f *toolFactory) CreateAgentTools(ctx context.Context, userID string, ids .
 				if e != nil || current.UserID != userID || !current.IsEnabled {
 					return fmt.Errorf("MCP连接已停用或不可用")
 				}
-				resolved, _, e := ResolveMCPConnection(current)
+				resolved, currentPrefix, e := ResolveMCPConnection(current)
 				if e != nil {
 					return fmt.Errorf("MCP配置已失效")
 				}
 				actual, _ := json.Marshal(resolved)
-				if string(actual) != string(expected) {
+				if string(actual) != string(expected) || currentPrefix != prefix {
 					return fmt.Errorf("MCP配置已更新，请重新发起任务")
 				}
 				return nil
@@ -107,15 +103,15 @@ func parseDisabledTools(userConfig map[string]interface{}) map[string]bool {
 	return disabled
 }
 
-// mcpToolPrefix 构造 MCP 工具名前缀：{tool_key}_{provider_key}
-// provider_key 由管理员填写，可能含空格等非法字符，需清洗后使用，
+// MCPToolPrefix 构造稳定前缀：命名空间与模板标识。
+// 部署标识可能含空格等字符，需清洗后使用，
 // 保证最终工具名满足模型厂商对函数名的约束（通常只允许字母、数字、下划线、连字符）。
-func mcpToolPrefix(toolKey, providerKey string) string {
-	pk := sanitizeToolNamePart(providerKey)
+func MCPToolPrefix(namespace, key string) string {
+	pk := sanitizeToolNamePart(key)
 	if pk == "" {
-		return toolKey
+		return namespace
 	}
-	return toolKey + "_" + pk
+	return namespace + "_" + pk
 }
 
 // sanitizeToolNamePart 将任意字符串清洗为合法的工具名片段

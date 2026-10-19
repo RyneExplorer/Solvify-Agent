@@ -20,28 +20,28 @@ import (
 )
 
 type mcpTemplateStore interface {
-	GetByID(ctx context.Context, id string) (*entity.ToolProvider, error)
-	ListMCPProviders(ctx context.Context) ([]repository.MCPServerRow, error)
+	GetByID(ctx context.Context, id string) (*entity.MCPTemplate, error)
+	List(ctx context.Context) ([]entity.MCPTemplate, error)
 }
 
 type mcpService struct {
 	repo      repository.MCPRepository
 	templates mcpTemplateStore
-	provider  tool.MultiToolProvider
+	provider  tool.MCPClient
 }
 
-func NewMCPService(repo repository.MCPRepository, templates mcpTemplateStore, provider tool.MultiToolProvider) MCPService {
+func NewMCPService(repo repository.MCPRepository, templates mcpTemplateStore, provider tool.MCPClient) MCPService {
 	return &mcpService{repo, templates, provider}
 }
 func (s *mcpService) Templates(ctx context.Context) ([]response.MCPTemplateInfo, error) {
-	rows, err := s.templates.ListMCPProviders(ctx)
+	rows, err := s.templates.List(ctx)
 	if err != nil {
 		return nil, apperrors.WrapDefault(apperrors.CodeInternalError, err)
 	}
 	out := make([]response.MCPTemplateInfo, 0, len(rows))
 	for _, row := range rows {
-		p := &row.ToolProvider
-		if p.IsEnabled && p.ToolType.IsEnabled {
+		p := &row
+		if p.IsEnabled {
 			out = append(out, response.MCPTemplateInfo{ID: p.ID, Name: p.Name, Description: p.Description, ConfigSchema: json.RawMessage(p.ConfigSchema)})
 		}
 	}
@@ -94,7 +94,7 @@ func objectJSON(raw []byte) (datatypes.JSON, error) {
 	canonical, err := json.Marshal(value)
 	return datatypes.JSON(canonical), err
 }
-func (s *mcpService) validate(ctx context.Context, c *entity.MCPConnection) (*tool.MCPProviderConfig, error) {
+func (s *mcpService) validate(ctx context.Context, c *entity.MCPConnection) (*tool.MCPConfig, error) {
 	if strings.TrimSpace(c.DisplayName) == "" || len([]rune(c.DisplayName)) > 100 {
 		return nil, apperrors.New(apperrors.CodeBadRequest, "请填写MCP名称（不超过100字）")
 	}
@@ -104,7 +104,7 @@ func (s *mcpService) validate(ctx context.Context, c *entity.MCPConnection) (*to
 		}
 		p, err := s.templates.GetByID(ctx, *c.TemplateID)
 		if err != nil {
-			return nil, apperrors.NotFoundOrInternal(apperrors.CodeToolProviderNotFound, err)
+			return nil, apperrors.NotFoundOrInternal(apperrors.CodeMCPTemplateNotFound, err)
 		}
 		c.Template = p
 	}
@@ -112,12 +112,12 @@ func (s *mcpService) validate(ctx context.Context, c *entity.MCPConnection) (*to
 	if err != nil {
 		return nil, apperrors.New(apperrors.CodeBadRequest, err.Error())
 	}
-	if err = s.provider.Validate(&tool.ExecuteConfig{ProviderConfig: &tool.ProviderConfig{MCP: cfg}}); err != nil {
+	if err = s.provider.Validate(cfg); err != nil {
 		return nil, apperrors.New(apperrors.CodeBadRequest, "MCP连接配置无效")
 	}
 	return cfg, nil
 }
-func (s *mcpService) draft(ctx context.Context, userID string, req request.CreateMCPConnectionRequest) (*entity.MCPConnection, *tool.MCPProviderConfig, error) {
+func (s *mcpService) draft(ctx context.Context, userID string, req request.CreateMCPConnectionRequest) (*entity.MCPConnection, *tool.MCPConfig, error) {
 	conn, err := objectJSON(req.Connection)
 	if err != nil {
 		return nil, nil, err
@@ -191,7 +191,7 @@ func (s *mcpService) Delete(ctx context.Context, userID, id string) error {
 }
 func (s *mcpService) Probe(ctx context.Context, userID string, req request.ProbeMCPConnectionRequest) (*response.TestResult, error) {
 	start := time.Now()
-	var cfg *tool.MCPProviderConfig
+	var cfg *tool.MCPConfig
 	var err error
 	if req.ID != "" {
 		var c *entity.MCPConnection
@@ -205,7 +205,7 @@ func (s *mcpService) Probe(ctx context.Context, userID string, req request.Probe
 	if err != nil {
 		return nil, err
 	}
-	tools, err := s.provider.GetTools(ctx, &tool.ProviderConfig{MCP: cfg})
+	tools, err := s.provider.GetTools(ctx, cfg)
 	out := &response.TestResult{Success: err == nil, ResponseTime: time.Since(start).Milliseconds()}
 	if err != nil {
 		out.Message = "MCP连接或工具发现失败，请检查地址、凭据及服务状态"

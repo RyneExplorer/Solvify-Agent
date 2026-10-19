@@ -14,19 +14,17 @@ import (
 var mcpPlaceholder = regexp.MustCompile(`\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}`)
 
 // ResolveMCPConnection 从可信归属和模板生成运行配置，不改写共享模板。
-func ResolveMCPConnection(c *entity.MCPConnection) (*MCPProviderConfig, string, error) {
-	var cfg MCPProviderConfig
-	prefix := mcpToolPrefix("mcp", c.ID)
+func ResolveMCPConnection(c *entity.MCPConnection) (*MCPConfig, string, error) {
+	var cfg MCPConfig
+	prefix := MCPToolPrefix("mcp", c.ID)
 	if c.TemplateID != nil {
 		p := c.Template
-		if p == nil || !p.IsEnabled || p.ProviderType != "mcp" || !p.ToolType.IsEnabled {
+		if p == nil || !p.IsEnabled {
 			return nil, "", fmt.Errorf("MCP预置不可用")
 		}
-		var pc ProviderConfig
-		if err := json.Unmarshal(p.ProviderConfig, &pc); err != nil || pc.MCP == nil {
+		if err := json.Unmarshal(p.Connection, &cfg); err != nil {
 			return nil, "", fmt.Errorf("MCP预置配置错误")
 		}
-		cfg = *pc.MCP
 		values := map[string]any{}
 		if err := json.Unmarshal(c.Config, &values); err != nil || values == nil {
 			return nil, "", fmt.Errorf("MCP配置必须为对象")
@@ -55,11 +53,7 @@ func ResolveMCPConnection(c *entity.MCPConnection) (*MCPProviderConfig, string, 
 		if strings.Contains(cfg.URL, "{{") {
 			return nil, "", fmt.Errorf("MCP预置地址不允许包含用户变量")
 		}
-		key := p.ToolType.ToolKey
-		if key == "" {
-			key = "mcp"
-		}
-		prefix = mcpToolPrefix(key, p.ProviderKey) // 保留历史checkpoint中的工具名。
+		prefix = p.ToolPrefix // 创建时固定，迁移保留历史checkpoint中的工具名。
 	} else {
 		if err := json.Unmarshal(c.Connection, &cfg); err != nil {
 			return nil, "", fmt.Errorf("MCP连接配置格式错误")
