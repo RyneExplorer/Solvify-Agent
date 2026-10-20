@@ -237,6 +237,8 @@ func TestQuickAgentBudgetGuardOnFirstRunAndResume(t *testing.T) {
 
 func mustExecute(t *testing.T, ctx context.Context, e *Engine, req Request, m *deepTestModel) <-chan Event {
 	t.Helper()
+	ctx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
 	if req.MaxContextLength == 0 {
 		req.MaxContextLength = 64000
 		req.ModelName = "gpt-4o"
