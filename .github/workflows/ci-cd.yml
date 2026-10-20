@@ -66,7 +66,16 @@ jobs:
         uses: actions/checkout@v6
 
       - name: 检查 Shell 语法
-        run: bash -n deploy/deploy.sh deploy/server-bootstrap.sh
+        run: |
+          for script in deploy/deploy.sh deploy/database.sh deploy/server-bootstrap.sh; do
+            bash -n "$script"
+          done
+
+      - name: 验证部署失败保护
+        run: python3 -m unittest discover -s deploy/tests -p 'test_deploy.py' -v
+
+      - name: 验证数据库备份恢复和增量升级
+        run: python3 deploy/tests/database_integration.py
 
       - name: 准备 Compose 检查配置
         env:
@@ -217,9 +226,11 @@ jobs:
         env:
           PACKAGE_DIR: ${{ runner.temp }}/solvify-deploy-package
         run: |
-          mkdir -p "$PACKAGE_DIR/postgres/init"
+          mkdir -p "$PACKAGE_DIR/postgres/init" "$PACKAGE_DIR/migrations"
           cp deploy/compose.prod.yaml "$PACKAGE_DIR/"
           cp deploy/deploy.sh "$PACKAGE_DIR/"
+          cp deploy/database.sh deploy/migrations.list "$PACKAGE_DIR/"
+          cp scripts/migrations/*.sql "$PACKAGE_DIR/migrations/"
           cp deploy/server-bootstrap.sh "$PACKAGE_DIR/"
           cp deploy/.env.production.example "$PACKAGE_DIR/"
           cp deploy/config.production.yaml.example "$PACKAGE_DIR/"

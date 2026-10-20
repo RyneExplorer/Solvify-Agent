@@ -1,6 +1,6 @@
 # Docker Compose 生产部署
 
-本目录用于将 Solvify-Agent 部署到一台 Linux 服务器。生产环境包含 Vue/Nginx 前端、Go 后端、PostgreSQL/pgvector、Redis 和一次性数据库迁移任务。
+本目录用于将 Solvify-Agent 部署到一台 Linux 服务器。生产环境包含 Vue/Nginx 前端、Go 后端、PostgreSQL/pgvector、Redis。发布脚本在 PostgreSQL 容器内执行备份和一次性增量升级。
 
 ## 默认约定
 
@@ -96,7 +96,8 @@ ghcr.io/<owner>/<repo>-frontend:<commit-sha>
 3. 验证 Shell、Compose 和 Dockerfile
 4. 发布 SHA 与 `latest` 标签
 5. 上传部署包并调用 `deploy.sh`
-6. 检查 `http://<DEPLOY_HOST>:18888/health`
+6. 数据服务就绪后备份数据库、校验归档，按 `migrations.list` 升级已有库
+7. 更新后端和前端，检查 `http://<DEPLOY_HOST>:18888/health`
 
 如果第一次发布因 GHCR Package 仍为私有而失败，将 Package 改为公开后，在 Actions 页面重新运行失败的工作流。
 
@@ -114,7 +115,22 @@ ghcr.io/<owner>/<repo>-frontend:<commit-sha>
 /opt/solvify-agent/shared/.release.env.previous
 ```
 
-新版本健康检查失败时，脚本会恢复上一组提交 SHA 镜像。数据库脚本只允许向前兼容的幂等变更，不执行数据库结构降级。
+新版本健康检查失败时，脚本会恢复上一组提交 SHA 镜像。备份或迁移失败时尚未替换应用，保留原应用容器并恢复发布记录。数据库脚本只允许向前兼容的幂等变更，不执行数据库结构降级，也不自动恢复旧备份覆盖在线数据。
+
+### 数据库升级与备份
+
+空数据卷首次启动仍使用 `postgres/init/001-init-schema.sql`；已有数据卷不会重新初始化。每次发布都执行以下步骤：
+
+1. 在部署锁内，使用数据库容器的 `POSTGRES_USER`、`POSTGRES_DB` 创建 `pg_dump --format=custom` 一致性备份。
+2. 校验归档目录并解码全部归档数据，完成后原子改名，保存 SHA256 文件；任一步失败都不迁移、不更新应用。
+3. 单个 PostgreSQL 连接持有升级会话锁，按清单执行未应用的版本。每个版本的 SQL 与 `app_schema_migrations` 记录在同一事务内提交；失败版本回滚，已成功版本保留，重试跳过已应用版本，避免重复覆盖后续模型/MCP配置编辑。
+4. 核验消息向量任务的六个字段、MCP 连接/模板和上下文产物表后，才更新后端。
+
+备份位于 `/opt/solvify-agent/shared/backups/<UTC时间>-<提交SHA>.<随机后缀>.dump`，目录权限 `0700`，文件权限 `0600`。同时保留 `.sha256` 和私有 `.migration.log`；数据库错误不直接写入 Actions 日志。备份包含凭据等业务数据，不提交 Git，也不上传到 CI。备份不会自动清理，请根据磁盘容量设置独立保留策略，并将重要备份复制到受控的异机存储。它只包含数据库，不包含上传文件、Redis或服务器配置。
+
+校验通过表示归档可完整读取；生产发布不会自动创建恢复库。CI 使用隔离容器验证备份实际恢复、新库初始化、旧库升级、重复升级、失败事务回滚。需要恢复时，先停止相关写入、核对目标数据库和备份时间，在独立空库演练并核对数据后再切换；不要直接向在线库执行覆盖恢复。
+
+新增迁移需加入 `deploy/migrations.list`，文件存放于 `scripts/migrations/`。SQL仅包含一个独立外层 `BEGIN;` / `COMMIT;` 事务，不能嵌套事务或使用 `CREATE INDEX CONCURRENTLY` 等事务外语句。脚本在发布时统一封装版本记录；历史已应用版本不重复执行。迁移事务锁等待最多30秒、每条语句最多5分钟。需要长时间或破坏性升级时单独设计维护步骤，不能直接加入自动发布。
 
 ## 6. 常用运维命令
 

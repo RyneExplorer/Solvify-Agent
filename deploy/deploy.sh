@@ -12,6 +12,8 @@ PREVIOUS_RELEASE_ENV="$SOLVIFY_ROOT/shared/.release.env.previous"
 LOCK_FILE="$SOLVIFY_ROOT/deploy.lock"
 COMPOSE_PROJECT_NAME="solvify-agent"
 HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-180}"
+APPLICATION_UPDATE_STARTED=false
+source "$SCRIPT_DIR/database.sh"
 
 # 输出部署信息
 log() {
@@ -138,13 +140,24 @@ rollback() {
 handle_error() {
   local exit_code="$?"
   local line_number="${1:-未知}"
+  local rollback_code=0
 
   trap - ERR
   set +e
   log "部署在第 ${line_number} 行失败"
-  print_diagnostics
-  rollback
-  local rollback_code="$?"
+  if [[ "$APPLICATION_UPDATE_STARTED" == true ]]; then
+    print_diagnostics
+    rollback || rollback_code="$?"
+  elif [[ -f "$PREVIOUS_RELEASE_ENV" ]]; then
+    if cp "$PREVIOUS_RELEASE_ENV" "$RELEASE_ENV" && chmod 0600 "$RELEASE_ENV"; then
+      log "尚未替换应用，保留当前应用容器并恢复发布记录"
+    else
+      rollback_code=1
+    fi
+  else
+    rm -f -- "$RELEASE_ENV" || rollback_code="$?"
+    log "尚未启动应用，保留数据服务供排查"
+  fi
   if [[ "$rollback_code" -ne 0 ]]; then
     log "自动回滚未完成，请人工检查"
   fi
@@ -186,11 +199,13 @@ main() {
 
   require_command docker
   require_command flock
+  require_command sha256sum
   docker compose version >/dev/null 2>&1 || fail "需要安装 Docker Compose v2"
 
   [[ -f "$COMPOSE_FILE" ]] || fail "Compose 文件不存在：${COMPOSE_FILE}"
   [[ -f "$ENV_FILE" ]] || fail "生产环境变量不存在：${ENV_FILE}"
   [[ -f "$CONFIG_FILE" ]] || fail "生产配置不存在：${CONFIG_FILE}"
+  validate_migration_package || fail "数据库迁移包校验失败"
   if grep -q "CHANGE_ME" "$ENV_FILE" "$CONFIG_FILE"; then
     fail "生产配置仍包含 CHANGE_ME，请先填写真实值"
   fi
@@ -215,7 +230,11 @@ main() {
   wait_for_health postgres
   wait_for_health redis
 
+  backup_database "$release_sha"
+  migrate_database
+
   log "更新后端"
+  APPLICATION_UPDATE_STARTED=true
   compose_command up -d --no-deps backend
   wait_for_health backend
 
