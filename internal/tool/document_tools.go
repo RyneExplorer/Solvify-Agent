@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"fmt"
+	"slices"
 	"solvify-agent/internal/model/entity"
 	"strings"
 	"time"
@@ -30,17 +31,24 @@ type GrepChunksInput struct {
 	Limit   int    `json:"limit" jsonschema_description:"返回数量限制，默认10"`
 }
 
-func runGrepChunks(ctx context.Context, chunkRepo repository.DocumentChunkRepository, userID string, input GrepChunksInput) (ToolResponse, error) {
+type scopedChunkSearcher interface {
+	SearchByKeywordInKnowledgeBases(ctx context.Context, userID string, kbIDs []string, query string, topK int) ([]repository.DocumentSearchRow, error)
+}
+
+func runGrepChunks(ctx context.Context, chunkRepo scopedChunkSearcher, userID string, kbIDs []string, input GrepChunksInput) (ToolResponse, error) {
 	input.Keyword = strings.TrimSpace(input.Keyword)
 	if input.Keyword == "" {
 		return ToolResponse{Success: false, Message: "搜索关键词不能为空"}, nil
+	}
+	if len(kbIDs) == 0 {
+		return ToolResponse{Success: false, Message: "未选择可检索的知识库"}, nil
 	}
 	limit := input.Limit
 	if limit <= 0 {
 		limit = 10
 	}
 
-	results, err := chunkRepo.SearchByKeyword(ctx, userID, input.Keyword, limit)
+	results, err := chunkRepo.SearchByKeywordInKnowledgeBases(ctx, userID, kbIDs, input.Keyword, limit)
 	if err != nil {
 		logger.Errorf("[Tool] grep_chunks 搜索异常: keyword=%q, err=%v", input.Keyword, err)
 		return ToolResponse{Success: false, Message: fmt.Sprintf("搜索暂时不可用（%v）", err)}, nil
@@ -73,13 +81,14 @@ func runGrepChunks(ctx context.Context, chunkRepo repository.DocumentChunkReposi
 
 // NewGrepChunksTool 创建 grep_chunks 工具。
 // repo 实例由调用方闭包捕获，InferTool 内部无状态。
-func NewGrepChunksTool(chunkRepo repository.DocumentChunkRepository) func(userID string, kbIDs []string) einoTool.InvokableTool {
+func NewGrepChunksTool(chunkRepo scopedChunkSearcher) func(userID string, kbIDs []string) einoTool.InvokableTool {
 	return func(userID string, kbIDs []string) einoTool.InvokableTool {
+		kbIDs = slices.Clone(kbIDs)
 		t, _ := toolutils.InferTool[GrepChunksInput, ToolResponse](
 			"grep_chunks",
 			"关键词精确匹配搜索文档内容，返回文档ID、标题和匹配片段。当需要精确查找某个关键词在文档中的位置时使用。",
 			func(ctx context.Context, input GrepChunksInput) (ToolResponse, error) {
-				return runGrepChunks(ctx, chunkRepo, userID, input)
+				return runGrepChunks(ctx, chunkRepo, userID, kbIDs, input)
 			},
 		)
 		return t
@@ -92,17 +101,20 @@ type GetDocumentInfoInput struct {
 	DocumentID string `json:"document_id" jsonschema:"required" jsonschema_description:"文档ID"`
 }
 
-func runGetDocumentInfo(ctx context.Context, documentRepo repository.DocumentRepository, userID string, input GetDocumentInfoInput) (ToolResponse, error) {
+func runGetDocumentInfo(ctx context.Context, documentRepo repository.DocumentRepository, userID string, kbIDs []string, input GetDocumentInfoInput) (ToolResponse, error) {
 	if strings.TrimSpace(input.DocumentID) == "" {
 		return ToolResponse{Success: false, Message: "文档ID不能为空"}, nil
+	}
+	if len(kbIDs) == 0 {
+		return ToolResponse{Success: false, Message: "未选择可读取的知识库"}, nil
 	}
 	doc, found, err := documentRepo.FindByID(ctx, userID, input.DocumentID, entity.DocumentStatusDeleted)
 	if err != nil {
 		logger.Errorf("[Tool] get_document_info 查询异常: docID=%q, err=%v", input.DocumentID, err)
 		return ToolResponse{Success: false, Message: fmt.Sprintf("查询暂时不可用（%v）", err)}, nil
 	}
-	if !found {
-		return ToolResponse{Success: false, Message: "未找到该文档"}, nil
+	if !found || !slices.Contains(kbIDs, doc.KnowledgeBaseID) {
+		return ToolResponse{Success: false, Message: "在所选知识库中未找到该文档"}, nil
 	}
 
 	statusText := map[int]string{
@@ -138,11 +150,12 @@ func runGetDocumentInfo(ctx context.Context, documentRepo repository.DocumentRep
 
 func NewGetDocumentInfoTool(documentRepo repository.DocumentRepository) func(userID string, kbIDs []string) einoTool.InvokableTool {
 	return func(userID string, kbIDs []string) einoTool.InvokableTool {
+		kbIDs = slices.Clone(kbIDs)
 		t, _ := toolutils.InferTool[GetDocumentInfoInput, ToolResponse](
 			"get_document_info",
 			"获取文档完整元数据，包括标题、文件名、类型、大小、状态、分块数等。当需要了解某个文档的详细信息时使用。",
 			func(ctx context.Context, input GetDocumentInfoInput) (ToolResponse, error) {
-				return runGetDocumentInfo(ctx, documentRepo, userID, input)
+				return runGetDocumentInfo(ctx, documentRepo, userID, kbIDs, input)
 			},
 		)
 		return t
@@ -217,6 +230,7 @@ func runListKnowledgeChunks(ctx context.Context, documentRepo repository.Documen
 
 func NewListKnowledgeChunksTool(documentRepo repository.DocumentRepository) func(userID string, kbIDs []string) einoTool.InvokableTool {
 	return func(userID string, kbIDs []string) einoTool.InvokableTool {
+		kbIDs = slices.Clone(kbIDs)
 		t, _ := toolutils.InferTool[ListKnowledgeChunksInput, ToolResponse](
 			"list_knowledge_chunks",
 			"获取知识库中的文档列表，返回文档ID和标题。当用户问'知识库有哪些文档'或'这个知识库下有哪些文件'时使用。",
@@ -234,15 +248,18 @@ type ListKnowledgeBasesInput struct {
 	IncludeStats *bool `json:"include_stats" jsonschema_description:"是否包含文档数和存储量统计，默认true"`
 }
 
-func runListKnowledgeBases(ctx context.Context, kbRepo repository.KnowledgeBaseRepository, userID string, input ListKnowledgeBasesInput) (ToolResponse, error) {
+func runListKnowledgeBases(ctx context.Context, kbRepo repository.KnowledgeBaseRepository, userID string, kbIDs []string, input ListKnowledgeBasesInput) (ToolResponse, error) {
 	includeStats := input.IncludeStats == nil || *input.IncludeStats
-
+	if len(kbIDs) == 0 {
+		return ToolResponse{Success: true, Message: "未选择知识库", Data: []interface{}{}}, nil
+	}
 	kbs, err := kbRepo.ListNormal(ctx, userID, 1)
 	if err != nil {
 		logger.Errorf("[Tool] list_knowledge_bases 查询异常: userID=%q, err=%v", userID, err)
 		return ToolResponse{Success: false, Message: fmt.Sprintf("查询暂时不可用（%v）", err)}, nil
 	}
 
+	kbs = slices.DeleteFunc(slices.Clone(kbs), func(kb entity.KnowledgeBase) bool { return !slices.Contains(kbIDs, kb.ID) })
 	if len(kbs) == 0 {
 		return ToolResponse{Success: true, Message: "还没有创建知识库", Data: []interface{}{}}, nil
 	}
@@ -286,11 +303,12 @@ func runListKnowledgeBases(ctx context.Context, kbRepo repository.KnowledgeBaseR
 
 func NewListKnowledgeBasesTool(kbRepo repository.KnowledgeBaseRepository) func(userID string, kbIDs []string) einoTool.InvokableTool {
 	return func(userID string, kbIDs []string) einoTool.InvokableTool {
+		kbIDs = slices.Clone(kbIDs)
 		t, _ := toolutils.InferTool[ListKnowledgeBasesInput, ToolResponse](
 			"list_knowledge_bases",
-			"获取用户的所有知识库列表，返回知识库ID、名称、分类、描述、文档数、存储量。当用户问'有哪些知识库'或'知识库列表'时使用。",
+			"获取本次选中的知识库列表，返回知识库ID、名称、分类、描述、文档数、存储量。当用户问'有哪些知识库'或'知识库列表'时使用。",
 			func(ctx context.Context, input ListKnowledgeBasesInput) (ToolResponse, error) {
-				return runListKnowledgeBases(ctx, kbRepo, userID, input)
+				return runListKnowledgeBases(ctx, kbRepo, userID, kbIDs, input)
 			},
 		)
 		return t

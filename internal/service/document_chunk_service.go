@@ -2,8 +2,6 @@ package service
 
 import (
 	"context"
-	"regexp"
-	"strings"
 
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -25,11 +23,6 @@ const (
 	chunkKeywordHardLimit = 512
 )
 
-var (
-	htmlTagPattern          = regexp.MustCompile(`<[^>]+>`)
-	separatorNormalizeRegex = regexp.MustCompile(`[\s,，.。;；:：!！?？()（）\[\]【】{}<>《》"'“”‘’、/\\|]+`)
-)
-
 // documentChunkService 封装文档分块、关键词提取和向量生成能力
 type documentChunkService struct {
 	embeddingService EmbeddingServiceInterface
@@ -43,11 +36,9 @@ func NewDocumentChunkService(embeddingService EmbeddingServiceInterface) Documen
 // NormalizeContent 规整文档正文
 func (s *documentChunkService) NormalizeContent(content, fileType string) string {
 	if fileType == "html" {
-		content = htmlTagPattern.ReplaceAllString(content, " ")
+		content = htmlDocumentText(content)
 	}
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	content = strings.ReplaceAll(content, "\t", " ")
-	return strings.TrimSpace(separatorNormalizeRegex.ReplaceAllString(content, " "))
+	return normalizeDocumentDisplayContent(content)
 }
 
 // SplitContent 按固定窗口切分正文
@@ -130,8 +121,7 @@ func (s *documentChunkService) BuildChunks(ctx context.Context, doc entity.Docum
 //  2. 旧实现把候选按词频排序后砍到 20 个，而排序用的计数随后即被丢弃 ——
 //     结果是「能不丢的词被丢了」，见 pkg/textseg 的包注释。
 //
-// 入参 content 恒已过 NormalizeContent（6 个调用点全部如此）：html 已剥离、
-// 分隔符已规整，所以这里不再重复处理。
+// 仅关键词交给公共分词器处理，正文的标点、数字、换行与代码不参与破坏性归一化。
 func (s *documentChunkService) extractKeywords(content string) entity.TextArray {
 	terms := textseg.Extract(content)
 	if len(terms) > chunkKeywordHardLimit {

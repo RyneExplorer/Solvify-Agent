@@ -498,3 +498,14 @@ Remove-Item Env:SOLVIFY_CONTEXT_STRESS_TEST
 
 用户连接信息之外仅调整上下文窗口与思考模式。none/always/unknown分别禁用、锁定、沿用默认；optional须已识别协议才允许切换。额度/协议资料来自同身份旧配置、管理员完全匹配部署或服务商元数据/已核实目录。用户API不能伪造能力。管理员折叠资料可补第三方输出上限及协议；无明确额度不猜测。编辑测试携带config_id并按当前用户归属读取；当前模式保存前仍实测工具。
 本轮沿用JSONB，无新增schema迁移；已核对当前系统1条/用户1条配置与新解析兼容，保留原思考关闭协议。当前契约见docs/model-configuration.md。
+
+
+## 2026-10-20 文档正文保真修复后的已有数据处理
+
+文档正文现在只统一换行、清除文件头BOM及外层空行，保留数值标点、URL、版本号、Markdown空行/行尾换行标记与代码缩进。HTML按节点提取可读正文并保留段落/表格边界，跳过脚本、样式等非正文节点；关键词仍使用公共分词器，向量与引用使用保真分块。
+
+新上传、笔记创建和新版本自动使用新处理方式。已经入库的受损分块不会因代码更新自动恢复，也不能从`129 95`猜回`129.95`。部署后按文档逐个执行现有 `POST /api/v1/documents/:id/reindex`：此入口读取该用户当前可编辑文档的最新版本正文，先生成全部新分块与向量，再经现有事务替换检索数据，不新增文档版本。若最新版本正文已经受损，先从原始文件恢复保真正文，再创建新版本，不能对受损文本反复重建。
+
+重建会替换当前分块ID，旧回答中的分块引用可能无法继续打开；操作前明确需要重建的文档范围，并保留原始文件和已有版本。此次代码修复未自动批量重建用户文档或修改运行模型配置。
+
+验收命令在本指南既有Go与前端检查之外，可显式运行 `SOLVIFY_KNOWLEDGE_SCOPE_DB_TEST=1 go test ./internal/tool -run TestDocumentToolsPostgresKnowledgeBaseScope -count=1`（随机临时schema，仅本地数据库）；真实模型合成样本使用 `SOLVIFY_CONTEXT_LIVE_TEST=1 go test ./internal/agent -run TestContextLiveDeepSeek -count=1 -v`，包含压缩与两轮引用追问，需模型额度，不在普通CI执行。

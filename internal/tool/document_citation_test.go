@@ -13,7 +13,7 @@ type citationChunkRepo struct {
 	user string
 }
 
-func (r *citationChunkRepo) SearchByKeyword(ctx context.Context, user, query string, limit int) ([]repository.DocumentSearchRow, error) {
+func (r *citationChunkRepo) SearchByKeywordInKnowledgeBases(ctx context.Context, user string, kbIDs []string, query string, limit int) ([]repository.DocumentSearchRow, error) {
 	r.user = user
 	return []repository.DocumentSearchRow{{ID: "chunk-select", DocumentID: "doc-select", KnowledgeBaseID: "kb-go", Title: "select详解", Content: "select正文"}}, nil
 }

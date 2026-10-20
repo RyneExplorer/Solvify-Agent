@@ -30,4 +30,6 @@ type DocumentChunkRepository interface {
 	FindByID(ctx context.Context, userID, chunkID string) (ChunkDetail, bool, error)
 	// SearchByKeyword 按关键字搜索文档内容
 	SearchByKeyword(ctx context.Context, userID, query string, topK int) ([]DocumentSearchRow, error)
+	// SearchByKeywordInKnowledgeBases 仅搜索指定知识库；空范围不返回任何内容。
+	SearchByKeywordInKnowledgeBases(ctx context.Context, userID string, kbIDs []string, query string, topK int) ([]DocumentSearchRow, error)
 }
