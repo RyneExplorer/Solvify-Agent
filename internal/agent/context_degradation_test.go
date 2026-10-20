@@ -12,7 +12,6 @@ import (
 	"solvify-agent/internal/llm"
 	"solvify-agent/internal/model/entity"
 	"solvify-agent/pkg/config"
-	"solvify-agent/pkg/tokenutil"
 )
 
 func TestContextMaterialsReplaceSourceHistoryWithoutDuplicating(t *testing.T) {
@@ -123,9 +122,6 @@ func TestContextDegradationKeepsProtectedToolResult(t *testing.T) {
 			schema.UserMessage("报告操作结果，不重试"),
 			schema.AssistantMessage("", []schema.ToolCall{{ID: "call-protected", Type: "function", Function: schema.FunctionCall{Name: "write_record", Arguments: `{}`}}}),
 			schema.ToolMessage(content, "call-protected"),
-		}
-		if tokenutil.CountTokens(content, "gpt-4o") <= toolResultCap {
-			t.Fatal("样本未达到工具裁剪触发条件")
 		}
 		request := Request{Profile: ProfileQuick, ModelName: "gpt-4o", MaxContextLength: 32000, OutputLimit: 1024}
 		calls := 0

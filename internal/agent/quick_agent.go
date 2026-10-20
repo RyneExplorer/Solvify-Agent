@@ -47,6 +47,8 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 		logger.Infof("[Agent] 已注入澄清追问中间件: %v", clarifyNames)
 	}
 
+	guard := newBudgetGuard(req)
+	guard.finalCheckElsewhere = true // 调用级budgetModel负责动态输出分配与最终拒绝。
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:             quickAgentName,
 		Description:      "快速模式 Agent，基于知识库回答问题，必要时向用户澄清",
@@ -56,7 +58,7 @@ func (e *Engine) runQuickAgent(ctx context.Context, req Request, chatModel model
 		MaxIterations:    iterations,
 		ModelRetryConfig: e.modelRetryConfig(),
 		// 每次模型调用前的总预算检查（首次执行 / 每轮迭代 / 中断恢复三条路径共用）。
-		Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, systemPromptFinal, chatModel), newBudgetGuard(req)},
+		Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, systemPromptFinal, chatModel), guard, &completionGuard{}},
 	})
 	if err != nil {
 		logger.Errorf("[Agent] ChatModelAgent 初始化失败: %v", err)

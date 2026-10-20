@@ -44,6 +44,7 @@ type interruptionAgent struct {
 	cancel  context.CancelFunc
 	plan    bool
 	partial string
+	kind    apperrors.Kind
 }
 
 func (*interruptionAgent) EstimateToolsTokens(ctx context.Context, _ string, _ []string, _ string, _ agent.Profile, _ bool, _ ...string) (int, context.Context, error) {
@@ -60,18 +61,26 @@ func (a *interruptionAgent) Execute(context.Context, agent.Request, model.ToolCa
 	if a.cancel != nil {
 		a.cancel()
 	} else {
-		ch <- agent.Event{Type: agent.EventError, Kind: apperrors.KindTimeout, Done: true}
+		kind := a.kind
+		if kind == "" {
+			kind = apperrors.KindTimeout
+		}
+		ch <- agent.Event{Type: agent.EventError, Kind: kind, Done: true}
 	}
 	close(ch)
 	return ch, nil
 }
 
 func TestAgentModePreservesInterruptedAnswer(t *testing.T) {
-	for _, scenario := range []string{"quick", "deep", "cancel", "no_output"} {
+	for _, scenario := range []string{"quick", "deep", "cancel", "no_output", "output_limit", "output_filtered", "model_output_invalid"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			a := &interruptionAgent{partial: "已经生成的部分内容", plan: scenario == "deep"}
+			completionError := scenario == "output_limit" || scenario == "output_filtered" || scenario == "model_output_invalid"
+			if completionError {
+				a.kind, a.plan = apperrors.Kind(scenario), true
+			}
 			if scenario == "cancel" {
 				a.cancel = cancel
 			}
@@ -82,7 +91,7 @@ func TestAgentModePreservesInterruptedAnswer(t *testing.T) {
 			svc := &chatService{sessionRepo: &inputLimitSessionRepo{}, messageRepo: messages, modelRepo: &interruptionModels{}, agentEngine: a}
 			ch := make(chan dto.StreamEvent, 20)
 			profile := agent.ProfileQuick
-			if scenario == "deep" {
+			if a.plan {
 				profile = agent.ProfileDeep
 			}
 			svc.processAgentMode(ctx, "owner", "session", "user-msg", requestdto.SendMessageRequest{Content: "测试", ModelID: "model", ModelType: "system"}, profile, ch)
@@ -94,6 +103,12 @@ func TestAgentModePreservesInterruptedAnswer(t *testing.T) {
 				}
 				if event.Type == "error" {
 					failed = true
+					if completionError {
+						want := messageFor(a.kind, profile)
+						if event.Title != want.Title || event.Detail != want.Detail || event.Retryable {
+							t.Fatalf("结束异常提示错误: %+v", event)
+						}
+					}
 				}
 			}
 			if scenario != "cancel" && !failed {
@@ -107,6 +122,13 @@ func TestAgentModePreservesInterruptedAnswer(t *testing.T) {
 			}
 			if len(messages.saved) != 1 || !strings.Contains(messages.saved[0].Content, a.partial) || !strings.Contains(messages.saved[0].Content, "回答已中断，内容不完整") || !strings.Contains(string(messages.saved[0].Metadata), "execution_error") {
 				t.Fatalf("部分回答未保留: %+v", messages.saved)
+			}
+			persisted := messageResponse(messages.saved[0])
+			if persisted.ExecutionError == "" || (a.plan && persisted.ExecutionPlan == nil) || persisted.ExecutionRetryable != (scenario != "cancel" && !completionError) {
+				t.Fatalf("历史响应丢失失败原因或计划: %+v", persisted)
+			}
+			if completionError && !strings.Contains(persisted.ExecutionError, messageFor(a.kind, profile).Detail) {
+				t.Fatalf("历史记录丢失准确结束原因: %s", persisted.ExecutionError)
 			}
 		})
 	}

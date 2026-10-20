@@ -81,7 +81,7 @@ func (e *Engine) runWithRunner(
 				break
 			}
 			logger.Errorf("[Agent] Runner 事件错误: %v", agentEvent.Err)
-			if isToolChoiceUnsupportedError(agentEvent.Err.Error()) {
+			if apperrors.Classify(agentEvent.Err) == apperrors.KindUnknown && isToolChoiceUnsupportedError(agentEvent.Err.Error()) {
 				eventch.Send(ctx, eventCh, Event{
 					Type:   EventError,
 					Kind:   apperrors.KindToolUnsupported,
@@ -262,6 +262,7 @@ func (e *Engine) consumeMessageStream(
 	defer stream.Close()
 
 	var toolCallPending bool
+	answerStarted := false
 	var toolCallName string
 
 	for {
@@ -299,10 +300,12 @@ func (e *Engine) consumeMessageStream(
 					if tc.Function.Name != "" {
 						toolCallName = tc.Function.Name
 						eventch.Send(ctx, eventCh, Event{
-							Type:   EventToolCall,
-							Title:  "调用工具",
-							Detail: strutil.Truncate(tc.Function.Arguments, 200),
-							Status: "running",
+							Type:       EventToolCall,
+							ToolCallID: tc.ID,
+							ToolName:   tc.Function.Name,
+							Title:      "调用工具",
+							Detail:     strutil.Truncate(tc.Function.Arguments, 200),
+							Status:     "running",
 						})
 						toolCallPending = true
 					}
@@ -318,8 +321,15 @@ func (e *Engine) consumeMessageStream(
 				continue
 			}
 
-			// 最终答案
+			// 已确认工具调用后的正文属于过程说明，不并入最终答案。
+			if toolCallPending {
+				continue
+			}
 			if msg.Content != "" {
+				if !answerStarted {
+					beginAnswerSegment(ctx, fullAnswer, eventCh)
+					answerStarted = true
+				}
 				fullAnswer.WriteString(msg.Content)
 				eventch.Send(ctx, eventCh, Event{Type: EventAnswer, Content: msg.Content})
 			}
@@ -331,6 +341,8 @@ func (e *Engine) consumeMessageStream(
 			title, detail, _ := formatToolEnd(toolCallName, &einoTool.CallbackOutput{Response: msg.Content}, toolDescMap)
 			eventch.Send(ctx, eventCh, Event{
 				Type:       EventToolResult,
+				ToolCallID: msg.ToolCallID,
+				ToolName:   mv.ToolName,
 				Title:      title,
 				Detail:     detail,
 				Status:     "success",
@@ -340,6 +352,20 @@ func (e *Engine) consumeMessageStream(
 		}
 	}
 	return nil
+}
+
+// 一轮工具交互可能先流出简短进度，再流出最终正文；分隔按消息边界插入，
+// 不依赖模型恰好在首个片段输出换行，SSE与持久化全文保持一致。
+func beginAnswerSegment(ctx context.Context, answer *strings.Builder, events chan<- Event) {
+	if answer.Len() == 0 || strings.HasSuffix(answer.String(), "\n\n") {
+		return
+	}
+	separator := "\n\n"
+	if strings.HasSuffix(answer.String(), "\n") {
+		separator = "\n"
+	}
+	answer.WriteString(separator)
+	eventch.Send(ctx, events, Event{Type: EventAnswer, Content: separator})
 }
 
 func (e *Engine) handleMessage(
@@ -360,10 +386,12 @@ func (e *Engine) handleMessage(
 				}
 				title, detail := formatToolStart(tc.Function.Name, extractQueryFromArgs(tc.Function.Arguments), nil, toolDescMap)
 				eventch.Send(ctx, eventCh, Event{
-					Type:   EventToolCall,
-					Title:  title,
-					Detail: detail,
-					Status: "running",
+					Type:       EventToolCall,
+					ToolCallID: tc.ID,
+					ToolName:   tc.Function.Name,
+					Title:      title,
+					Detail:     detail,
+					Status:     "running",
 				})
 			}
 			if strings.TrimSpace(msg.Content) != "" {
@@ -377,6 +405,7 @@ func (e *Engine) handleMessage(
 			return
 		}
 		if msg.Content != "" {
+			beginAnswerSegment(ctx, fullAnswer, eventCh)
 			fullAnswer.WriteString(msg.Content)
 			eventch.Send(ctx, eventCh, Event{Type: EventAnswer, Content: msg.Content})
 		}
@@ -386,6 +415,8 @@ func (e *Engine) handleMessage(
 			title, detail, _ := formatToolEnd(toolName, &einoTool.CallbackOutput{Response: msg.Content}, toolDescMap)
 			eventch.Send(ctx, eventCh, Event{
 				Type:       EventToolResult,
+				ToolCallID: msg.ToolCallID,
+				ToolName:   toolName,
 				Title:      title,
 				Detail:     detail,
 				Status:     "success",

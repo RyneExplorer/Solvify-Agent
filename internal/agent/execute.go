@@ -15,6 +15,7 @@ func (e *Engine) Execute(ctx context.Context, req Request, chatModel model.ToolC
 	eventCh := make(chan Event, 100)
 
 	go func() {
+		eventCh := eventCh
 		defer close(eventCh)
 		if limits, ok := chatModel.(interface{ ContextWindow() int }); ok && req.MaxContextLength <= 0 {
 			req.MaxContextLength = limits.ContextWindow()
@@ -34,6 +35,12 @@ func (e *Engine) Execute(ctx context.Context, req Request, chatModel model.ToolC
 		if req.RunID == "" {
 			req.RunID = uuid.NewString()
 		}
+		if req.citations == nil {
+			req.citations = &citationRegistry{}
+		}
+		verifiedEvents, citationsDone := citationEventChannel(ctx, req.citations, eventCh)
+		defer func() { close(verifiedEvents); <-citationsDone }()
+		eventCh = verifiedEvents
 		ctx = llm.WithBudgetIdentity(ctx, req.ModelID, req.MaxContextLength)
 		chatModel = &budgetModel{inner: chatModel, guard: newBudgetGuard(req)}
 		if req.effectiveProfile() == ProfileQuick {

@@ -34,8 +34,10 @@ const (
 
 // Request 描述 Agent 执行请求
 type Request struct {
-	ContextData []ContextMaterial `json:",omitempty"`
-	RunID       string            // 由程序生成并随checkpoint冻结
+	artifactReads map[string]artifactReadGrant // 仅由可信依赖结果重建，模型参数不能设置
+	citations     *citationRegistry
+	ContextData   []ContextMaterial `json:",omitempty"`
+	RunID         string            // 由程序生成并随checkpoint冻结
 	// Profile 问答模式；空值等同 ProfileDeep（保持既有行为不变），判定一律走 effectiveProfile
 	Profile           Profile
 	CheckpointID      string               // 恢复执行时使用的 checkpointID（恢复场景必填）
@@ -118,8 +120,10 @@ type Event struct {
 	Kind      apperrors.Kind `json:"-"`
 	Done      bool           `json:"done"`
 	Retryable bool           `json:"retryable,omitempty"`
-	// ToolResult 工具调用结果（完整内容，供前端展示）
+	// ToolResult 保留原始结果，供内部结果判定与来源处理。
 	ToolResult string `json:"tool_result,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	ToolName   string `json:"tool_name,omitempty"`
 	// interrupt 事件字段
 	CheckpointID  string         `json:"checkpoint_id,omitempty"`
 	InterruptID   string         `json:"interrupt_id,omitempty"`

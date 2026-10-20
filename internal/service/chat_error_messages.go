@@ -32,9 +32,21 @@ type kindMessage struct {
 // ⚠️ 新增种类时只改这一张表。判定在 pkg/errors（哨兵优先、文本兜底），
 // 不要在 agent / controller 里另写用户可见文案。
 var errorMessages = map[apperrors.Kind]kindMessage{
+	apperrors.KindOutputLimit: {ErrorMessage: ErrorMessage{
+		Title:  "回答达到输出上限",
+		Detail: "本次生成达到模型输出上限，内容尚未完成。已生成内容予以保留，可缩小单次回答范围后重试",
+	}},
+	apperrors.KindOutputFiltered: {ErrorMessage: ErrorMessage{
+		Title:  "模型输出被过滤",
+		Detail: "模型未能完整输出本次内容，已生成部分不代表完整回答",
+	}},
+	apperrors.KindModelOutputInvalid: {ErrorMessage: ErrorMessage{
+		Title:  "模型响应未正常结束",
+		Detail: "模型未返回可确认的正常结束状态，已生成部分不代表完整回答，请检查模型接口兼容性",
+	}},
 	apperrors.KindContextBudget: {ErrorMessage: ErrorMessage{
 		Title:  "上下文预算不足",
-		Detail: "必要内容超过模型输入额度，请缩短问题或选择更大窗口的模型",
+		Detail: "当前必要内容无法在输入与输出预算内完成。请缩短问题或减少资料，或选择更大窗口的模型",
 	}},
 	// ── 模型配置 ──
 	apperrors.KindModelConfig: {ErrorMessage: ErrorMessage{
@@ -77,8 +89,8 @@ var errorMessages = map[apperrors.Kind]kindMessage{
 		Retryable: true,
 	}},
 	apperrors.KindContextLength: {ErrorMessage: ErrorMessage{
-		Title:  "对话太长了",
-		Detail: "当前对话超出了模型的上下文限制，请开启新对话继续",
+		Title:  "模型上下文超限",
+		Detail: "模型端点拒绝了当前输入与输出额度。请缩小资料范围；若反复出现，请核对当前部署的窗口与输入上限",
 	}},
 	apperrors.KindTimeout: {ErrorMessage: ErrorMessage{
 		Title:     "AI 服务响应超时",
@@ -136,12 +148,12 @@ var errorMessages = map[apperrors.Kind]kindMessage{
 		},
 		Quick: &ErrorMessage{
 			Title:     "快速检索轮次用尽",
-			Detail:    "本次快速检索用尽了推理轮次，请重试，或切换到深度模式（可用轮次更多）",
+			Detail:    "本次快速检索已达到模型调用轮次上限，尚未完成回答。可缩小查询范围后重试",
 			Retryable: true,
 		},
 		Deep: &ErrorMessage{
-			Title:     "深度推理轮次用尽",
-			Detail:    "本次深度推理用尽了推理轮次，请重试，或把问题拆小一些",
+			Title:     "深度任务达到调用上限",
+			Detail:    "本次执行已达到模型调用轮次上限，任务尚未完成。已完成结果保留在任务卡中，可缩小查询范围后重试；反复出现时请检查任务调用额度配置",
 			Retryable: true,
 		},
 	},

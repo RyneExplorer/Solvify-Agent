@@ -81,9 +81,19 @@ go vet ./...
 
 直接创建的 Eino ChatModelAgent（快速、普通深度及 PlanExecute 专业子 Agent）通过 `ModelRetryConfig` 重试临时模型故障，`agent.model_max_retries` 默认 3，可用 `AGENT_MODEL_MAX_RETRIES` 覆盖；允许 0–5，0 关闭。3 次重试表示单个模型节点最多 4 次调用，不是整个 Agent 重跑。
 
-仅重试网络超时、连接重置/拒绝、意外 EOF 及 HTTP 408/429/500/502/503/504；认证、非法参数、上下文预算不足及请求取消不重试。已产生任何模型消息的失败流不重试，避免重复输出；沿用 Eino 默认指数退避与抖动，以及原请求 context 和输入预算校验，不重新执行已完成工具。
+通用临时故障重试仅处理网络超时、连接重置/拒绝、意外 EOF 及 HTTP 408/429/500/502/503/504；认证、非法参数、上下文预算不足及请求取消不走该重试。已产生任何模型消息的失败流不重试，避免重复输出；沿用 Eino 默认指数退避与抖动，以及原请求 context 和输入预算校验，不重新执行已完成工具。
 
-当前 Eino v0.9.14 的 prebuilt PlanExecute Planner/Executor/Replanner 配置未暴露 `ModelRetryConfig`，这些控制节点保持原行为。本项不调整 HTTP 客户端超时。
+上下文有独立的有界处理：调用前先减少可选材料，再按总窗口与独立输入上限调整本次输出预留，最低512 tokens（原额度更小时不提高），实际请求参数同步调整。端点明确拒绝上下文且没有输出时，允许降低本次输出预留再调用一次；流已返回后不做此恢复。专业任务的额外调用计入原有额度并随 checkpoint 保存，控制节点单次最多恢复一次。此策略不修改模型持久配置、不扩大已知窗口；必要输入仍超限时明确失败。
+
+当前 Eino v0.9.14 的 prebuilt PlanExecute Planner/Executor/Replanner 配置未暴露 `ModelRetryConfig`，这些控制节点没有通用临时故障重试，但同样经过调用级输出分配与单次上下文恢复。本项不调整 HTTP 客户端超时。
+
+深度计划的 `deep_max_plan_execute_rounds` 限制执行批次，页面显示“执行批次”；它与 `deep_max_subagent_iterations` 的专业任务模型调用额度独立。后者默认12次，包含模型重试、审批/澄清调用和最终回答；显式配置仍生效。每次调用告知剩余额度，最后一次必须处理已有结果，继续请求工具则在工具执行前以额度耗尽终止。该计数与原上限随子 checkpoint 保存，恢复不重置；旧 checkpoint 缺少新增计数时继续由 Eino 已保存的剩余迭代次数约束。它不是用户对话轮数，工具并行调用也不等于多次模型调用。已有部署显式配置为3时需要调整配置并重启服务。
+
+失败回复在同一条消息中保留部分正文、任务计划及错误说明；历史消息通过 `execution_error` 读取已保存的失败原因，正文及既有 HTTP 状态和业务码不变。
+
+PlanExecute 保留 Eino 官方 `plan`/`respond`。研究只提供事实与来源，审查只提供要点、大纲和证据缺口（通常600中文字以内），Replanner 生成最终正文。普通回答默认结论前置、3—5个重点、通常300—600中文字；明确要求详细内容、代码或指定篇幅时按需展开，不用字符串裁切压短正文。快速、普通深度、控制节点、专业任务及最终流必须有正常且与文本/工具形态一致的 `finish_reason`；`length`、`content_filter`、缺失/未知/不匹配结束分别返回输出上限、过滤或模型响应异常，禁止异常工具请求实际执行。部分最终正文与错误说明按既有失败记录保存，不发送成功终态，也不自动续写或重试；运行摘要结束异常时保留原上下文。
+
+相关离线验证：`go test ./internal/agent ./internal/llm -run 'Test(ModelCompletion|SingleAgentCompletion|ContextRecovery|AdaptiveOutput|FitOutput|PlanExecute|PETask|QuickSummary)'` 与 `go test ./internal/service -run TestAgentModePreservesInterruptedAnswer`。模拟模型结合真实 Engine/Eino 及本地 HTTP 验证终态、实际输出参数、实时首段、恢复预算、工具边界、部分结果及保存行为；普通/详细/证据缺口固定样本只验证提示词装配，实际文案质量、时延和 token 收益仍需独立真实模型评估。
 
 ### Controller（`internal/api/v1/<module>`）
 
@@ -488,3 +498,14 @@ Remove-Item Env:SOLVIFY_CONTEXT_STRESS_TEST
 
 用户连接信息之外仅调整上下文窗口与思考模式。none/always/unknown分别禁用、锁定、沿用默认；optional须已识别协议才允许切换。额度/协议资料来自同身份旧配置、管理员完全匹配部署或服务商元数据/已核实目录。用户API不能伪造能力。管理员折叠资料可补第三方输出上限及协议；无明确额度不猜测。编辑测试携带config_id并按当前用户归属读取；当前模式保存前仍实测工具。
 本轮沿用JSONB，无新增schema迁移；已核对当前系统1条/用户1条配置与新解析兼容，保留原思考关闭协议。当前契约见docs/model-configuration.md。
+
+
+## 2026-10-20 文档正文保真修复后的已有数据处理
+
+文档正文现在只统一换行、清除文件头BOM及外层空行，保留数值标点、URL、版本号、Markdown空行/行尾换行标记与代码缩进。HTML按节点提取可读正文并保留段落/表格边界，跳过脚本、样式等非正文节点；关键词仍使用公共分词器，向量与引用使用保真分块。
+
+新上传、笔记创建和新版本自动使用新处理方式。已经入库的受损分块不会因代码更新自动恢复，也不能从`129 95`猜回`129.95`。部署后按文档逐个执行现有 `POST /api/v1/documents/:id/reindex`：此入口读取该用户当前可编辑文档的最新版本正文，先生成全部新分块与向量，再经现有事务替换检索数据，不新增文档版本。若最新版本正文已经受损，先从原始文件恢复保真正文，再创建新版本，不能对受损文本反复重建。
+
+重建会替换当前分块ID，旧回答中的分块引用可能无法继续打开；操作前明确需要重建的文档范围，并保留原始文件和已有版本。此次代码修复未自动批量重建用户文档或修改运行模型配置。
+
+验收命令在本指南既有Go与前端检查之外，可显式运行 `SOLVIFY_KNOWLEDGE_SCOPE_DB_TEST=1 go test ./internal/tool -run TestDocumentToolsPostgresKnowledgeBaseScope -count=1`（随机临时schema，仅本地数据库）；真实模型合成样本使用 `SOLVIFY_CONTEXT_LIVE_TEST=1 go test ./internal/agent -run TestContextLiveDeepSeek -count=1 -v`，包含压缩与两轮引用追问，需模型额度，不在普通CI执行。

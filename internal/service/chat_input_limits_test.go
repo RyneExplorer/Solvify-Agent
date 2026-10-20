@@ -34,6 +34,24 @@ func (repo *inputLimitMessageRepo) Create(_ context.Context, message *entity.Cha
 	return errors.New("测试持久化失败")
 }
 
+func TestChatService_RejectBlankMessagesBeforeSideEffects(t *testing.T) {
+	for _, content := range []string{"", "   ", "\t", "\r\n", " \t\r\n ", "\u00a0\u2003\u3000"} {
+		t.Run(content, func(t *testing.T) {
+			sessions := &inputLimitSessionRepo{}
+			messages := &inputLimitMessageRepo{}
+			svc := &chatService{sessionRepo: sessions, messageRepo: messages}
+			stream, err := svc.SendMessage(context.Background(), "owner", "session", requestdto.SendMessageRequest{Content: content})
+			var businessError *apperrors.BizError
+			if stream != nil || !errors.As(err, &businessError) || businessError.Code != apperrors.CodeBadRequest {
+				t.Fatalf("空白消息未返回参数错误：stream=%v err=%v", stream, err)
+			}
+			if sessions.calls != 0 || messages.calls != 0 {
+				t.Fatalf("空白消息仍触发仓库：sessions=%d messages=%d", sessions.calls, messages.calls)
+			}
+		})
+	}
+}
+
 func TestChatService_InputLimitBeforeSideEffects(t *testing.T) {
 	for _, content := range []string{strings.Repeat("中", requestdto.MaxChatMessageChars+1), strings.Repeat("😀", requestdto.MaxChatMessageChars+1), "下面是不可省略的当前问题，完整读入后只回答收到。\n" + strings.Repeat("当前问题必要数据 alpha=7 budget-check=overflow\n", 1500)} {
 		sessions := &inputLimitSessionRepo{}

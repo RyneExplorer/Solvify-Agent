@@ -9,16 +9,13 @@ import * as toolApi from '@/api/mcp'
 import { request } from '@/api/client'
 import type { ChatSession, ExecutionPlan, FeedbackRequest, PendingApproval, StreamEvent } from '@/types/chat'
 import { applyExecutionPlanEvent, finishExecutionPlan } from './chatExecutionPlan'
+import type { ExecutionTraceStep } from './chatExecutionTrace'
 import type { MCPTemplate, MCPConnection } from '@/types/mcp'
 
 // ── UI 展示用的本地类型 ──
 
 // 推理时间线步骤
-interface TimelineStep {
-  title: string
-  detail?: string
-  status: string
-}
+type TimelineStep = ExecutionTraceStep
 
 // 聊天消息展示结构
 interface DisplayMessage {
@@ -27,6 +24,7 @@ interface DisplayMessage {
   content: string
   detail?: string
   retryable?: boolean
+  partial_content?: string
   sources?: StreamEvent['sources']
   timeline?: TimelineStep[]
   trace_id?: string
@@ -260,10 +258,19 @@ export function useChat() {
       if (res.code === 0) {
         const serverMessages = (res.data.messages ?? []).map((m) => ({
           id: m.id,
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
+          role: (m.execution_error ? 'error' : m.role) as DisplayMessage['role'],
+          content: m.execution_error ? '任务未完成' : m.content,
+          detail: m.execution_error,
+          retryable: m.execution_error ? m.execution_retryable === true : undefined,
+          partial_content: m.execution_error && m.content !== '深度任务未完成：' + m.execution_error ? m.content : undefined,
           sources: m.sources,
           timeline: m.reasoning_steps?.map((s) => ({
+            type: s.type,
+            tool_call_id: s.tool_call_id,
+            tool_name: s.tool_name,
+            task_id: s.task_id,
+            plan_id: s.plan_id,
+            plan_version: s.plan_version,
             title: s.content ?? s.type,
             detail: s.detail,
             status: s.status ?? 'success',
@@ -395,15 +402,35 @@ export function useChat() {
     let finalSources: StreamEvent['sources'] = []
     let traceId: string | undefined
     let reader: Awaited<ReturnType<typeof chatApi.sendMessage>> | undefined
+    let timedOut = false
 
     const preserveInterruptedAnswer = () => {
       const partial = streamContent.value || finalContent
       if (!partial && !streamPlan.value && !streamTimeline.value.length) return
-      streamTimeline.value.forEach(s => { if (s.status === 'running') s.status = 'error' })
+      streamTimeline.value.forEach(s => { if (s.status === 'running') s.status = 'ended' })
       const message: DisplayMessage = {
         id: assistantId || 'a-' + Date.now(),
         role: 'assistant',
         content: partial ? partial + '\n\n（回答已中断，内容不完整）' : '',
+        sources: finalSources.length ? finalSources : [...(streamSources.value ?? [])],
+        timeline: streamTimeline.value.length ? [...streamTimeline.value] : undefined,
+        execution_plan: streamPlan.value ?? undefined,
+        trace_id: traceId,
+      }
+      const index = messages.value.findIndex(m => m.id === message.id)
+      if (index >= 0) messages.value[index] = message
+      else messages.value.push(message)
+    }
+
+    // 一个执行只生成一条终态消息，部分正文、计划和失败原因归属同一消息。
+    const finishWithError = (title: string, detail?: string, retryable = true) => {
+      streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
+      streamTimeline.value.forEach(s => { if (s.status === 'running') s.status = 'ended' })
+      const partial = streamContent.value || finalContent
+      const message: DisplayMessage = {
+        id: assistantId || 'e-' + Date.now(),
+        role: 'error', content: title, detail, retryable,
+        partial_content: partial ? partial + '\n\n（回答已中断，内容不完整）' : undefined,
         sources: finalSources.length ? finalSources : [...(streamSources.value ?? [])],
         timeline: streamTimeline.value.length ? [...streamTimeline.value] : undefined,
         execution_plan: streamPlan.value ?? undefined,
@@ -426,13 +453,9 @@ export function useChat() {
 
     const onStreamTimeout = () => {
       if (isLoading.value) {
+        timedOut = true
         abortController?.abort()
-        messages.value.push({
-          id: 'e-' + Date.now(),
-          role: 'error',
-          content: '响应超时',
-          retryable: true,
-        })
+        finishWithError('连接等待超时', '未收到执行进展，请检查网络或稍后重试')
       }
     }
     // 网络兜底留出后端 120 秒调用与错误传递时间；模型超时由后端判定。
@@ -497,14 +520,16 @@ export function useChat() {
               case 'tool_call':
               case 'tool_result':
               case 'warning':
-                // 添加新步骤前，将所有运行中的步骤标记为成功
-                streamTimeline.value.forEach(
-                  (s) => s.status === 'running' && (s.status = 'success'),
-                )
                 streamTimeline.value.push({
+                  type: evt.type,
+                  tool_call_id: evt.tool_call_id,
+                  tool_name: evt.tool_name,
+                  task_id: evt.task_id,
+                  plan_id: evt.plan_id,
+                  plan_version: evt.plan_version,
                   title: evt.title ?? evt.content ?? '',
                   detail: evt.detail,
-                  status: evt.status ?? 'running',
+                  status: evt.status ?? (evt.type === 'warning' ? 'warning' : evt.type === 'tool_call' ? 'running' : 'unknown'),
                 })
                 progressText.value = ''
                 break
@@ -515,7 +540,7 @@ export function useChat() {
 
                 // 查找是否已有同名的 running 状态事件
                 const existingIdx = streamTimeline.value.findIndex(
-                  (s) => s.title === thinkTitle && s.status === 'running',
+                  (s) => s.type === 'thinking' && s.title === thinkTitle && s.status === 'running',
                 )
 
                 if (existingIdx >= 0) {
@@ -527,9 +552,10 @@ export function useChat() {
                 } else {
                   // 没有找到同名 running 事件，直接添加
                   streamTimeline.value.forEach(
-                    (s) => s.status === 'running' && (s.status = 'success'),
+                    (s) => s.type === 'thinking' && s.status === 'running' && (s.status = 'success'),
                   )
                   streamTimeline.value.push({
+                    type: evt.type,
                     title: thinkTitle,
                     detail: evt.detail,
                     status: evt.status ?? 'running',
@@ -547,7 +573,7 @@ export function useChat() {
               case 'answer':
                 progressText.value = ''
                 streamTimeline.value.forEach(
-                  (s) => s.status === 'running' && (s.status = 'success'),
+                  (s) => s.type === 'thinking' && s.status === 'running' && (s.status = 'success'),
                 )
                 finalContent += evt.content ?? ''
                 streamContent.value = finalContent
@@ -555,16 +581,7 @@ export function useChat() {
 
               case 'error':
                 isLoading.value = false
-                streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
-                preserveInterruptedAnswer()
-                messages.value.push({
-                  id: 'e-' + Date.now(),
-                  role: 'error',
-                  content: evt.title || '未知错误',
-                  detail: evt.detail,
-                  retryable: evt.retryable !== false,
-                  execution_plan: streamPlan.value ?? undefined,
-                })
+                finishWithError(evt.title || '执行失败', evt.detail, evt.retryable !== false)
                 return
 
               case 'interrupt': {
@@ -611,7 +628,7 @@ export function useChat() {
                 if (evt.plan) streamPlan.value = applyExecutionPlanEvent(streamPlan.value, { ...evt, type: 'plan' })
                 streamPlan.value = finishExecutionPlan(streamPlan.value, 'success')
                 streamTimeline.value.forEach(
-                  (s) => s.status === 'running' && (s.status = 'success'),
+                  (s) => s.type === 'thinking' && s.status === 'running' && (s.status = 'success'),
                 )
                 if (evt.sources?.length) {
                   finalSources = evt.sources
@@ -658,19 +675,13 @@ export function useChat() {
     } catch (e: unknown) {
       const isAbort = e instanceof DOMException && e.name === 'AbortError'
       if (isAbort) {
-        streamPlan.value = finishExecutionPlan(streamPlan.value, 'canceled')
-        preserveInterruptedAnswer()
+        if (!timedOut) {
+          streamPlan.value = finishExecutionPlan(streamPlan.value, 'canceled')
+          preserveInterruptedAnswer()
+        }
       } else {
         const msg = e instanceof Error ? e.message : '请求失败'
-        streamPlan.value = finishExecutionPlan(streamPlan.value, 'error')
-        preserveInterruptedAnswer()
-        messages.value.push({
-          id: 'e-' + Date.now(),
-          role: 'error',
-          content: msg,
-          retryable: true,
-          execution_plan: streamPlan.value ?? undefined,
-        })
+        finishWithError(msg)
       }
     } finally {
       clearInterval(waitingTimer)
@@ -840,65 +851,39 @@ export function useChat() {
   function formatContent(content: string, _sources?: unknown[]): string {
     if (!content) return ''
 
-    const cites: {
-      type: string
-      doc?: string
-      chunkId?: string
-      url?: string
-      title?: string
-    }[] = []
-
-    let processed = content
-    processed = processed.replace(
+    const urlToNumMap = new Map<string, number>()
+    // 只解析 Markdown 的 HTML token，代码块和行内代码由 marked 原样转义。
+    const renderer = new marked.Renderer()
+    renderer.html = ({ text }) => text.replace(
       /<kb\s+[^>]*?doc="([^"]*)"[^>]*?chunk_id="([^"]*)"[^>]*?\/?>/gi,
       (_, doc: string, chunkId: string) => {
-        const idx = cites.length
-        cites.push({ type: 'kb', doc, chunkId })
-        return `%%CITE${idx}%%`
+        doc = decodeCitationAttribute(doc)
+        chunkId = decodeCitationAttribute(chunkId)
+        return `<span class="inline-cite-kb" data-chunk-id="${escapeAttr(chunkId)}" data-doc="${escapeAttr(doc)}">📄${escapeHtml(doc)}</span>`
       },
     )
-    processed = processed.replace(
+    .replace(
       /<web\s+[^>]*?url="([^"]*)"[^>]*?title="([^"]*)"[^>]*?\/?>/gi,
       (_, url: string, title: string) => {
-        const idx = cites.length
-        cites.push({ type: 'web', url, title })
-        return `%%CITE${idx}%%`
+        url = decodeCitationAttribute(url)
+        title = decodeCitationAttribute(title)
+        let num = urlToNumMap.get(url)
+        if (num === undefined) {
+          num = urlToNumMap.size + 1
+          urlToNumMap.set(url, num)
+        }
+        const tipKey = nextTipKey()
+        tooltipStore.set(tipKey, title)
+        return `<a class="inline-cite-web" href="${escapeAttr(url)}" target="_blank" rel="noopener" data-tip-key="${tipKey}">[${num}]</a>`
       },
     )
 
-    let html = marked.parse(processed, {
+    return marked.parse(content, {
       breaks: true,
       gfm: true,
+      renderer,
     }) as string
 
-    const urlToNumMap = new Map<string, number>()
-    let webNum = 0
-    for (let i = 0; i < cites.length; i++) {
-      const c = cites[i]
-      let citeHtml: string
-      if (c.type === 'kb') {
-        const docName = escapeHtml(c.doc ?? '知识库文档')
-        const chunkId = c.chunkId ?? ''
-        const docTitle = escapeAttr(c.doc ?? '')
-        citeHtml = `<span class="inline-cite-kb" data-chunk-id="${escapeAttr(chunkId)}" data-doc="${docTitle}">📄${docName}</span>`
-      } else {
-        const url = c.url ?? ''
-        let num = urlToNumMap.get(url)
-        if (num === undefined) {
-          webNum++
-          num = webNum
-          urlToNumMap.set(url, num)
-        }
-        const title = c.title ?? '网页链接'
-        const tipKey = nextTipKey()
-        tooltipStore.set(tipKey, title)
-        const safeUrl = escapeAttr(url)
-        citeHtml = `<a class="inline-cite-web" href="${safeUrl}" target="_blank" rel="noopener" data-tip-key="${tipKey}">[${num}]</a>`
-      }
-      html = html.replace(`%%CITE${i}%%`, citeHtml)
-    }
-
-    return html
   }
 
   // 清理 tooltip 文本中的元数据标签
@@ -931,14 +916,18 @@ export function useChat() {
   function extractWebSources(content: string): { url: string; title: string }[] {
     const result: { url: string; title: string }[] = []
     const seen = new Set<string>()
-    const re = /<web\s+url="([^"]*)"\s+title="([^"]*)"\s*\/>/g
-    let m
-    while ((m = re.exec(String(content))) !== null) {
-      if (!seen.has(m[1])) {
-        seen.add(m[1])
-        result.push({ url: m[1], title: m[2] })
+    marked.walkTokens(marked.lexer(content), token => {
+      if (token.type !== 'html') return
+      const re = /<web\s+url="([^"]*)"\s+title="([^"]*)"\s*\/>/g
+      let m
+      while ((m = re.exec(token.text)) !== null) {
+        const url = decodeCitationAttribute(m[1])
+        if (!seen.has(url)) {
+          seen.add(url)
+          result.push({ url, title: decodeCitationAttribute(m[2]) })
+        }
       }
-    }
+    })
     return result
   }
 
@@ -1003,6 +992,15 @@ export function useChat() {
 }
 
 // ── 工具函数 ──
+
+function decodeCitationAttribute(value: string): string {
+  const entities: Record<string, string> = {
+    '&quot;': '"', '&#34;': '"', '&#x22;': '"',
+    '&apos;': "'", '&#39;': "'", '&#x27;': "'",
+    '&lt;': '<', '&gt;': '>', '&amp;': '&',
+  }
+  return value.replace(/&(?:quot|apos|lt|gt|amp|#34|#39|#x22|#x27);/gi, entity => entities[entity.toLowerCase()] ?? entity)
+}
 
 // HTML 转义
 function escapeHtml(s: string): string {

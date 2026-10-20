@@ -48,6 +48,11 @@ export interface ChunkSource {
 }
 
 export interface ReasoningStep {
+  tool_call_id?: string
+  tool_name?: string
+  task_id?: string
+  plan_id?: string
+  plan_version?: number
   type: string
   content?: string
   detail?: string
@@ -86,6 +91,8 @@ export interface ChatMessage {
   sources?: SourceInfo[]
   reasoning_steps?: ReasoningStep[]
   execution_plan?: ExecutionPlan
+  execution_error?: string
+  execution_retryable?: boolean
   created_at: string
 }
 
@@ -110,6 +117,8 @@ export interface ClarifyPayload {
 }
 
 export interface StreamEvent {
+  tool_call_id?: string
+  tool_name?: string
   type: string
   title?: string
   detail?: string

@@ -188,17 +188,18 @@ func (p *pePlan) FirstStep() string {
 
 // peState 只存业务数据；模型、工具和互斥锁由每次请求重新装配。
 type peState struct {
-	Request   Request
-	Plan      ExecutionPlan
-	Results   map[string]TaskResult
-	Batch     []TaskSpec
-	Round     int
-	Final     string
-	RetryUsed bool
-	Unsafe    map[string]bool
-	Denied    bool
-	Blocked   bool
-	Failures  map[string]string
+	Request      Request
+	Plan         ExecutionPlan
+	Results      map[string]TaskResult
+	Batch        []TaskSpec
+	Round        int
+	Final        string
+	RetryUsed    bool
+	Unsafe       map[string]bool
+	Denied       bool
+	Blocked      bool
+	Failures     map[string]string
+	ToolProgress map[string]peToolProgress `json:",omitempty"`
 	// 与终止失败分开保存；模型纠正后清除，忽略错误不能标记任务成功。
 	ArtifactArgumentFailures map[string]string `json:",omitempty"`
 }
@@ -207,6 +208,7 @@ type peChildState struct {
 	RuntimeContext string
 	TaskID         string
 	Data           []byte
+	ModelBudget    *taskModelBudget `json:",omitempty"`
 }
 
 func init() {
@@ -330,6 +332,16 @@ func (r *peRuntime) installPlan(s *peState, next *pePlan) error {
 				ancestors[dep] = true
 				walk(dep)
 			}
+		}
+	}
+	if !first {
+		completeSynthesisDependencies(&p, latestSynthesis)
+		// 归一化后的完整图仍必须通过引用、环路和状态校验。
+		if err := p.Validate(0); err != nil {
+			return err
+		}
+		for _, task := range p.Tasks {
+			byID[task.ID] = task
 		}
 	}
 	walk(latestSynthesis)

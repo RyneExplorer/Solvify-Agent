@@ -100,6 +100,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 				req.ResumeData = nil
 				req.Query = "原问题（仅作背景）：" + s.Request.Query + "\n只执行当前任务：" + task.Title + "\n任务说明：" + task.Description
 				req.History = append(req.History[:0:0], s.Request.History...)
+				req.artifactReads = dependencyArtifactGrants(s.Plan, task.ID, s.Results)
 				inputs = task
 				if task.Agent == "synthesis_review" {
 					inputs.DependsOn = peResearchAncestors(s.Plan, task.ID)
@@ -123,7 +124,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 			return
 		}
 		ctx = r.traceContext(ctx, "researching", taskID)
-		privateContext := &taskContextSnapshot{}
+		privateContext := &taskContextSnapshot{Restoring: saved != nil}
 		if saved != nil {
 			privateContext.Raw = saved.RuntimeContext
 		}
@@ -136,7 +137,11 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 			}
 			req.Query += evidence
 		}
-		agent, ks, err := a.buildAgent(ctx, req)
+		budget := &taskModelBudget{}
+		if saved != nil && saved.ModelBudget != nil {
+			budget = saved.ModelBudget
+		}
+		agent, ks, err := a.buildAgent(ctx, req, budget)
 		if err != nil {
 			g.Send(&adk.AgentEvent{Err: err})
 			return
@@ -192,20 +197,24 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 				}
 				if len(msg.ToolCalls) > 0 {
 					for _, call := range msg.ToolCalls {
-						peEvent(g, Event{Type: EventToolCall, TaskID: task.ID, AgentName: task.Agent, Title: "调用工具 " + call.Function.Name, Detail: truncateTaskSummary(call.Function.Arguments, 200), Status: TaskRunning})
+						peEvent(g, Event{Type: EventToolCall, TaskID: task.ID, AgentName: task.Agent, ToolCallID: call.ID, ToolName: call.Function.Name, Title: "调用工具 " + call.Function.Name, Detail: truncateTaskSummary(call.Function.Arguments, 200), Status: TaskRunning})
 					}
 				} else if mv.Role == schema.Tool {
 					var ref artifactReference
 					if json.Unmarshal([]byte(msg.Content), &ref) == nil && ref.ArtifactID != "" {
 						artifacts = appendArtifactReference(artifacts, ref)
 					}
-					toolEvent := Event{Type: EventToolResult, TaskID: task.ID, AgentName: task.Agent, Title: "工具执行结果", ToolResult: msg.Content, Status: TaskSuccess}
-					if message, recoverable := artifactArgumentFailure(mv.ToolName, msg.Content); recoverable {
-						toolEvent.Status, toolEvent.Retryable, toolEvent.Detail = TaskError, true, message
-					}
-					peEvent(g, toolEvent)
+					toolEvent := Event{Type: EventToolResult, TaskID: task.ID, AgentName: task.Agent, ToolCallID: msg.ToolCallID, ToolName: mv.ToolName, Title: "工具执行结果", ToolResult: msg.Content, Status: TaskSuccess}
+					r.mu.Lock()
+					terminal := s.Denied || s.Blocked || s.Unsafe[task.ID]
+					r.mu.Unlock()
+					peEvent(g, peToolResultEvent(mv.ToolName, toolEvent, terminal))
 				} else if mv.Role == schema.Assistant {
 					answer = msg.Content
+					// 非空正文仍可能因长度或过滤结束，保存部分材料但不标记成功。
+					if completionErr := validateModelCompletion(msg); completionErr != nil {
+						taskError = completionErr
+					}
 				}
 			}
 		}
@@ -244,6 +253,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 			} else if reason := s.ArtifactArgumentFailures[task.ID]; reason != "" && taskError == nil && interrupt == nil {
 				result.Status, result.Error = TaskError, "产物读取参数尚未纠正："+reason
 			}
+			applyPEToolProgress(s, &result)
 			mergeTaskResult(&s.Plan, s.Results, result)
 			detail := truncateTaskSummary(result.Summary, 500)
 			if result.Error != "" {
@@ -267,7 +277,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 				g.Send(&adk.AgentEvent{Err: fmt.Errorf("缺少子任务恢复数据")})
 				return
 			}
-			ev := adk.CompositeInterrupt(ctx, map[string]any{"task_id": task.ID}, &peChildState{TaskID: task.ID, Data: data.Data, RuntimeContext: privateContext.Raw}, adk.FromInterruptContexts(interrupt.Action.Interrupted.InterruptContexts))
+			ev := adk.CompositeInterrupt(ctx, map[string]any{"task_id": task.ID}, &peChildState{TaskID: task.ID, Data: data.Data, RuntimeContext: privateContext.Raw, ModelBudget: budget}, adk.FromInterruptContexts(interrupt.Action.Interrupted.InterruptContexts))
 			ev.AgentName = a.role
 			g.Send(ev)
 			return
@@ -278,7 +288,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 	return iter
 }
 
-func (a *peTaskAgent) buildAgent(ctx context.Context, req Request) (*adk.ChatModelAgent, *tool.KnowledgeSearchTool, error) {
+func (a *peTaskAgent) buildAgent(ctx context.Context, req Request, budget *taskModelBudget) (*adk.ChatModelAgent, *tool.KnowledgeSearchTool, error) {
 	r := a.runtime
 	e := r.engine
 	sorted := e.sortedInternalTools()
@@ -316,6 +326,10 @@ func (a *peTaskAgent) buildAgent(ctx context.Context, req Request) (*adk.ChatMod
 	clarify := e.clarifyToolNames()
 	// 预算与中间件注入读同一个结果（见 agentIterations）。
 	iterations := agentIterations(e.deepSubagentIterations(req), len(dangerous) > 0 || len(clarify) > 0)
+	if budget.Limit == 0 {
+		budget.Limit = iterations
+	}
+	iterations = budget.Limit
 	config.ToolCallMiddlewares = append(config.ToolCallMiddlewares, compose.ToolMiddleware{Invokable: a.resultMiddleware(req.TaskID, dangerous)})
 	if len(dangerous) > 0 {
 		config.ToolCallMiddlewares = append(config.ToolCallMiddlewares, compose.ToolMiddleware{Invokable: buildDangerousToolMiddleware(dangerous)})
@@ -324,7 +338,10 @@ func (a *peTaskAgent) buildAgent(ctx context.Context, req Request) (*adk.ChatMod
 		config.ToolCallMiddlewares = append(config.ToolCallMiddlewares, compose.ToolMiddleware{Invokable: buildClarifyMiddleware(clarify)})
 	}
 	instruction := composeSystemPrompt(buildDeepTaskPrompt(ctx, a.role, ts, iterations), req.SystemPrompt)
-	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: a.role, Description: a.Description(ctx), Instruction: instruction, Model: r.model, ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: e.withToolExecutionTimeout(config)}, MaxIterations: iterations, ModelRetryConfig: e.modelRetryConfig(), Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, instruction, r.model), newBudgetGuard(req)}, GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
+	taskModel := &peTaskModel{inner: r.model, budget: budget}
+	guard := newBudgetGuard(req)
+	guard.finalCheckElsewhere = true
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: a.role, Description: a.Description(ctx), Instruction: instruction, Model: taskModel, ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: e.withToolExecutionTimeout(config)}, MaxIterations: iterations, ModelRetryConfig: e.modelRetryConfig(), Handlers: []adk.ChatModelAgentMiddleware{e.runtimeHandler(req, instruction, taskModel), guard}, GenModelInput: func(_ context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
 		return append([]*schema.Message{schema.SystemMessage(instruction)}, input.Messages...), nil
 	}})
 	return agent, knowledgeSearchToolOf(ts.Tools), err
@@ -340,7 +357,7 @@ func (a *peTaskAgent) resultMiddleware(taskID string, dangerous map[string]bool)
 			if err == nil {
 				if reason := s.Failures[taskID]; reason != "" && (s.Denied || s.Blocked || s.Unsafe[taskID]) {
 					r.mu.Unlock()
-					return &compose.ToolOutput{Result: reason}, nil
+					return &compose.ToolOutput{Result: failedToolOutput(reason, 0)}, nil
 				}
 				if dangerous[input.Name] {
 					s.Unsafe[taskID] = true
@@ -357,16 +374,18 @@ func (a *peTaskAgent) resultMiddleware(taskID string, dangerous map[string]bool)
 			}
 			output, err := next(ctx, input)
 			var biz *bizerrors.BizError
-			var failure string
-			blocked := false
 			if errors.As(err, &biz) {
-				blocked = biz.Code == bizerrors.CodeForbidden || biz.Code == bizerrors.CodeUnauthorized
-				if blocked || biz.Err == nil {
-					failure = biz.Message
-					output, err = &compose.ToolOutput{Result: failure}, nil
+				if biz.Code == bizerrors.CodeForbidden || biz.Code == bizerrors.CodeUnauthorized || biz.Err == nil {
+					output, err = &compose.ToolOutput{Result: failedToolOutput(biz.Message, biz.Code)}, nil
 				}
 			}
 			if output != nil && err == nil {
+				r.mu.Lock()
+				if reason := s.Failures[taskID]; reason != "" && (s.Denied || s.Blocked || s.Unsafe[taskID]) {
+					// 审批中间件可能返回纯文本；事件仍以可信拒绝事实判定失败。
+					output = &compose.ToolOutput{Result: failedToolOutput(reason, 0)}
+				}
+				r.mu.Unlock()
 				if input.Name == artifactReadToolName {
 					message, recoverable := artifactArgumentFailure(input.Name, output.Result)
 					r.mu.Lock()
@@ -383,21 +402,16 @@ func (a *peTaskAgent) resultMiddleware(taskID string, dangerous map[string]bool)
 						return output, nil
 					}
 				}
-				var response struct {
-					Success *bool  `json:"success"`
-					Message string `json:"message"`
-				}
-				if json.Unmarshal([]byte(output.Result), &response) == nil && response.Success != nil && !*response.Success {
-					failure = response.Message
-					if failure == "" {
-						failure = "研究工具未返回成功结果"
-					}
-				}
-			}
-			if failure != "" {
+				outcome := classifyToolResult(output.Result)
 				r.mu.Lock()
-				s.Failures[taskID] = failure
-				s.Blocked = s.Blocked || blocked
+				if input.Name != artifactReadToolName && !r.engine.clarifyToolNames()[input.Name] {
+					recordPEToolResult(s, taskID, input.Name, outcome)
+				}
+				// 只有真实安全边界失败不可被后续查询纠正；一般只读失败由进度记录处理。
+				if outcome.Failed && (outcome.Blocked || s.Unsafe[taskID]) {
+					s.Failures[taskID] = outcome.Message
+					s.Blocked = s.Blocked || outcome.Blocked
+				}
 				r.mu.Unlock()
 			}
 			return output, err

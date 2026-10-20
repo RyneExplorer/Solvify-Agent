@@ -214,7 +214,13 @@ import SearchDialog from '@/components/SearchDialog.vue'
 import { useAuth } from '@/composables/useAuth'
 
 const historyExpanded = ref(true)
-const collapsed = ref(false)
+const mobileViewport = window.matchMedia('(max-width: 767px)')
+const collapsed = ref(mobileViewport.matches)
+
+function onViewportChange(event: MediaQueryListEvent) {
+  collapsed.value = event.matches
+}
+
 const searchDialogRef = ref<InstanceType<typeof SearchDialog>>()
 const { isAdmin } = useAuth()
 
@@ -376,10 +382,12 @@ function onGlobalKeydown(e: KeyboardEvent) {
 }
 
 onMounted(() => {
+  mobileViewport.addEventListener('change', onViewportChange)
   document.addEventListener('click', onDocClick)
   document.addEventListener('keydown', onGlobalKeydown)
 })
 onUnmounted(() => {
+  mobileViewport.removeEventListener('change', onViewportChange)
   document.removeEventListener('click', onDocClick)
   document.removeEventListener('keydown', onGlobalKeydown)
 })

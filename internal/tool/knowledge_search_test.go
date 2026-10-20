@@ -200,6 +200,21 @@ func TestKnowledgeSearchTool_ResultJSONMatchesCollected(t *testing.T) {
 	}
 }
 
+func TestKnowledgeSearchToolPreservesFullChunksWithoutDuplicateBody(t *testing.T) {
+	testConfig(t)
+	body := strings.Repeat("详细原文证据。", 100) + "尾部唯一事实"
+	docs := []rag.Document{{ID: "c1", DocumentID: "d1", KnowledgeBaseID: "kb_1", Title: "详细文档", Content: body, Score: 0.95}, {ID: "c1", DocumentID: "d1", KnowledgeBaseID: "kb_1", Title: "详细文档", Content: body, Score: 0.95}, {ID: "c2", DocumentID: "d2", KnowledgeBaseID: "kb_1", Title: "其他文档", Content: "补充事实", Score: 0.8}}
+	tl := NewKnowledgeSearchTool(&stubRetriever{docs: docs}).WithContext("u_1", []string{"kb_1"})
+	out, err := tl.InvokableRun(context.Background(), `{"query":"详细文档"}`)
+	var result SearchResult
+	if err != nil || json.Unmarshal([]byte(out), &result) != nil || len(result.Sources) != 2 || result.Sources[0].ID != "c1" || result.Sources[0].Content != body || result.Sources[1].ID != "c2" || len(tl.Sources()) != 2 {
+		t.Fatalf("完整分块、排名或去重错误: %s, %v", out, err)
+	}
+	if strings.Contains(result.Content, "详细原文证据") || strings.Count(out, "尾部唯一事实") != 1 {
+		t.Fatal("原文在摘要中重复或被提前截断")
+	}
+}
+
 // runSearch 跑一次 InvokableRun，并确认真的产出了来源。
 // 只在测试主 goroutine 调用（内部用 t.Fatalf）。
 func runSearch(t *testing.T, tl *KnowledgeSearchTool, query string) {

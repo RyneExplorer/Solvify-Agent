@@ -75,7 +75,7 @@ func TestContextArtifactSaveReadAndFailure(t *testing.T) {
 	if json.Unmarshal([]byte(out.Result), &ref) != nil || len(ref.ArtifactID) != 64 || len(repo.values) != 1 {
 		t.Fatal("未提交原文引用")
 	}
-	reader := artifactReadTool{repo, artifactScope(req), e.runtimePolicy(), req.ModelName}
+	reader := artifactReadTool{repo: repo, scope: artifactScope(req), policy: e.runtimePolicy(), model: req.ModelName}
 	var rebuilt strings.Builder
 	for offset := 0; ; {
 		args, _ := json.Marshal(map[string]any{"artifact_id": ref.ArtifactID, "offset": offset, "limit": 700})
@@ -121,8 +121,8 @@ func TestContextArtifactSaveReadAndFailure(t *testing.T) {
 	}
 	repo.fail = true
 	out, err = endpoint(context.Background(), &compose.ToolInput{Name: "search", CallID: "failed"})
-	if err != nil || out.Result != content {
-		t.Fatal("写失败改变原文")
+	if err == nil || out != nil || len(repo.values) != 1 {
+		t.Fatal("原文保存失败未明确中止，或产生了伪引用")
 	}
 	for _, fact := range []string{`{"success": false,"message":"` + content + `"}`, "用户拒绝审批，操作未执行" + content} {
 		protected := e.artifactMiddleware(req)(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {

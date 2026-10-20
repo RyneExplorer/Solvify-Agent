@@ -8,7 +8,6 @@ import (
 	"mime/multipart"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -53,8 +52,6 @@ var allowedDocumentFileTypes = map[string]struct{}{
 	"csv": {}, "xls": {}, "xlsx": {}, "pptx": {}, "json": {},
 	"png": {}, "jpg": {}, "jpeg": {},
 }
-
-var excessiveBlankLineRegex = regexp.MustCompile(`\n{3,}`)
 
 // documentService 封装文档业务用例实现
 type documentService struct {
@@ -645,11 +642,12 @@ func hashText(content string) string {
 func normalizeDocumentDisplayContent(content string) string {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	content = strings.ReplaceAll(content, "\r", "\n")
-	lines := strings.Split(content, "\n")
-	for index, line := range lines {
-		lines[index] = strings.TrimRight(line, " \t")
+	content = strings.TrimPrefix(content, "\ufeff")
+	if strings.TrimSpace(content) == "" {
+		return ""
 	}
-	return strings.TrimSpace(excessiveBlankLineRegex.ReplaceAllString(strings.Join(lines, "\n"), "\n\n"))
+	// Markdown行尾双空格、代码缩进和空行属于正文，不能为展示或检索删除。
+	return strings.Trim(content, "\n")
 }
 
 // findWritableKnowledgeBase 查询可上传的本地知识库

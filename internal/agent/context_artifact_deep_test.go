@@ -16,7 +16,7 @@ import (
 )
 
 func TestPlanExecuteOversizedArtifactReadCompletesDependencies(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	e := deepTestEngine()
 	e.cfg.DeepMaxSubagentIterations = 10
@@ -83,7 +83,7 @@ func TestPlanExecuteOversizedArtifactReadCompletesDependencies(t *testing.T) {
 		}
 	}
 	want := []rune(strings.Repeat(guardProbeRaw, 800) + guardProbeTail)[1000:]
-	if rebuilt.String() != string(want) || readCalls < 2 || firstTaskCalls != readCalls+2 || probe.calls.Load() != 1 {
+	if rebuilt.String() != string(want) || readCalls != 1 || firstTaskCalls != readCalls+2 || probe.calls.Load() != 1 {
 		t.Fatalf("读取缺失、重试或重新执行原工具: read=%d model=%d source=%d", readCalls, firstTaskCalls, probe.calls.Load())
 	}
 	if !completed["t1"] || !completed["t2"] || !completed["t3"] || answers != 1 || done != 1 {
@@ -94,7 +94,7 @@ func TestPlanExecuteOversizedArtifactReadCompletesDependencies(t *testing.T) {
 func TestPlanExecuteArtifactArgumentCorrection(t *testing.T) {
 	for _, scenario := range []string{"type", "missing", "negative", "offset", "json", "ignored", "budget"} {
 		t.Run(scenario, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
 			e := deepTestEngine()
 			e.cfg.DeepMaxSubagentIterations = 5

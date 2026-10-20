@@ -47,6 +47,18 @@ func (r *documentChunkRepository) SearchByKeyword(ctx context.Context, userID, q
 	return rows, err
 }
 
+// SearchByKeywordInKnowledgeBases 在排序和数量限制前同时约束用户与所选知识库。
+func (r *documentChunkRepository) SearchByKeywordInKnowledgeBases(ctx context.Context, userID string, kbIDs []string, query string, topK int) ([]DocumentSearchRow, error) {
+	if len(kbIDs) == 0 {
+		return nil, nil
+	}
+	keyword := "%" + query + "%"
+	keywordArray := buildKeywordArray(query)
+	var rows []DocumentSearchRow
+	err := dbFor(ctx, r.db).Raw(searchByKeywordInKnowledgeBasesSQL, keyword, keywordArray, userID, keyword, keywordArray, kbIDs, topK).Scan(&rows).Error
+	return rows, err
+}
+
 // searchByKeywordSQL 是「关键字搜索」读取 chunk 正文的 SQL。
 //
 // ⚠️ 它必须拼上 entity.RetrievedChunkVisibilitySQL：这是**第二个**读取 chunk 内容的出口，
@@ -60,7 +72,12 @@ func (r *documentChunkRepository) SearchByKeyword(ctx context.Context, userID, q
 // （实测评测库 5 篇文档 × 每篇 3 块，count(DISTINCT created_at) 恒为 1），
 // 而「同分并列」最常发生的恰恰就是同一篇文档的块之间。
 // 守卫：document_chunk_repository_test.go。
-var searchByKeywordSQL = `
+var searchByKeywordSQL = searchByKeywordSelectSQL + entity.RetrievedChunkVisibilitySQL + searchByKeywordOrderSQL
+
+var searchByKeywordInKnowledgeBasesSQL = searchByKeywordSelectSQL + `
+		  AND dc.knowledge_base_id IN ?` + entity.RetrievedChunkVisibilitySQL + searchByKeywordOrderSQL
+
+const searchByKeywordSelectSQL = `
 		SELECT dc.id, dc.knowledge_base_id, dc.document_id, COALESCE(d.title, '') as title, dc.content,
 			CASE
 				WHEN dc.content ILIKE ? THEN 1.0
@@ -70,7 +87,9 @@ var searchByKeywordSQL = `
 		FROM document_chunks dc
 		LEFT JOIN documents d ON d.id = dc.document_id
 		WHERE dc.user_id = ?
-		  AND (dc.content ILIKE ? OR dc.keywords && ?::text[])` + entity.RetrievedChunkVisibilitySQL + `
+		  AND (dc.content ILIKE ? OR dc.keywords && ?::text[])`
+
+const searchByKeywordOrderSQL = `
 		ORDER BY score DESC, dc.id
 		LIMIT ?`
 

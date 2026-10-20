@@ -23,6 +23,37 @@ type peSpanCapture struct {
 	spans []sdktrace.ReadOnlySpan
 }
 
+func TestPlanExecuteRootTraceCompletionPhase(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		name := "completed"
+		if failed {
+			name = "failed"
+		}
+		t.Run(name, func(t *testing.T) {
+			capture := &peSpanCapture{}
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(capture))
+			t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+			ctx, span := provider.Tracer("completion-test").Start(deepTestContext(t), "completion-root")
+			m := peModel(`{"strategy":"direct","tasks":[{"id":"s","agent":"synthesis_review","title":"审查"}]}`, new(atomic.Int32))
+			base := m.respond
+			m.respond = func(ctx context.Context, msgs []*schema.Message) (*schema.Message, error) {
+				msg, err := base(ctx, msgs)
+				if failed && err == nil && strings.Contains(msgs[0].Content, "Solvify Planner") {
+					msg.ResponseMeta = &schema.ResponseMeta{FinishReason: "length"}
+				}
+				return msg, err
+			}
+			collectPEEvents(t, ctx, deepTestEngine(), Request{Query: "核对", UserID: "u", SessionID: "root-phase"}, m)
+			span.End()
+			capture.mu.Lock()
+			defer capture.mu.Unlock()
+			if len(capture.spans) != 1 || peSpanAttr(capture.spans[0], "langfuse.observation.metadata.phase") != name {
+				t.Fatalf("根链路终态不准确: want=%s spans=%+v", name, capture.spans)
+			}
+		})
+	}
+}
+
 func TestPlanExecuteLangfuseResumeCorrelation(t *testing.T) {
 	capture := &peSpanCapture{}
 	handler, err := langfuse.NewHandler(context.Background(), &langfuse.Config{

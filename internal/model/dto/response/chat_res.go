@@ -27,17 +27,19 @@ type SessionResponse struct {
 
 // MessageResponse 描述聊天消息响应
 type MessageResponse struct {
-	ID               string          `json:"id"`
-	SessionID        string          `json:"session_id"`
-	Role             string          `json:"role"`
-	Content          string          `json:"content"`
-	ModelID          string          `json:"model_id,omitempty"`
-	SearchMode       string          `json:"search_mode,omitempty"`
-	KnowledgeBaseIDs []string        `json:"knowledge_base_ids,omitempty"`
-	Sources          []SourceInfo    `json:"sources,omitempty"`
-	ReasoningSteps   []ReasoningStep `json:"reasoning_steps,omitempty"`
-	ExecutionPlan    *ExecutionPlan  `json:"execution_plan,omitempty"`
-	CreatedAt        time.Time       `json:"created_at"`
+	ID                 string          `json:"id"`
+	SessionID          string          `json:"session_id"`
+	Role               string          `json:"role"`
+	Content            string          `json:"content"`
+	ModelID            string          `json:"model_id,omitempty"`
+	SearchMode         string          `json:"search_mode,omitempty"`
+	KnowledgeBaseIDs   []string        `json:"knowledge_base_ids,omitempty"`
+	Sources            []SourceInfo    `json:"sources,omitempty"`
+	ReasoningSteps     []ReasoningStep `json:"reasoning_steps,omitempty"`
+	ExecutionPlan      *ExecutionPlan  `json:"execution_plan,omitempty"`
+	ExecutionError     string          `json:"execution_error,omitempty"`
+	ExecutionRetryable bool            `json:"execution_retryable,omitempty"`
+	CreatedAt          time.Time       `json:"created_at"`
 }
 
 type TaskProgress struct {
@@ -80,12 +82,14 @@ type ChunkSource struct {
 
 // StreamEvent 描述 SSE 流式事件
 type StreamEvent struct {
-	Type    string       `json:"type"`
-	Title   string       `json:"title,omitempty"`
-	Detail  string       `json:"detail,omitempty"`
-	Status  string       `json:"status,omitempty"`
-	Content string       `json:"content,omitempty"`
-	Sources []SourceInfo `json:"sources,omitempty"`
+	ToolCallID string       `json:"tool_call_id,omitempty"`
+	ToolName   string       `json:"tool_name,omitempty"`
+	Type       string       `json:"type"`
+	Title      string       `json:"title,omitempty"`
+	Detail     string       `json:"detail,omitempty"`
+	Status     string       `json:"status,omitempty"`
+	Content    string       `json:"content,omitempty"`
+	Sources    []SourceInfo `json:"sources,omitempty"`
 	// citation 事件字段
 	CitationID       string `json:"citation_id,omitempty"`
 	CitationChunkID  string `json:"chunk_id,omitempty"`
@@ -131,10 +135,15 @@ type CitationInfo struct {
 
 // ReasoningStep 描述 Agent 推理步骤（用于持久化和历史回显）
 type ReasoningStep struct {
-	Type    string `json:"type"`              // "thinking" / "tool_call" / "tool_result" / "plan" / "warning"
-	Content string `json:"content,omitempty"` // 步骤标题
-	Detail  string `json:"detail,omitempty"`  // 步骤详情（如工具查询关键词、检索结果摘要、计划描述等）
-	Status  string `json:"status,omitempty"`  // 步骤状态 "running" / "success" / "error"
+	ToolCallID  string `json:"tool_call_id,omitempty"`
+	ToolName    string `json:"tool_name,omitempty"`
+	TaskID      string `json:"task_id,omitempty"`
+	PlanID      string `json:"plan_id,omitempty"`
+	PlanVersion int    `json:"plan_version,omitempty"`
+	Type        string `json:"type"`              // "thinking" / "tool_call" / "tool_result" / "plan" / "warning"
+	Content     string `json:"content,omitempty"` // 步骤标题
+	Detail      string `json:"detail,omitempty"`  // 步骤详情（如工具查询关键词、检索结果摘要、计划描述等）
+	Status      string `json:"status,omitempty"`  // 步骤状态 "running" / "success" / "error"
 }
 
 // ListSessionsResponse 描述会话列表响应

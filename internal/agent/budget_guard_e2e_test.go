@@ -12,7 +12,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"solvify-agent/pkg/config"
-	"solvify-agent/pkg/tokenutil"
 )
 
 // 这一组走**生产路径**：Engine.Execute → runQuickAgent → adk.NewChatModelAgent → adk.Runner。
@@ -22,18 +21,18 @@ import (
 // 只有走一遍真实装配才能覆盖（否则把 Handlers 整行删掉，单测照样全绿）。
 //
 // 覆盖面（对应计划 §7 的 V1/V2）：
-//   V1 首次执行：工具结果的截断发生在**模型看到它之前**；
+//   V1 首次执行：窗口充足时保留完整工具结果；
 //   V2 中断恢复：恢复后的那一轮模型调用同样过检查 —— 恢复不重新装配，
 //     但预算检查是挂在 Agent 上的，不能因此跳过。
 
-const guardProbeRaw = "检索结果内容" // ×800 ⇒ 远超 toolResultCap
+const guardProbeRaw = "检索结果内容"
 
 // guardProbeTail 只钉在正文**末尾**：截断是砍尾巴，所以「哨兵还在」就等价于
 // 「没有截断」。反过来用「是否还含正文片段」判是恒真的 —— 截断后的前缀仍然是
 // 那 800 遍原文的开头，Contains 照样为真（这条第一版就撞上了）。
 const guardProbeTail = "<<TAIL-SENTINEL-ONLY-SURVIVES-WITHOUT-TRUNCATION>>"
 
-// guardProbeTool 是「返回必超上限结果」的探针工具。
+// guardProbeTool 返回带末尾哨兵的长结果，用于验证原文保留。
 type guardProbeTool struct{ calls *atomic.Int32 }
 
 func (t guardProbeTool) Info(context.Context) (*schema.ToolInfo, error) {
@@ -109,16 +108,6 @@ func toolContentByCallID(msgs []*schema.Message, callID string) (string, bool) {
 }
 
 func TestQuickAgentBudgetGuardOnFirstRunAndResume(t *testing.T) {
-	raw := strings.Repeat(guardProbeRaw, 800) + guardProbeTail
-	// 反空转：探针结果必须真的超上限、且末尾哨兵真的在原文里 ——
-	// 否则「哨兵不见了」这件事说明不了任何问题。
-	if got := tokenutil.CountTokens(raw, "gpt-4o"); got <= toolResultCap {
-		t.Fatalf("探针结果只有 %d token，未超过 toolResultCap=%d ⇒ 用例恒真", got, toolResultCap)
-	}
-	if !strings.Contains(raw, guardProbeTail) {
-		t.Fatal("哨兵不在探针原文里 ⇒ 断言恒真")
-	}
-
 	var probe guardProbeTool
 	probe.calls = &atomic.Int32{}
 
@@ -162,9 +151,8 @@ func TestQuickAgentBudgetGuardOnFirstRunAndResume(t *testing.T) {
 		UserID:    "u1",
 		SessionID: "s1",
 		// 走离屏模型 ID，避免 llm 包里的运行时降级表干扰窗口取值。
-		// 窗口取小值（最坏档位：固定开销 + 输出预留几乎吃满额度）。
-		// 工具结果的截断是**无条件**的，所以结论不随窗口取值变化。
-		ModelID: "e2e-budget-guard-window", ModelName: "gpt-4o", MaxContextLength: 16000,
+		// 窗口足以容纳探针原文，首次执行与恢复都应保留完整证据。
+		ModelID: "e2e-budget-guard-window", ModelName: "gpt-4o", MaxContextLength: 64000,
 	}
 
 	// ── 首次执行 ──
@@ -192,16 +180,13 @@ func TestQuickAgentBudgetGuardOnFirstRunAndResume(t *testing.T) {
 		t.Fatalf("首次执行应有 2 次模型调用，实际 %d", len(seen))
 	}
 
-	// V1：第 2 次模型调用看到的是**已截断**的工具结果。
+	// V1：第2次模型调用能看到窗口容得下的完整工具结果。
 	toolContent, ok := toolContentByCallID(seen[1], "call-probe")
 	if !ok {
 		t.Fatal("第 2 次模型调用里没有探针工具的结果 ⇒ 探针路径没走到")
 	}
-	if n := tokenutil.CountTokens(toolContent, "gpt-4o"); n > toolResultCap {
-		t.Fatalf("模型看到未截断的工具结果: %d token > 上限 %d", n, toolResultCap)
-	}
-	if strings.Contains(toolContent, guardProbeTail) {
-		t.Fatalf("模型看到的是未裁剪的工具结果（尾部哨兵仍在，长度 %d）", len(toolContent))
+	if toolContent != strings.Repeat(guardProbeRaw, 800)+guardProbeTail {
+		t.Fatal("模型未看到完整工具证据")
 	}
 
 	// ── 中断恢复（换一个 Engine：模拟「恢复时是另一个进程/实例」）──
@@ -237,8 +222,7 @@ func TestQuickAgentBudgetGuardOnFirstRunAndResume(t *testing.T) {
 		t.Fatalf("应完成四轮模型调用和两次检索：模型=%d，检索=%d", calls, probe.calls.Load())
 	}
 
-	// V2：恢复后的第一次模型调用，旧消息里的工具结果**仍是截断后的**。
-	// 若预算检查的写回没进 checkpoint（或恢复路径绕开了检查），这里会看到原文。
+	// V2：换Engine恢复后完整证据仍保留，预算检查不额外丢失尾部内容。
 	if len(seen) == 0 {
 		t.Fatal("恢复后没有任何模型调用")
 	}
@@ -246,11 +230,8 @@ func TestQuickAgentBudgetGuardOnFirstRunAndResume(t *testing.T) {
 	if !ok {
 		t.Fatal("恢复后的模型调用里没有探针工具的结果")
 	}
-	if n := tokenutil.CountTokens(toolContent, "gpt-4o"); n > toolResultCap {
-		t.Fatalf("恢复后模型看到未截断的工具结果: %d token > 上限 %d ⇒ 恢复路径绕过了预算检查", n, toolResultCap)
-	}
-	if strings.Contains(toolContent, guardProbeTail) {
-		t.Fatalf("恢复后工具结果的尾部哨兵又出现了（长度 %d）⇒ 压缩结果没进 checkpoint", len(toolContent))
+	if toolContent != strings.Repeat(guardProbeRaw, 800)+guardProbeTail {
+		t.Fatal("恢复后完整证据丢失")
 	}
 }
 

@@ -37,8 +37,7 @@ func (m *contextModel) InputLimit() int {
 	}
 	return m.declared
 }
-func (m *contextModel) OutputLimit() int         { return m.output }
-func (m *contextModel) FinalBudgetChecked() bool { return true }
+func (m *contextModel) OutputLimit() int { return m.output }
 func (m *contextModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	if len(tools) > 0 && m.options != nil {
 		if err := m.options.CheckTools(); err != nil {

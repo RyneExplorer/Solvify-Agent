@@ -16,7 +16,6 @@ import (
 	"solvify-agent/internal/rag"
 	"solvify-agent/pkg/config"
 	"solvify-agent/pkg/logger"
-	"solvify-agent/pkg/strutil"
 )
 
 // KnowledgeSearchTool 知识库语义搜索工具
@@ -114,11 +113,17 @@ func (t *KnowledgeSearchTool) InvokableRun(ctx context.Context, argumentsInJSON 
 
 	var contentBuilder strings.Builder
 	var sources []SourceDocument
-	contentBuilder.WriteString("根据以下参考资料回答。\n")
-	contentBuilder.WriteString("回答时必须在句末插入引用标签，格式为 <kb doc=\"文档名\" chunk_id=\"真实ID\" />。\n")
-	contentBuilder.WriteString("【禁止】把以下原文复制到回答中。\n\n")
+	contentBuilder.WriteString("sources按相关度排列，content为各分块完整原文，id即真实chunk_id。根据相关证据回答。\n")
+	contentBuilder.WriteString("引用来源时只选择程序给出的标识：<cite id=\"真实chunk_id\" />，不自行填写文档名或URL。\n")
+	seen := map[string]bool{}
 	for _, doc := range result.Documents {
-		contentBuilder.WriteString(fmt.Sprintf("[chunk_id=%s] %s: %s\n\n", doc.ID, doc.Title, strutil.Truncate(doc.Content, 150)))
+		if doc.ID != "" && seen[doc.ID] {
+			continue
+		}
+		if doc.ID != "" {
+			seen[doc.ID] = true
+		}
+		contentBuilder.WriteString(fmt.Sprintf("[chunk_id=%s] %s\n", doc.ID, doc.Title))
 		sources = append(sources, SourceDocument{
 			ID:              doc.ID,
 			DocumentID:      doc.DocumentID,

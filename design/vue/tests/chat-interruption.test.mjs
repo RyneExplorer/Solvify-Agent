@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { transformWithEsbuild } from 'vite'
 import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
+import { normalizeExecutionTrace } from '../src/composables/chatExecutionTrace.ts'
 
 // 执行真实 composable，替换网络与路由边界，不把状态处理逻辑复制到测试。
 let source = await readFile(new URL('../src/composables/useChat.ts', import.meta.url), 'utf8')
@@ -17,7 +18,7 @@ source = source
   .replace("from 'marked'", `from '${import.meta.resolve('marked')}'`)
 const { code } = await transformWithEsbuild(source, 'useChat.ts', { loader: 'ts' })
 
-for (const scenario of ['backend_error', 'disconnect', 'cancel', 'success', 'waiting_success']) {
+for (const scenario of ['backend_error', 'plan_error', 'disconnect', 'cancel', 'success', 'waiting_success']) {
   test(`聊天流 ${scenario} 保留正确正文和终态`, async (t) => {
     const originalNow = Date.now
     const originalInterval = globalThis.setInterval
@@ -45,7 +46,16 @@ for (const scenario of ['backend_error', 'disconnect', 'cancel', 'success', 'wai
         return {
           async read() {
             reads++
-            if (reads === 1) return { done: false, value: encoder.encode('data: {"type":"start","message_id":"a1"}\n\ndata: {"type":"answer","content":"部分答案"}\n\n') }
+            if (reads === 1) {
+              const events = [
+                { type: 'start', message_id: 'a1' },
+                { type: 'plan', plan: { id: 'p', strategy: 'sequential', status: 'running', tasks: [
+                  { id: 't', title: '研究', agent: 'knowledge_research', status: 'running' },
+                ] } },
+              ]
+              if (scenario !== 'plan_error') events.push({ type: 'answer', content: '部分答案' })
+              return { done: false, value: encoder.encode(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')) }
+            }
             if (scenario === 'disconnect') throw new Error('连接已断开')
             if (scenario === 'cancel') throw new DOMException('停止生成', 'AbortError')
             if (scenario === 'waiting_success') {
@@ -76,17 +86,24 @@ for (const scenario of ['backend_error', 'disconnect', 'cancel', 'success', 'wai
     chat.selectedModel.value = 'model'
     chat.input.value = '测试'
     await chat.sendMessage()
-    const assistants = chat.messages.value.filter(message => message.role === 'assistant')
-    assert.equal(assistants.length, 1)
-    assert.equal(assistants[0].id, 'a1')
+    const replies = chat.messages.value.filter(message => message.role !== 'user')
+    assert.equal(replies.length, 1, '一个执行只保留一条终态消息，避免重复计划和操作栏')
+    const reply = replies[0]
+    assert.equal(reply.id, 'a1')
+    assert.equal(reply.execution_plan.id, 'p')
     if (scenario.endsWith('success')) {
-      assert.equal(assistants[0].content, '完整答案')
-    } else {
-      assert.match(assistants[0].content, /部分答案/)
-      assert.match(assistants[0].content, /回答已中断，内容不完整/)
+      assert.equal(reply.content, '完整答案')
+    } else if (scenario !== 'plan_error') {
+      const partial = reply.partial_content ?? reply.content
+      assert.match(partial, /部分答案/)
+      assert.match(partial, /回答已中断，内容不完整/)
     }
-    if (scenario === 'backend_error' || scenario === 'disconnect') {
-      assert.equal(chat.messages.value.filter(message => message.role === 'error').length, 1)
+    if (['backend_error', 'disconnect', 'plan_error'].includes(scenario)) {
+      assert.equal(reply.role, 'error')
+      assert.equal(reply.execution_plan.status, 'error')
+      assert.equal(reply.execution_plan.tasks[0].status, 'canceled')
+      if (scenario !== 'disconnect') assert.equal(reply.detail, '请稍后重试')
+      if (scenario === 'plan_error') assert.equal(reply.partial_content, undefined)
     }
     assert.equal(chat.isLoading.value, false)
     assert.equal(chat.streamContent.value, '')
@@ -94,3 +111,85 @@ for (const scenario of ['backend_error', 'disconnect', 'cancel', 'success', 'wai
     if (scenario === 'waiting_success') assert.ok(waitingCleared, '完成后必须清理等待提示计时器')
   })
 }
+
+test('重新打开失败会话保留一份计划、部分正文及失败说明', async (t) => {
+  t.after(() => { delete globalThis.__timeoutChatAPI })
+  globalThis.__timeoutChatAPI = {
+    async getMessages() {
+      return { code: 0, data: { messages: [{
+        id: 'saved', role: 'assistant', content: '部分回答\n\n（回答已中断，内容不完整）',
+        execution_error: '已达到模型调用上限',
+        execution_retryable: true,
+        execution_plan: { id: 'p', strategy: 'sequential', status: 'error', tasks: [] },
+      }] } }
+    },
+  }
+  const { useChat } = await import(`data:text/javascript;base64,${Buffer.from(code + '\n// history').toString('base64')}`)
+  let chat
+  const app = createSSRApp({ setup() { chat = useChat(); return () => null } })
+  app.provide('refreshHistory', async () => {})
+  await renderToString(app)
+  chat.selectSession('history-session')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(chat.messages.value.length, 1)
+  const message = chat.messages.value[0]
+  assert.equal(message.role, 'error')
+  assert.equal(message.detail, '已达到模型调用上限')
+  assert.equal(message.retryable, true)
+  assert.match(message.partial_content, /部分回答/)
+  assert.equal(message.execution_plan.id, 'p')
+})
+
+test('真实SSE并行工具结果只完成对应调用，刷新后保持相同状态', async (t) => {
+  t.after(() => { delete globalThis.__timeoutChatAPI })
+  const encoder = new TextEncoder()
+  let chat
+  let reads = 0
+  let saved = []
+  const identity = { plan_id: 'p', plan_version: 2, tool_name: 'grep_chunks' }
+  const events = [
+    { type: 'tool_call', title: '调用工具 grep_chunks', status: 'running', tool_call_id: 'a', task_id: 'knowledge', ...identity },
+    { type: 'tool_call', title: '调用工具 grep_chunks', status: 'running', tool_call_id: 'b', task_id: 'web', ...identity },
+    { type: 'tool_result', title: '工具执行结果', status: 'error', detail: '查询限流', tool_call_id: 'b', task_id: 'web', ...identity },
+    { type: 'tool_result', title: '工具执行结果', status: 'success', tool_call_id: 'a', task_id: 'knowledge', ...identity },
+  ]
+  const packet = events => ({ done: false, value: encoder.encode(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')) })
+  globalThis.__timeoutChatAPI = {
+    async sendMessage() {
+      return {
+        async read() {
+          reads++
+          if (reads === 1) return packet([{ type: 'start', message_id: 'tool-run' }, ...events.slice(0, 2)])
+          if (reads === 2) {
+            assert.deepEqual(normalizeExecutionTrace(chat.streamTimeline.value, true).map(row => row.status), ['running', 'running'])
+            return packet([events[2]])
+          }
+          if (reads === 3) {
+            assert.deepEqual(normalizeExecutionTrace(chat.streamTimeline.value, true).map(row => row.status), ['running', 'error'])
+            return packet([events[3]])
+          }
+          assert.deepEqual(normalizeExecutionTrace(chat.streamTimeline.value, true).map(row => row.status), ['success', 'error'])
+          saved = chat.streamTimeline.value.map(step => ({ ...step, content: step.title }))
+          return packet([{ type: 'done', content: '基于可用资料回答', done: true }])
+        },
+        async cancel() {}, releaseLock() {},
+      }
+    },
+    async getMessages() { return { data: { messages: [{ id: 'tool-run', role: 'assistant', content: '基于可用资料回答', reasoning_steps: saved }] } } },
+  }
+  const { useChat } = await import(`data:text/javascript;base64,${Buffer.from(code + '\n// correlated-tools').toString('base64')}`)
+  const app = createSSRApp({ setup() { chat = useChat(); return () => null } })
+  app.provide('refreshHistory', async () => {})
+  await renderToString(app)
+  chat.activeSessionId.value = 'tool-session'
+  chat.selectedModel.value = 'model'
+  chat.input.value = '查询资料'
+  await chat.sendMessage()
+  const live = normalizeExecutionTrace(chat.messages.value.find(message => message.id === 'tool-run').timeline, false)
+  assert.deepEqual(live.map(row => row.status), ['success', 'error'])
+  chat.selectSession('reloaded-session')
+  await new Promise(resolve => setImmediate(resolve))
+  const history = normalizeExecutionTrace(chat.messages.value.find(message => message.id === 'tool-run').timeline, false)
+  assert.deepEqual(history, live)
+  assert.equal(history[1].resultDetail, '查询限流')
+})

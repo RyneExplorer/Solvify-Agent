@@ -143,40 +143,21 @@
     <template v-else>
       <div ref="chatEl" class="flex-1 overflow-y-auto px-6 py-6">
         <div class="max-w-[800px] mx-auto space-y-6">
-          <div v-for="(msg, msgIdx) in messages" :key="msg.id" class="flex" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
-            <div class="max-w-[80%]">
-              <!-- Timeline -->
-              <div v-if="msg.role === 'assistant' && msg.timeline?.length" class="mb-3">
-                <button
-                  @click="collapsedTimelines.has(msgIdx) ? collapsedTimelines.delete(msgIdx) : collapsedTimelines.add(msgIdx)"
-                  class="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-600 mb-1 cursor-pointer"
-                >
-                  <svg
-                    class="w-3 h-3 transition-transform"
-                    :class="{ '-rotate-90': collapsedTimelines.has(msgIdx) }"
-                    fill="none" stroke="currentColor" viewBox="0 0 24 24"
-                  ><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
-                  <span>推理步骤 ({{ msg.timeline.length }})</span>
-                </button>
-                <div v-show="!collapsedTimelines.has(msgIdx)" class="space-y-1.5">
-                  <div v-for="(step, si) in msg.timeline" :key="si" class="group">
-                    <div class="flex items-start gap-2 py-0.5 text-xs">
-                      <span class="text-emerald-500 shrink-0">✓</span>
-                      <span class="text-emerald-600">{{ step.title }}</span>
-                    </div>
-                    <div v-if="step.detail" class="ml-5 mt-1 text-xs text-slate-500 bg-slate-50 rounded-lg px-3 py-2 whitespace-pre-wrap">{{ step.detail }}</div>
-                  </div>
-                </div>
-              </div>
+          <div v-for="msg in messages" :key="msg.id" class="flex" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
+            <div class="min-w-0" :class="msg.role === 'user' ? 'max-w-[80%]' : 'w-full'">
+              <!-- Plan and execution records -->
               <DeepTaskPlan v-if="msg.execution_plan" :plan="msg.execution_plan" />
+              <ExecutionTrace v-if="msg.role !== 'user' && msg.timeline?.length" :steps="msg.timeline" :status="msg.role === 'error' ? 'error' : msg.execution_plan?.status" />
               <!-- Bubble -->
-              <div :class="['px-4 py-3 rounded-2xl text-sm leading-relaxed', msg.role === 'user' ? 'bg-slate-100 text-slate-800' : msg.role === 'error' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-white text-slate-800']">
+              <div v-if="msg.partial_content" v-html="formatContent(msg.partial_content, msg.sources)" class="md-content px-4 py-3 text-sm leading-relaxed text-slate-800" />
+              <ChatFailure v-if="msg.role === 'error'" :title="msg.content" :detail="msg.detail" />
+              <div v-else-if="msg.content" :class="['px-4 py-3 rounded-2xl text-sm leading-relaxed', msg.role === 'user' ? 'bg-slate-100 text-slate-800' : 'bg-white text-slate-800']">
                 <div v-if="msg.role === 'assistant'" v-html="formatContent(msg.content, msg.sources)" class="md-content" />
                 <template v-else>{{ msg.content }}</template>
               </div>
               <!-- Actions -->
               <div v-if="msg.role === 'assistant' || msg.role === 'error'" class="flex items-center gap-1 mt-2 flex-wrap">
-                <button class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="复制" @click="copyText(msg.content)">
+                <button class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="复制" @click="copyText([msg.partial_content, msg.content, msg.detail].filter(Boolean).join('\n\n'))">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
                 </button>
                 <button v-if="msg.role === 'assistant'" class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="重新生成" @click="regenerate">
@@ -188,7 +169,7 @@
                 <button v-if="msg.role === 'assistant'" class="p-1.5 rounded-md hover:bg-slate-100 text-slate-400" title="保存到知识库" @click="openSaveNoteDialog(msg.content)">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 21v-8H7v8M7 3v5h8"/></svg>
                 </button>
-                <span class="mx-1 w-px h-4 bg-slate-200" />
+                <span v-if="msg.role === 'assistant'" class="mx-1 w-px h-4 bg-slate-200" />
                 <button
                   v-if="msg.role === 'assistant'"
                   class="p-1.5 rounded-md hover:bg-slate-100 transition-colors"
@@ -209,7 +190,7 @@
                 </button>
               </div>
               <!-- Sources -->
-              <div v-if="msg.role === 'assistant' && msg.sources?.filter(s => s?.title).length" class="mt-2 flex flex-wrap items-center gap-1.5">
+              <div v-if="msg.role !== 'user' && msg.sources?.filter(s => s?.title).length" class="mt-2 flex flex-wrap items-center gap-1.5">
                 <span class="text-[11px] text-slate-400">来源:</span>
                 <span
                   v-for="(s, si) in msg.sources.filter(s => s?.title)"
@@ -220,7 +201,7 @@
                 >{{ cleanTitle(s.title) }}</span>
               </div>
               <!-- Meta: trace id / feedback reasons -->
-              <div v-if="msg.role === 'assistant' && (msg.trace_id || msg.feedback_reasons?.length)" class="mt-2 flex flex-wrap items-center gap-2">
+              <div v-if="msg.role !== 'user' && (msg.trace_id || msg.feedback_reasons?.length)" class="mt-2 flex flex-wrap items-center gap-2">
                 <div v-if="msg.trace_id" class="flex items-center gap-1 text-[11px] text-slate-400">
                   <span>Trace</span>
                   <code class="px-1.5 py-0.5 bg-slate-100 rounded-md font-mono" :title="msg.trace_id">{{ msg.trace_id.slice(0, 10) }}…</code>
@@ -242,25 +223,15 @@
                   >{{ r }}</span>
                 </div>
               </div>
-              <div v-if="msg.role === 'error' && msg.detail && msg.detail !== msg.content" class="mt-1 text-xs text-red-500">{{ msg.detail }}</div>
             </div>
           </div>
 
           <!-- Streaming loading -->
           <div v-if="isLoading || (pendingApproval && streamPlan)" class="flex justify-start">
-            <div class="max-w-[80%]">
-              <div class="px-4 py-3 rounded-2xl bg-white text-sm">
-                <div v-if="streamTimeline.length" class="mb-3 space-y-1.5">
-                  <div v-for="(step, si) in streamTimeline" :key="si" class="group">
-                    <div class="flex items-start gap-2 py-0.5 text-xs">
-                      <span v-if="step.status === 'running'" class="w-3 h-3 mt-0.5 border-2 border-slate-200 border-t-emerald-500 rounded-full animate-spin shrink-0" />
-                      <span v-else class="w-3 h-3 mt-0.5 text-emerald-500 shrink-0">✓</span>
-                      <span :class="step.status === 'running' ? 'text-slate-500' : 'text-emerald-600'">{{ step.title }}</span>
-                    </div>
-                    <div v-if="step.detail" class="ml-5 mt-1 text-xs text-slate-500 bg-slate-50 rounded-lg px-3 py-2 whitespace-pre-wrap">{{ step.detail }}</div>
-                  </div>
-                </div>
+            <div class="w-full min-w-0">
+              <div class="rounded-2xl bg-white text-sm">
                 <DeepTaskPlan v-if="streamPlan" :plan="streamPlan" />
+                <ExecutionTrace v-if="streamTimeline.length" :steps="streamTimeline" :active="isLoading" :status="streamPlan?.status" />
                 <div v-if="progressText" class="flex items-center gap-2 mb-2 text-xs text-slate-400">
                   <span class="w-3 h-3 border-2 border-slate-200 border-t-emerald-500 rounded-full animate-spin" />{{ progressText }}
                 </div>
@@ -497,6 +468,8 @@ import { useMarkdownTooltip } from '@/composables/useMarkdownTooltip'
 import { createNote } from '@/api/document'
 import ChatInputCard from '@/components/ChatInputCard.vue'
 import DeepTaskPlan from '@/components/DeepTaskPlan.vue'
+import ExecutionTrace from '@/components/ExecutionTrace.vue'
+import ChatFailure from '@/components/ChatFailure.vue'
 import AppDialog from '@/components/ui/AppDialog.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import AppDropdownSelect from '@/components/ui/AppDropdownSelect.vue'
@@ -504,7 +477,7 @@ import AppDropdownSelect from '@/components/ui/AppDropdownSelect.vue'
 const route = useRoute()
 const chat = useChat()
 const {
-  activeSession: session, messages, collapsedTimelines, isLoading, streamContent, streamSources, streamTimeline, streamPlan, progressText,
+  activeSession: session, messages, isLoading, streamContent, streamSources, streamTimeline, streamPlan, progressText,
   modelOptions, knowledgeBases, connected, input, selectedModel, selectedKBs, searchMode, kbTriggerText,
   selectedMCPConfigIds, enabledMCPOptions, mcpLoading,
   init, sendMessage, scrollToBottom, toggleKB, formatContent, getSourceChunkIds, copyText, regenerate, retryLastMessage, stopGeneration,

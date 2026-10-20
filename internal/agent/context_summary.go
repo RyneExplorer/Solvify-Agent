@@ -37,7 +37,10 @@ type coveredContextGroup struct {
 	Revision   int
 }
 
-type taskContextSnapshot struct{ Raw string }
+type taskContextSnapshot struct {
+	Raw       string
+	Restoring bool
+}
 
 type taskContextSnapshotKey struct{}
 
@@ -79,18 +82,27 @@ func (m *runtimeContextMiddleware) BeforeModelRewriteState(ctx context.Context, 
 	if state == nil {
 		return ctx, state, nil
 	}
+	state, err := m.engine.expandToolContext(ctx, m.req, state)
+	if err != nil {
+		return ctx, nil, err
+	}
 	request := m.req
 	snapshot := runtimeSnapshot{Version: 1, UserID: request.UserID, SessionID: request.SessionID, RunID: request.RunID, AgentID: request.AgentName, TaskID: request.TaskID, InstructionHash: contentHash(m.instruction)}
 	previousValue, hadPrevious := getRuntimeSnapshot(ctx, m.key())
 	if value, ok := getRuntimeSnapshot(ctx, m.key()); ok {
 		raw, valid := value.(string)
-		if !valid || json.Unmarshal([]byte(raw), &snapshot) != nil || snapshot.Version != 1 || snapshot.UserID != request.UserID || snapshot.SessionID != request.SessionID || snapshot.RunID != request.RunID || snapshot.AgentID != request.AgentName || snapshot.TaskID != request.TaskID || snapshot.InstructionHash != contentHash(m.instruction) {
+		if !valid || json.Unmarshal([]byte(raw), &snapshot) != nil || snapshot.Version != 1 || snapshot.UserID != request.UserID || snapshot.SessionID != request.SessionID || snapshot.RunID != request.RunID || snapshot.AgentID != request.AgentName || snapshot.TaskID != request.TaskID || !m.matchesSnapshotInstruction(ctx, snapshot.InstructionHash) {
 			return ctx, state, fmt.Errorf("运行上下文版本或归属不匹配")
 		}
 	}
+	// 只更新已知旧模板的指令指纹，保留摘要、调用计数、归属和证据。
+	snapshot.InstructionHash = contentHash(m.instruction)
 	seen := map[string]bool{}
 	for _, ref := range snapshot.References {
 		seen[ref.ArtifactID] = true
+	}
+	for i := range snapshot.References {
+		snapshot.References[i].Content, snapshot.References[i].Preview = "", ""
 	}
 	for _, message := range state.Messages {
 		if message == nil || message.Role != schema.Tool {
@@ -98,6 +110,7 @@ func (m *runtimeContextMiddleware) BeforeModelRewriteState(ctx context.Context, 
 		}
 		var ref artifactReference
 		if json.Unmarshal([]byte(message.Content), &ref) == nil && ref.ArtifactID != "" && !seen[ref.ArtifactID] {
+			ref.Content, ref.Preview = "", ""
 			snapshot.References = append(snapshot.References, ref)
 			seen[ref.ArtifactID] = true
 		}
@@ -106,7 +119,7 @@ func (m *runtimeContextMiddleware) BeforeModelRewriteState(ctx context.Context, 
 		if m.engine.artifactRepo == nil {
 			return ctx, state, fmt.Errorf("上下文产物存储不可用")
 		}
-		a, err := m.engine.artifactRepo.FindScoped(ctx, artifactScope(request), ref.ArtifactID)
+		a, err := findArtifactWithGrants(ctx, m.engine.artifactRepo, artifactScope(request), request.artifactReads, ref.ArtifactID)
 		if err != nil {
 			return ctx, state, err
 		}
@@ -170,7 +183,7 @@ func (m *runtimeContextMiddleware) BeforeModelRewriteState(ctx context.Context, 
 				result, callErr := m.summaryModel.Generate(summaryCtx, input, model.WithTools([]*schema.ToolInfo{}), model.WithMaxTokens(p.SummaryOutput))
 				summaryExpired := summaryCtx.Err()
 				cancel()
-				if callErr == nil && summaryExpired == nil && result != nil && strings.TrimSpace(result.Content) != "" && len(result.ToolCalls) == 0 && tokenutil.CountTokens(result.Content, request.ModelName) <= p.SummaryOutput {
+				if callErr == nil && summaryExpired == nil && validateModelCompletion(result) == nil && strings.TrimSpace(result.Content) != "" && len(result.ToolCalls) == 0 && tokenutil.CountTokens(result.Content, request.ModelName) <= p.SummaryOutput {
 					summary := result.Content
 					if len(snapshot.References) > 0 {
 						refs := append([]artifactReference(nil), snapshot.References...)
@@ -235,6 +248,7 @@ func (m *runtimeContextMiddleware) BeforeModelRewriteState(ctx context.Context, 
 		return ctx, state, err
 	}
 	setRuntimeSnapshot(ctx, m.key(), string(raw))
+	m.publishArtifactReadBudget(ctx, next, budget)
 	return ctx, next, nil
 }
 

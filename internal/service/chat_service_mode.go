@@ -123,6 +123,7 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 	toolEventSeen := false
 	agentErrorSeen := false
 	var failureDetail string
+	var failureRetryable bool
 
 	for agentEvent := range agentEventCh {
 		if agentEvent.Type == agent.EventPlan && agentEvent.Plan != nil {
@@ -225,7 +226,8 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 			// 失败原因只认种类，不再拿错误文本去撞关键词表 ——
 			// 此前把 agentEvent.Error 原样喂给关键词表，裸词 "exceeds" 让
 			// 「exceeds max iterations」也被判成上下文超长，把模型窗口从 64000 砍到 8192。
-			failureDetail = messageFor(agentEvent.Kind, profile).Detail
+			failure := messageFor(agentEvent.Kind, profile)
+			failureDetail, failureRetryable = failure.Detail, failure.Retryable
 		}
 
 		eventch.Send(ctx, eventCh, toStreamEvent(agentEvent, profile))
@@ -263,7 +265,7 @@ func (s *chatService) processAgentMode(ctx context.Context, userID, sessionID, u
 			if fullContent == "" {
 				content = "深度任务未完成：" + failureDetail
 			}
-			metadata := datatypes.JSON(mustMarshal(map[string]any{"execution_plan": executionPlan, "reasoning_steps": reasoningSteps, "execution_error": failureDetail}))
+			metadata := datatypes.JSON(mustMarshal(map[string]any{"execution_plan": executionPlan, "reasoning_steps": reasoningSteps, "execution_error": failureDetail, "execution_retryable": failureRetryable}))
 			saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			if err := s.saveAssistantMessage(saveCtx, sessionID, assistantMsgID, content, req, agentSources, metadata); err != nil {
 				logger.Errorf("保存回答中断记录失败: sessionID=%s, err=%v", sessionID, err)
@@ -547,10 +549,15 @@ func applyReasoningStep(steps *[]dto.ReasoningStep, e agent.Event) {
 		})
 	case agent.EventToolCall, agent.EventToolResult, agent.EventWarning:
 		*steps = append(*steps, dto.ReasoningStep{
-			Type:    e.Type,
-			Content: e.Title,
-			Detail:  e.Detail,
-			Status:  e.Status,
+			ToolCallID:  e.ToolCallID,
+			ToolName:    e.ToolName,
+			TaskID:      e.TaskID,
+			PlanID:      e.PlanID,
+			PlanVersion: e.PlanVersion,
+			Type:        e.Type,
+			Content:     e.Title,
+			Detail:      e.Detail,
+			Status:      e.Status,
 		})
 	}
 }
