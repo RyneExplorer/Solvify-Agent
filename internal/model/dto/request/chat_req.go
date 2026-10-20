@@ -2,6 +2,7 @@ package request
 
 import (
 	"fmt"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -35,6 +36,9 @@ type SendMessageRequest struct {
 }
 
 func (input SendMessageRequest) ValidateContent() error {
+	if strings.TrimSpace(input.Content) == "" {
+		return fmt.Errorf("消息内容不能为空")
+	}
 	if utf8.RuneCountInString(input.Content) > MaxChatMessageChars {
 		return fmt.Errorf("单条消息不能超过%d个字符，请缩短后重试", MaxChatMessageChars)
 	}

@@ -44,6 +44,24 @@ func inputLimitBody(t *testing.T, content, mode string) string {
 	return string(body)
 }
 
+func TestChatRoutes_RejectBlankMessages(t *testing.T) {
+	for _, mode := range []string{"quick", "smart-reasoning"} {
+		for _, content := range []string{"", "   ", "\t", "\r\n", " \t\r\n ", "\u00a0\u2003\u3000"} {
+			t.Run(fmt.Sprintf("%s/%q", mode, content), func(t *testing.T) {
+				stub := &inputLimitChatService{}
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/sessions/"+testSessionID+"/messages", strings.NewReader(inputLimitBody(t, content, mode)))
+				req.Header.Set("Content-Type", "application/json")
+				writer := streamRecorder{httptest.NewRecorder()}
+				newTestRouter(stub, 1).ServeHTTP(writer, req)
+				result := decode(t, writer.ResponseRecorder)
+				if writer.Code != http.StatusOK || result.Code != apperrors.CodeBadRequest || stub.calls != 0 || strings.HasPrefix(writer.Header().Get("Content-Type"), "text/event-stream") {
+					t.Fatalf("空白消息未在Service之前拒绝：%+v calls=%d", result, stub.calls)
+				}
+			})
+		}
+	}
+}
+
 func TestChatRoutes_MessageCharacterLimit(t *testing.T) {
 	for _, mode := range []string{"quick", "smart-reasoning"} {
 		for _, symbol := range []string{"a", "中", "😀"} {

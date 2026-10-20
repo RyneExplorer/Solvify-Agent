@@ -8,10 +8,10 @@
       rows="2"
       class="w-full px-5 py-3 text-sm text-slate-700 placeholder-slate-300 resize-none border-none outline-none"
     />
-    <div class="flex items-center justify-between px-4 py-2 border-t border-slate-100">
-      <div class="flex items-center gap-2">
+    <div class="flex items-center justify-between gap-2 px-4 py-2 border-t border-slate-100">
+      <div class="flex flex-1 min-w-0 flex-wrap items-center gap-2">
         <!-- KB Dropdown -->
-        <div class="relative" ref="kbDropdownRef">
+        <div class="relative max-w-full" ref="kbDropdownRef">
           <button
             @click="toggleKbDropdown"
             class="tool-trigger"
@@ -93,7 +93,7 @@
         </div>
 
         <!-- Search mode -->
-        <div class="relative" ref="searchDropdownRef">
+        <div class="relative max-w-full" ref="searchDropdownRef">
           <button @click="toggleSearchDropdown" class="tool-trigger">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
             <span>{{ searchModeLabel }}</span>
@@ -124,7 +124,7 @@
         </div>
 
         <!-- Model -->
-        <div class="relative" ref="modelDropdownRef">
+        <div class="relative max-w-full" ref="modelDropdownRef">
           <button @click="toggleModelDropdown" class="tool-trigger">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
             <span>{{ modelLabel }}</span>
@@ -175,7 +175,7 @@
           <div class="h-6 w-20 bg-slate-100 rounded-md animate-pulse" />
         </div>
         <!-- MCP 服务器（仅当有可用 MCP 时显示） -->
-        <div v-else-if="searchMode === 'smart-reasoning' && mcpOptions.length" class="relative" ref="mcpDropdownRef">
+        <div v-else-if="searchMode === 'smart-reasoning' && mcpOptions.length" class="relative max-w-full" ref="mcpDropdownRef">
           <button @click="toggleMCPDropdown" class="tool-trigger" :class="{ 'opacity-60': loading }" :disabled="loading">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"/></svg>
             <span :title="mcpTooltip">{{ mcpLabel }}</span>
@@ -256,12 +256,12 @@
       </div>
 
       <button v-if="loading" @click="$emit('stop')"
-        class="w-9 h-9 rounded-full flex items-center justify-center transition-all bg-red-500 hover:bg-red-600 text-white shadow-md" title="停止生成">
+        class="w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-all bg-red-500 hover:bg-red-600 text-white shadow-md" title="停止生成">
         <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
       </button>
       <template v-else>
         <button @click="$emit('send')" :disabled="!input.trim()"
-          class="w-9 h-9 rounded-full flex items-center justify-center transition-all"
+          class="w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-all"
           :class="input.trim() ? 'bg-slate-800 hover:bg-slate-700 text-white shadow-md' : 'bg-slate-100 text-slate-300 cursor-not-allowed'">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>
         </button>
@@ -516,7 +516,15 @@ function onKeydown(e: KeyboardEvent) {
 
 <style scoped>
 .tool-trigger {
-  @apply flex items-center gap-1.5 text-xs text-slate-700 hover:bg-slate-50 rounded-lg px-3 py-1.5 transition-colors;
+  @apply flex min-w-0 max-w-full items-center gap-1.5 whitespace-nowrap text-xs text-slate-700 hover:bg-slate-50 rounded-lg px-3 py-1.5 transition-colors;
+}
+
+.tool-trigger > span {
+  @apply truncate;
+}
+
+.tool-trigger > svg {
+  @apply shrink-0;
 }
 
 .kb-fade-enter-active,
