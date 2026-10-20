@@ -1,6 +1,7 @@
 package tokenutil
 
 import (
+	"crypto/sha256"
 	"strings"
 	"sync"
 
@@ -76,7 +77,8 @@ func CountTokens(text, modelOrEncoding string) int {
 	}
 	tk, err := getEncoding(modelOrEncoding)
 	if err == nil && tk != nil {
-		return len(tk.Encode(text, nil, nil))
+		key := tokenCountKey{encoding: tk, content: sha256.Sum256([]byte(text))}
+		return exactTokenCounts.count(key, func() int { return len(tk.Encode(text, nil, nil)) })
 	}
 	return legacyEstimate(text)
 }
@@ -94,6 +96,10 @@ func TruncateByTokens(text, modelOrEncoding string, maxTokens int) (string, int)
 	if err != nil || tk == nil {
 		// 真 BPE 拿不到就用估算做字节/字符近似，优先保证不越上限
 		return legacyTruncate(text, maxTokens)
+	}
+	key := tokenCountKey{encoding: tk, content: sha256.Sum256([]byte(text))}
+	if count, ok := exactTokenCounts.get(key); ok && count <= maxTokens {
+		return text, count
 	}
 	ids := tk.Encode(text, nil, nil)
 	if len(ids) <= maxTokens {
