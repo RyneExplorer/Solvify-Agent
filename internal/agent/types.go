@@ -34,9 +34,10 @@ const (
 
 // Request 描述 Agent 执行请求
 type Request struct {
-	citations   *citationRegistry
-	ContextData []ContextMaterial `json:",omitempty"`
-	RunID       string            // 由程序生成并随checkpoint冻结
+	artifactReads map[string]artifactReadGrant // 仅由可信依赖结果重建，模型参数不能设置
+	citations     *citationRegistry
+	ContextData   []ContextMaterial `json:",omitempty"`
+	RunID         string            // 由程序生成并随checkpoint冻结
 	// Profile 问答模式；空值等同 ProfileDeep（保持既有行为不变），判定一律走 effectiveProfile
 	Profile           Profile
 	CheckpointID      string               // 恢复执行时使用的 checkpointID（恢复场景必填）

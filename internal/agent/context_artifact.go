@@ -28,6 +28,8 @@ const artifactReadToolName = "read_context_artifact"
 func (e *Engine) WithArtifactRepo(repo repository.ContextArtifactRepo) { e.artifactRepo = repo }
 
 type artifactReference struct {
+	OwnerTaskID  string             `json:"owner_task_id,omitempty"`
+	OwnerAgentID string             `json:"owner_agent_id,omitempty"`
 	ArtifactID   string             `json:"artifact_id"`
 	Hash         string             `json:"hash"`
 	Version      int                `json:"version"`
@@ -45,6 +47,7 @@ type artifactReference struct {
 
 // 选择器及偏移均由程序记录；分页偏移相对于所选视图，原文始终保持不变。
 type artifactSelection struct {
+	DecodedText bool   `json:"decoded_text,omitempty"`
 	Kind        string `json:"kind"`
 	Value       string `json:"value,omitempty"`
 	SourceStart int    `json:"source_start,omitempty"`
@@ -94,6 +97,7 @@ func (e *Engine) artifactMiddleware(req Request) compose.InvokableToolMiddleware
 			preview, _ := tokenutil.TruncateByTokens(out.Result, req.ModelName, min(p.ReadTokens, 500))
 			readPolicy := e.artifactReadingPolicy(req)
 			raw, _ := json.Marshal(artifactReference{
+				OwnerTaskID: scope.TaskID, OwnerAgentID: scope.AgentID,
 				ArtifactID: id, Hash: hash, Version: 1, Runes: len([]rune(out.Result)), Preview: preview,
 				MaxReadRunes: readPolicy.ReadRunes,
 				Read:         fmt.Sprintf("原文已保存；预览不代表全部内容。可使用read_context_artifact按keyword、section或json_path定位；分段每次最多%d个字符，超大limit自动缩小。实际长度还受动态token预算限制；complete=false时用返回的next_offset继续，不要按请求limit推算偏移。", readPolicy.ReadRunes),
@@ -117,6 +121,7 @@ type artifactReadTool struct {
 	scope  repository.ArtifactScope
 	policy config.RuntimeContextPolicy
 	model  string
+	grants map[string]artifactReadGrant
 }
 
 type artifactArgumentFeedback struct {
@@ -151,13 +156,13 @@ func artifactArgumentFailure(toolName, result string) (string, bool) {
 func (t artifactReadTool) Info(context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
 		Name: artifactReadToolName,
-		Desc: fmt.Sprintf("读取本运行本任务产物；keyword定位关键词，section定位Markdown章节，json_path用JSON Pointer定位字段，chunk_id定位知识分块。定位参数最多选一个。默认读取原文，偏移/长度以字符计，每次最多%d字符且受token预算限制；complete表示所选视图是否读到末尾，false用next_offset续读。只能用工具给出的artifact_id。invalid_arguments按提示纠正，纠错消耗当前执行预算。", t.policy.ReadRunes),
+		Desc: fmt.Sprintf("读取本任务产物及程序授权的前置依赖产物；keyword定位关键词，section定位Markdown章节，json_path用JSON Pointer定位字段，chunk_id定位知识分块。json_path可与keyword组合：先展开字段再定位；其余定位参数不组合。默认读取原文，偏移/长度以字符计，每次最多%d字符且受token预算限制；complete表示所选视图是否读到末尾，false用next_offset续读。只能用工具给出的artifact_id。invalid_arguments按提示纠正，纠错消耗当前执行预算。", t.policy.ReadRunes),
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
 			"artifact_id": {Type: schema.String, Required: true, Desc: "工具结果提供的产物ID"},
 			"offset":      {Type: schema.Integer, Desc: "从0开始的字符偏移；省略为0，后续分页使用上次返回的next_offset"},
-			"keyword":     {Type: schema.String, Desc: "在offset之后定位关键词，返回从命中位置开始的原文；后续不带keyword并使用next_offset续读"},
+			"keyword":     {Type: schema.String, Desc: "在offset之后定位关键词，返回从命中位置开始的原文；后续保持返回的selection视图，不带keyword并使用next_offset续读"},
 			"section":     {Type: schema.String, Desc: "Markdown章节标题，含其子章节；续读时保留section并使用next_offset"},
-			"json_path":   {Type: schema.String, Desc: "JSON Pointer，例如/sources/0/content或/data/items；偏移是所选值的序列化字符位置，续读时保留路径"},
+			"json_path":   {Type: schema.String, Desc: "JSON Pointer，例如/sources/0/content或/data/items；字符串按解码正文偏移，其他值按JSON序列化字符偏移，续读时保留路径"},
 			"chunk_id":    {Type: schema.String, Desc: "知识库sources中的真实分块id；返回该分块完整记录，续读时保留chunk_id"},
 			"limit":       {Type: schema.Integer, Desc: fmt.Sprintf("请求读取的字符数；省略或0默认%d，超过%d自动缩小；实际返回可能因token预算进一步减少", t.policy.ReadRunes, t.policy.ReadRunes)},
 		}),
@@ -209,14 +214,14 @@ func (t artifactReadTool) InvokableRun(ctx context.Context, args string, _ ...ei
 			selectors++
 		}
 	}
-	if selectors > 1 {
-		return t.invalidArguments("arguments", "keyword、section、json_path和chunk_id最多选择一个")
+	if selectors > 1 && !(selectors == 2 && req.JSONPath != nil && req.Keyword != "") {
+		return t.invalidArguments("arguments", "仅json_path可与keyword组合，其他定位参数最多选择一个")
 	}
 	// limit是请求的页长；缩小超大请求即可继续读取，无需终止任务或额外纠错调用。
 	if req.Limit == 0 || req.Limit > t.policy.ReadRunes {
 		req.Limit = t.policy.ReadRunes
 	}
-	a, err := t.repo.FindScoped(ctx, t.scope, req.ID)
+	a, err := findArtifactWithGrants(ctx, t.repo, t.scope, t.grants, req.ID)
 	if err != nil {
 		return "", err
 	}
@@ -225,12 +230,18 @@ func (t artifactReadTool) InvokableRun(ctx context.Context, args string, _ ...ei
 	}
 	content := a.Content
 	selection := artifactSelection{Kind: "source"}
+	// MCP正文是JSON字符串；在解码后的正文中定位，偏移也固定到该视图。
+	if req.JSONPath == nil && req.Keyword != "" {
+		if path, found := artifactTextPath(content, req.Keyword); found {
+			req.JSONPath = &path
+		}
+	}
 	if req.JSONPath != nil {
-		content, err = artifactJSONPointer(content, *req.JSONPath)
+		content, err = artifactJSONPointerView(content, *req.JSONPath, true)
 		if err != nil {
 			return t.invalidArguments("json_path", err.Error())
 		}
-		selection.Kind, selection.Value = "json_path", *req.JSONPath
+		selection.Kind, selection.Value, selection.DecodedText = "json_path", *req.JSONPath, true
 	}
 	if req.ChunkID != "" {
 		content, err = artifactKnowledgeChunk(content, req.ChunkID)
@@ -254,20 +265,28 @@ func (t artifactReadTool) InvokableRun(ctx context.Context, args string, _ ...ei
 	if req.Keyword != "" {
 		position, found := locateArtifact(content, req.Keyword, req.Offset)
 		if !found {
-			return t.invalidArguments("keyword", "当前位置之后未找到关键词，请更换关键词")
+			return t.invalidArguments("keyword", fmt.Sprintf("当前位置之后未找到关键词；请从offset=0换用短关键词，或用json_path定位正文后续读。当前视图长度%d；不要猜测偏移。", len(runes)))
 		}
 		req.Offset = position
 	}
 	end := req.Offset + min(len(runes)-req.Offset, req.Limit)
 	// 按完整字符缩短，并以最终JSON计费，避免转义膨胀、短末页空转和半个UTF-8字符。
 	// 搜索范围受ReadRunes限制；非末尾至少返回一个字符，否则明确报告额度不足。
-	low, high := min(1, end-req.Offset), end-req.Offset
+	encodePage := func(size int) string {
+		next := req.Offset + size
+		raw, _ := json.Marshal(artifactReference{OwnerTaskID: a.TaskID, OwnerAgentID: a.AgentID, ArtifactID: a.ID, Hash: a.Hash, Version: a.Version, Runes: len([]rune(a.Content)), Offset: req.Offset, NextOffset: next, TotalRunes: len(runes), Content: string(runes[req.Offset:next]), Complete: next == len(runes), MaxReadRunes: t.policy.ReadRunes, Selection: &selection})
+		return string(raw)
+	}
+	if full := encodePage(end - req.Offset); tokenutil.CountTokens(full, t.model) <= t.policy.ReadTokens {
+		return full, nil
+	}
+	low, high := min(1, end-req.Offset), end-req.Offset-1
 	var result string
 	for low <= high {
 		size := low + (high-low)/2
 		next := req.Offset + size
 		piece := string(runes[req.Offset:next])
-		raw, err := json.Marshal(artifactReference{ArtifactID: a.ID, Hash: a.Hash, Version: a.Version, Runes: len([]rune(a.Content)), Offset: req.Offset, NextOffset: next, TotalRunes: len(runes), Content: piece, Complete: next == len(runes), MaxReadRunes: t.policy.ReadRunes, Selection: &selection})
+		raw, err := json.Marshal(artifactReference{OwnerTaskID: a.TaskID, OwnerAgentID: a.AgentID, ArtifactID: a.ID, Hash: a.Hash, Version: a.Version, Runes: len([]rune(a.Content)), Offset: req.Offset, NextOffset: next, TotalRunes: len(runes), Content: piece, Complete: next == len(runes), MaxReadRunes: t.policy.ReadRunes, Selection: &selection})
 		if err != nil {
 			return "", err
 		}
@@ -288,7 +307,7 @@ func (e *Engine) addArtifactTool(req Request, tools []einoTool.BaseTool) []einoT
 	if e.artifactRepo == nil || req.AgentName == "synthesis_review" {
 		return tools
 	}
-	return append(append([]einoTool.BaseTool(nil), tools...), artifactReadTool{e.artifactRepo, artifactScope(req), e.artifactReadingPolicy(req), req.ModelName})
+	return append(append([]einoTool.BaseTool(nil), tools...), artifactReadTool{repo: e.artifactRepo, scope: artifactScope(req), policy: e.artifactReadingPolicy(req), model: req.ModelName, grants: req.artifactReads})
 }
 
 func appendArtifactReference(refs []artifactReference, ref artifactReference) []artifactReference {
@@ -342,8 +361,11 @@ func (e *Engine) taskArtifactEvidence(ctx context.Context, req Request, task Tas
 				return "", fmt.Errorf("上下文产物存储不可用")
 			}
 			scopeReq := req
-			scopeReq.TaskID = result.TaskID
-			scopeReq.AgentName = result.Agent
+			scopeReq.TaskID, scopeReq.AgentName = artifactOwner(ref, result)
+			owner, allowed := results[scopeReq.TaskID]
+			if !allowed || owner.Status != TaskSuccess || owner.Agent != scopeReq.AgentName {
+				return "", fmt.Errorf("产物不属于有效前置任务")
+			}
 			a, err := e.artifactRepo.FindScoped(ctx, artifactScope(scopeReq), ref.ArtifactID)
 			if err != nil {
 				return "", err
@@ -398,7 +420,7 @@ func artifactEvidenceView(content string, ref artifactReference) (string, error)
 	switch ref.Selection.Kind {
 	case "source":
 	case "json_path":
-		content, err = artifactJSONPointer(content, ref.Selection.Value)
+		content, err = artifactJSONPointerView(content, ref.Selection.Value, ref.Selection.DecodedText)
 	case "chunk_id":
 		content, err = artifactKnowledgeChunk(content, ref.Selection.Value)
 	case "section":

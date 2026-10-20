@@ -37,7 +37,10 @@ type coveredContextGroup struct {
 	Revision   int
 }
 
-type taskContextSnapshot struct{ Raw string }
+type taskContextSnapshot struct {
+	Raw       string
+	Restoring bool
+}
 
 type taskContextSnapshotKey struct{}
 
@@ -88,10 +91,12 @@ func (m *runtimeContextMiddleware) BeforeModelRewriteState(ctx context.Context, 
 	previousValue, hadPrevious := getRuntimeSnapshot(ctx, m.key())
 	if value, ok := getRuntimeSnapshot(ctx, m.key()); ok {
 		raw, valid := value.(string)
-		if !valid || json.Unmarshal([]byte(raw), &snapshot) != nil || snapshot.Version != 1 || snapshot.UserID != request.UserID || snapshot.SessionID != request.SessionID || snapshot.RunID != request.RunID || snapshot.AgentID != request.AgentName || snapshot.TaskID != request.TaskID || snapshot.InstructionHash != contentHash(m.instruction) {
+		if !valid || json.Unmarshal([]byte(raw), &snapshot) != nil || snapshot.Version != 1 || snapshot.UserID != request.UserID || snapshot.SessionID != request.SessionID || snapshot.RunID != request.RunID || snapshot.AgentID != request.AgentName || snapshot.TaskID != request.TaskID || !m.matchesSnapshotInstruction(ctx, snapshot.InstructionHash) {
 			return ctx, state, fmt.Errorf("运行上下文版本或归属不匹配")
 		}
 	}
+	// 只更新已知旧模板的指令指纹，保留摘要、调用计数、归属和证据。
+	snapshot.InstructionHash = contentHash(m.instruction)
 	seen := map[string]bool{}
 	for _, ref := range snapshot.References {
 		seen[ref.ArtifactID] = true
@@ -114,7 +119,7 @@ func (m *runtimeContextMiddleware) BeforeModelRewriteState(ctx context.Context, 
 		if m.engine.artifactRepo == nil {
 			return ctx, state, fmt.Errorf("上下文产物存储不可用")
 		}
-		a, err := m.engine.artifactRepo.FindScoped(ctx, artifactScope(request), ref.ArtifactID)
+		a, err := findArtifactWithGrants(ctx, m.engine.artifactRepo, artifactScope(request), request.artifactReads, ref.ArtifactID)
 		if err != nil {
 			return ctx, state, err
 		}

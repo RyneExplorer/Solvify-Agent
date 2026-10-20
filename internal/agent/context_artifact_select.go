@@ -7,8 +7,39 @@ import (
 	"strings"
 )
 
+// 仅展开已知MCP text封装，不在任意JSON字段中猜正文。多项结果须唯一命中。
+func artifactTextPath(content, keyword string) (string, bool) {
+	var envelope struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal([]byte(content), &envelope) != nil {
+		return "", false
+	}
+	selected := -1
+	for i, item := range envelope.Content {
+		if item.Type != "text" || (len(envelope.Content) > 1 && !strings.Contains(item.Text, keyword)) {
+			continue
+		}
+		if selected >= 0 {
+			return "", false
+		}
+		selected = i
+	}
+	if selected < 0 {
+		return "", false
+	}
+	return fmt.Sprintf("/content/%d/text", selected), true
+}
+
 // JSON Pointer按RFC6901定位字段，不执行代码或模型生成的表达式。
 func artifactJSONPointer(content, pointer string) (string, error) {
+	return artifactJSONPointerView(content, pointer, false)
+}
+
+func artifactJSONPointerView(content, pointer string, decoded bool) (string, error) {
 	if !json.Valid([]byte(content)) {
 		return "", fmt.Errorf("原文不是有效JSON")
 	}
@@ -49,6 +80,9 @@ func artifactJSONPointer(content, pointer string) (string, error) {
 				return "", fmt.Errorf("json_path不能继续展开该值")
 			}
 		}
+	}
+	if text, ok := value.(string); ok && decoded {
+		return text, nil
 	}
 	raw, err := json.Marshal(value)
 	return string(raw), err

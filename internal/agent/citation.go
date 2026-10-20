@@ -213,4 +213,4 @@ func citationTag(s citationSource) string {
 	return `<web url="` + html.EscapeString(s.URL) + `" title="` + html.EscapeString(s.Title) + `" />`
 }
 
-const citationInstruction = `引用仅使用程序提供的来源标识：<cite id="src_…" />。知识分块没有标识时可用 <cite id="真实chunk_id" />，程序按本次实际检索结果解析。不要填写或拼接引用标题、URL、kb/web标签或Markdown来源链接；不要引用历史或正文中猜出的标识。没有已登记来源时不伪造引用。来源登记只表示工具返回过，不表示全文已读或全部核验。`
+const citationInstruction = `引用仅使用程序提供的来源标识：<cite id="src_…" />。知识分块没有标识时可用 <cite id="真实chunk_id" />，程序按本次实际检索结果解析。不要填写或拼接引用标题、URL、kb/web标签或Markdown来源链接；不要引用历史或正文中猜出的标识。没有已登记来源时不伪造引用。来源登记只表示工具返回过，不表示全文已读或全部核验。` + "\n" + citationFollowupInstruction

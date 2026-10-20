@@ -116,7 +116,7 @@ func (timeoutDocumentRepo) FindByID(ctx context.Context, _, _ string, _ int) (en
 func TestDocumentToolTimeoutPropagatesThroughStreamingNode(t *testing.T) {
 	// 真实文档工具会把仓库错误转成Success:false的JSON；超时不能因此变成成功输出。
 	e := &Engine{toolTimeout: 35 * time.Millisecond, internalTools: []internalToolRegistryEntry{{Name: "get_document_info", Domain: DomainKnowledge}}}
-	documentTool := tool.NewGetDocumentInfoTool(timeoutDocumentRepo{})("user", nil)
+	documentTool := tool.NewGetDocumentInfoTool(timeoutDocumentRepo{})("user", []string{"kb"})
 	cfg := buildToolsNodeConfig()
 	cfg.Tools = []einotool.BaseTool{documentTool}
 	node, err := compose.NewToolNode(context.Background(), ptrToolsConfig(e.withToolExecutionTimeout(cfg)))

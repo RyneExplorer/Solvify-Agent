@@ -100,6 +100,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 				req.ResumeData = nil
 				req.Query = "原问题（仅作背景）：" + s.Request.Query + "\n只执行当前任务：" + task.Title + "\n任务说明：" + task.Description
 				req.History = append(req.History[:0:0], s.Request.History...)
+				req.artifactReads = dependencyArtifactGrants(s.Plan, task.ID, s.Results)
 				inputs = task
 				if task.Agent == "synthesis_review" {
 					inputs.DependsOn = peResearchAncestors(s.Plan, task.ID)
@@ -123,7 +124,7 @@ func (a *peTaskAgent) execute(ctx context.Context, in *adk.AgentInput, resume *a
 			return
 		}
 		ctx = r.traceContext(ctx, "researching", taskID)
-		privateContext := &taskContextSnapshot{}
+		privateContext := &taskContextSnapshot{Restoring: saved != nil}
 		if saved != nil {
 			privateContext.Raw = saved.RuntimeContext
 		}

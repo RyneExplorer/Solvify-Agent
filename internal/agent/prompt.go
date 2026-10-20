@@ -55,7 +55,7 @@ func buildDeepSystemPrompt(ctx context.Context, ts profileToolSet, maxToolCalls 
 	sb.WriteString("4. **不重复调用**：已获得足够信息时，直接给出答案，不要为了'再确认'重复调用\n")
 	sb.WriteString(fmt.Sprintf("5. **工具上限 %d 次**：工具调用总数不超过 %d 次，用完必须收敛\n", maxToolCalls, maxToolCalls))
 	sb.WriteString("6. **强制收敛**：达到最大推理轮次或用完工具次数时，立即总结已有信息给出最终答案。禁止再规划'下一步应该'、'我还需要'等思考性输出\n")
-	sb.WriteString("7. **答案分层**：有 ToolCalls 的轮次 Message.Content 只写 1-2 句简短推理（不会展示给用户）；只有 ToolCalls 为空的轮次才是完整、可读、面向最终用户的答案正文\n")
+	sb.WriteString("7. **答案分层**：有 ToolCalls 的轮次 Message.Content 只写 1-2 句简短进度说明（可能展示给用户，不输出内部推理）；只有 ToolCalls 为空的轮次才是完整、可读、面向最终用户的答案正文\n")
 
 	// ── 危险工具审批 / 澄清追问 / 联网搜索 ──
 	writeDangerousSection(&sb, internalSorted, dynDangerous)
@@ -199,7 +199,7 @@ func buildQuickSystemPrompt(ctx context.Context, ts profileToolSet, maxToolCalls
 	sb.WriteString("3. **不重复调用**：已获得足够信息时直接给答案，不要为了'再确认'重复调用\n")
 	sb.WriteString(fmt.Sprintf("4. **工具上限 %d 次**：工具调用总数不超过 %d 次，用完必须收敛\n", maxToolCalls, maxToolCalls))
 	sb.WriteString("5. **强制收敛**：达到最大推理轮次或用完工具次数时，立即总结已有信息给出最终答案。禁止再规划'下一步应该'、'我还需要'等思考性输出\n")
-	sb.WriteString("6. **答案分层**：有 ToolCalls 的轮次 Message.Content 只写 1-2 句简短推理（不会展示给用户）；只有 ToolCalls 为空的轮次才是完整、可读、面向最终用户的答案正文\n")
+	sb.WriteString("6. **答案分层**：有 ToolCalls 的轮次 Message.Content 只写 1-2 句简短进度说明（可能展示给用户，不输出内部推理）；只有 ToolCalls 为空的轮次才是完整、可读、面向最终用户的答案正文\n")
 
 	writeDangerousSection(&sb, internalSorted, false)
 	writeClarifySection(&sb, internalSorted)
@@ -283,6 +283,7 @@ func buildDeepTaskPrompt(ctx context.Context, name string, ts profileToolSet, it
 		sb.WriteString("优先直接检索当前任务主题；通常一到两轮检索足够。已有相关证据时停止查询，必须预留一轮输出研究结论，不为原问题中其他任务重复研究。\n")
 		sb.WriteString("交付精炼事实清单：关键结论、对应来源与未覆盖主题；不写面向用户的完整文章，不大段复制原文。\n")
 	case "web_research":
+		sb.WriteString(webResearchReadingInstruction + "\n")
 		sb.WriteString("使用已挂载的外部工具研究当前问题，保留网址和日期。写操作会触发人工审批，不绕过审批。\n")
 		sb.WriteString("按主题交付精炼事实、来源和缺口，不逐页复述。仅实际读到的内容才能声称已核验；未抓取正文或只读预览需明确，不写完整文章。\n")
 	case "document_operation":

@@ -82,7 +82,7 @@ func (e *Engine) expandToolContext(ctx context.Context, req Request, state *adk.
 		if json.Unmarshal([]byte(msg.Content), &ref) != nil || ref.ArtifactID == "" || ref.Hash == "" || ref.Selection != nil || ref.Runes <= 0 {
 			continue
 		}
-		a, err := e.artifactRepo.FindScoped(ctx, artifactScope(req), ref.ArtifactID)
+		a, err := findArtifactWithGrants(ctx, e.artifactRepo, artifactScope(req), req.artifactReads, ref.ArtifactID)
 		if err != nil {
 			return nil, fmt.Errorf("读取工具上下文原文失败: %w", err)
 		}

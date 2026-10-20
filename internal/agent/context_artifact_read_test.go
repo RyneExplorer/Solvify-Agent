@@ -113,7 +113,7 @@ func artifactReadFixture(t *testing.T, policy config.RuntimeContextPolicy, conte
 	if err = json.Unmarshal([]byte(out.Result), &ref); err != nil || ref.ArtifactID == "" {
 		t.Fatalf("缺少产物引用: %v", err)
 	}
-	return artifactReadTool{repo, artifactScope(req), policy, req.ModelName}, ref, out.Result
+	return artifactReadTool{repo: repo, scope: artifactScope(req), policy: policy, model: req.ModelName}, ref, out.Result
 }
 
 func TestContextArtifactReadClampsLimit(t *testing.T) {

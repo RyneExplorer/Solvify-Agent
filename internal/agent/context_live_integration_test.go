@@ -52,7 +52,7 @@ func TestContextLiveDeepSeek(t *testing.T) {
 		t.Fatal("未找到可用 DeepSeek 模型配置")
 	}
 	window = min(window, 8192)
-	client, err := llm.NewOpenAIClient(ctx, llm.OpenAIClientConfig{APIKey: key, BaseURL: base, Model: name, MaxContextLength: window, Config: []byte(`{"max_input_tokens":8192,"max_output_tokens":8192,"max_completion_tokens":4096,"output_token_field":"max_completion_tokens","tool_calling":true,"reasoning_capability":"none","reasoning_mode":"default"}`)})
+	client, err := llm.NewOpenAIClient(ctx, llm.OpenAIClientConfig{APIKey: key, BaseURL: base, Model: name, MaxContextLength: window, Config: []byte(`{"max_input_tokens":8192,"max_output_tokens":8192,"max_completion_tokens":4096,"output_token_field":"max_completion_tokens","tool_calling":true,"reasoning_capability":"optional","reasoning_mode":"off","reasoning_protocol":"thinking"}`)})
 	if err != nil {
 		t.Fatal("DeepSeek 客户端初始化失败")
 	}
@@ -121,6 +121,7 @@ func TestContextLiveDeepSeek(t *testing.T) {
 			})
 		})
 	}
+	t.Run("citation_followup", func(t *testing.T) { verifyCitationFollowupLive(t, ctx, cfg.Agent, client, name) })
 }
 
 func liveContextErrorCategory(err error) string {

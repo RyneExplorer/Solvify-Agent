@@ -262,6 +262,7 @@ func (e *Engine) consumeMessageStream(
 	defer stream.Close()
 
 	var toolCallPending bool
+	answerStarted := false
 	var toolCallName string
 
 	for {
@@ -320,8 +321,15 @@ func (e *Engine) consumeMessageStream(
 				continue
 			}
 
-			// 最终答案
+			// 已确认工具调用后的正文属于过程说明，不并入最终答案。
+			if toolCallPending {
+				continue
+			}
 			if msg.Content != "" {
+				if !answerStarted {
+					beginAnswerSegment(ctx, fullAnswer, eventCh)
+					answerStarted = true
+				}
 				fullAnswer.WriteString(msg.Content)
 				eventch.Send(ctx, eventCh, Event{Type: EventAnswer, Content: msg.Content})
 			}
@@ -344,6 +352,20 @@ func (e *Engine) consumeMessageStream(
 		}
 	}
 	return nil
+}
+
+// 一轮工具交互可能先流出简短进度，再流出最终正文；分隔按消息边界插入，
+// 不依赖模型恰好在首个片段输出换行，SSE与持久化全文保持一致。
+func beginAnswerSegment(ctx context.Context, answer *strings.Builder, events chan<- Event) {
+	if answer.Len() == 0 || strings.HasSuffix(answer.String(), "\n\n") {
+		return
+	}
+	separator := "\n\n"
+	if strings.HasSuffix(answer.String(), "\n") {
+		separator = "\n"
+	}
+	answer.WriteString(separator)
+	eventch.Send(ctx, events, Event{Type: EventAnswer, Content: separator})
 }
 
 func (e *Engine) handleMessage(
@@ -383,6 +405,7 @@ func (e *Engine) handleMessage(
 			return
 		}
 		if msg.Content != "" {
+			beginAnswerSegment(ctx, fullAnswer, eventCh)
 			fullAnswer.WriteString(msg.Content)
 			eventch.Send(ctx, eventCh, Event{Type: EventAnswer, Content: msg.Content})
 		}

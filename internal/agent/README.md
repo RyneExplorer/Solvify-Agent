@@ -47,13 +47,15 @@
 
 工具结果超过 `artifact_threshold` 时将完整原文保存到 PostgreSQL `context_artifacts.content`，返回带 hash/version 的引用。模型调用前按窗口、输出预留、输入上限以及消息和工具定义的实际 token 总量统一分配资料空间：能容纳的结果直接展开全文；超出软水位时在所有已保存结果之间分配额度。JSON 数组和知识库 sources 按完整记录保留排名前缀，省略时标记 `complete=false`，不把切坏的 JSON 当成有效结果。没有可靠原文引用的结果不再统一裁成1500 tokens；仍超硬预算则明确拒绝。
 
-`read_context_artifact` 支持 `keyword`、Markdown `section`、JSON Pointer `json_path`、知识分块 `chunk_id`，一次最多选择一个。`offset`、`limit` 按所选视图的 Unicode 字符计数；关键词返回原文偏移，章节/JSON/分块续读需保留选择器。工具返回 `selection`、`total_runes`、`next_offset`，`complete` 只表示所选视图读到末尾；必须使用实际返回的 `next_offset` 续读，不能按请求页长推算。结构投影的长度不代表原文偏移，需按定位器补读。
+`read_context_artifact` 支持 `keyword`、Markdown `section`、JSON Pointer `json_path`、知识分块 `chunk_id`，`json_path` 可与 `keyword` 组合，先展开字段再定位，其余定位参数不组合。`offset`、`limit` 按所选视图的 Unicode 字符计数；关键词在当前视图返回偏移，章节/JSON/分块续读需保留选择器。工具返回 `selection`、`total_runes`、`next_offset`，`complete` 只表示所选视图读到末尾；必须使用实际返回的 `next_offset` 续读，不能按请求页长推算。结构投影的长度不代表原文偏移，需按定位器补读。MCP text 封装在关键词定位时展开为正文视图，JSON 字符串字段按解码后的文本读取；返回的 `selection.decoded_text` 标识该视图，旧 checkpoint 未带标识时仍按原序列化视图校验既有证据范围。
 
 正常运行的读取 token 额度由模型窗口、当前消息、工具定义及 `tool_context_ratio`（默认0.5）计算；每轮刷新，多个并行读取后的消息在下轮统一分配，避免先完成的工具抢占额度。读取仍受原文大小和100万字符的硬边界限制。`read_tokens`、`read_runes` 保留为未解析窗口的兼容策略。研究任务记录实际读取的选择器和范围，汇总按依赖的原权限读取这些范围并共享预算。任务结果和摘要快照中的引用只保存定位信息；模型消息仍按原有Runner机制随checkpoint保存。
 
-存储配额和网络响应上限独立于模型窗口。默认单产物2 MiB、单运行20 MiB、单用户100 MiB，TTL 48小时；HTTP/MCP还受自身响应体限制。保存失败或超配额会明确报错，不能返回一个不可读取的引用或默默丢掉原文。读取、展开与汇总均校验用户/会话/运行/Agent/任务范围及原文 hash/version。
+存储配额和网络响应上限独立于模型窗口。默认单产物2 MiB、单运行20 MiB、单用户100 MiB，TTL 48小时；HTTP/MCP还受自身响应体限制。保存失败或超配额会明确报错，不能返回一个不可读取的引用或默默丢掉原文。读取、展开与汇总均校验用户/会话/运行/Agent/任务范围及原文 hash/version。后续研究任务可以只读成功前置任务的产物，授权根据程序保存的依赖图和产物引用重建，不接受模型传入身份；用户、会话、运行范围保持不变。无关任务、哈希或版本变化仍拒绝；恢复时重新构建授权，不通过 checkpoint 重置预算。
 
 非法JSON、字段类型、缺少ID、负数与越界偏移作为工具结果返回 `success=false`、`error_type=invalid_arguments`、`field`、中文 `message` 和 `retryable=true`，模型可在原执行预算内修正后重新调用。深度任务单独保存尚未纠正的参数错误，正确读取后清除，模型忽略错误则任务失败；该标记仅识别程序内置读取工具。归属、存储、取消、版本/哈希与无法返回有效片段的预算错误仍通过Go error终止，不转为可纠正参数错误。
+
+重规划时，尚未执行的最终汇总若遗漏有效研究依赖，由程序补齐缺失依赖，再检查完整图是否有环、未知依赖和非法状态。已完成任务、研究结果和审批事实不可改写。模板升级只兼容本次QA修复前的已知指令指纹，并保留运行摘要次数与状态；旧 checkpoint 有效期结束后可移除 `context_instruction_compat.go` 的迁移。
 
 ### 输出和错误
 

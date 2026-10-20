@@ -334,6 +334,16 @@ func (r *peRuntime) installPlan(s *peState, next *pePlan) error {
 			}
 		}
 	}
+	if !first {
+		completeSynthesisDependencies(&p, latestSynthesis)
+		// 归一化后的完整图仍必须通过引用、环路和状态校验。
+		if err := p.Validate(0); err != nil {
+			return err
+		}
+		for _, task := range p.Tasks {
+			byID[task.ID] = task
+		}
+	}
 	walk(latestSynthesis)
 	for _, t := range p.Tasks {
 		if t.Status == TaskCanceled || t.Status == TaskError {

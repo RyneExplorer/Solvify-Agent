@@ -75,7 +75,7 @@ func TestContextArtifactSaveReadAndFailure(t *testing.T) {
 	if json.Unmarshal([]byte(out.Result), &ref) != nil || len(ref.ArtifactID) != 64 || len(repo.values) != 1 {
 		t.Fatal("未提交原文引用")
 	}
-	reader := artifactReadTool{repo, artifactScope(req), e.runtimePolicy(), req.ModelName}
+	reader := artifactReadTool{repo: repo, scope: artifactScope(req), policy: e.runtimePolicy(), model: req.ModelName}
 	var rebuilt strings.Builder
 	for offset := 0; ; {
 		args, _ := json.Marshal(map[string]any{"artifact_id": ref.ArtifactID, "offset": offset, "limit": 700})
