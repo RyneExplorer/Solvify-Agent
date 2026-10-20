@@ -39,6 +39,8 @@ func peCall(name string, args any) *schema.Message {
 
 func collectPEEvents(t *testing.T, ctx context.Context, e *Engine, req Request, m model.ToolCallingChatModel) []Event {
 	t.Helper()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	if req.MaxContextLength == 0 {
 		req.MaxContextLength = 64000
 		req.ModelName = "gpt-4o"
@@ -57,6 +59,9 @@ func collectPEEvents(t *testing.T, ctx context.Context, e *Engine, req Request, 
 			out = append(out, ev)
 		case <-time.After(10 * time.Second):
 			t.Fatal("Plan-and-Execute 未结束")
+			return out
+		case <-ctx.Done():
+			t.Fatalf("Plan-and-Execute 等待结束：%v", ctx.Err())
 			return out
 		}
 	}

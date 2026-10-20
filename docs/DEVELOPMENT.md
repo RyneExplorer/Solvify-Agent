@@ -509,3 +509,13 @@ Remove-Item Env:SOLVIFY_CONTEXT_STRESS_TEST
 重建会替换当前分块ID，旧回答中的分块引用可能无法继续打开；操作前明确需要重建的文档范围，并保留原始文件和已有版本。此次代码修复未自动批量重建用户文档或修改运行模型配置。
 
 验收命令在本指南既有Go与前端检查之外，可显式运行 `SOLVIFY_KNOWLEDGE_SCOPE_DB_TEST=1 go test ./internal/tool -run TestDocumentToolsPostgresKnowledgeBaseScope -count=1`（随机临时schema，仅本地数据库）；真实模型合成样本使用 `SOLVIFY_CONTEXT_LIVE_TEST=1 go test ./internal/agent -run TestContextLiveDeepSeek -count=1 -v`，包含压缩与两轮引用追问，需模型额度，不在普通CI执行。
+
+## 精确token计数与CI插桩验证
+
+预算路径对相同消息、工具结果和指令重复计数时，复用同一编码器下的精确BPE计数。进程内LRU最多1024项，key包含编码器身份及正文SHA-256；只保存摘要和计数，不保留正文或可还原正文的token序列。并发相同计算合并，分词在缓存锁外执行；纯计算不绑定某个等待请求的取消。编码器重新加载产生新身份，自然隔离旧计数。编码不可用的字符估算不写入此缓存；首次遇到新文本仍需真实分词。
+
+涉及分词、预算或Agent执行的修改，应运行CI实际组合 `go test -race -coverprofile=coverage.out ./...`，普通全量测试或部分race不能替代。Windows PowerShell中将整个参数写为 `'-coverprofile=coverage.out'`，避免参数被拆分。缓存准确性验证覆盖不同编码、并发合并和容量淘汰；性能对比可用 `go test -race ./pkg/tokenutil -run '^$' -bench BenchmarkTokenCountRepeatedChinese -benchtime=1x -count=1`，结果仅代表本机。
+
+旧Go自动切换到下载的1.25.0工具链时，覆盖无测试文件包可能遇到`no such tool "covdata"`（[Go问题75031](https://github.com/golang/go/issues/75031)）。本机已验证可在当前PowerShell进程设置 `$env:GOTOOLCHAIN = 'go1.25.0+auto'` 再运行上述命令，无须写入全局Go配置；这不代表应修改CI的测试范围。
+
+Agent测试创建的执行上下文随测试结束取消；深度流程收集事件结束或超时时取消执行，避免失败用例遗留任务污染后续测试。CI仍保留race、覆盖率和原测试等待期限，长重复文本样本及尾部证据断言不变。
